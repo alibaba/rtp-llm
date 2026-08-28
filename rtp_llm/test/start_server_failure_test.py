@@ -8,7 +8,7 @@ from rtp_llm.utils.process_manager import ProcessManager
 
 
 class StartServerFailureTest(unittest.TestCase):
-    def test_health_check_failure_requests_failure_shutdown_and_exits_nonzero(self):
+    def test_health_check_failure_requests_failure_shutdown_and_raises(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT
 
@@ -26,17 +26,13 @@ class StartServerFailureTest(unittest.TestCase):
                 autospec=True,
                 side_effect=request_failure_shutdown,
             ) as request_shutdown,
-            patch(
-                "rtp_llm.utils.process_manager.os._exit",
-                side_effect=SystemExit(1),
-            ) as exit_parent,
         ):
-            with self.assertRaises(SystemExit) as exit_context:
+            with self.assertRaisesRegex(
+                RuntimeError, "managed server processes exited abnormally"
+            ):
                 start_server(py_env_configs)
 
         request_shutdown.assert_called_once()
-        exit_parent.assert_called_once_with(1)
-        self.assertEqual(exit_context.exception.code, 1)
 
     def test_health_check_failure_after_shutdown_preserves_graceful_exit(self):
         py_env_configs = PyEnvConfigs()
@@ -64,11 +60,17 @@ class StartServerFailureTest(unittest.TestCase):
                 "monitor_and_release_processes",
                 autospec=True,
             ) as monitor_and_release,
+            patch("rtp_llm.start_server._maybe_run_startup_real_warmup") as warmup,
+            patch(
+                "rtp_llm.start_server._mark_startup_warmup_health_gate_ready"
+            ) as mark_ready,
         ):
             start_server(py_env_configs)
 
         request_shutdown.assert_not_called()
         monitor_and_release.assert_called_once()
+        warmup.assert_not_called()
+        mark_ready.assert_not_called()
 
 
 if __name__ == "__main__":

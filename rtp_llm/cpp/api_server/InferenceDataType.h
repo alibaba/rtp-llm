@@ -97,6 +97,9 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("disk_reuse_len", disk_reuse_len, disk_reuse_len);
+        json.Jsonize("prefill_disk_reuse_len", prefill_disk_reuse_len, prefill_disk_reuse_len);
+        json.Jsonize("decode_disk_reuse_len", decode_disk_reuse_len, decode_disk_reuse_len);
         json.Jsonize("speculative_draft_rounds", speculative_draft_rounds, speculative_draft_rounds);
         json.Jsonize("speculative_accepted_tokens_per_pos",
                      speculative_accepted_tokens_per_pos,
@@ -117,6 +120,9 @@ public:
         cum_log_probs                       = base.cum_log_probs;
         local_reuse_len                     = base.local_reuse_len;
         remote_reuse_len                    = base.remote_reuse_len;
+        disk_reuse_len                      = base.disk_reuse_len;
+        prefill_disk_reuse_len              = base.prefill_disk_reuse_len;
+        decode_disk_reuse_len               = base.decode_disk_reuse_len;
         speculative_draft_rounds            = base.speculative_draft_rounds;
         speculative_accepted_tokens_per_pos = base.speculative_accepted_tokens_per_pos;
 

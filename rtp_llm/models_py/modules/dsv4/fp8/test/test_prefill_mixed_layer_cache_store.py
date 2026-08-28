@@ -43,6 +43,7 @@ class _FakeAttn:
         self._prefill_meta_shared = None
         self._kv_cache = "original_kv"
         self._block_tables_by_type = "original_bt"
+        self._cp_ctx = None
         self.freqs_bound = False
 
     def _build_shared_prefill_meta(self, x, start_pos, **kwargs):
@@ -103,12 +104,15 @@ class _FakeLayer:
 
 
 class _FakeKVCache:
-    def __init__(self, events: list):
+    def __init__(self, events: list, cache_tags: tuple[str, ...]):
         self.events = events
+        self.cache_tags = cache_tags
 
     def get_layer_cache_groups(self, layer_idx: int):
         self.events.append(("get_cache", layer_idx))
-        return f"layer_cache_{layer_idx}"
+        return [
+            SimpleNamespace(tag=tag, layer_idx=layer_idx) for tag in self.cache_tags
+        ]
 
 
 class _FakeV4:
@@ -123,6 +127,7 @@ class _FakeV4:
         self._kv_cache_sharded = False
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids = ()
         # ``forward_layers`` builds the per-forward ``PrefillWorkspace`` from
         # these bind-time dims (transformer.py resolves them on the real model).
         # Tiny values keep the CPU allocation trivial; the test patches
@@ -149,22 +154,37 @@ class _FakeV4:
 
 
 class MixedLayerCacheStoreOrderTest(unittest.TestCase):
-    def _run_case(self, ratios: list[int]) -> list:
+    def _run_case(
+        self,
+        ratios: list[int],
+        *,
+        tagged: bool = True,
+        writer_tags: tuple[str, ...] = ("swa_kv", "hca_kv"),
+        cache_tags: tuple[str, ...] = ("swa_kv", "hca_kv"),
+    ) -> list:
         events: list = []
         v4 = _FakeV4(ratios, events)
-        kv_cache = _FakeKVCache(events)
+        kv_cache = _FakeKVCache(events, cache_tags)
         attn_inputs = SimpleNamespace(
             input_lengths=torch.tensor([4], dtype=torch.int32),
             prefix_lengths=torch.tensor([0], dtype=torch.int32),
             is_prefill=True,
             cache_store_inputs=object(),
         )
+        attention_inputs = (
+            {tag: SimpleNamespace(writer_tag=tag) for tag in writer_tags}
+            if tagged
+            else None
+        )
 
         def fake_create_writer(attn, kv):
-            events.append(("create_writer", kv))
+            writer_tag = getattr(attn, "writer_tag", "plain")
+            events.append(("create_writer", writer_tag))
 
             def write(layer_cache):
-                events.append(("store", layer_cache))
+                events.append(
+                    ("store", writer_tag, layer_cache.tag, layer_cache.layer_idx)
+                )
 
             return write
 
@@ -189,6 +209,7 @@ class MixedLayerCacheStoreOrderTest(unittest.TestCase):
                 torch.tensor([0, 4], dtype=torch.int32),
                 block_tables_by_type={0: torch.ones(1, 1, dtype=torch.int32)},
                 attn_inputs=attn_inputs,
+                attention_inputs=attention_inputs,
             )
 
         self.assertEqual(tuple(out.shape), (4, 4))
@@ -229,13 +250,39 @@ class MixedLayerCacheStoreOrderTest(unittest.TestCase):
                     first_layer_for_ratio.setdefault(ratio, i)
                     expected.append(("layer", i, ratio, first_layer_for_ratio[ratio]))
                     expected.append(("get_cache", i))
-                    expected.append(("store", f"layer_cache_{i}"))
+                    expected.extend(
+                        ("store", tag, tag, i) for tag in ("swa_kv", "hca_kv")
+                    )
                 self.assertEqual(layer_store_events, expected)
 
                 clear_events = [
                     e for e in events if e[0] == "set_meta" and e[2] is None
                 ]
                 self.assertEqual(len(clear_events), len(ratios))
+
+    def test_plain_input_keeps_single_group_fast_path(self) -> None:
+        events = self._run_case(
+            [0],
+            tagged=False,
+            cache_tags=("swa_kv",),
+        )
+        self.assertIn(("store", "plain", "swa_kv", 0), events)
+
+    def test_plain_input_rejects_multiple_layer_cache_groups(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "exactly one cache group"):
+            self._run_case(
+                [0],
+                tagged=False,
+                cache_tags=("swa_kv", "hca_kv"),
+            )
+
+    def test_tagged_input_rejects_missing_writer_for_layer_tag(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing cache-store writer"):
+            self._run_case(
+                [0],
+                writer_tags=("swa_kv",),
+                cache_tags=("swa_kv", "hca_kv"),
+            )
 
 
 class CacheStoreCPMetadataTest(unittest.TestCase):

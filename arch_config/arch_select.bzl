@@ -12,6 +12,20 @@ def copy_all_so():
     copy_so("@rtp_llm//:th_transformer_config")
     copy_so("@rtp_llm//:th_grammar_tokenizer_info")
     copy_so("@rtp_llm//:rtp_compute_ops")
+    for target in [
+        "flashinfer_batch_paged_prefill",
+        "flashinfer_batch_paged_prefill_256",
+        "flashinfer_batch_paged_decode",
+        "flashinfer_batch_paged_decode_256",
+        "flashinfer_batch_ragged_prefill",
+        "flashinfer_batch_ragged_prefill_256",
+        "flashinfer_single_decode",
+        "flashinfer_single_decode_256",
+        "flashinfer_single_prefill",
+        "flashinfer_single_prefill_256",
+        "flashinfer_sm90",
+    ]:
+        copy_so("@flashinfer_cpp_cu13//:" + target)
 
 # flash_attn wheels are not published for CUDA 13; FlashInfer JIT provides the
 # kernels instead, so these requirements resolve to nothing on cuda13 configs.
@@ -53,18 +67,6 @@ def cache_store_deps():
     native.alias(
         name = "cache_store_arch_select_impl",
         actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
-    )
-
-def transfer_rdma_deps():
-    native.alias(
-        name = "transfer_rdma_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:no_rdma_impl",
-    )
-
-def transfer_backend_deps():
-    native.alias(
-        name = "transfer_backend_arch_select_impl",
-        actual = "@rtp_llm//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_base_impl",
     )
 
 def embedding_arpc_deps():

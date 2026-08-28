@@ -87,7 +87,12 @@ TEST_F(AsyncRunnerTest, CudaTensorWork) {
     auto src = torch::ones({64}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto dst = torch::zeros({64}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    runner.launch([&src, &dst] { dst.copy_(src); });
+    auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    input_ready_event->record(currentStream());
+    runner.launch([&src, &dst, input_ready_event] {
+        input_ready_event->block(cuda_graph::graphGetCurrentStream());
+        dst.copy_(src);
+    });
     runner.sync(currentStream());
 
     auto result = dst.cpu();

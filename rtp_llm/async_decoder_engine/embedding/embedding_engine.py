@@ -42,6 +42,10 @@ class EmbeddingCppEngine(BaseEngine):
             self.mm_process_engine = None
 
     @override
+    def request_stop(self) -> None:
+        self.cpp_engine.request_stop()
+
+    @override
     def _start(self):
         self.mm_process_engine = None
         if (

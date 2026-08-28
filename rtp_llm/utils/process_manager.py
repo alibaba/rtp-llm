@@ -4,7 +4,7 @@ import signal
 import threading
 import time
 from multiprocessing import Process
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 from rtp_llm.utils.shutdown_config import (
     AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
@@ -29,6 +29,14 @@ PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 600
 DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
+NESTED_PROCESS_MANAGER_EXIT_GRACE_SECONDS = 10
+
+
+def parent_shutdown_timeout(child_shutdown_timeout: int) -> int:
+    """Give a parent manager time to reap a child manager after child shutdown."""
+    if child_shutdown_timeout == -1:
+        return -1
+    return child_shutdown_timeout + NESTED_PROCESS_MANAGER_EXIT_GRACE_SECONDS
 
 
 class ProcessManager:
@@ -51,6 +59,7 @@ class ProcessManager:
         pre_stop_drain_signal: bool = False,
         backend_post_frontend_drain_seconds: float = DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS,
         pre_exit_cleanup: Optional[Callable[[], None]] = None,
+        termination_ack_timeout: float = 10.0,
     ):
         if shutdown_timeout != -1 and shutdown_timeout <= 0:
             logging.warning(
@@ -90,6 +99,13 @@ class ProcessManager:
         self._deferred_sigterm_seen = False
         self._deferred_sigterm_timer: Optional[threading.Timer] = None
         self._used_pre_stop_drain_signal = False
+        self.termination_ack_timeout = termination_ack_timeout
+        self.termination_ack_events: List[Optional[Any]] = []
+        self.termination_ack_failures: List[str] = []
+        self.expected_shutdown_exit_codes: List[FrozenSet[int]] = []
+        self.shutdown_signals_sent: List[bool] = []
+        self.first_dead_time = 0.0
+        self.terminated = False
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -176,25 +192,67 @@ class ProcessManager:
         if shutdown_group not in self.shutdown_group_order:
             self.shutdown_group_order.append(shutdown_group)
 
-    def set_processes(self, processes: List[Process], shutdown_group: str = "default"):
+    def set_processes(
+        self,
+        processes: List[Process],
+        termination_ack_events: Optional[List[Optional[Any]]] = None,
+        expected_shutdown_exit_codes: Optional[List[Set[int]]] = None,
+        shutdown_group: str = "default",
+    ):
         """Set the processes to manage (replaces existing list)"""
         self.processes = processes if processes else []
+        self.termination_ack_failures = []
+        if termination_ack_events is None:
+            self.termination_ack_events = [None] * len(self.processes)
+        elif len(termination_ack_events) != len(self.processes):
+            raise ValueError("termination acknowledgement count must match processes")
+        else:
+            self.termination_ack_events = list(termination_ack_events)
+        if expected_shutdown_exit_codes is None:
+            self.expected_shutdown_exit_codes = [frozenset()] * len(self.processes)
+        elif len(expected_shutdown_exit_codes) != len(self.processes):
+            raise ValueError("expected shutdown exit-code count must match processes")
+        else:
+            self.expected_shutdown_exit_codes = [
+                frozenset(exit_codes) for exit_codes in expected_shutdown_exit_codes
+            ]
+        self.shutdown_signals_sent = [False] * len(self.processes)
         self.process_groups = {}
         self.shutdown_group_order = []
         self._register_group(shutdown_group)
         self.process_groups[shutdown_group] = self.processes.copy()
 
-    def add_process(self, process: Process, shutdown_group: str = "default"):
+    def add_process(
+        self,
+        process: Process,
+        shutdown_group: str = "default",
+        expected_shutdown_exit_codes: Optional[Set[int]] = None,
+    ):
         """Add a single process to manage"""
         if process:
             self.processes.append(process)
+            self.termination_ack_events.append(None)
+            self.expected_shutdown_exit_codes.append(
+                frozenset(expected_shutdown_exit_codes or ())
+            )
+            self.shutdown_signals_sent.append(False)
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].append(process)
 
-    def add_processes(self, processes: List[Process], shutdown_group: str = "default"):
+    def add_processes(
+        self,
+        processes: List[Process],
+        shutdown_group: str = "default",
+        expected_shutdown_exit_codes: Optional[Set[int]] = None,
+    ):
         """Add multiple processes to manage"""
         if processes:
             self.processes.extend(processes)
+            self.termination_ack_events.extend([None] * len(processes))
+            self.expected_shutdown_exit_codes.extend(
+                [frozenset(expected_shutdown_exit_codes or ())] * len(processes)
+            )
+            self.shutdown_signals_sent.extend([False] * len(processes))
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].extend(processes)
 
@@ -204,25 +262,83 @@ class ProcessManager:
         group_name: str,
         force_immediate: bool = False,
         signum: signal.Signals = signal.SIGTERM,
+        wait_for_ack: bool = True,
     ):
+        live_processes = [proc for proc in processes if proc.is_alive()]
         for proc in processes:
+            if not any(live_process is proc for live_process in live_processes):
+                logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
+
+        ack_processes = []
+        remaining_processes = []
+        for proc in live_processes:
+            index = self._process_index(proc)
+            ack_event = (
+                self.termination_ack_events[index]
+                if index is not None and index < len(self.termination_ack_events)
+                else None
+            )
+            if wait_for_ack and ack_event is not None:
+                ack_processes.append((proc, ack_event))
+            else:
+                remaining_processes.append(proc)
+
+        # Signal every collective follower before waiting for any acknowledgement.
+        for proc, _ in ack_processes:
+            self._signal_managed_process(proc, group_name, signum, force_immediate)
+
+        ack_wait_budget = self.termination_ack_timeout
+        if self.shutdown_timeout != -1:
+            ack_wait_budget = min(ack_wait_budget, float(self.shutdown_timeout))
+        ack_deadline = self.first_dead_time + ack_wait_budget
+        for proc, ack_event in ack_processes:
+            logging.info(
+                "Waiting for shutdown-ready acknowledgement from process %s",
+                proc.pid,
+            )
+            remaining = max(0.0, ack_deadline - time.time())
+            if not ack_event.wait(remaining):
+                failure = (
+                    f"name={proc.name} pid={proc.pid} shutdown-ready "
+                    f"ack timed out after shared {ack_wait_budget}s deadline"
+                )
+                logging.error(failure)
+                self.termination_ack_failures.append(failure)
+
+        # Leaders and independent ranks are safe to stop after the follower barrier.
+        for proc in remaining_processes:
+            self._signal_managed_process(proc, group_name, signum, force_immediate)
+
+    def _process_index(self, process: Process) -> Optional[int]:
+        for index, managed_process in enumerate(self.processes):
+            if managed_process is process:
+                return index
+        return None
+
+    def _signal_managed_process(
+        self,
+        proc: Process,
+        group_name: str,
+        signum: signal.Signals,
+        force_immediate: bool,
+    ) -> None:
+        logging.info(
+            f"Sending {signal.Signals(signum).name} to {group_name} "
+            f"process {proc.name} pid={proc.pid}"
+        )
+        self._signal_process(proc, signum)
+        index = self._process_index(proc)
+        if index is not None and index < len(self.shutdown_signals_sent):
+            self.shutdown_signals_sent[index] = True
+        if force_immediate and proc.is_alive():
+            time.sleep(0.05)
             if proc.is_alive():
+                sig_name = signal.Signals(signum).name
                 logging.info(
-                    f"Sending {signal.Signals(signum).name} to {group_name} "
+                    f"Sending immediate second {sig_name} to {group_name} "
                     f"process {proc.name} pid={proc.pid}"
                 )
                 self._signal_process(proc, signum)
-                if force_immediate and proc.is_alive():
-                    time.sleep(0.05)
-                    if proc.is_alive():
-                        sig_name = signal.Signals(signum).name
-                        logging.info(
-                            f"Sending immediate second {sig_name} to {group_name} "
-                            f"process {proc.name} pid={proc.pid}"
-                        )
-                        self._signal_process(proc, signum)
-            else:
-                logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
 
     def _signal_process(self, proc: Process, signum: signal.Signals):
         if signum == signal.SIGTERM:
@@ -340,7 +456,9 @@ class ProcessManager:
             return False
         return exitcode in (-signal.SIGTERM, -signal.SIGINT)
 
-    def _terminate_processes(self, drain_timeout: int, staged: bool = True):
+    def _terminate_processes(
+        self, drain_timeout: Optional[float] = None, staged: bool = True
+    ):
         """SIGTERM all managed processes. Caller picks `drain_timeout`:
           - graceful exit → user's shutdown_timeout (e.g., 5min).
           - failure exit  → 0 (skip drain wait, SIGTERM backend immediately).
@@ -363,6 +481,12 @@ class ProcessManager:
         SIGINT here is the explicit parent-to-backend shutdown handoff so it
         can begin reaping its rank children before the outer manager escalates.
         """
+        if self.terminated:
+            return
+        if drain_timeout is None:
+            drain_timeout = self.shutdown_timeout
+        if self.first_dead_time == 0:
+            self.first_dead_time = time.time()
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
         self._used_pre_stop_drain_signal = False
         drain_deadline = self._make_deadline(drain_timeout)
@@ -380,6 +504,7 @@ class ProcessManager:
                         self.deferred_group_shutdown_timeout_seconds(drain_timeout),
                         "deferred",
                     )
+                    self.terminated = True
                     return
                 self._wait_process_list_exit(
                     self.processes,
@@ -399,12 +524,14 @@ class ProcessManager:
                         if group_name in self.DEFERRED_GROUPS
                         else signal.SIGTERM
                     ),
+                    wait_for_ack=False,
                 )
             self._wait_process_list_exit(
                 self.processes,
                 self._remaining_timeout(drain_deadline),
                 "managed",
             )
+        self.terminated = True
 
     def _make_deadline(self, timeout: Optional[float]) -> Optional[float]:
         if timeout is None or timeout < 0:
@@ -727,6 +854,38 @@ class ProcessManager:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")
 
+    def _unexpected_exit_statuses(self) -> List[str]:
+        """Return managed-process exits that were not part of clean shutdown."""
+        failures = list(self.termination_ack_failures)
+        for index, proc in enumerate(self.processes):
+            exit_code = proc.exitcode
+            is_alive = proc.is_alive()
+            if exit_code is None:
+                failures.append(
+                    f"name={proc.name} pid={proc.pid} exit_code=None "
+                    f"is_alive={is_alive}"
+                )
+                continue
+            if is_alive:
+                failures.append(
+                    f"name={proc.name} pid={proc.pid} exit_code={exit_code} "
+                    "is_alive=True"
+                )
+                continue
+            allowed_exit_codes = {0} if self.shutdown_requested else set()
+            if (
+                self.shutdown_requested
+                and index < len(self.expected_shutdown_exit_codes)
+                and index < len(self.shutdown_signals_sent)
+                and self.shutdown_signals_sent[index]
+            ):
+                allowed_exit_codes.update(self.expected_shutdown_exit_codes[index])
+            if exit_code not in allowed_exit_codes:
+                failures.append(
+                    f"name={proc.name} pid={proc.pid} exit_code={exit_code}"
+                )
+        return failures
+
     def _monitor_processes_health(self):
         """Watch children; on shutdown or unexpected death, SIGTERM then SIGKILL.
 
@@ -756,50 +915,34 @@ class ProcessManager:
             self._force_kill_processes()
             break
 
-    def monitor_and_release_processes(self):
-        """Monitor all processes until completion or failure.
-
-        The failure_detected → os._exit(1) check runs even when self.processes
-        is empty: callers may construct the manager, hit an exception before
-        any child is registered (e.g. backend Process pickle/spawn fails,
-        import error, config validation), then call request_failure_shutdown()
-        + monitor_and_release_processes() in a finally. The parent must still
-        exit non-zero so the supervisor (k8s/systemd) restarts.
-        """
+    def monitor_and_release_processes(self) -> bool:
+        """Monitor all processes and report whether every exit was expected."""
         if self.processes:
             logging.info(f"Monitoring {len(self.processes)} processes")
             self._monitor_processes_health()
             self._join_all_processes()
-
-            # All children may have exited before the monitor loop first ran
-            # (race at startup) or during it without tripping the in-loop
-            # dead-detection branch (e.g. simultaneous death between
-            # iterations). Inspect final exitcodes to surface silent crashes
-            # the monitor missed.
-            if not self.shutdown_requested and not self.failure_detected:
-                unexpected_exits = [
-                    (p.name, p.exitcode)
-                    for p in self.processes
-                    if p.exitcode is not None
-                ]
-                if unexpected_exits:
-                    logging.error(
-                        "Children exited without shutdown request: "
-                        f"{unexpected_exits}"
-                    )
-                    self.failure_detected = True
         else:
             logging.info("No processes to monitor")
 
-        if self.failure_detected:
-            logging.error("Child process failure cleanup completed, exiting parent")
+        exit_failures = self._unexpected_exit_statuses()
+        if self.failure_detected and not exit_failures:
+            exit_failures.append("failure shutdown requested before child registration")
+        if exit_failures:
+            logging.error(
+                "Managed processes exited abnormally: %s", "; ".join(exit_failures)
+            )
             if self.pre_exit_cleanup:
                 try:
                     self.pre_exit_cleanup()
                 except Exception:
                     logging.exception("Pre-exit cleanup failed")
-            os._exit(1)
+            return False
         logging.info("Process monitoring completed")
+        return True
+
+    def graceful_shutdown(self):
+        """Trigger graceful shutdown."""
+        self.shutdown_requested = True
 
     def request_failure_shutdown(self):
         """Mark failure-driven shutdown.

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -27,47 +27,38 @@ bool HybridTypeKVCacheAllocator::doInit() {
                                 "HybridTypeKVCacheAllocator requires at least one FULL MHA/MLA cache group");
     }
 
-    auto pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_      = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+    auto pool_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfig(config_));
+    pool_config->use_cuda_malloc_backing = use_cuda_malloc_block_pool_;
+    block_pool_ = std::make_shared<DeviceBlockPool>(std::shared_ptr<const DeviceBlockPoolConfig>(pool_config));
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const int group_nums = config_.groupNums();
     kv_cache_groups_.reserve(group_nums);
 
-    SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
-
-    if (shared_block_cache_) {
-        std::vector<BlockPoolPtr> group_pools(static_cast<size_t>(group_nums), block_pool_);
-        shared_block_cache_->init(group_nums, group_pools);
-    }
-
-    for (int gid = 0; gid < group_nums; ++gid) {
-        const auto& cache_group = config_.topology().groupById(static_cast<size_t>(gid));
+    for (int group_id = 0; group_id < group_nums; ++group_id) {
+        const auto& cache_group = config_.topology().groupById(static_cast<size_t>(group_id));
         const auto& spec        = cache_group.spec;
 
         KVCacheGroupPtr group;
         const auto      group_type = cache_group.policy.group_type;
         if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWAKVCacheGroup>(
-                cache_group, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr);
-            swa_group_ids_.push_back(gid);
+            group = std::make_shared<SWAKVCacheGroup>(cache_group, block_pool_, group_id, config_.linear_step);
+            swa_group_ids_.push_back(group_id);
         } else if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
-            group = std::make_shared<LinearKVCacheGroup>(
-                cache_group, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr);
-            linear_group_ids_.push_back(gid);
+            group = std::make_shared<LinearKVCacheGroup>(cache_group, block_pool_, group_id, config_.linear_step);
+            linear_group_ids_.push_back(group_id);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, gid, shared_cache_raw, nullptr);
-            full_group_ids_.push_back(gid);
+            group = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, group_id);
+            full_group_ids_.push_back(group_id);
         }
 
-        RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup gid %d", gid);
+        RTP_LLM_CHECK_WITH_INFO(group->init(), "Failed to initialize KVCacheGroup group_id %d", group_id);
         kv_cache_groups_.push_back(group);
     }
 
     global_layer_to_local_id_.assign(static_cast<size_t>(config_.layer_all_num), -1);
-    for (int gid = 0; gid < group_nums; ++gid) {
-        const auto& cur_group_layers = config_.topology().groupById(static_cast<size_t>(gid)).layer_ids;
+    for (int group_id = 0; group_id < group_nums; ++group_id) {
+        const auto& cur_group_layers = config_.topology().groupById(static_cast<size_t>(group_id)).layer_ids;
         for (size_t local_layer_idx = 0; local_layer_idx < cur_group_layers.size(); ++local_layer_idx) {
             const int global_layer_idx = cur_group_layers[local_layer_idx];
             if (global_layer_idx >= 0 && static_cast<size_t>(global_layer_idx) < global_layer_to_local_id_.size()) {
@@ -78,26 +69,6 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
     RTP_LLM_LOG_INFO("HybridTypeKVCacheAllocator init success");
     return true;
-}
-
-void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     gid,
-                                                        const BlockIndicesType& blocks,
-                                                        bool                    is_connector) const {
-    (void)gid;
-    if (is_connector) {
-        block_pool_->connectorReference(blocks);
-    } else {
-        block_pool_->requestReference(blocks);
-    }
-}
-
-void HybridTypeKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector) {
-    (void)gid;
-    if (is_connector) {
-        block_pool_->connectorFree(blocks);
-    } else {
-        block_pool_->requestFree(blocks);
-    }
 }
 
 GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
@@ -135,10 +106,11 @@ int HybridTypeKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
-    const auto& group = config_.topology().soleGroupForLayer(layer_id);
-    const int   gid   = static_cast<int>(config_.topology().groupIdForTag(group.tag));
-    RTP_LLM_CHECK_WITH_INFO(gid >= 0 && gid < static_cast<int>(kv_cache_groups_.size()), "invalid group id mapping");
-    return gid;
+    const auto& group    = config_.topology().soleGroupForLayer(layer_id);
+    const int   group_id = static_cast<int>(config_.topology().groupIdForTag(group.tag));
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && group_id < static_cast<int>(kv_cache_groups_.size()),
+                            "invalid group id mapping");
+    return group_id;
 }
 
 int HybridTypeKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_id) const {
@@ -192,16 +164,16 @@ BlockAddrInfo HybridTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int b
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("convertIndexToAddr invalid layer_id=%d", layer_id);
     }
-    const int gid = defaultGroupIdForLayer(layer_id);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
+    const int group_id = defaultGroupIdForLayer(layer_id);
+    return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("convertIndexToBuffer invalid layer_id=%d", layer_id);
     }
-    const int gid = defaultGroupIdForLayer(layer_id);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id);
+    const int group_id = defaultGroupIdForLayer(layer_id);
+    return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToBuffer(layer_id, block_id);
 }
 
 std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
@@ -211,8 +183,8 @@ std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBuffer(int laye
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("convertIndexToBuffer(partition) invalid layer_id=%d", layer_id);
     }
-    const int gid = defaultGroupIdForLayer(layer_id);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
+    const int group_id = defaultGroupIdForLayer(layer_id);
+    return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }
 
@@ -240,24 +212,24 @@ std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBuffer(
 
 BlockAddrInfo
 HybridTypeKVCacheAllocator::convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
-    validateGroupIdForLayer(layer_id, gid);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, block_id);
+    const auto group_id = static_cast<int>(config_.topology().groupIdForTag(tag));
+    validateGroupIdForLayer(layer_id, group_id);
+    return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToAddr(layer_id, block_id);
 }
 
 std::vector<BlockInfo>
 HybridTypeKVCacheAllocator::convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const {
-    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
-    validateGroupIdForLayer(layer_id, gid);
+    const auto group_id = static_cast<int>(config_.topology().groupIdForTag(tag));
+    validateGroupIdForLayer(layer_id, group_id);
     return logicalGroupBlockBuffers(
-        gid, kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(layer_id, block_id));
+        group_id, kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToBuffer(layer_id, block_id));
 }
 
 std::vector<BlockInfo> HybridTypeKVCacheAllocator::convertIndexToBufferByTag(
     int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
-    const auto gid = static_cast<int>(config_.topology().groupIdForTag(tag));
-    validateGroupIdForLayer(layer_id, gid);
-    return kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToBuffer(
+    const auto group_id = static_cast<int>(config_.topology().groupIdForTag(tag));
+    validateGroupIdForLayer(layer_id, group_id);
+    return kv_cache_groups_[static_cast<size_t>(group_id)]->convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }
 
