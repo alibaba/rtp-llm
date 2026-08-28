@@ -38,14 +38,44 @@ public:
         return TaskPhase::RECEIVED;
     }
 
+    // Block-aligned KV token usage for one stream: allocated blocks times
+    // tokens-per-block (CP-shard aware via StreamCacheResource::reuseBlockTokens).
+    // Returns 0 when no KV block has been allocated yet (same signal
+    // derivePhase reads), or when the resource has already been released —
+    // for a finished record that is exactly the "occupied nothing at terminal
+    // time" value, so callers need no extra state.
+    static int64_t computeKvTokens(const GenerateStreamPtr& stream) {
+        if (!stream) {
+            return 0;
+        }
+        const size_t blocks = stream->curBlocksNum();
+        if (blocks == 0) {
+            return 0;
+        }
+        return static_cast<int64_t>(blocks) * stream->streamCacheResource().reuseBlockTokens();
+    }
+
+    // Hard cap on running_task_info detail entries reported per
+    // GetWorkerStatus. Deliberately far above any realistic running count so
+    // it never fires today; it exists purely to bound RPC payload and
+    // aggregation memory. When exceeded, the running detail is truncated and
+    // running_detail_truncated is set so consumers can tell truncation-driven
+    // absence apart from actual completion.
+    static constexpr size_t kMaxRunningTaskDetailEntries = 4096;
+
     EngineScheduleInfo getEngineScheduleInfo(int64_t latest_finished_version) {
         std::shared_lock<std::shared_mutex> lock(read_write_lock_);
         EngineScheduleInfo                  info;
         std::unordered_set<int64_t>         emitted_preemption_overlays;
         for (auto& [id, entry] : running_streams_) {
-            auto task_info  = entry.task_info;
-            task_info.phase = derivePhase(entry.stream);
-            auto overlay    = priority_preemption_overlays_.find(id);
+            if (info.running_task_info_list.size() >= kMaxRunningTaskDetailEntries) {
+                info.running_detail_truncated = true;
+                break;
+            }
+            auto task_info      = entry.task_info;
+            task_info.phase     = derivePhase(entry.stream);
+            task_info.kv_tokens = computeKvTokens(entry.stream);
+            auto overlay        = priority_preemption_overlays_.find(id);
             if (overlay != priority_preemption_overlays_.end()) {
                 task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
                 emitted_preemption_overlays.insert(id);
@@ -58,6 +88,10 @@ public:
         // overlay-only TaskInfo without inserting a synthetic engine runtime
         // entry; it therefore does not change scheduler/load accounting.
         for (const auto& [request_id, overlay] : priority_preemption_overlays_) {
+            if (info.running_task_info_list.size() >= kMaxRunningTaskDetailEntries) {
+                info.running_detail_truncated = true;
+                break;
+            }
             if (emitted_preemption_overlays.find(request_id) == emitted_preemption_overlays.end()) {
                 info.running_task_info_list.push_back(overlay);
             }
@@ -83,12 +117,11 @@ public:
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         const auto                          stream_batch_id = stream->generateInput()->group_id;
         const auto                          batch_id        = resolveBatchId(identity, stream_batch_id);
-        auto                                new_task        = makeTaskInfo(
-            TaskIdentity{identity.request_id, batch_id},
-            stream->prefixLength(),
-            stream->inputLength(),
-            stream->getTimeInfo().wait_time_us);
-        running_streams_[identity.request_id] = RunningEntry{std::move(new_task), stream};
+        auto                                new_task        = makeTaskInfo(TaskIdentity{identity.request_id, batch_id},
+                                     stream->prefixLength(),
+                                     stream->inputLength(),
+                                     stream->getTimeInfo().wait_time_us);
+        running_streams_[identity.request_id]               = RunningEntry{std::move(new_task), stream};
     }
 
     // WorkerStatus control overlay for the original Prefill. This does not
@@ -104,7 +137,7 @@ public:
                                       /*prefix_length=*/0,
                                       /*input_length=*/0,
                                       /*waiting_time_ms=*/0);
-        auto running = running_streams_.find(request_id);
+        auto running   = running_streams_.find(request_id);
         if (running != running_streams_.end()) {
             task_info = running->second.task_info;
         } else {
@@ -125,9 +158,7 @@ public:
     // Publish the single authoritative completion delta for priority Cancel.
     // The caller must invoke this only after the Prefill request execution has
     // quiesced and its local/downstream cleanup path has returned.
-    bool markPriorityPreemptionCanceled(int64_t request_id,
-                                        int64_t error_code,
-                                        const std::string& error_message) {
+    bool markPriorityPreemptionCanceled(int64_t request_id, int64_t error_code, const std::string& error_message) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                overlay = priority_preemption_overlays_.find(request_id);
         if (overlay == priority_preemption_overlays_.end()) {
@@ -144,12 +175,12 @@ public:
             task_info          = running->second.task_info;
             const auto& stream = running->second.stream;
             if (stream) {
-                const int64_t current = autil::TimeUtility::currentTimeInMilliSeconds();
-                task_info.end_time_ms       = current;
-                task_info.prefix_length     = stream->prefixLength();
-                task_info.input_length      = stream->inputLength();
-                task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
-                task_info.iterate_count     = stream->iterCount();
+                const int64_t current     = autil::TimeUtility::currentTimeInMilliSeconds();
+                task_info.end_time_ms     = current;
+                task_info.prefix_length   = stream->prefixLength();
+                task_info.input_length    = stream->inputLength();
+                task_info.waiting_time_ms = stream->getTimeInfo().wait_time_us / 1000;
+                task_info.iterate_count   = stream->iterCount();
                 task_info.execution_time_ms =
                     computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
             }
@@ -158,8 +189,8 @@ public:
         if (task_info.end_time_ms < 0) {
             task_info.end_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
         }
-        task_info.error_code    = error_code;
-        task_info.error_message = error_message;
+        task_info.error_code                   = error_code;
+        task_info.error_message                = error_message;
         task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELED;
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
@@ -175,7 +206,7 @@ public:
         if (ptr == running_streams_.end()) {
             return;
         }
-        auto& task_info = ptr->second.task_info;
+        auto&   task_info           = ptr->second.task_info;
         int64_t current             = autil::TimeUtility::currentTimeInMilliSeconds();
         task_info.end_time_ms       = current;
         task_info.prefix_length     = stream->prefixLength();
@@ -183,6 +214,9 @@ public:
         task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
         task_info.iterate_count     = stream->iterCount();
         task_info.execution_time_ms = computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
+        // Snapshot KV usage at terminal time; reads as 0 once the resource has
+        // been released, which is the correct "occupied nothing now" value.
+        task_info.kv_tokens = computeKvTokens(stream);
 
         auto overlay = priority_preemption_overlays_.find(request_id);
         if (overlay != priority_preemption_overlays_.end()) {
@@ -190,9 +224,9 @@ public:
             // teardown must not emit an untyped terminal record. Preserve the
             // latest runtime metrics in the control overlay; the priority
             // finalizer will publish the one authoritative CANCELED record.
-            overlay->second                              = task_info;
-            overlay->second.end_time_ms                  = -1;
-            overlay->second.error_code                   = 0;
+            overlay->second             = task_info;
+            overlay->second.end_time_ms = -1;
+            overlay->second.error_code  = 0;
             overlay->second.error_message.clear();
             overlay->second.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
             running_streams_.erase(ptr);
@@ -260,12 +294,9 @@ protected:
         return stream_batch_id;
     }
 
-    static EngineScheduleInfo::TaskInfo makeTaskInfo(const TaskIdentity& identity,
-                                                      int64_t             prefix_length,
-                                                      int64_t             input_length,
-                                                      int64_t             waiting_time_ms) {
-        EngineScheduleInfo::TaskInfo task_info{
-            identity.request_id, prefix_length, input_length, waiting_time_ms};
+    static EngineScheduleInfo::TaskInfo
+    makeTaskInfo(const TaskIdentity& identity, int64_t prefix_length, int64_t input_length, int64_t waiting_time_ms) {
+        EngineScheduleInfo::TaskInfo task_info{identity.request_id, prefix_length, input_length, waiting_time_ms};
         task_info.batch_id = identity.batch_id;
         return task_info;
     }
@@ -288,8 +319,18 @@ protected:
             }
         }
     }
-    std::unordered_map<int64_t, RunningEntry>                   running_streams_;
-    std::unordered_map<int64_t, EngineScheduleInfo::TaskInfo>   priority_preemption_overlays_;
+    std::unordered_map<int64_t, RunningEntry>                 running_streams_;
+    std::unordered_map<int64_t, EngineScheduleInfo::TaskInfo> priority_preemption_overlays_;
+    // Finished window: a bounded FIFO of the most recent finished_capacity_
+    // terminal records, each stamped with a monotonically increasing version.
+    // GetWorkerStatus(latest_finished_version) replays every entry with
+    // version > latest_finished_version, so a Master that lost an increment
+    // (transport failure, skipped poll) re-receives the same terminals on the
+    // next pull within the window — terminal delivery is state-based, not
+    // one-shot. Eviction is capacity-based only (pop_front at 1000 entries);
+    // trimFinishedStreams() is currently dead code and must stay deactivated,
+    // because a 5s time-based eviction would shorten the replay window and
+    // break that self-healing property.
     std::list<std::pair<int64_t, EngineScheduleInfo::TaskInfo>> finished_streams_;
     std::atomic<int64_t>      version_{autil::TimeUtility::currentTimeInMicroSeconds()};
     mutable std::shared_mutex read_write_lock_;

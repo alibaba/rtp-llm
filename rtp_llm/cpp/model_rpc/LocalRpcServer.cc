@@ -264,6 +264,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_is_waiting(task.phase != rtp_llm::TaskPhase::RUNNING);
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_kv_tokens(task.kv_tokens);
         task_info->set_priority_preemption_progress(
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
         if (task.error_code != 0) {
@@ -285,6 +286,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_is_waiting(task.phase != rtp_llm::TaskPhase::RUNNING);
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_kv_tokens(task.kv_tokens);
         task_info->set_priority_preemption_progress(
             static_cast<PriorityPreemptionProgressPB>(task.priority_preemption_progress));
         if (task.error_code != 0) {
@@ -292,6 +294,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
             task_info->mutable_error_info()->set_error_message(task.error_message);
         }
     }
+    response->set_running_detail_truncated(engine_schedule_info.running_detail_truncated);
 
     response->set_dp_size(status_info.dp_size);
     response->set_tp_size(status_info.tp_size);
