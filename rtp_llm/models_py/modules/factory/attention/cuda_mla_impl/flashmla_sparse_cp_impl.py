@@ -50,6 +50,7 @@ from .flashmla_sparse_impl import (
     _allocate_prefill_fused_kv,
     _as_uint8,
     _GatherWorkspace,
+    _pad_flashmla_topk,
     _topk_2d,
 )
 
@@ -358,6 +359,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
         use_cuda_graph: bool = False,
+        indexer_top_k: Optional[int] = None,
+        indexer_group_size: int = 1,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -368,6 +371,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
             use_cuda_graph=use_cuda_graph,
+            indexer_top_k=indexer_top_k,
+            indexer_group_size=indexer_group_size,
         )
         self.attn_inputs = None
         self.cp_info = None
@@ -426,7 +431,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
     def _refresh_fp8_kernel_metadata(self, n_q: int) -> None:
         key = (
             int(n_q) * int(self.num_heads),
-            int(self.top_k),
+            int(self.kernel_top_k),
             int(self.num_heads),
             1,
             True,
@@ -435,7 +440,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
                 cache_seqlens=None,
                 num_q_tokens_per_head_k=key[0],
-                topk=self.top_k,
+                topk=self.kernel_top_k,
                 num_heads_q=self.num_heads,
                 num_heads_k=1,
                 is_fp8_kvcache=True,
@@ -457,7 +462,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
             cache_seqlens=None,
             num_q_tokens_per_head_k=key[0],
-            topk=self.top_k,
+            topk=self.kernel_top_k,
             num_heads_q=self.num_heads,
             num_heads_k=1,
             is_fp8_kvcache=True,
@@ -949,7 +954,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             kv_cache_flat = kv_cache.kv_cache_base.view(
                 -1, 1, kv_cache.kv_cache_base.size(-1)
             )
-            global_topk = self._convert_topk_indices_to_global(topk)
+            global_topk = _pad_flashmla_topk(
+                self._convert_topk_indices_to_global(topk), self.kernel_top_k
+            )
             attn_out, _, _ = flash_mla_sparse_fwd(
                 q0,
                 kv_cache_flat,
@@ -964,7 +971,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         if kv_cache_flat.ndim == 3:
             kv_cache_flat = kv_cache_flat.unsqueeze(-2)
-        global_topk = self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0)
+        global_topk = _pad_flashmla_topk(
+            self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0),
+            self.kernel_top_k,
+        )
         meta = self._fp8_kernel_metadata_q0
         attn_out, _ = flash_mla_with_kvcache(
             q=q0.unsqueeze(0),
@@ -1016,7 +1026,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         # Preserve -1 so flash_mla_sparse_fwd skips these positions.
         padding_mask = topk_2d < 0
         raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        global_indices = _pad_flashmla_topk(
+            raw_global.masked_fill(padding_mask, -1).unsqueeze(1),
+            self.kernel_top_k,
+        )
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             fused_kv.unsqueeze(1),

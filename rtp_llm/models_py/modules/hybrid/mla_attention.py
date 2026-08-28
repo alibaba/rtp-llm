@@ -10,7 +10,7 @@ from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache
 from rtp_llm.utils.model_weight import W
 
 # CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
@@ -182,6 +182,7 @@ class MlaAttention(nn.Module):
         q_c_scale: Optional[torch.Tensor] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
+        global_kv_cache: Optional[KVCache] = None,
     ) -> Optional[torch.Tensor]:
         if self.reuse_topk_indices or force_reuse_topk_indices:
             if not fmha_impl.is_sparse():
@@ -208,6 +209,7 @@ class MlaAttention(nn.Module):
             x_scale=x_scale,
             q_c_fp8=q_c_fp8,
             q_c_scale=q_c_scale,
+            global_kv_cache=global_kv_cache,
         )
 
     def forward(
@@ -220,6 +222,7 @@ class MlaAttention(nn.Module):
         prev_topk_indices: Optional[torch.Tensor] = None,
         force_reuse_topk_indices: bool = False,
         return_topk: bool = False,
+        global_kv_cache: Optional[KVCache] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
         q_c = None
@@ -305,6 +308,7 @@ class MlaAttention(nn.Module):
             q_c_scale,
             prev_topk_indices,
             force_reuse_topk_indices,
+            global_kv_cache,
         )
         # q_c and its quantized representation are Indexer-only. Releasing
         # the local references here lets SparseMLA reuse their blocks;

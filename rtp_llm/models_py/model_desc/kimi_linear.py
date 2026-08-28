@@ -54,6 +54,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
+    KVCache,
     LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
@@ -769,6 +770,7 @@ class KimiLinearDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
+        global_kv_cache: Optional[KVCache] = None,
     ) -> DecodeLayerOutput:
         if self.hc_enabled:
             return self._forward_hc(
@@ -777,6 +779,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 kv_cache,
                 attention_inputs,
                 attn_meta,
+                global_kv_cache,
             )
 
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
@@ -796,6 +799,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
+                global_kv_cache=global_kv_cache,
             )
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -809,6 +813,7 @@ class KimiLinearDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: KimiLinearMetadata,
+        global_kv_cache: Optional[KVCache],
     ) -> DecodeLayerOutput:
         residual = hidden_states
         hidden_states, post, comb = self.attn_hc.pre(residual)
@@ -828,6 +833,7 @@ class KimiLinearDecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 fmha_impl=fmha_impl,
                 kv_cache=kv_cache,
+                global_kv_cache=global_kv_cache,
             )
 
         hidden_states = self.attn_hc.post(hidden_states, residual, post, comb)
@@ -956,6 +962,7 @@ class KimiLinearModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
+                global_kv_cache=self.kv_cache,
             )
             hidden_states = output.hidden_states
             residual = output.residual

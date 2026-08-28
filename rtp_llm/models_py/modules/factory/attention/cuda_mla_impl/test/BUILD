@@ -25,6 +25,36 @@ py_test(
 )
 
 py_test(
+    name = "glm53_grouped_topk_test",
+    srcs = ["sparse_mla_op_test.py"],
+    main = "sparse_mla_op_test.py",
+    args = ["SparseMlaOpTest.test_glm53_grouped_topk_expansion"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {
+        'gpu': 'L20D_DEV',
+        'gpu_count': '1',
+    },
+)
+
+py_test(
+    name = "glm53_topk2051_kernel_test",
+    srcs = ["sparse_mla_op_test.py"],
+    main = "sparse_mla_op_test.py",
+    args = ["SparseMlaOpTest.test_glm53_topk2051_prefill_and_decode_kernel"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {
+        'gpu': 'L20D_DEV',
+        'gpu_count': '1',
+    },
+)
+
+py_test(
     name = "sparse_mla_fp8_decode_op_test",
     srcs = ["sparse_mla_decode_op_test.py"],
     deps = [

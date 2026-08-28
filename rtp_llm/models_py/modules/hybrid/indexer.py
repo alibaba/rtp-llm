@@ -7,8 +7,12 @@ from torch import nn
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
+    fp32_state_pool_view,
+    fp8_pool_view,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops.compute_ops import KVCache, KVCacheRegionName
 from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
@@ -74,6 +78,7 @@ class Indexer(nn.Module):
         self.index_n_heads = attn_config.indexer_head_num
         self.index_head_dim = attn_config.indexer_head_dim
         self.index_topk = attn_config.indexer_topk
+        self.compress_ratio = int(getattr(attn_config, "indexer_compress_ratio", 1))
 
         self.rope_head_dim = attn_config.rope_head_dim
         self.block_size = 128  # quantization block size (128)
@@ -105,6 +110,52 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+
+        if self.compress_ratio > 1:
+            if self._prefill_cp_enabled():
+                raise ValueError(
+                    "GLM-5.3-Flash compressed indexer does not support prefill CP"
+                )
+            if self.compress_ratio != 4:
+                raise ValueError(
+                    "GLM-5.3-Flash compressed indexer requires ratio 4, got "
+                    f"{self.compress_ratio}"
+                )
+            from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
+
+            # RTP loader linear tensors use [in, out]. CompressorFP8 consumes
+            # native F.linear weights [out, in], while the KPool gate is loaded
+            # directly from the checkpoint and already has [out, in] layout.
+            k_weight = weights[W.mla_indexer_k_w].T.contiguous()
+            gate_weight = weights[W.v4_indexer_compressor_wgate].contiguous()
+            weights_projection = weights[W.mla_indexer_weights_proj_w].T.contiguous()
+            self.compressed_indexer = IndexerFP8(
+                dim=int(k_weight.shape[1]),
+                q_lora_rank=int(weights[W.mla_indexer_qb_w].shape[0]),
+                index_n_heads=self.index_n_heads,
+                index_head_dim=self.index_head_dim,
+                rope_head_dim=self.rope_head_dim,
+                index_topk=self.index_topk,
+                compress_ratio=self.compress_ratio,
+                max_batch_size=1024,
+                max_seq_len=int(attn_config.max_seq_len),
+                norm_eps=layernorm_eps,
+                q_projection=self.wq_b,
+                weights_projection=weights_projection,
+                compressor_weights={
+                    "ape": weights[W.v4_indexer_compressor_ape],
+                    "wkv": k_weight,
+                    "wgate": gate_weight,
+                    # KPool applies LayerNorm before pooling, so the generic
+                    # post-pool RMS weight is intentionally unused.
+                    "norm": torch.ones_like(weights[W.mla_indexer_k_norm_w]),
+                },
+                compressor_kpool_mode=True,
+                compressor_pre_norm_weight=weights[W.mla_indexer_k_norm_w],
+                compressor_pre_norm_bias=weights[W.mla_indexer_k_norm_b],
+                rotate_q=True,
+            )
+            return
 
         self.wk = LinearFactory.create_linear_from_weights(
             weights,
@@ -156,6 +207,171 @@ class Indexer(nn.Module):
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
         )
+
+    def _bind_compressed_pools(
+        self, global_kv_cache: KVCache, attention_inputs: Any
+    ) -> tuple[torch.Tensor, int]:
+        from rtp_llm.models_py.modules.dsv4.attn_type import (
+            INDEXER_KV,
+            INDEXER_STATE,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
+            require_pool_tokens_per_block,
+        )
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            build_block_tables_batched,
+        )
+
+        block_tables = build_block_tables_batched(global_kv_cache, attention_inputs)
+        if block_tables is None:
+            raise RuntimeError(
+                "GLM-5.3-Flash compressed indexer block tables are unavailable"
+            )
+        kv_base = global_kv_cache.get_raw_pool_tensor(
+            self.layer_idx, KVCacheRegionName.INDEXER_KV
+        )
+        state_base = global_kv_cache.get_raw_pool_tensor(
+            self.layer_idx, KVCacheRegionName.INDEXER_STATE
+        )
+        kv_view, kv_eb = fp8_pool_view(kv_base, entry_bytes=132)
+        state_view, state_eb = fp32_state_pool_view(
+            state_base, state_width=2 * self.index_head_dim
+        )
+        kv_key = int(INDEXER_KV)
+        state_key = int(INDEXER_STATE)
+        kv_block_table = block_tables[kv_key]
+        self.compressed_indexer.set_pool_context(
+            kv_view,
+            kv_block_table,
+            kv_eb,
+            state_view,
+            block_tables[state_key],
+            state_eb,
+            state_tokens_per_block=require_pool_tokens_per_block(
+                global_kv_cache, region=state_key
+            ),
+            kv_tokens_per_block=require_pool_tokens_per_block(
+                global_kv_cache, region=kv_key
+            ),
+            kv_owner_tokens_per_block=int(global_kv_cache.seq_size_per_block),
+        )
+        return kv_block_table, kv_eb
+
+    @staticmethod
+    def _has_prefix(attention_inputs: Any) -> bool:
+        prefix_host = getattr(attention_inputs, "prefix_lengths_host", None)
+        if prefix_host is not None and prefix_host.numel():
+            return any(int(value) > 0 for value in prefix_host.tolist())
+        prefix = attention_inputs.prefix_lengths
+        return bool(prefix.numel() and prefix.max().item() > 0)
+
+    def _forward_compressed(
+        self,
+        hidden_states: torch.Tensor,
+        q_lora: torch.Tensor,
+        fmha_params: Any,
+        attention_inputs: Any,
+        global_kv_cache: KVCache,
+        use_fast_path: bool,
+    ) -> Optional[torch.Tensor]:
+        kv_block_table, kv_eb = self._bind_compressed_pools(
+            global_kv_cache, attention_inputs
+        )
+        is_multi_token_decode = bool(
+            getattr(attention_inputs, "is_target_verify", False)
+        ) or bool(getattr(attention_inputs, "is_draft_extend", False))
+        is_regular_prefill = bool(attention_inputs.is_prefill) and not (
+            is_multi_token_decode
+        )
+        try:
+            if is_regular_prefill:
+                batch_size = int(attention_inputs.input_lengths.numel())
+                meta = self.compressed_indexer.prepare(
+                    bsz=1,
+                    seqlen=int(hidden_states.shape[0]),
+                    sp_int=0,
+                    device=hidden_states.device,
+                    kv_block_table=kv_block_table,
+                    kv_eb=kv_eb,
+                    use_varlen=True,
+                    batch_size=batch_size,
+                    cu_seqlens=attention_inputs.cu_seqlens,
+                    input_lengths=attention_inputs.input_lengths,
+                    prefix_lengths=attention_inputs.prefix_lengths,
+                    position_ids=fmha_params.positions_d,
+                    req_id_per_token=fmha_params.batch_indice_d,
+                    has_prefix=self._has_prefix(attention_inputs),
+                )
+                topk = self.compressed_indexer(
+                    hidden_states,
+                    q_lora,
+                    meta,
+                    workspace=None,
+                )
+            else:
+                batch_size = int(attention_inputs.input_lengths.numel())
+                total_tokens = int(hidden_states.shape[0])
+                if batch_size <= 0 or total_tokens % batch_size:
+                    raise RuntimeError(
+                        "GLM-5.3-Flash compressed decode requires a uniform "
+                        f"query length: tokens={total_tokens} batch={batch_size}"
+                    )
+                q_len = total_tokens // batch_size
+                hidden_3d = hidden_states.reshape(
+                    batch_size, q_len, hidden_states.shape[-1]
+                )
+                q_lora_3d = q_lora.reshape(batch_size, q_len, q_lora.shape[-1])
+                positions = fmha_params.positions_d.reshape(-1).to(torch.long)
+                topk_buffer = torch.full(
+                    (batch_size, q_len, self.index_topk),
+                    -1,
+                    dtype=torch.int32,
+                    device=hidden_states.device,
+                )
+                compressor_meta = None
+                if q_len > 1:
+                    from dataclasses import replace
+
+                    b_idx = torch.arange(
+                        batch_size, device=hidden_states.device, dtype=torch.long
+                    ).repeat_interleave(q_len)
+                    cu_seq_per_req = torch.arange(
+                        0,
+                        total_tokens + 1,
+                        q_len,
+                        device=hidden_states.device,
+                        dtype=torch.int32,
+                    )
+                    self.compressed_indexer._propagate_pool_to_nested()
+                    compressor_meta = (
+                        self.compressed_indexer.compressor.prepare_metadata(
+                            positions,
+                            b_idx,
+                            has_prefix=True,
+                            is_batched=True,
+                            seq_start_per_req=positions.view(batch_size, q_len)[:, 0]
+                            .to(torch.int32)
+                            .contiguous(),
+                            cu_seq_per_req=cu_seq_per_req,
+                        )
+                    )
+                    compressor_meta = replace(
+                        compressor_meta,
+                        compressed_lens_per_token=(
+                            (positions + 1) // self.compress_ratio
+                        ).to(torch.int32),
+                    )
+                topk = self.compressed_indexer.forward_decode_vectorized(
+                    hidden_3d,
+                    q_lora_3d,
+                    positions.view(batch_size, q_len)[:, 0],
+                    topk_buffer,
+                    position_ids=positions if q_len > 1 else None,
+                    compressor_meta=compressor_meta,
+                ).reshape(-1, self.index_topk)
+            return None if use_fast_path else topk
+        finally:
+            self.compressed_indexer.clear_pool_context()
 
     def _prefill_cp_enabled(self) -> bool:
         if self.parallelism_config is None:
@@ -381,7 +597,21 @@ class Indexer(nn.Module):
         x_scale: Optional[torch.Tensor] = None,
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
+        global_kv_cache: Optional[KVCache] = None,
     ) -> torch.Tensor:
+        if self.compress_ratio > 1:
+            if global_kv_cache is None:
+                raise RuntimeError(
+                    "GLM-5.3-Flash compressed indexer requires global KVCache"
+                )
+            return self._forward_compressed(
+                hidden_states,
+                q_lora,
+                fmha_params,
+                attention_inputs,
+                global_kv_cache,
+                use_fast_path,
+            )
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)
             self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)

@@ -164,6 +164,9 @@ def _run_prefill_topk(
     topk: int,
     compress_ratio: int,
 ) -> None:
+    # Every backend may leave padded lanes untouched. Initialize the full
+    # destination so invalid compressed indices can never escape as stale data.
+    out.fill_(-1)
     if _fp8_prefill_topk_use_torch():
         _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
         return
@@ -302,6 +305,13 @@ class IndexerFP8(PoolBackedModule):
         max_seq_len: int,
         norm_eps: float = 1e-6,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        q_projection: Optional[nn.Module] = None,
+        weights_projection: Optional[torch.Tensor] = None,
+        compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
+        compressor_kpool_mode: bool = False,
+        compressor_pre_norm_weight: Optional[torch.Tensor] = None,
+        compressor_pre_norm_bias: Optional[torch.Tensor] = None,
+        rotate_q: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -317,10 +327,11 @@ class IndexerFP8(PoolBackedModule):
             "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
             "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
         )
-        assert layer_weights is not None, (
-            "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
-            "construction is not supported (use the BF16 path for that)."
-        )
+        assert layer_weights is not None or (
+            q_projection is not None
+            and weights_projection is not None
+            and compressor_weights is not None
+        ), "IndexerFP8 requires DSV4 layer_weights or explicit GLM projections"
         self.dim = dim
         self.n_heads = index_n_heads
         self.head_dim = index_head_dim
@@ -329,30 +340,41 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        self.rotate_q = bool(rotate_q)
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
 
-        self.wq_b = _v4_fp8_linear(
-            layer_weights[W.v4_indexer_wq_b_w],
-            layer_weights[W.v4_indexer_wq_b_s],
-        )
-        # weights_proj is plain BF16. Pre-fold the runtime ``softmax_scale *
+        if q_projection is not None:
+            self.wq_b = q_projection
+        else:
+            assert layer_weights is not None
+            self.wq_b = _v4_fp8_linear(
+                layer_weights[W.v4_indexer_wq_b_w],
+                layer_weights[W.v4_indexer_wq_b_s],
+            )
+        # Pre-fold the runtime ``softmax_scale *
         # n_heads^-0.5`` into the weight at load time so prefill / decode can
-        # do a single ``F.linear`` (cuBLAS GEMM) without a trailing elementwise
-        # mul. New tensor — never mutate ``layer_weights`` in place.
+        # do a single ``F.linear`` without a trailing elementwise mul. Preserve
+        # the checkpoint loader dtype (GLM uses FP32; DSV4 uses BF16). New
+        # tensor — never mutate ``layer_weights`` in place.
         _wp_scale = self.softmax_scale * self.n_heads**-0.5
-        self.weights_proj = (
-            layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
-        ).contiguous()
+        if weights_projection is None:
+            assert layer_weights is not None
+            weights_projection = layer_weights[W.v4_indexer_weights_proj_w]
+        self.weights_proj = (weights_projection * _wp_scale).contiguous()
 
         # Nested compressor: 132B layout (head_dim=128).
-        inner_cmp_weights = {
-            "ape": layer_weights[W.v4_indexer_compressor_ape],
-            "wkv": layer_weights[W.v4_indexer_compressor_wkv],
-            "wgate": layer_weights[W.v4_indexer_compressor_wgate],
-            "norm": layer_weights[W.v4_indexer_compressor_norm],
-        }
+        if compressor_weights is None:
+            assert layer_weights is not None
+            inner_cmp_weights = {
+                "ape": layer_weights[W.v4_indexer_compressor_ape],
+                "wkv": layer_weights[W.v4_indexer_compressor_wkv],
+                "wgate": layer_weights[W.v4_indexer_compressor_wgate],
+                "norm": layer_weights[W.v4_indexer_compressor_norm],
+            }
+        else:
+            inner_cmp_weights = compressor_weights
         self.compressor = CompressorFP8(
             dim=dim,
             head_dim=index_head_dim,
@@ -363,6 +385,10 @@ class IndexerFP8(PoolBackedModule):
             norm_eps=norm_eps,
             rotate=True,
             compressor_weights=inner_cmp_weights,
+            overlap=False if compressor_kpool_mode else None,
+            kpool_mode=compressor_kpool_mode,
+            pre_norm_weight=compressor_pre_norm_weight,
+            pre_norm_bias=compressor_pre_norm_bias,
         )
         self.max_batch_size = max_batch_size
         self._kv_cache_t = max_seq_len // compress_ratio
@@ -376,6 +402,11 @@ class IndexerFP8(PoolBackedModule):
         # the nested compressor rebuilds its slot mappings post-gather
         # (CompressorFP8.forward handles that internally).
         self._cp_ctx: Optional[CPContext] = None
+
+    def _compute_weights(self, x: torch.Tensor) -> torch.Tensor:
+        """Project per-head gates in the checkpoint weight's native dtype."""
+        weight = self.weights_proj
+        return F.linear(x if x.dtype == weight.dtype else x.to(weight.dtype), weight)
 
     # --------------------------------------------------------------
     # Pool propagation to nested compressor
@@ -504,6 +535,7 @@ class IndexerFP8(PoolBackedModule):
         qr: torch.Tensor,
         freqs_cis: torch.Tensor,
         batched_rope: bool = False,
+        apply_rope: bool = True,
     ) -> torch.Tensor:
         """qr → wq_b → unflatten → RoPE → q.
 
@@ -526,6 +558,14 @@ class IndexerFP8(PoolBackedModule):
             else:
                 q = self.wq_b(qr)
             q = q.unflatten(-1, (self.n_heads, self.head_dim))
+        if not apply_rope:
+            if self.rotate_q:
+                from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                    _rotate_activation,
+                )
+
+                q = _rotate_activation(q)
+            return q
         with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
             rope_view = q[..., -self.rope_head_dim :]
             if not rope_view.is_cuda:
@@ -535,6 +575,12 @@ class IndexerFP8(PoolBackedModule):
             )
 
             rope_only_inplace(rope_view, freqs_cis)
+        if self.rotate_q:
+            from rtp_llm.models_py.modules.base.cuda.indexer_op import (
+                _rotate_activation,
+            )
+
+            q = _rotate_activation(q)
         return q
 
     # --------------------------------------------------------------
@@ -566,20 +612,38 @@ class IndexerFP8(PoolBackedModule):
             )
 
             if position_ids is None:
-                freqs = self.freqs_cis[start_pos.long()]
-                q = self._compute_indexer_q(qr, freqs, batched_rope=True)
+                freqs = (
+                    self.freqs_cis[start_pos.long()]
+                    if self.freqs_cis is not None
+                    else x.new_empty((bsz, 0), dtype=torch.complex64)
+                )
+                q = self._compute_indexer_q(
+                    qr,
+                    freqs,
+                    batched_rope=True,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
                 compressed_len = ((start_pos + 1) // ratio).view(bsz, 1, 1)
             else:
                 assert compressor_meta is not None
                 pos_flat = compressor_meta.positions.reshape(-1)
-                freqs = self.freqs_cis.index_select(0, pos_flat).contiguous()
-                q = self._compute_indexer_q(qr, freqs, batched_rope=False)
+                freqs = (
+                    self.freqs_cis.index_select(0, pos_flat).contiguous()
+                    if self.freqs_cis is not None
+                    else x.new_empty((pos_flat.numel(), 0), dtype=torch.complex64)
+                )
+                q = self._compute_indexer_q(
+                    qr,
+                    freqs,
+                    batched_rope=False,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
                 assert compressor_meta.compressed_lens_per_token is not None
                 compressed_len = compressor_meta.compressed_lens_per_token.view(
                     bsz, q_len, 1
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
-            weights = F.linear(x, self.weights_proj)
+            weights = self._compute_weights(x)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -621,6 +685,7 @@ class IndexerFP8(PoolBackedModule):
             score_2d = score.view(bsz * q_len, T_max)
             lengths_i32 = compressed_len.view(bsz * q_len)
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
+            out_topk_buffer.fill_(-1)
             if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
                 rtp_llm_ops.dsv4_persistent_topk(
                     score_2d,
@@ -631,7 +696,6 @@ class IndexerFP8(PoolBackedModule):
                     T_max,
                 )
             else:
-                out_topk_buffer.fill_(-1)
                 if K_eff > 0:
                     t_range = torch.arange(T_max, device=score.device).view(1, T_max)
                     score_masked = torch.where(
@@ -690,7 +754,9 @@ class IndexerFP8(PoolBackedModule):
         layout-agnostic — once the caller starts feeding per-request
         ``cu_seqlens`` we'll fan that out here.
         """
-        assert self.freqs_cis is not None, "IndexerFP8.prepare needs freqs_cis bound"
+        assert (
+            self.compressor.kpool_mode or self.freqs_cis is not None
+        ), "IndexerFP8.prepare needs freqs_cis unless GLM KPool NoPE is active"
         ratio = self.compress_ratio
         # ``use_varlen`` is required — set by
         # ``Attention._build_csa_prefill_meta`` which receives it from
@@ -792,8 +858,10 @@ class IndexerFP8(PoolBackedModule):
             # sp:sp+S]`` for B == 1 contiguous range; per-token gather is
             # required when requests interleave on the flat axis.
             with record_function_range("dsv4.fp8.indexer.prepare.freqs"):
-                freqs_cis_slice = self.freqs_cis.index_select(
-                    0, positions_d.to(torch.long)
+                freqs_cis_slice = (
+                    self.freqs_cis.index_select(0, positions_d.to(torch.long))
+                    if self.freqs_cis is not None
+                    else torch.empty((M, 0), dtype=torch.complex64, device=device)
                 )
 
             if kv_block_table is not None and kv_eb > 0:
@@ -824,7 +892,11 @@ class IndexerFP8(PoolBackedModule):
                 T = end_pos // ratio
                 M = bsz * seqlen
 
-                freqs_cis_slice = self.freqs_cis[sp_int : sp_int + seqlen]
+                freqs_cis_slice = (
+                    self.freqs_cis[sp_int : sp_int + seqlen]
+                    if self.freqs_cis is not None
+                    else torch.empty((seqlen, 0), dtype=torch.complex64, device=device)
+                )
 
                 # Global Q positions for this chunk: sp..sp+S-1 (B==1 → flat [M]).
                 positions_d = torch.arange(
@@ -1025,20 +1097,24 @@ class IndexerFP8(PoolBackedModule):
         ):
             return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
 
-        if self.compressor.freqs_cis is None:
+        if not self.compressor.kpool_mode and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
 
         self._propagate_pool_to_nested()
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
-                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+                q = self._compute_indexer_q(
+                    qr,
+                    attention_inputs.freqs_cis_slice,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor(
                     x, sp, meta=attention_inputs.compressor_meta, workspace=workspace
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
-                weights = F.linear(x, self.weights_proj)
+                weights = self._compute_weights(x)
 
             assert (
                 has_fp8_mqa_logits()
@@ -1169,7 +1245,7 @@ class IndexerFP8(PoolBackedModule):
             or self._kv_eb <= 0
         ):
             return None
-        if self.compressor.freqs_cis is None:
+        if not self.compressor.kpool_mode and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
         self._propagate_pool_to_nested()
         kwargs = {
@@ -1226,7 +1302,7 @@ class IndexerFP8(PoolBackedModule):
             self.compressor.finish_prefill(nested_pending)
             return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
 
-        if self.compressor.freqs_cis is None:
+        if not self.compressor.kpool_mode and self.compressor.freqs_cis is None:
             self.compressor.freqs_cis = self.freqs_cis
         # ``set_pool_context`` is idempotent — re-propagating is safe and
         # mirrors ``forward``'s unconditional propagate so callers that
@@ -1235,11 +1311,15 @@ class IndexerFP8(PoolBackedModule):
         self._propagate_pool_to_nested()
         try:
             with record_function_range("dsv4.fp8.indexer.prefill.compute_q"):
-                q = self._compute_indexer_q(qr, attention_inputs.freqs_cis_slice)
+                q = self._compute_indexer_q(
+                    qr,
+                    attention_inputs.freqs_cis_slice,
+                    apply_rope=not self.compressor.kpool_mode,
+                )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor.finish_prefill(nested_pending)
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
-                weights = F.linear(x, self.weights_proj)
+                weights = self._compute_weights(x)
 
             assert (
                 has_fp8_mqa_logits()

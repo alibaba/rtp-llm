@@ -63,6 +63,9 @@ def _test_config():
             "index_head_dim": 128,
             "index_n_heads": 32,
             "index_topk": 2048,
+            "index_kpool": 4,
+            "index_kpool_compress": True,
+            "index_kpool_always_select_tail": True,
             "indexer_rope_interleave": True,
             "index_share_for_mtp_iteration": True,
             "indexer_types": ["full"] * 45,
@@ -280,7 +283,11 @@ class Glm53FlashConfigTest(unittest.TestCase):
         self.assertEqual(config.moe_layer_index, list(range(3, 45)))
         self.assertEqual(config.attn_config.rope_head_dim, 0)
         self.assertFalse(config.has_positional_encoding)
-        self.assertEqual(config.attn_config.indexer_topk, 2048)
+        self.assertEqual(config.attn_config.indexer_topk, 512)
+        self.assertEqual(config.attn_config.indexer_compress_ratio, 4)
+        self.assertEqual(config.attn_config.indexer_compressor_overlap, 0)
+        self.assertEqual(config.attn_config.sparse_attention_topk, 2051)
+        self.assertEqual(config.attn_config.indexer_layer_ids, list(range(3, 45, 4)))
         self.assertEqual(
             config.hybrid_attention_config.hybrid_attention_types[0],
             HybridAttentionType.LINEAR,
@@ -297,6 +304,30 @@ class Glm53FlashConfigTest(unittest.TestCase):
         self.assertTrue(
             config.hybrid_attention_config.enable_independent_kv_cache_pools
         )
+
+    def test_rejects_disabled_kpool_compression(self):
+        config_json = _test_config()
+        config_json["text_config"]["index_kpool_compress"] = False
+        with self.assertRaisesRegex(ValueError, "index_kpool_compress=true"):
+            parse_glm53_flash_config(config_json)
+
+    def test_rejects_wrong_kpool_ratio(self):
+        config_json = _test_config()
+        config_json["text_config"]["index_kpool"] = 2
+        with self.assertRaisesRegex(ValueError, "index_kpool=4"):
+            parse_glm53_flash_config(config_json)
+
+    def test_rejects_raw_topk_not_divisible_by_kpool(self):
+        config_json = _test_config()
+        config_json["text_config"]["index_topk"] = 2047
+        with self.assertRaisesRegex(ValueError, "positive and divisible"):
+            parse_glm53_flash_config(config_json)
+
+    def test_rejects_disabled_tail_selection(self):
+        config_json = _test_config()
+        config_json["text_config"]["index_kpool_always_select_tail"] = False
+        with self.assertRaisesRegex(ValueError, "always_select_tail=true"):
+            parse_glm53_flash_config(config_json)
 
     def test_kda_recurrent_state_is_always_fp32(self):
         config = parse_glm53_flash_config(_test_config())

@@ -17,6 +17,7 @@ def _convert_req_index_to_global_index_kernel(
     max_num_blocks_per_req: tl.constexpr,
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE: tl.constexpr,
     ENTRIES_PER_BLOCK: tl.constexpr,
+    NUM_TOPK_TOKENS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     # strides (in elements)
@@ -34,13 +35,14 @@ def _convert_req_index_to_global_index_kernel(
 
     # Each program covers BLOCK_N consecutive columns
     indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    valid_indice = indice_id < NUM_TOPK_TOKENS
 
     # Load request id for this token (no mask: grid is exact)
     req = tl.load(req_id_ptr + token_id)
 
     # Load token indices for this tile
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-    tok = tl.load(ti_ptr)  # int32
+    tok = tl.load(ti_ptr, mask=valid_indice, other=-1)  # int32
 
     # Invalid local indices and unallocated block-table entries propagate as -1.
     is_invalid_tok = tok < 0
@@ -71,7 +73,7 @@ def _convert_req_index_to_global_index_kernel(
 
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
+    tl.store(out_ptr_ij, out_val, mask=valid_indice)
 
 
 def triton_convert_req_index_to_global_index(
@@ -115,9 +117,6 @@ def triton_convert_req_index_to_global_index(
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE = int(TOKENS_PER_BLOCK_FOR_BLOCK_TABLE)
     assert ENTRIES_PER_BLOCK > 0
     assert TOKENS_PER_BLOCK_FOR_BLOCK_TABLE > 0
-    assert (
-        NUM_TOPK_TOKENS % BLOCK_N == 0
-    ), f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
 
     if HAS_PREFILL_WORKSPACE:
         assert prefill_workspace_request_ids is not None
@@ -127,7 +126,7 @@ def triton_convert_req_index_to_global_index(
 
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
+    tiles_per_row = triton.cdiv(NUM_TOPK_TOKENS, BLOCK_N)
 
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
@@ -161,6 +160,7 @@ def triton_convert_req_index_to_global_index(
         max_num_blocks_per_req,
         TOKENS_PER_BLOCK_FOR_BLOCK_TABLE,
         ENTRIES_PER_BLOCK,
+        NUM_TOPK_TOKENS,
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         # strides

@@ -38,6 +38,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
@@ -280,6 +281,10 @@ class CompressorFP8(PoolBackedModule):
         norm_eps: float = 1e-6,
         rotate: bool = False,
         compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
+        overlap: Optional[bool] = None,
+        kpool_mode: bool = False,
+        pre_norm_weight: Optional[torch.Tensor] = None,
+        pre_norm_bias: Optional[torch.Tensor] = None,
     ):
         """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
         "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``."""
@@ -307,7 +312,17 @@ class CompressorFP8(PoolBackedModule):
         self._cp_role = cp_role
         self.rope_head_dim = rope_head_dim
         self.compress_ratio = compress_ratio
-        self.overlap = compress_ratio == 4
+        self.overlap = compress_ratio == 4 if overlap is None else bool(overlap)
+        self.kpool_mode = bool(kpool_mode)
+        if self.kpool_mode and (
+            head_dim != INDEXER_HEAD_DIM or self.overlap or rope_head_dim != 0
+        ):
+            raise ValueError(
+                "GLM-5.3-Flash KPool requires head_dim=128, rope_head_dim=0, "
+                "and overlap disabled"
+            )
+        if self.kpool_mode and (pre_norm_weight is None or pre_norm_bias is None):
+            raise ValueError("GLM-5.3-Flash KPool requires LayerNorm weight and bias")
         self.rotate = rotate
         self.norm_eps = norm_eps
         coff = 1 + self.overlap
@@ -337,6 +352,16 @@ class CompressorFP8(PoolBackedModule):
         self.norm.weight = nn.Parameter(
             compressor_weights["norm"].to(torch.bfloat16),
             requires_grad=False,
+        )
+        self.pre_norm_weight = (
+            nn.Parameter(pre_norm_weight.to(torch.bfloat16), requires_grad=False)
+            if pre_norm_weight is not None
+            else None
+        )
+        self.pre_norm_bias = (
+            nn.Parameter(pre_norm_bias.to(torch.bfloat16), requires_grad=False)
+            if pre_norm_bias is not None
+            else None
         )
 
         # Fuse wkv + wgate into one bf16 weight matrix; saves one
@@ -386,6 +411,19 @@ class CompressorFP8(PoolBackedModule):
             out_dim = coff * self.head_dim
             self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
             self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
+
+    def _normalize_kpool_key(self, key: torch.Tensor) -> torch.Tensor:
+        """Apply the checkpoint's per-token LayerNorm before KPool."""
+        if not self.kpool_mode:
+            return key
+        assert self.pre_norm_weight is not None and self.pre_norm_bias is not None
+        return F.layer_norm(
+            key.to(torch.bfloat16),
+            (self.head_dim,),
+            self.pre_norm_weight,
+            self.pre_norm_bias,
+            self.norm_eps,
+        ).float()
 
     # ----------------------------------------------------------------------
     # Compatibility shims (kept to match the BF16 ``Compressor`` API surface
@@ -705,7 +743,11 @@ class CompressorFP8(PoolBackedModule):
             return
 
         with record_function_range("dsv4.fp8.compressor.launch.cos_sin_cache"):
-            cos_sin_cache = self._ensure_cos_sin_cache(kv_flat.device)
+            cos_sin_cache = (
+                kv_flat.new_empty((1, 0), dtype=torch.float32)
+                if self.kpool_mode
+                else self._ensure_cos_sin_cache(kv_flat.device)
+            )
 
         with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
             run_save_partial_states(
@@ -767,6 +809,7 @@ class CompressorFP8(PoolBackedModule):
                 seq_start_per_req=meta.seq_start_per_req if use_varlen_raw else None,
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
+                kpool_mode=self.kpool_mode,
             )
 
     # ----------------------------------------------------------------------
@@ -936,6 +979,7 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
+            kv_flat = self._normalize_kpool_key(kv_flat)
 
         if meta is None:
             # Non-CP fallback: rebuild positions/b_idx from sp/bsz/seqlen.
@@ -1057,6 +1101,7 @@ class CompressorFP8(PoolBackedModule):
             )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
+            kv_flat = self._normalize_kpool_key(kv_flat)
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
                 positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
@@ -1111,6 +1156,7 @@ class CompressorFP8(PoolBackedModule):
         # kernels; the Triton writer consumes row stride explicitly.
         kv_flat = kv.view(T, -1)
         score_flat = score.view(T, -1)
+        kv_flat = self._normalize_kpool_key(kv_flat)
         if meta is None:
             if position_ids is None:
                 positions = start_pos.to(device=device, dtype=torch.long).reshape(bsz)

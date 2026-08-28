@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/GLM53CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -274,18 +275,17 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num      = config.layer_num;
-    config.block_num          = 0;
-    config.seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    config.kernel_seq_size_per_block =
-        kv_cache_config.kernel_seq_size_per_block > 0 ?
-            static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
-            config.seq_size_per_block;
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.dtype              = dtype;
-    config.linear_step        = 1;
-    config.is_sparse          = model_config.attn_config.is_sparse;
+    config.layer_num                 = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_all_num             = config.layer_num;
+    config.block_num                 = 0;
+    config.seq_size_per_block        = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.kernel_seq_size_per_block = kv_cache_config.kernel_seq_size_per_block > 0 ?
+                                           static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                           config.seq_size_per_block;
+    config.use_mla                   = model_config.attn_config.use_mla;
+    config.dtype                     = dtype;
+    config.linear_step               = 1;
+    config.is_sparse                 = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
         DSV4CacheConfigHelper::applyConfig(
@@ -294,13 +294,18 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
                                 "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");
         populateHybridAttentionGroups(config, model_config, parallelism_config);
+        if (model_config.attn_config.indexer_compress_ratio > 1) {
+            GLM53CacheConfigHelper::appendIndexerPools(
+                config, model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        }
     }
 
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
     setupIndependentPoolSizes(config, is_mtp);
-    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+    if (!model_config.attn_config.layer_compress_ratios.empty()
+        || model_config.attn_config.indexer_compress_ratio > 1) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;
     }

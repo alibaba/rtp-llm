@@ -47,6 +47,8 @@ _UNQUANTIZED_WEIGHT_NAMES = {
     W.mla_vc,
     W.mla_indexer_qb_w,
     W.mla_indexer_k_w,
+    W.v4_indexer_compressor_wgate,
+    W.v4_indexer_compressor_ape,
 }
 
 
@@ -150,7 +152,26 @@ def parse_glm53_flash_config(
     attn_config.is_sparse = True
     attn_config.indexer_head_dim = int(text_config["index_head_dim"])
     attn_config.indexer_head_num = int(text_config["index_n_heads"])
-    attn_config.indexer_topk = int(text_config["index_topk"])
+    raw_indexer_topk = int(text_config["index_topk"])
+    indexer_compress_ratio = int(text_config.get("index_kpool", 0))
+    if not bool(text_config.get("index_kpool_compress", False)):
+        raise ValueError("GLM-5.3-Flash requires index_kpool_compress=true")
+    if indexer_compress_ratio != 4:
+        raise ValueError(
+            "GLM-5.3-Flash requires index_kpool=4, got " f"{indexer_compress_ratio}"
+        )
+    if raw_indexer_topk <= 0 or raw_indexer_topk % indexer_compress_ratio != 0:
+        raise ValueError(
+            "GLM-5.3-Flash index_topk must be positive and divisible by "
+            f"index_kpool: topk={raw_indexer_topk}, "
+            f"index_kpool={indexer_compress_ratio}"
+        )
+    if not bool(text_config.get("index_kpool_always_select_tail", False)):
+        raise ValueError("GLM-5.3-Flash requires index_kpool_always_select_tail=true")
+    attn_config.indexer_topk = raw_indexer_topk // indexer_compress_ratio
+    attn_config.indexer_compress_ratio = indexer_compress_ratio
+    attn_config.indexer_compressor_overlap = 0
+    attn_config.sparse_attention_topk = raw_indexer_topk + indexer_compress_ratio - 1
     config.indexer_types = list(text_config.get("indexer_types", []))
     config.index_share_for_mtp_iteration = bool(
         text_config.get("index_share_for_mtp_iteration", False)
@@ -159,6 +180,11 @@ def parse_glm53_flash_config(
     config.hybrid_attention_config.enable_hybrid_attention = True
     config.hybrid_attention_config.enable_independent_kv_cache_pools = True
     config.hybrid_attention_config.hybrid_attention_types = hybrid_types
+    attn_config.indexer_layer_ids = [
+        layer_id
+        for layer_id, layer_type in enumerate(hybrid_types)
+        if layer_type != HybridAttentionType.LINEAR
+    ]
     linear_config = config.linear_attention_config
     linear_hf_config = text_config["linear_attn_config"]
     linear_config.linear_conv_kernel_dim = int(

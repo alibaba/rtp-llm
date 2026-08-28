@@ -219,19 +219,28 @@ class GenericMoeMTPModel(GptModelBase):
         ):
             raise RuntimeError("MTP indexer share requires device positions_d per row")
 
-        # Each reuse iteration appends one causal KV position. Prepend it and
-        # shift the previous selection right: while the anchor is short this
-        # only evicts a trailing -1; once top-k is full it evicts the tail. This
-        # keeps positions generated earlier in the same proposal cycle at the
-        # front instead of making them invisible to later draft tokens. Avoid
-        # inserting duplicates when the current position is already selected.
-        position_column = positions.reshape(-1, 1)
+        # The shared selection lives in compressed KPool space. A four-token
+        # group becomes addressable only when the current raw position closes
+        # that group; incomplete tokens are supplied separately by SparseMLA's
+        # causal tail. Ratio one keeps the original per-token behavior.
+        group_size = int(getattr(self.config.attn_config, "indexer_compress_ratio", 1))
+        if group_size <= 0:
+            raise RuntimeError(
+                f"invalid indexer_compress_ratio for MTP reuse: {group_size}"
+            )
+        group_complete = torch.remainder(positions + 1, group_size) == 0
+        pooled_position_column = torch.div(
+            positions, group_size, rounding_mode="floor"
+        ).reshape(-1, 1)
         with_current_position = torch.cat(
-            [position_column, topk_indices[:, :-1]], dim=1
+            [pooled_position_column, topk_indices[:, :-1]], dim=1
         )
-        position_present = (topk_indices == position_column).any(dim=1, keepdim=True)
+        position_present = (topk_indices == pooled_position_column).any(
+            dim=1, keepdim=True
+        )
+        should_insert = group_complete.reshape(-1, 1) & ~position_present
         topk_indices.copy_(
-            torch.where(position_present, topk_indices, with_current_position)
+            torch.where(should_insert, with_current_position, topk_indices)
         )
         return topk_indices
 
@@ -306,6 +315,7 @@ class GenericMoeMTPModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                global_kv_cache=self.kv_cache,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
                 force_reuse_topk_indices=reuse_topk_indices,

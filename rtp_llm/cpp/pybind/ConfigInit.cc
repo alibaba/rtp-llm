@@ -1589,6 +1589,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
+        .def_readwrite("indexer_compress_ratio", &AttentionConfigs::indexer_compress_ratio)
+        .def_readwrite("indexer_compressor_overlap", &AttentionConfigs::indexer_compressor_overlap)
+        .def_readwrite("sparse_attention_topk", &AttentionConfigs::sparse_attention_topk)
+        .def_readwrite("indexer_layer_ids", &AttentionConfigs::indexer_layer_ids)
         // DeepSeek-V4 fields
         .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
         .def_readwrite("o_groups", &AttentionConfigs::o_groups)

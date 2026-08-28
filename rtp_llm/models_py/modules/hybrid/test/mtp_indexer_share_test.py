@@ -85,14 +85,18 @@ class MtpIndexerShareTest(unittest.TestCase):
             collective_torch._parallelism_config = old_config
             collective_torch._cpu_world_group = old_group
 
-    def _model(self, enabled=True, topk=4, capacity=3):
+    def _model(self, enabled=True, topk=4, capacity=3, compress_ratio=1):
         model = object.__new__(GenericMoeMTPModel)
         model._mtp_indexer_share_enabled = enabled
         model._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL
         model._mtp_shared_topk_indices = torch.zeros(
             (capacity, topk), dtype=torch.int32
         )
-        model.config = SimpleNamespace(attn_config=SimpleNamespace(indexer_topk=topk))
+        model.config = SimpleNamespace(
+            attn_config=SimpleNamespace(
+                indexer_topk=topk, indexer_compress_ratio=compress_ratio
+            )
+        )
         return model
 
     def test_role_is_gated_and_validated(self):
@@ -185,6 +189,43 @@ class MtpIndexerShareTest(unittest.TestCase):
             ),
         )
         self.assertTrue(torch.equal(duplicate, second_snapshot))
+
+    def test_compressed_reuse_updates_only_at_four_token_boundary(self):
+        model = self._model(topk=4, capacity=2, compress_ratio=4)
+        model._mtp_shared_topk_indices.copy_(
+            torch.tensor([[7, 3, 1, -1], [6, 2, 0, -1]], dtype=torch.int32)
+        )
+        hidden = torch.zeros((2, 8))
+
+        unchanged = model._get_mtp_reuse_topk_indices(
+            hidden,
+            SimpleNamespace(
+                fmha_params=SimpleNamespace(
+                    positions_d=torch.tensor([32, 34], dtype=torch.int32)
+                )
+            ),
+        )
+        self.assertTrue(
+            torch.equal(
+                unchanged,
+                torch.tensor([[7, 3, 1, -1], [6, 2, 0, -1]], dtype=torch.int32),
+            )
+        )
+
+        boundary = model._get_mtp_reuse_topk_indices(
+            hidden,
+            SimpleNamespace(
+                fmha_params=SimpleNamespace(
+                    positions_d=torch.tensor([35, 35], dtype=torch.int32)
+                )
+            ),
+        )
+        self.assertTrue(
+            torch.equal(
+                boundary,
+                torch.tensor([[8, 7, 3, 1], [8, 6, 2, 0]], dtype=torch.int32),
+            )
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_causal_position_update_is_cuda_graph_safe(self):

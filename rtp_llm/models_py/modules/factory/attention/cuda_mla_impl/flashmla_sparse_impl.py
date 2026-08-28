@@ -35,6 +35,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.models_py.modules.hybrid.indexer_grouping import (
+    IndexerGroupingGeometry,
+    append_incomplete_tail_indices,
+    expand_indexer_group_indices,
+)
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
@@ -61,6 +66,8 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 # Helpers
 # ---------------------------------------------------------------------------
 
+_FLASHMLA_TOPK_ALIGNMENT = 128
+
 
 def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
     """[T, topk] or [T, h_kv, topk] → [T, topk]. MLA always has h_kv=1."""
@@ -70,6 +77,19 @@ def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
 def _as_uint8(kv: torch.Tensor) -> torch.Tensor:
     """Reinterpret an FP8 tensor as uint8 (no-op if already uint8)."""
     return kv.view(torch.uint8) if kv.dtype != torch.uint8 else kv
+
+
+def _pad_flashmla_topk(indices: torch.Tensor, kernel_top_k: int) -> torch.Tensor:
+    """Right-pad semantic top-k rows with -1 for FlashMLA's tiled ABI."""
+    width = int(indices.shape[-1])
+    if width == kernel_top_k:
+        return indices
+    if width > kernel_top_k:
+        raise ValueError(
+            f"semantic top-k width {width} exceeds kernel width {kernel_top_k}"
+        )
+    padding = indices.new_full((*indices.shape[:-1], kernel_top_k - width), -1)
+    return torch.cat((indices, padding), dim=-1)
 
 
 def _is_multi_token_decode(attn_inputs: PyAttentionInputs) -> bool:
@@ -111,6 +131,8 @@ class SparseMlaOp(object):
         softmax_extra_scale: float,
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
+        indexer_top_k: Optional[int] = None,
+        indexer_group_size: int = 1,
     ):
         self.num_heads = num_heads
         self.kv_lora_rank = kv_lora_rank
@@ -121,6 +143,18 @@ class SparseMlaOp(object):
         self.softmax_extra_scale = softmax_extra_scale
         self.scale = (self.qk_head_dim**-0.5) * softmax_extra_scale
         self.top_k = top_k
+        # FlashMLA SM90/SM100 sparse kernels consume top-k in fixed tiles.
+        # Keep ``top_k`` as the semantic width (e.g. GLM's 2048 history +
+        # three live-tail tokens = 2051), and expose a separate physical width
+        # padded with -1 sentinels. 128 is accepted by both architectures.
+        self.kernel_top_k = (
+            (top_k + _FLASHMLA_TOPK_ALIGNMENT - 1) // _FLASHMLA_TOPK_ALIGNMENT
+        ) * _FLASHMLA_TOPK_ALIGNMENT
+        self.indexer_top_k = top_k if indexer_top_k is None else indexer_top_k
+        self.indexer_group_size = indexer_group_size
+        IndexerGroupingGeometry(
+            self.indexer_top_k, self.indexer_group_size, self.top_k
+        ).validate()
 
         # Filled by plan() each forward
         self.block_table: Optional[torch.Tensor] = None
@@ -146,7 +180,15 @@ class SparseMlaOp(object):
         Returns [T, 1, topk]. h_kv=1 for MLA — heads share indices.
         """
         assert self.block_table is not None and self.mla_params is not None
-        topk_2d = _topk_2d(topk_indices)
+        raw_lengths = (
+            self.mla_params.positions_d.reshape(-1)[: topk_indices.shape[0]].to(
+                torch.int32
+            )
+            + 1
+            if self.indexer_group_size > 1
+            else None
+        )
+        topk_2d = self._prepare_local_topk_indices(topk_indices, raw_lengths)
         topk = topk_2d.shape[1]
         assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
         global_2d = triton_convert_req_index_to_global_index(
@@ -166,6 +208,39 @@ class SparseMlaOp(object):
         )
         return global_2d.unsqueeze(1)
 
+    def _prepare_local_topk_indices(
+        self,
+        topk_indices: torch.Tensor,
+        raw_sequence_lengths: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Expand pooled group ids into raw token ids and append raw tail."""
+        if topk_indices.dim() not in (2, 3):
+            raise ValueError(
+                "topk_indices must be [tokens, topk] or [tokens, heads, topk], "
+                f"got shape={tuple(topk_indices.shape)}"
+            )
+        topk_2d = _topk_2d(topk_indices)
+        if int(topk_2d.shape[1]) != self.indexer_top_k:
+            raise ValueError(
+                f"indexer topk {topk_2d.shape[1]} does not match configured "
+                f"selection topk {self.indexer_top_k}"
+            )
+        expanded = expand_indexer_group_indices(
+            topk_2d,
+            self.indexer_group_size,
+            raw_sequence_lengths=raw_sequence_lengths,
+        )
+        if raw_sequence_lengths is not None:
+            expanded = append_incomplete_tail_indices(
+                expanded, raw_sequence_lengths, self.indexer_group_size
+            )
+        if int(expanded.shape[1]) != self.top_k:
+            raise RuntimeError(
+                f"expanded sparse topk width {expanded.shape[1]} does not "
+                f"match attention topk {self.top_k}"
+            )
+        return expanded
+
     def forward(
         self,
         q: torch.Tensor,
@@ -178,7 +253,9 @@ class SparseMlaOp(object):
 
         Returns [T, H, kv_lora_rank].
         """
-        global_indices = self._convert_topk_indices_to_global(topk_indices)
+        global_indices = _pad_flashmla_topk(
+            self._convert_topk_indices_to_global(topk_indices), self.kernel_top_k
+        )
         out, _, _ = flash_mla_sparse_fwd(
             q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
         )
@@ -236,7 +313,7 @@ class SparseMlaFp8Op(SparseMlaOp):
     def _reset_sched_meta(self, num_q_tokens_per_head_k: int) -> None:
         key = (
             int(num_q_tokens_per_head_k),
-            int(self.top_k),
+            int(self.kernel_top_k),
             int(self.num_heads),
             1,
             True,
@@ -247,7 +324,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             self._sched_meta, _ = get_mla_metadata(
                 cache_seqlens=None,
                 num_q_tokens_per_head_k=num_q_tokens_per_head_k,
-                topk=self.top_k,
+                topk=self.kernel_top_k,
                 num_heads_q=self.num_heads,
                 num_heads_k=1,
                 is_fp8_kvcache=True,
@@ -364,10 +441,21 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Request-local topk → workspace offset (ws_starts[req] + local_pos)
         offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
-        topk_2d = _topk_2d(topk_indices)
+        raw_lengths = (
+            self.mla_params.positions_d.reshape(-1)[: topk_indices.shape[0]].to(
+                torch.int32
+            )
+            + 1
+            if self.indexer_group_size > 1
+            else None
+        )
+        topk_2d = self._prepare_local_topk_indices(topk_indices, raw_lengths)
         padding_mask = topk_2d < 0
         raw_global = topk_2d + offsets.unsqueeze(1)
-        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        global_indices = _pad_flashmla_topk(
+            raw_global.masked_fill(padding_mask, -1).unsqueeze(1),
+            self.kernel_top_k,
+        )
 
         out, _, _ = flash_mla_sparse_fwd(
             q,
@@ -396,8 +484,9 @@ class SparseMlaFp8Op(SparseMlaOp):
             kv_cache = kv_cache.unsqueeze(-2)
 
         # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
-        global_indices = (
-            self._convert_topk_indices_to_global(topk_indices).squeeze(1).unsqueeze(0)
+        global_indices = _pad_flashmla_topk(
+            self._convert_topk_indices_to_global(topk_indices).squeeze(1).unsqueeze(0),
+            self.kernel_top_k,
         )
 
         attn_out, _ = flash_mla_with_kvcache(
@@ -471,6 +560,7 @@ class SparseMlaImpl(MlaImplBase):
         op_kwargs = {"parallelism_config": parallelism_config}
         if issubclass(op_cls, SparseMlaFp8Op):
             op_kwargs["use_cuda_graph"] = is_cuda_graph
+        geometry = IndexerGroupingGeometry.from_attention_config(attn_configs)
         self.fmha_impl: SparseMlaOp = op_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
@@ -478,8 +568,10 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.nope_head_dim,
             attn_configs.kernel_tokens_per_block,
             attn_configs.softmax_extra_scale,
-            attn_configs.indexer_topk,
+            geometry.attention_topk,
             **op_kwargs,
+            indexer_top_k=geometry.selection_topk,
+            indexer_group_size=geometry.group_size,
         )
 
         self.rope_impl = NewMlaRotaryEmbeddingOp(
@@ -490,8 +582,8 @@ class SparseMlaImpl(MlaImplBase):
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
-        self._fuse_qk_rope_cat_cache_mla = (
-            _fused_qk_rope_cat_cache_mla_enabled(self.rope_head_dim)
+        self._fuse_qk_rope_cat_cache_mla = _fused_qk_rope_cat_cache_mla_enabled(
+            self.rope_head_dim
         )
         self._kv_cache_type = (
             "fp8_ds_mla"

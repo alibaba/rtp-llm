@@ -316,6 +316,33 @@ def ref_sparse_mla_forward(
     return output.to(q.dtype)
 
 
+def ref_sparse_mla_forward_streaming(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    topk_indices_global: torch.Tensor,
+    scale: float,
+    kv_lora_rank: int,
+) -> torch.Tensor:
+    """Memory-bounded reference for production-width GLM sparse top-k."""
+    kv_fp32 = kv.squeeze(1).float()
+    result = torch.empty(
+        q.shape[0],
+        q.shape[1],
+        kv_lora_rank,
+        dtype=torch.float32,
+        device=q.device,
+    )
+    for token_idx in range(q.shape[0]):
+        indices = topk_indices_global[token_idx].long()
+        valid = (indices >= 0) & (indices < kv_fp32.shape[0])
+        valid_indices = indices[valid]
+        gathered = kv_fp32.index_select(0, valid_indices)
+        scores = torch.matmul(q[token_idx].float(), gathered.transpose(0, 1)) * scale
+        weights = torch.softmax(scores, dim=-1)
+        result[token_idx] = torch.matmul(weights, gathered[:, :kv_lora_rank])
+    return result.to(q.dtype)
+
+
 @skipIf(not CUDA_VERSION_OK, SKIP_REASON)
 class SparseMlaOpTest(TestCase):
     """SparseMlaOp 测试类"""
@@ -416,6 +443,121 @@ class SparseMlaOpTest(TestCase):
             return True
         else:
             return True
+
+    def test_glm53_grouped_topk_expansion(self):
+        """Pooled ids expand to raw ids; an incomplete tail stays explicit."""
+        op = SparseMlaOp(
+            num_heads=64,
+            kv_lora_rank=512,
+            qk_rope_head_dim=0,
+            qk_nope_head_dim=256,
+            page_size=128,
+            softmax_extra_scale=1.0,
+            top_k=19,
+            indexer_top_k=4,
+            indexer_group_size=4,
+        )
+        pooled = torch.tensor([[0, 1, 2, -1], [0, -1, -1, -1]], dtype=torch.int32)
+        raw_lengths = torch.tensor([10, 3], dtype=torch.int32)
+        expanded = op._prepare_local_topk_indices(pooled, raw_lengths)
+
+        self.assertEqual(tuple(expanded.shape), (2, 19))
+        self.assertEqual(expanded[0, :8].tolist(), list(range(8)))
+        self.assertTrue(torch.all(expanded[0, 8:16] == -1))
+        self.assertEqual(expanded[0, -3:].tolist(), [8, 9, -1])
+        self.assertTrue(torch.all(expanded[1, :16] == -1))
+        self.assertEqual(expanded[1, -3:].tolist(), [0, 1, 2])
+
+    def test_glm53_topk2051_prefill_and_decode_kernel(self):
+        """Run FlashMLA at the checkpoint's 2048+3 raw-token width."""
+        seq_len = 2051
+        page_size = 128
+        kv_lora_rank = 512
+        num_heads = 64
+        block_table_host = generate_block_table(1, seq_len, page_size)
+        block_table_device = block_table_host.to("cuda")
+        generator = torch.Generator(device="cuda").manual_seed(20260828)
+        kv = (
+            torch.randn(
+                seq_len,
+                1,
+                kv_lora_rank,
+                generator=generator,
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            / 10.0
+        )
+        pooled = torch.arange(512, dtype=torch.int32, device="cuda")
+
+        for is_prefill in (True, False):
+            with self.subTest(phase="prefill" if is_prefill else "decode"):
+                query_tokens = 4 if is_prefill else 1
+                prefix_lengths = (
+                    torch.tensor([2047], dtype=torch.int32, device="cpu")
+                    if is_prefill
+                    else torch.empty(0, dtype=torch.int32, device="cpu")
+                )
+                sequence_lengths = torch.tensor(
+                    [seq_len if is_prefill else seq_len - 1],
+                    dtype=torch.int32,
+                    device="cpu",
+                )
+                input_lengths = torch.tensor(
+                    [query_tokens], dtype=torch.int32, device="cpu"
+                )
+                mla_params = rtp_llm_ops.FlashInferMlaAttnParams()
+                mla_params.fill_params(
+                    prefix_lengths,
+                    sequence_lengths,
+                    input_lengths,
+                    block_table_host,
+                    page_size,
+                )
+                expected_positions = [2047, 2048, 2049, 2050] if is_prefill else [2050]
+                self.assertEqual(mla_params.positions_d.tolist(), expected_positions)
+
+                q = (
+                    torch.randn(
+                        query_tokens,
+                        num_heads,
+                        kv_lora_rank,
+                        generator=generator,
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                    )
+                    / 10.0
+                )
+                topk_indices = pooled.view(1, 1, 512).expand(query_tokens, 1, 512)
+                op = SparseMlaOp(
+                    num_heads=num_heads,
+                    kv_lora_rank=kv_lora_rank,
+                    qk_rope_head_dim=0,
+                    qk_nope_head_dim=256,
+                    page_size=page_size,
+                    softmax_extra_scale=1.0,
+                    top_k=2051,
+                    indexer_top_k=512,
+                    indexer_group_size=4,
+                )
+                op.plan(mla_params, block_table_device)
+                output = op.forward(q, kv, topk_indices)
+                global_indices = op._convert_topk_indices_to_global(topk_indices)[
+                    :, 0, :
+                ]
+                self.assertEqual(tuple(global_indices.shape), (query_tokens, 2051))
+                self.assertEqual(global_indices[-1, -3:].tolist(), [2048, 2049, 2050])
+                if is_prefill:
+                    self.assertEqual(global_indices[0, -3:].tolist(), [-1, -1, -1])
+
+                expected = ref_sparse_mla_forward_streaming(
+                    q, kv, global_indices, 256**-0.5, kv_lora_rank
+                )
+                self.assertTrue(torch.isfinite(output).all().item())
+                cosine = F.cosine_similarity(
+                    output.float().flatten(), expected.float().flatten(), dim=0
+                ).item()
+                self.assertGreater(cosine, 0.99)
 
     def test_sparse_mla_op_prefill(self):
         """

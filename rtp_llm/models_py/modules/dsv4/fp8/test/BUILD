@@ -30,6 +30,7 @@ _DSV4_FP8_TESTS = [
     "test_topk_v3_tie_break",
     "test_dsv4_top_k_per_row_prefill",
     "test_fused_compressor_meta_triton",
+    "test_glm53_kpool_kernel",
     "test_ring_write_mask",
     "test_fp8_mqa_prefill_indexer_score",
     "test_fp8_paged_indexer_score",

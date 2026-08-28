@@ -33,7 +33,7 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     should_enable_glm5_cmp,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
 
@@ -692,6 +692,7 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        global_kv_cache: Optional[KVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
         force_reuse_topk_indices: bool = False,
@@ -726,6 +727,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     prev_topk_indices=prev_topk_indices,
                     force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
+                    global_kv_cache=global_kv_cache,
                 )
             else:
                 hidden_states = self.self_attn(
@@ -745,6 +747,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     prev_topk_indices=prev_topk_indices,
                     force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
+                    global_kv_cache=global_kv_cache,
                 )
             else:
                 hidden_states = self.self_attn(
@@ -849,6 +852,7 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                global_kv_cache=self.kv_cache,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
             )

@@ -15,7 +15,8 @@ namespace rtp_llm {
 namespace {
 
 bool hasTypedHybridPoolLayout(const ModelConfig& model_config) {
-    return !model_config.attn_config.layer_compress_ratios.empty();
+    return !model_config.attn_config.layer_compress_ratios.empty()
+           || model_config.attn_config.indexer_compress_ratio > 1;
 }
 
 bool shouldUseHybridPoolLayout(const ModelConfig& model_config) {
@@ -40,7 +41,7 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
             if (!isDsv4FixedRegion(region)) {
                 continue;
             }
-            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_hca   = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
                 bytes += config.group_block_size_bytes[gid];
@@ -77,6 +78,28 @@ void validateDsv4KernelSeqSize(size_t seq_size_per_block, size_t kernel_seq_size
                             kernel_seq_size_per_block);
 }
 
+void validateTypedKernelSeqSize(const ModelConfig& model_config,
+                                size_t             seq_size_per_block,
+                                size_t             kernel_seq_size_per_block,
+                                const char*        config_name) {
+    if (!model_config.attn_config.layer_compress_ratios.empty()) {
+        validateDsv4KernelSeqSize(seq_size_per_block, kernel_seq_size_per_block, config_name);
+        return;
+    }
+    const auto ratio = static_cast<size_t>(model_config.attn_config.indexer_compress_ratio);
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0 && seq_size_per_block >= kernel_seq_size_per_block
+                                && seq_size_per_block % kernel_seq_size_per_block == 0,
+                            "%s GLM-5.3-Flash seq_size_per_block(%zu) must be divisible by kernel block(%zu)",
+                            config_name,
+                            seq_size_per_block,
+                            kernel_seq_size_per_block);
+    RTP_LLM_CHECK_WITH_INFO(ratio == 4 && kernel_seq_size_per_block % ratio == 0,
+                            "%s GLM-5.3-Flash kernel block(%zu) must be divisible by KPool ratio(%zu)",
+                            config_name,
+                            kernel_seq_size_per_block,
+                            ratio);
+}
+
 }  // namespace
 
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
@@ -108,7 +131,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
         if (hasTypedHybridPoolLayout(model_config)) {
-            validateDsv4KernelSeqSize(config.seq_size_per_block, kernel_seq_size_per_block, "cache");
+            validateTypedKernelSeqSize(model_config, config.seq_size_per_block, kernel_seq_size_per_block, "cache");
         } else {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block % kv_cache_config.kernel_seq_size_per_block == 0,
                                     "seq_size_per_block(%d) must be divisible by kernel_seq_size_per_block(%d)",
@@ -154,8 +177,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int  joint_step       = std::max(1, config.linear_step);
-        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        const int joint_step = std::max(1, config.linear_step);
+        block_num            = paged_budget / effectivePagedBlockBytes(config, joint_step);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",

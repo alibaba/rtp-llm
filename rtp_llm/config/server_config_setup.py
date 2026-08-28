@@ -350,6 +350,28 @@ def setup_default_args(py_env_configs):
             f"model_type is not set and could not be inferred from checkpoint path: {py_env_configs.model_args.ckpt_path}. Please provide --model_type or MODEL_TYPE environment variable."
         )
 
+    # One KPool entry represents four raw tokens. DeepGEMM's paged indexer
+    # accepts 32/64/128 entries per kernel block, so the generic 64-token
+    # default is invalid for GLM-5.3-Flash.
+    if py_env_configs.model_args.model_type == "glm5_3_flash":
+        kv_config = py_env_configs.kv_cache_config
+        if kv_config.seq_size_per_block == 0:
+            kv_config.seq_size_per_block = 128
+            logging.info("set GLM-5.3-Flash SEQ_SIZE_PER_BLOCK 128 by default")
+        if kv_config.kernel_seq_size_per_block == 0:
+            kv_config.kernel_seq_size_per_block = kv_config.seq_size_per_block
+        kernel_tokens = kv_config.kernel_seq_size_per_block
+        if (
+            kv_config.seq_size_per_block % kernel_tokens != 0
+            or kernel_tokens // 4 not in (32, 64, 128)
+        ):
+            raise ValueError(
+                "GLM-5.3-Flash cache blocks require kernel tokens 128, 256, "
+                "or 512 and seq_size_per_block divisible by the kernel block; "
+                f"got seq_size_per_block={kv_config.seq_size_per_block}, "
+                f"kernel_seq_size_per_block={kernel_tokens}"
+            )
+
     # add rocm env config, if using default value, change it to optimize version
     # 这些特殊处理仍然需要设置环境变量（因为可能被 C++ 代码读取）
     if os.path.exists("/dev/kfd") and os.getenv("FT_DISABLE_CUSTOM_AR") is None:

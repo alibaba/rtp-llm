@@ -220,6 +220,11 @@ class KVCache:
     def get_layer_cache(self, arg0: int, arg1: KVCacheRegionName) -> LayerKVCache:
         """Return a raw per-layer LayerKVCache for the given global layer id and KV cache attention type."""
         ...
+    def get_raw_pool_tensor(
+        self, arg0: int, arg1: KVCacheRegionName
+    ) -> torch.Tensor:
+        """Return raw block-major storage for a typed cache region."""
+        ...
 
 class ParamsBase:
     def __init__(self) -> None: ...

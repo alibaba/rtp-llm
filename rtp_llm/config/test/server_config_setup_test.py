@@ -5,12 +5,41 @@ from unittest.mock import patch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
+    setup_default_args,
     setup_and_configure_server,
 )
 from rtp_llm.server.server_args.server_args import setup_args
 
 
 class GenerateConfigTest(TestCase):
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_uses_kpool_compatible_cache_block_default(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        setup_default_args(py_env_configs)
+        self.assertEqual(py_env_configs.kv_cache_config.seq_size_per_block, 128)
+        self.assertEqual(py_env_configs.kv_cache_config.kernel_seq_size_per_block, 128)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "MODEL_TYPE": "glm5_3_flash",
+            "SEQ_SIZE_PER_BLOCK": "64",
+            "USE_ALL_GATHER": "0",
+        },
+        clear=True,
+    )
+    def test_glm53_rejects_kpool_incompatible_cache_block(self):
+        py_env_configs: PyEnvConfigs = setup_args()
+        with self.assertRaisesRegex(ValueError, "kernel tokens 128, 256, or 512"):
+            setup_default_args(py_env_configs)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
