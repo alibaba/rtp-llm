@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FlexLB 压测报告生成器：v4 骨架纯图表 Canvas 模板，数据全部由脚本填充。
+"""FlexLB 压测报告生成器：直接吐 self-contained Chart.js 4.4.7 HTML。
 
-模板纪律（与 v4 报告 flexlb-run-20260825-201548-report-v4.canvas.tsx 对齐）：
-  * 组件只用 Stack/H1/H2/Text/Grid/Stat/Divider/ChartComparisonGrid/
-    ChartContainer/LineChart/BarChart/Table；仅导入 'qoder/canvas'，默认导出。
-  * 图表高度：延迟节 250，其余 230；所有图表统一挂 valueFormatter={fmt2}。
-  * caption 只写 x/y 轴说明（可含采样粒度）；不写 footer，不含任何
-    分析/解释/归因文字；汇总表两列（指标 / 数值）。
-  * 数值无千分位逗号；JSX 文本节点对 & < > { } 一律实体转义；
-    JS 字符串字面量按 JS 规则转义（反斜杠/单引号/换行）。
+数据管线保持不变：aggregate JSON → 统计 → panel（LineChart / BarChart）+ KPI +
+汇总表。渲染层拆到 canvas_report_render_html.py，页面观感对齐既有
+outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 panel /
+280px chart，legend 单击切换、tooltip x 轴 index 联动，无 zoom 插件）。
+
+内部实现：main() 用 emit_ 系列先在内存拼一份完整 tsx 字符串（保留原有全部
+41 图 / 154 组数据的正确性），末端通过 _extract_spec_from_tsx() 反抽出
+{run_id/title/subtitle/kpis/panels} spec，喂 canvas_report_render_html.render()
+写入 --out 指向的 HTML 文件；不再写 .tsx 中间产物。
 
 用法：
   python3 canvas_report_gen.py --aggregate <agg.json> \
       [--engine-dist <engine_dist.json>] [--summary <summary.json>] \
       [--slo <slo_batch_analysis.json>] \
-      --out <out.canvas.tsx> [--run-id <id>] \
+      --out <out.html> [--run-id <id>] \
       [--p-engines 750] [--d-engines 500] [--shards 8] [--replay 1000]
 
 缺省规则：
@@ -31,9 +32,11 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
+import re
 import sys
 
 TAG = "[canvas_report_gen]"
@@ -163,6 +166,20 @@ def nice_max(v):
         if cand >= v * 1.02:
             return round(cand, 10)
     return mag * 10
+
+
+def ts_step_values(pts, times):
+    """有序 [(t, v)] 序列按 times 逐点对齐（前向 step 插值）：
+    取 t' <= t 的最后一个样本值；t 早于首样本取首值，晚于尾样本取尾值。"""
+    if not pts:
+        return [0 for _ in times]
+    ts = [p[0] for p in pts]
+    vals = [p[1] for p in pts]
+    out = []
+    for t in times:
+        i = bisect.bisect_right(ts, t)
+        out.append(vals[i - 1] if i > 0 else vals[0])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +322,158 @@ def load_json(path):
         return json.load(f)
 
 
+# ---------------------------------------------------------------------------
+# tsx → spec 反抽（末端渲染桥）
+# ---------------------------------------------------------------------------
+#
+# emit_ 系列在内存里拼一份完整 tsx（保留原 41 图/154 组数据的算法路径不动），
+# 这里从 tsx 字符串反抽出 render_html 需要的 spec dict：
+#   {run_id, title, subtitle, kpis:[{label,value,tone}], panels:[panel]}
+#   panel: {id,title,caption,type('line'|'bar'),x,yMax,unit,series:[{name,data,color,tone}]}
+# 好处：不重构那 2000 行 emit_ 逻辑（碰它风险大），只在末端做一次纯正则/JSON
+# 转换。同一套抽取器也用于 preview_gen.py 手动预览。
+#
+# 注意事项：
+#  * const 命名同时含 UPPER_CASE（X 轴）与 camelCase（Y 轴 series），正则须
+#    放宽到 [A-Za-z_]+。
+#  * ChartContainer body 里可能含多个 LineChart/BarChart（ChartComparisonGrid
+#    形态），因此按"container 开合位定位 + body 内循环抽 chart"两段处理，
+#    不用一个 regex 匹整体。
+#  * chart 属性顺序不稳定（valueSuffix 有时在 domain 前），故 attrs 用独立
+#    子正则各抽（ATTR_CATS/HEIGHT/DOMAIN/SUFFIX）。
+
+
+_TSX_CONST_RE = re.compile(
+    r"^const ([A-Za-z_][A-Za-z0-9_]*) = (\[.*?\])\s*;\s*$", re.M | re.S
+)
+_TSX_STAT_RE = re.compile(
+    r'<Stat value="([^"]*)" label="([^"]*)"(?: tone="([^"]*)")? />'
+)
+_TSX_CONTAINER_OPEN = re.compile(
+    r'<ChartContainer title="([^"]*)" caption="([^"]*)">', re.S
+)
+_TSX_CHART_TAG = re.compile(
+    r"<(LineChart|BarChart)\s+([^>]*?)\s+series=\{\[(.*?)\]\}\s*/>", re.S
+)
+_TSX_ATTR_CATS = re.compile(r"categories=\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_TSX_ATTR_DOMAIN = re.compile(r"domain=\{\[([^\]]+)\]\}")
+_TSX_ATTR_SUFFIX = re.compile(r'valueSuffix="([^"]*)"')
+_TSX_SERIES_RE = re.compile(
+    r"\{\s*key:\s*'([^']*)'\s*,\s*name:\s*'([^']*)'\s*,\s*data:\s*"
+    r"([A-Za-z_][A-Za-z0-9_]*)(?:\s*,\s*tone:\s*'([^']*)')?\s*\}",
+    re.S,
+)
+
+_TSX_TONE_TO_KPI = {
+    "success": "success",
+    "danger": "danger",
+    "warning": "warn",
+    "warn": "warn",
+}
+
+
+def _extract_spec_from_tsx(tsx_src, run_id, subtitle):
+    """从内存 tsx 字符串反抽 render_html.render() 需要的 spec dict。"""
+    # 惰性 import，避免测试或 --help 场景强依赖 render_html
+    import canvas_report_render_html as _rh
+
+    # 1) 抽 const NAME = [...]; → dict[str, list]
+    consts = {}
+    for m in _TSX_CONST_RE.finditer(tsx_src):
+        name, expr = m.group(1), m.group(2)
+        try:
+            consts[name] = json.loads(expr.replace("'", '"'))
+        except Exception:
+            pass
+
+    # 2) 抽 KPI（<Stat …/>）
+    kpis = []
+    for m in _TSX_STAT_RE.finditer(tsx_src):
+        val, label, tone = m.group(1), m.group(2), m.group(3)
+        kpis.append(
+            {"label": label, "value": val, "tone": _TSX_TONE_TO_KPI.get(tone or "", "")}
+        )
+
+    # 3) 抽 ChartContainer + body 内多个 chart
+    panels = []
+    pid = 0
+    for om in _TSX_CONTAINER_OPEN.finditer(tsx_src):
+        close_pos = tsx_src.find("</ChartContainer>", om.end())
+        if close_pos < 0:
+            continue
+        body = tsx_src[om.end() : close_pos]
+        title, caption = om.group(1), om.group(2)
+        for tm in _TSX_CHART_TAG.finditer(body):
+            ctype, attrs, series_body = tm.groups()
+            cats_m = _TSX_ATTR_CATS.search(attrs)
+            if not cats_m:
+                continue
+            dom_m = _TSX_ATTR_DOMAIN.search(attrs)
+            suf_m = _TSX_ATTR_SUFFIX.search(attrs)
+            x_ref = cats_m.group(1)
+            x_vals = consts.get(x_ref, [])
+            series = []
+            for i, sm in enumerate(_TSX_SERIES_RE.finditer(series_body)):
+                _key, s_name, data_ref, tone = sm.groups()
+                data = consts.get(data_ref, [])
+                series.append(
+                    {
+                        "name": s_name,
+                        "data": data,
+                        "color": _rh.series_color(tone, i),
+                        "tone": tone or "",
+                    }
+                )
+            if not series:
+                continue
+            pid += 1
+            y_max = None
+            if dom_m:
+                try:
+                    y_max = float(dom_m.group(1).split(",")[1])
+                except Exception:
+                    y_max = None
+            panels.append(
+                {
+                    "id": "p%d" % pid,
+                    "title": title,
+                    "caption": caption,
+                    "type": "bar" if ctype == "BarChart" else "line",
+                    "x": x_vals,
+                    "yMax": y_max,
+                    "unit": (suf_m.group(1).strip() if suf_m else ""),
+                    "series": series,
+                }
+            )
+
+    return {
+        "run_id": run_id,
+        "title": "FlexLB 压测报告 · run " + run_id,
+        "subtitle": subtitle,
+        "kpis": kpis[:6],
+        "panels": panels,
+    }
+
+
+def normalize_out_runid(path):
+    """--out 文件名中 RUNID 段（8 位日期_6 位时间）下划线统一转连字符。
+
+    防回归（Canvas 预览 ENOENT 历史坑已复发 4 次）：run 目录本身用
+    下划线 RUNID（如 20260828_155349），而 Canvas 预览引用的报告命名
+    规范是 flexlb-run-<RUNID>-report.canvas.tsx 且 RUNID 用连字符
+    （flexlb-run-20260828-155349-report.canvas.tsx）。生成器在输出处
+    强制规范化文件名，调用方传下划线 RUNID 也不会产出坏文件名。
+    只匹配 8 位日期 + "_" + 6 位时间的 RUNID 形态，不碰文件名其它
+    下划线；报告内部 run_id 展示保留 meta.run_dir 原样（与远端 run
+    目录名对账）。
+    """
+    base = os.path.basename(path)
+    fixed = re.sub(r"(?<!\d)(\d{8})_(\d{6})(?!\d)", r"\1-\2", base)
+    if fixed != base:
+        return os.path.join(os.path.dirname(path), fixed)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="FlexLB 压测纯图表 Canvas 报告生成器（v4 骨架，数据脚本填充）"
@@ -326,7 +495,9 @@ def main():
         "--slo",
         help="slo_batch_analysis.json（缺省取 aggregate 同目录同名文件，存在才读）",
     )
-    ap.add_argument("--out", required=True, help="输出 .canvas.tsx 路径")
+    ap.add_argument(
+        "--out", required=True, help="输出 .html 路径（self-contained Chart.js HTML）"
+    )
     ap.add_argument("--run-id", help="run 标识（缺省取 aggregate meta.run_dir）")
     ap.add_argument(
         "--p-engines",
@@ -351,7 +522,31 @@ def main():
         default=1000,
         help="replay 倍速（数据文件不含此参数，CLI 提供）",
     )
+    ap.add_argument(
+        "--chartjs-file",
+        help=(
+            "本地 chart.umd.min.js 路径；传入则内联进 HTML（离线可打开）。"
+            "缺省时若脚本同目录存在 chart.umd.min.js 也内联，否则退回 CDN 引用。"
+        ),
+    )
     args = ap.parse_args()
+
+    # RUNID 文件名规范化（防 ENOENT 复发）：详见 normalize_out_runid
+    # 文档字符串；规范化后仍有下划线 RUNID 段则断言失败（自检）。
+    out_normalized = normalize_out_runid(args.out)
+    if out_normalized != args.out:
+        print(
+            TAG
+            + " normalized RUNID in --out filename: "
+            + os.path.basename(args.out)
+            + " -> "
+            + os.path.basename(out_normalized)
+        )
+        args.out = out_normalized
+    assert not re.search(r"(?<!\d)\d{8}_\d{6}(?!\d)", os.path.basename(args.out)), (
+        "--out filename RUNID segment must use hyphen "
+        "(flexlb-run-YYYYMMDD-HHMMSS-report.html), got: " + args.out
+    )
 
     warnings = []
     agg = load_json(args.aggregate)
@@ -380,6 +575,33 @@ def main():
 
     sm = agg.get("summary") or {}
     per_second = agg.get("per_second") or []
+    # ---- 错误桶定义（旧 7 桶 + err_other 细分 9 子桶；label 供图例/汇总表） ----
+    # 新子桶（20260828+ aggregate 才有）：旧 aggregate 无这些键 -> 全零
+    # -> 图/表自适应跳过，输出与旧版一致（向后兼容）。
+    ERR_DEFS = [
+        ("err_no_decode", "no worker", "danger"),
+        ("err_no_prefill", "no prefill worker", "danger"),
+        ("err_queue_full", "queue full", "warning"),
+        ("err_deadline", "deadline", "info"),
+        ("err_priority", "priority ahead", "warning"),
+        ("err_preempted", "preempted", None),
+        ("err_yielded", "yielded", None),
+        ("err_backpressure", "backpressure (843x)", "warning"),
+        ("err_queue_timeout", "queue timeout (8503)", "warning"),
+        ("err_rst_stream", "rst_stream", "danger"),
+        ("err_goaway", "goaway", "danger"),
+        ("err_unavailable", "unavailable", "danger"),
+        ("err_cancelled", "cancelled", None),
+        ("err_internal", "internal", "danger"),
+        ("err_empty_response", "empty response", "warning"),
+        ("err_duplicate_rid", "duplicate rid", "warning"),
+        ("err_other", "other", "neutral"),
+    ]
+    # 各桶 per_second 口径总量（仅带时间戳行；0 = 该桶不存在/无数据）
+    err_totals = {k: 0 for k, _, _ in ERR_DEFS}
+    for p in per_second:
+        for k, _, _ in ERR_DEFS:
+            err_totals[k] += p.get(k, 0) or 0
     queue_ts = agg.get("queue_timeseries") or []
     # compact time series (aggregate_canvas_run.py 861f3a9+；旧 aggregate 无这些键 ->
     # 空 list，对应图条件渲染)
@@ -394,6 +616,7 @@ def main():
     batcher_ts_by_role = agg.get("batcher_ts_by_role") or []
     batcher_engine_quantile_ts = agg.get("batcher_engine_quantile_ts") or []
     batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
+    queue_top_bottom_ts = agg.get("queue_top_bottom_ts") or {}
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
     cancel_ts = agg.get("cancel_qps_ts") or []
@@ -522,7 +745,7 @@ def main():
 
     # 队列时序（5s 粒度，avg/engine 口径：集群总量 ÷ 引擎数，
     # engine_dist.engine_count 优先）
-    TQ = p_run_req = p_run_batch = p_wait = None
+    TQ = p_run_req = p_run_batch = p_wait = p_master_bq = None
     d_run_req = d_wait = avg_batch = heap_used = None
     q_step = 5
     if queue_ts:
@@ -583,6 +806,24 @@ def main():
         )
         deltas = [b - a for a, b in zip(tq_vals, tq_vals[1:]) if b > a]
         q_step = max(set(deltas), key=deltas.count) if deltas else 5
+        if batcher_ts_by_role:
+            # 第四线：master batcher 队列（avg/engine，master 侧口径）。
+            # 数据源与 2.1 节 p_master_batcher 同源（batcher_ts_by_role 的
+            # prefill 集群总量 ÷ P 引擎数）；master 序列 t0 通常为 -10s，
+            # 按 TQ 时间轴前向 step 对齐（尾部超出取尾值，序列尾部已归零）。
+            btr_pts = [
+                (float(r.get("t", 0) or 0), r.get("prefill", 0) or 0)
+                for r in batcher_ts_by_role
+            ]
+            p_master_bq = const(
+                "pMasterBq",
+                num_arr(
+                    [
+                        round(v / max(1, p_engines), 2)
+                        for v in ts_step_values(btr_pts, tq_vals)
+                    ]
+                ),
+            )
 
     # engine_dist：窗口 Gini（按池独立，过滤 null 点）
     wg = (ed or {}).get("window_gini") or {}
@@ -822,29 +1063,50 @@ def main():
                 domain="[0, " + num(nice_max(qps_max * 1.05)) + "]",
             ),
         )
-        # 失败按原因分曲线（全零也画：证明无该类失败）
-        err_defs = [
-            ("err_no_decode", "no worker", "danger"),
-            ("err_queue_full", "queue full", "warning"),
-            ("err_deadline", "deadline", "info"),
-            ("err_priority", "priority ahead", "warning"),
-            ("err_preempted", "preempted", None),
-            ("err_yielded", "yielded", None),
-            ("err_other", "other", "neutral"),
-        ]
+        # 失败按原因分曲线：曲线按「实际存在的桶」自适应（具名桶优先，
+        # 总曲线数不超 ~8，超出时总量排序保留 top，其余合并为一条曲线）；
+        # 零失败 run 画一条全零 err_other 曲线保持「无失败」证据。
+        # 桶含义：deadline=客户端/调度超时；backpressure=master 准入拒绝
+        # （8430/8431/8432）；queue timeout=master 排队超时（8503）；
+        # rst_stream/goaway/unavailable/cancelled/internal=gRPC 传输层错误；
+        # empty response=零输出流；duplicate rid=请求 ID 重复；
+        # other=未归类残渣。旧 aggregate 无新子桶键 -> 全零 -> 自动跳过。
+        MAX_ERR_CURVES = 8
+        err_total_errors = sum(p.get("errors", 0) or 0 for p in per_second)
+        err_nonzero = [(k, lb, tn) for k, lb, tn in ERR_DEFS if err_totals.get(k)]
+        merged_keys = []
+        if err_total_errors > 0 and len(err_nonzero) > MAX_ERR_CURVES:
+            ranked = sorted(err_nonzero, key=lambda x: -err_totals[x[0]])
+            sel = ranked[: MAX_ERR_CURVES - 1] + [
+                ("__merged__", "small buckets merged", "neutral")
+            ]
+            merged_keys = [k for k, _, _ in ranked[MAX_ERR_CURVES - 1 :]]
+        elif err_total_errors > 0:
+            sel = err_nonzero
+        else:
+            sel = [("err_other", "other", "neutral")]
         err_series = []
-        for k, label, tone in err_defs:
-            ref = const(
-                "err" + k[4:].title().replace("_", ""),
-                num_arr([p.get(k, 0) for p in per_second]),
-            )
-            err_series.append((k, label, ref, tone))
-        err_max = max(
-            max((p.get(k, 0) or 0) for p in per_second) for k, _, _ in err_defs
-        )
+        err_max = 0
+        for k, lb, tn in sel:
+            if k == "__merged__":
+                cname = "errMergedSmall"
+                vals = [
+                    sum(p.get(mk, 0) or 0 for mk in merged_keys) for p in per_second
+                ]
+            else:
+                cname = "err" + k[4:].title().replace("_", "")
+                vals = [p.get(k, 0) or 0 for p in per_second]
+            ref = const(cname, num_arr(vals))
+            err_series.append((k, lb, ref, tn))
+            if vals:
+                err_max = max(err_max, max(vals))
         fail_chart = emit_container(
             "每秒失败 QPS：按原因",
-            "x = 压测时间（s）；y = 每秒失败请求数（按错误原因分类）",
+            "x = 压测时间（s）；y = 每秒失败请求数。桶：deadline=客户端/调度超时；"
+            "backpressure=master 准入拒绝（8430/8431/8432）；queue timeout=master"
+            " 排队超时（8503）；rst_stream/goaway/unavailable/cancelled/internal"
+            "=gRPC 传输层错误；empty response=零输出流；duplicate rid=请求 ID"
+            " 重复；other=未归类残渣。曲线按实际存在的桶自适应，小桶自动合并",
             emit_chart(
                 "LineChart",
                 TSEC,
@@ -1137,23 +1399,35 @@ def main():
     # 2. 队列（avg/engine：集群总量 ÷ 引擎数，engine_dist.engine_count 优先）
     if queue_ts:
         q_cap = "x = 压测时间（s，" + str(q_step) + "s 采样）"
-        queue_containers = [
-            emit_container(
-                "Prefill 队列（avg/engine）",
+        pq_series = [
+            ("rr", "running 请求数（引擎侧）", p_run_req, "success"),
+            ("rb", "running 批数（引擎侧）", p_run_batch, "info"),
+            ("w", "waiting 请求数（引擎侧）", p_wait, "neutral"),
+        ]
+        if p_master_bq:
+            pq_series.append(
+                ("mb", "master batcher 队列（master 侧）", p_master_bq, "danger")
+            )
+            pq_cap = (
                 q_cap
                 + "；y = 请求数 / 批数（avg/engine = 集群总量 ÷ "
                 + num(p_engines)
-                + " 引擎）",
-                emit_chart(
-                    "LineChart",
-                    TQ,
-                    230,
-                    [
-                        ("rr", "running 请求数", p_run_req, "success"),
-                        ("rb", "running 批数", p_run_batch, "info"),
-                        ("w", "waiting 请求数", p_wait, "neutral"),
-                    ],
-                ),
+                + " 引擎）；前三条为引擎侧队列，第四条为 master 侧 batcher "
+                "队列（master per-engine batcher 集群总量 ÷ 同引擎数，1s 采样 "
+                "step 对齐）"
+            )
+        else:
+            pq_cap = (
+                q_cap
+                + "；y = 请求数 / 批数（avg/engine = 集群总量 ÷ "
+                + num(p_engines)
+                + " 引擎）；均为引擎侧队列（无 master 侧序列）"
+            )
+        queue_containers = [
+            emit_container(
+                "Prefill 队列（avg/engine）",
+                pq_cap,
+                emit_chart("LineChart", TQ, 230, pq_series),
             ),
             emit_container(
                 "Decode 队列（avg/engine）",
@@ -1190,8 +1464,9 @@ def main():
         # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
         # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分；
         # 只画 prefill avg/engine + 128 容量线（decode 侧队列语义不同，不画）；
-        # prefill 另给跨引擎分位与 top-5 引擎序列（决策时点深度的
-        # 1s 采样近似）。旧口径（仅 batcher_ts，P+D 合计）退化画集群总量。
+        # prefill 另给 top-5 引擎序列（决策时点深度的 1s 采样近似；
+        # Top/Bottom-5 全集见 2.1 节）。旧口径（仅 batcher_ts，P+D 合计）
+        # 退化画集群总量。
         if batcher_ts_by_role:
             BRT = const(
                 "BRT",
@@ -1231,84 +1506,12 @@ def main():
                     ),
                 )
             )
-            if batcher_engine_quantile_ts:
-                EQT = const(
-                    "EQT",
-                    str_arr(
-                        sparse_cats([r.get("t", 0) for r in batcher_engine_quantile_ts])
-                    ),
-                )
-                queue_containers.append(
-                    emit_container(
-                        "prefill 引擎队列深度分布（跨引擎分位）",
-                        "x = 压测时间（s，1s 采样）；y = per-engine batcher 队列深度（跨引擎 p50/p90/p99/max）",
-                        emit_chart(
-                            "LineChart",
-                            EQT,
-                            230,
-                            [
-                                (
-                                    "q50",
-                                    "p50",
-                                    const(
-                                        "eqP50",
-                                        num_arr(
-                                            [
-                                                r.get("p50", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "success",
-                                ),
-                                (
-                                    "q90",
-                                    "p90",
-                                    const(
-                                        "eqP90",
-                                        num_arr(
-                                            [
-                                                r.get("p90", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "info",
-                                ),
-                                (
-                                    "q99",
-                                    "p99",
-                                    const(
-                                        "eqP99",
-                                        num_arr(
-                                            [
-                                                r.get("p99", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "warning",
-                                ),
-                                (
-                                    "qmx",
-                                    "max",
-                                    const(
-                                        "eqMax",
-                                        num_arr(
-                                            [
-                                                r.get("max", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "danger",
-                                ),
-                            ],
-                        ),
-                    )
-                )
-            if batcher_top_engines_ts:
-                # top-5 引擎序列：行键 = engineIp（动态），series 名用 e0..e4
+            if batcher_top_engines_ts and not (
+                (queue_top_bottom_ts.get("p_master_batcher") or {}).get("top")
+            ):
+                # 旧 aggregate（无 queue_top_bottom_ts 键）：退化渲染 P
+                # master-batcher Top-5（命名与 2.1 节统一）；新键存在时由
+                # 独立节渲染 top+bottom 全集，此处跳过避免重复。
                 top_engine_keys = []
                 for r in batcher_top_engines_ts:
                     for k in r:
@@ -1343,15 +1546,18 @@ def main():
                         )
                     queue_containers.append(
                         emit_container(
-                            "prefill 队列深度 top-5 引擎",
-                            "x = 压测时间（s，5s 采样）；y = per-engine batcher 队列深度（峰值 top-5 引擎）",
+                            "P master-batcher 队列深度 Top-5",
+                            "master batcher 队列深度（决策时点 1s 采样近似，5s 窗口）；"
+                            "数据源 master.json prometheus_timeseries per-engine；"
+                            "按峰值排序；容量上限 128（maxWaitingRequestsPerPrefillWorker）",
                             emit_chart("LineChart", TET, 230, top_lines),
                         )
                     )
         if batcher_ts:
             BT = const("BT", str_arr(sparse_cats([r.get("t", 0) for r in batcher_ts])))
-            # routing.queue.length 唯一上报点是 type=batchQueue（同一 batcher
-            # 队列的按优先级分桶视角），保持集群总量口径。
+            # routing 队列口径：与 batcher_queue_size 同源（同一 per-engine
+            # batcher 队列的集群合计）。旧 priority 桶口径（routing.queue.length）
+            # 尾部 stale 冻结为上报伪影，已弃用；旧 aggregate 数据仍为旧口径。
             routing_q = const(
                 "routingQueue",
                 num_arr([r.get("routing_queue", 0) or 0 for r in batcher_ts]),
@@ -1385,13 +1591,23 @@ def main():
             if any(r.get("routing_queue") for r in batcher_ts):
                 queue_containers.append(
                     emit_container(
-                        "master 队列深度：routing（集群总量）",
-                        "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）",
+                        "master 队列深度：routing（集群总量，batcher 同源口径）",
+                        "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）。"
+                        "口径：与 batcher_queue_size 同源（同一 per-engine batcher 队列的集群合计，"
+                        "尾部正确归零）；旧 priority 桶口径（routing.queue.length）尾部 stale 冻结"
+                        "为上报伪影，已弃用；旧 aggregate 数据仍为旧口径",
                         emit_chart(
                             "LineChart",
                             BT,
                             230,
-                            [("rq", "routing 队列", routing_q, "warning")],
+                            [
+                                (
+                                    "rq",
+                                    "routing 队列（batcher 同源）",
+                                    routing_q,
+                                    "warning",
+                                )
+                            ],
                         ),
                     )
                 )
@@ -1484,6 +1700,94 @@ def main():
         lines.append("      <H2>2. 队列（集群总量）</H2>")
         lines.extend(emit_grid(queue_containers))
         lines.append("")
+
+    # 2.1 队列 Top/Bottom-5 引擎（queue_top_bottom_ts；命名规范
+    # 「<侧>-<队列> Top-5 / Bottom-5」，每图 5 条线按引擎 IP 标注。
+    # 旧 aggregate 无此键 -> 整节省略（P master-batcher Top-5 由队列节
+    # 退化路径渲染）。
+    if queue_top_bottom_ts:
+        tb_containers = []
+        # (键, 标题基名, y 轴语义 + 数据源说明)
+        TB_META = (
+            (
+                "p_master_batcher",
+                "P master-batcher 队列深度",
+                "per-engine master batcher 队列深度（决策时点 1s 采样近似，"
+                "5s 窗口）；数据源 master.json prometheus_timeseries；"
+                "按峰值排序；容量上限 128（maxWaitingRequestsPerPrefillWorker）",
+            ),
+            (
+                "p_running",
+                "P running",
+                "per-engine prefill running 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序",
+            ),
+            (
+                "p_waiting",
+                "P waiting",
+                "per-engine prefill waiting 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序；"
+                "全零 = 引擎侧无等待积压",
+            ),
+            (
+                "d_running",
+                "D running",
+                "per-engine decode running 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序",
+            ),
+            (
+                "d_waiting",
+                "D waiting",
+                "per-engine decode waiting 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序；"
+                "全零 = 引擎侧无等待积压",
+            ),
+        )
+        TB_COLORS = ["danger", "warning", "info", "success", "neutral"]
+        for tb_key, tb_title, tb_cap in TB_META:
+            tb_entry = queue_top_bottom_ts.get(tb_key) or {}
+            for tb_kind, tb_kind_label in (("top", "Top-5"), ("bottom", "Bottom-5")):
+                tb_rows = tb_entry.get(tb_kind) or []
+                if not tb_rows:
+                    continue
+                tb_ips = []
+                for r in tb_rows:
+                    for k in r:
+                        if k != "t" and k not in tb_ips:
+                            tb_ips.append(k)
+                tb_ips = tb_ips[:5]
+                if not tb_ips:
+                    continue
+                tb_cats = const(
+                    "tbT" + tb_key + tb_kind,
+                    str_arr(sparse_cats([r.get("t", 0) for r in tb_rows])),
+                )
+                tb_series = []
+                for i, ip in enumerate(tb_ips):
+                    tb_series.append(
+                        (
+                            "tb%d" % i,
+                            ip,
+                            const(
+                                "tbV" + tb_key + tb_kind + str(i),
+                                num_arr([r.get(ip, 0) or 0 for r in tb_rows]),
+                            ),
+                            TB_COLORS[i % len(TB_COLORS)],
+                        )
+                    )
+                tb_containers.append(
+                    emit_container(
+                        tb_title + " " + tb_kind_label,
+                        "x = 压测时间（s，5s 窗口采样）；y = " + tb_cap,
+                        emit_chart("LineChart", tb_cats, 230, tb_series),
+                    )
+                )
+        if tb_containers:
+            lines.append("      <Divider />")
+            lines.append("")
+            lines.append("      <H2>2.1 队列 Top/Bottom-5 引擎</H2>")
+            lines.extend(emit_grid(tb_containers))
+            lines.append("")
 
     # 3. 调度均衡性（窗口 Gini，仅当 engine_dist 有数据）
     if p_wg_pts or d_wg_pts:
@@ -2025,6 +2329,24 @@ def main():
         num(error_n) + " · " + fmt_pct(error_rate) if error_n is not None else "—"
     )
     rows.append(["错误", err_disp])
+    # 错误构成（top 子桶）：优先 summary.error_breakdown（含无时间戳行，
+    # 与 error_count 同口径）；旧 aggregate 无此键时退化为 per_second
+    # 汇总口径（仅带时间戳行）。
+    err_breakdown = dict(sm.get("error_breakdown") or {})
+    if not err_breakdown and per_second:
+        err_breakdown = {k: v for k, v in err_totals.items() if v}
+    if err_breakdown:
+        _eb_label = {k: lb for k, lb, _ in ERR_DEFS}
+        _eb_items = sorted(err_breakdown.items(), key=lambda kv: -kv[1])
+        eb_parts = []
+        for k, v in _eb_items[:6]:
+            if not v:
+                continue
+            eb_parts.append((_eb_label.get(k) or k) + " " + fmt_int_trunc(v))
+        if len(_eb_items) > 6:
+            eb_parts.append("+" + str(len(_eb_items) - 6) + " 桶")
+        if eb_parts:
+            rows.append(["错误构成（top 子桶）", " · ".join(eb_parts)])
     if lat_summary:
         rows.append(
             [
@@ -2192,7 +2514,7 @@ def main():
     lines.append("      </Text>")
     lines.append("    </Stack>")
 
-    # ---- 写文件 ----
+    # ---- 拼 in-memory tsx（供末端反抽 spec，不写盘）----
     header = []
     header.append(
         "import { BarChart, ChartComparisonGrid, ChartContainer, Divider, Grid, H1, H2, "
@@ -2207,15 +2529,38 @@ def main():
     header.append("export default function FlexlbRunReport() {")
     header.append("  return (")
 
-    footer = []
-    footer.append("  );")
-    footer.append("}")
+    footer = ["  );", "}"]
+    tsx_src = "\n".join(header + lines + footer) + "\n"
+
+    # ---- 反抽 spec → 渲染 Chart.js HTML ----
+    # canvas_report_render_html.py 是同目录的 sibling 模块；作为脚本运行时
+    # 脚本目录自动在 sys.path 中，作为库被 import 时也依赖同目录可达。
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    if _this_dir not in sys.path:
+        sys.path.insert(0, _this_dir)
+    import canvas_report_render_html  # noqa: E402
+
+    spec = _extract_spec_from_tsx(tsx_src, run_id=str(run_id), subtitle=sources)
+    chartjs_tag = None
+    if args.chartjs_file:
+        chartjs_tag, chartjs_src = canvas_report_render_html.resolve_chartjs_tag(
+            (args.chartjs_file,)
+        )
+        if chartjs_src:
+            print(TAG + " chartjs inlined from: " + chartjs_src)
+        else:
+            print(
+                TAG
+                + " warning: --chartjs-file 指向的文件不可用（不存在/过短），回退 CDN: "
+                + str(args.chartjs_file)
+            )
+    html_out = canvas_report_render_html.render(spec, chartjs_tag=chartjs_tag)
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write("\n".join(header + lines + footer) + "\n")
+        f.write(html_out)
 
     # ---- stdout 摘要 ----
     sections = ["qps"] if per_second else []
@@ -2226,8 +2571,8 @@ def main():
     if (
         batcher_ts
         or batcher_ts_by_role
-        or batcher_engine_quantile_ts
         or batcher_top_engines_ts
+        or queue_top_bottom_ts
         or dispatch_reason_ts
         or dispatch_batch_size_ts
     ):
