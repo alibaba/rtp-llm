@@ -80,10 +80,14 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         // the same q to rejection sampling. Request top-k/top-p stay target-side.
         logits.div_(temperature_column);
         auto sampling_probabilities = torch::softmax(logits, -1);
-        auto sampled_tokens         = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        auto sampled_target_tokens  = sampled_draft_tokens;
+        if (d2t_map_.defined()) {
+            sampled_target_tokens = d2t_map_.index_select(0, sampled_draft_tokens.to(torch::kLong)).to(torch::kInt32);
+        }
         all_probabilities.select(1, step).copy_(sampling_probabilities);
-        token_columns.push_back(sampled_tokens);
-        previous_tokens = sampled_tokens.to(torch::kLong);
+        token_columns.push_back(sampled_target_tokens);
+        previous_tokens = sampled_target_tokens.to(torch::kLong);
     }
 
     SamplerOutput output;

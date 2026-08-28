@@ -2,7 +2,10 @@ import json
 import os
 from typing import Any, Dict, List
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    ssm_state_dtype_str_to_data_type,
+)
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
@@ -112,6 +115,11 @@ class Qwen3NextBase(BaseModel):
     def _parse_hybrid_attention_config(cls, config_json: dict, config: ModelConfig):
         attention_step = config_json["full_attention_interval"]
         config.hybrid_attention_config.enable_hybrid_attention = True
+        # Full-attention KV pages and recurrent GDN states have different
+        # physical layouts.  Use the generic per-group allocator so each group
+        # keeps its native block representation while sharing the same logical
+        # 64-token cache/reuse granularity.
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         hybrid_layer_types: List[HybridAttentionType] = []
         for i in range(config.num_layers):
             if (i + 1) % attention_step == 0:
@@ -137,6 +145,11 @@ class Qwen3NextBase(BaseModel):
         config.linear_attention_config.linear_value_head_dim = config_json[
             "linear_value_head_dim"
         ]
+        model_ssm_state_dtype = config_json.get("mamba_ssm_dtype")
+        if model_ssm_state_dtype is not None:
+            config.linear_attention_config.ssm_state_dtype = (
+                ssm_state_dtype_str_to_data_type(model_ssm_state_dtype)
+            )
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:

@@ -4,7 +4,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <thread>
 
 #include <errno.h>
@@ -20,6 +22,19 @@ namespace {
 
 constexpr int  kInitTimeoutMs  = 120 * 1000;
 constexpr char kLinkProbeToken = 0x5a;
+
+constexpr uint32_t kFrameMagic   = 0x52545042;  // "RTPB"
+constexpr uint16_t kFrameVersion = 1;
+
+struct BroadcastFrameHeader {
+    uint32_t magic         = kFrameMagic;
+    uint16_t version       = kFrameVersion;
+    uint16_t header_bytes  = sizeof(BroadcastFrameHeader);
+    uint64_t sequence      = 0;
+    uint64_t payload_bytes = 0;
+};
+
+static_assert(sizeof(BroadcastFrameHeader) == 24, "CpuTpBroadcaster frame header must remain stable");
 
 std::string makeUdsPath(const std::string& base, int rank) {
     return base + "_" + std::to_string(rank) + ".sock";
@@ -53,7 +68,7 @@ bool waitFdUntil(int fd, short events, std::chrono::steady_clock::time_point dea
 
         const auto remaining_ms =
             static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-        struct pollfd pfd{};
+        struct pollfd pfd {};
         pfd.fd     = fd;
         pfd.events = events;
         int rc     = ::poll(&pfd, 1, remaining_ms);
@@ -221,6 +236,7 @@ CpuTpBroadcaster::~CpuTpBroadcaster() {
 
 void CpuTpBroadcaster::reset() {
     std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::mutex> broadcast_lock(broadcast_mu_);
     for (int& fd : peer_fds_) {
         closeFd(fd);
     }
@@ -231,8 +247,9 @@ void CpuTpBroadcaster::reset() {
         my_uds_path_.clear();
     }
     base_path_.clear();
-    tp_rank_ = 0;
-    tp_size_ = 1;
+    tp_rank_       = 0;
+    tp_size_       = 1;
+    next_sequence_ = 0;
     initialized_.store(false, std::memory_order_release);
 }
 
@@ -275,7 +292,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
             listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             RTP_LLM_CHECK_WITH_INFO(listen_fd_ >= 0, "CpuTpBroadcaster socket: %s", std::strerror(errno));
 
-            struct sockaddr_un addr{};
+            struct sockaddr_un addr {};
             addr.sun_family = AF_UNIX;
             RTP_LLM_CHECK_WITH_INFO(
                 path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -343,7 +360,7 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
         }
     } else {
         const std::string  path = makeUdsPath(base_path, 0);
-        struct sockaddr_un addr{};
+        struct sockaddr_un addr {};
         addr.sun_family = AF_UNIX;
         RTP_LLM_CHECK_WITH_INFO(
             path.size() < sizeof(addr.sun_path), "CpuTpBroadcaster UDS path too long: %s", path.c_str());
@@ -400,29 +417,69 @@ void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& b
 }
 
 void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
+    std::lock_guard<std::mutex> lock(broadcast_mu_);
     RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
                             "CpuTpBroadcaster::broadcast called before initialize");
-    if (tp_size_ <= 1 || nbytes == 0) {
+    if (tp_size_ <= 1) {
         return;
     }
     RTP_LLM_CHECK_WITH_INFO(root == 0, "CpuTpBroadcaster supports only root=0 (star topology); got %d", root);
+    RTP_LLM_CHECK_WITH_INFO(
+        nbytes <= std::numeric_limits<uint64_t>::max(), "CpuTpBroadcaster payload is too large: %zu bytes", nbytes);
+
+    const BroadcastFrameHeader expected_header{
+        kFrameMagic, kFrameVersion, sizeof(BroadcastFrameHeader), next_sequence_, static_cast<uint64_t>(nbytes)};
 
     if (tp_rank_ == 0) {
         for (int k = 1; k < tp_size_; ++k) {
-            ssize_t n = writeAll(peer_fds_[k], buf, nbytes);
+            ssize_t n = writeAll(peer_fds_[k], &expected_header, sizeof(expected_header));
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(expected_header)),
+                                    "CpuTpBroadcaster frame-header write to rank %d failed at sequence %llu: %s",
+                                    k,
+                                    static_cast<unsigned long long>(next_sequence_),
+                                    std::strerror(errno));
+            n = writeAll(peer_fds_[k], buf, nbytes);
             RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                    "CpuTpBroadcaster write to rank %d (%zu bytes) failed: %s",
+                                    "CpuTpBroadcaster payload write to rank %d (%zu bytes) failed at sequence %llu: %s",
                                     k,
                                     nbytes,
+                                    static_cast<unsigned long long>(next_sequence_),
                                     std::strerror(errno));
         }
     } else {
-        ssize_t n = readAll(peer_fds_[0], buf, nbytes);
+        BroadcastFrameHeader received_header{};
+        ssize_t              n = readAll(peer_fds_[0], &received_header, sizeof(received_header));
+        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(sizeof(received_header)),
+                                "CpuTpBroadcaster frame-header read from rank 0 failed at sequence %llu: %s",
+                                static_cast<unsigned long long>(next_sequence_),
+                                std::strerror(errno));
+        RTP_LLM_CHECK_WITH_INFO(
+            received_header.magic == kFrameMagic && received_header.version == kFrameVersion
+                && received_header.header_bytes == sizeof(BroadcastFrameHeader),
+            "CpuTpBroadcaster invalid frame header at sequence %llu: magic=0x%x version=%u bytes=%u",
+            static_cast<unsigned long long>(next_sequence_),
+            received_header.magic,
+            received_header.version,
+            received_header.header_bytes);
+        RTP_LLM_CHECK_WITH_INFO(received_header.sequence == next_sequence_,
+                                "CpuTpBroadcaster sequence mismatch: expected %llu, got %llu",
+                                static_cast<unsigned long long>(next_sequence_),
+                                static_cast<unsigned long long>(received_header.sequence));
+        RTP_LLM_CHECK_WITH_INFO(
+            received_header.payload_bytes == nbytes,
+            "CpuTpBroadcaster payload size mismatch at sequence %llu: rank 0 sent %llu bytes, rank %d expects %zu",
+            static_cast<unsigned long long>(next_sequence_),
+            static_cast<unsigned long long>(received_header.payload_bytes),
+            tp_rank_,
+            nbytes);
+        n = readAll(peer_fds_[0], buf, nbytes);
         RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
-                                "CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s",
+                                "CpuTpBroadcaster payload read from rank 0 (%zu bytes) failed at sequence %llu: %s",
                                 nbytes,
+                                static_cast<unsigned long long>(next_sequence_),
                                 std::strerror(errno));
     }
+    ++next_sequence_;
 }
 
 }  // namespace rtp_llm

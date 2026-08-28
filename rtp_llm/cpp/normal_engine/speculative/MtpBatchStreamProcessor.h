@@ -19,7 +19,8 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
-        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -39,6 +40,16 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+
+    // Produce the next round's immutable page table by applying the exact
+    // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
+    // groups are copied unchanged.  Keeping this operation tensor-native lets
+    // proposal/verify overlap host bookkeeping without a per-round D2H join.
+    static torch::Tensor advanceLinearCacheBlockTable(const torch::Tensor&               current_table,
+                                                      const torch::Tensor&               previous_seq_lengths,
+                                                      const torch::Tensor&               accept_lengths,
+                                                      const std::vector<CacheGroupType>& group_types,
+                                                      int64_t                            seq_size_per_block);
 
     absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                          const GptModelOutputs&                      model_output,
@@ -85,30 +96,32 @@ public:
                                  const torch::Tensor& committed_ends,
                                  TensorHolder&        host_holder);
 
-    // Round-head stream state (anchor = last accepted token, committed_end =
-    // committed length - 1), derived once per decode round and consumed by
-    // both the propose and verify input builders below; new PD streams and
-    // steady streams take the same path. Consumers must treat both tensors as
-    // immutable — propose and verify alias this one storage.
-    struct DSparkRoundHead {
+    // Immutable state shared by the proposal and target-verification phases of
+    // one DSpARK round. Position bases contain one MRoPE/default tuple per
+    // request; each phase expands them to its own token width, so batching
+    // cannot shift one request onto another request's positions.
+    struct DSparkRoundState {
         torch::Tensor anchors;
         torch::Tensor committed_ends;
+        torch::Tensor position_bases;
     };
-    DSparkRoundHead buildDSparkRoundHead(const StreamGroups&   stream_groups,
-                                         const GptModelInputs& model_input,
-                                         TensorHolder&         host_holder) const;
+    DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
+                                           const GptModelInputs& model_input,
+                                           TensorHolder&         host_holder) const;
 
-    // Prepare the fixed-width DSpARK proposal input from current stream state.
-    // The returned round head is reused after sampling to build target verify.
-    DSparkRoundHead prepareDSparkDraftModelInput(const StreamGroups& stream_groups,
-                                                 GptModelInputs&     model_input,
-                                                 TensorHolder&       host_holder);
+    void prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
+                                        GptModelInputs&         model_input,
+                                        TensorHolder&           host_holder);
 
-    // Convert the proposal-stage input into dense target-verify rows.
-    void updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
-                                            GptModelInputs&        model_input,
-                                            const torch::Tensor&   proposals,
-                                            TensorHolder&          host_holder);
+    void prepareDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
+                                             GptModelInputs&         model_input,
+                                             const torch::Tensor&    proposals,
+                                             TensorHolder&           host_holder);
+
+    // Async target preparation runs before proposal sampling completes. Build
+    // its verify-width positions locally from the TP-synchronized proposal
+    // metadata; no second pre-proposal broadcast is needed.
+    void expandDSparkTargetVerifyPositionIdsFromProposal(GptModelInputs& model_input) const;
 
     void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                            const torch::Tensor& target_features,
@@ -134,6 +147,13 @@ public:
                                            std::vector<torch::Tensor>& draft_token_probs_list);
 
 protected:
+    void overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
+                                  GptModelInputs&     model_input,
+                                  TensorHolder&       host_holder) const;
+
+    torch::Tensor collectDSparkPositionBases(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
+    torch::Tensor expandDSparkPositionIds(const torch::Tensor& position_bases, int64_t width) const;
+
     void updateProposeTokens(const StreamGroups&                stream_groups,
                              const MergedOutput&                draft_prefill_output,
                              std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
@@ -160,11 +180,15 @@ protected:
     torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
     torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
     torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
+    int64_t dsparkQueryWidth() const {
+        return propose_step_ + static_cast<int64_t>(!dspark_sample_from_anchor_);
+    }
 
     int     propose_step_;
-    size_t  vocab_size_           = 0;
-    bool    is_dspark_            = false;
-    int32_t dspark_mask_token_id_ = -1;
+    size_t  vocab_size_                   = 0;
+    bool    is_dspark_                    = false;
+    int32_t dspark_mask_token_id_         = -1;
+    bool    dspark_sample_from_anchor_     = true;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

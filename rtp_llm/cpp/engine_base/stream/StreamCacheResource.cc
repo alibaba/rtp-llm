@@ -247,8 +247,8 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                 .propose_tokens_gpu     = std::move(propose_tokens_gpu),
                 .last_hidden_states_gpu = sp_output_buffer->hidden_states,
                 .draft_all_probs_gpu    = sp_output_buffer->all_probs,
-                .last_real_seq_len      = stream->seqLength(),
-                .next_real_seq_len      = stream->seqLength(),
+                .previous_seq_len_upper_bound = stream->seqLength(),
+                .next_seq_len_upper_bound     = stream->seqLength(),
             });
         }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: propose_tokens count=%zu", payload->propose_tokens.size());

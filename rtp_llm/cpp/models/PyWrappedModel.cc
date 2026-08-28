@@ -702,12 +702,11 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(fused_h2d)");
         fusedCopy(d2d_copies_);
     }
-
     graph_state_         = CudaGraphState();
     auto empty           = torch::Tensor();
     auto py_model_inputs = PyModelInputs({empty,
                                           empty,
-                                          empty,
+                                          attention_inputs_.combo_position_ids,
                                           torch_ext::PyEmbeddingInputs(),
                                           torch_ext::PyMultimodalInputs(),
                                           attention_inputs_,
@@ -733,7 +732,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
         auto empty           = torch::Tensor();
         auto py_model_inputs = PyModelInputs({empty,
                                               empty,
-                                              empty,
+                                              attention_inputs_.combo_position_ids,
                                               torch_ext::PyEmbeddingInputs(),
                                               torch_ext::PyMultimodalInputs(),
                                               attention_inputs_,
@@ -858,12 +857,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
+            if (py_model_outputs.mtp_target_hidden_states.defined()) {
+                outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
+            }
+            return outputs;
+        };
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                return callForwardPostLayers(hidden_states, inputs, true);
+                return attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -871,17 +876,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return outputs;
+            return attach_mtp_target_hidden_states(std::move(outputs));
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return forwardPostLayersLastHidden(hidden_states, inputs);
+                return attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            return attach_mtp_target_hidden_states(
+                callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

@@ -32,6 +32,8 @@ from rtp_llm.ops.compute_ops import (
 
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+_FLASHINFER_WORKSPACE_ALIGNMENT = 256
+_FLASHINFER_ACCUMULATOR_BYTES = 4
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -70,30 +72,124 @@ def quantize_to_fp8_if_needed(
     return output
 
 
-# Global workspace buffer pool
-_g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
+# Global workspace buffer pool. CUDA graph instances keep their compact buffers
+# alive; the default 128 MiB buffer is reused as staging while each instance is
+# planned and right-sized.
+_g_py_flashinfer_workspace_pool: dict[
+    tuple[torch.device, int], list[torch.Tensor]
+] = {}
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
 
 
-def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
+def _round_workspace_size(size_bytes: int) -> int:
+    if size_bytes <= 0:
+        raise ValueError(f"workspace size must be positive, got {size_bytes}")
+    return (
+        (size_bytes + _FLASHINFER_WORKSPACE_ALIGNMENT - 1)
+        // _FLASHINFER_WORKSPACE_ALIGNMENT
+        * _FLASHINFER_WORKSPACE_ALIGNMENT
+    )
+
+
+def _workspace_device(device: str | torch.device) -> torch.device:
+    resolved = torch.device(device)
+    if resolved.type == "cuda" and resolved.index is None:
+        resolved = torch.device("cuda", torch.cuda.current_device())
+    return resolved
+
+
+def get_py_flashinfer_workspace_buffer(
+    device: str | torch.device = "cuda",
+    size_bytes: int = DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+) -> torch.Tensor:
     """Get a PyFlashInfer workspace buffer from the pool.
 
     This function manages workspace buffers to support multiple concurrent instances.
     """
+    resolved_device = _workspace_device(device)
+    rounded_size = _round_workspace_size(size_bytes)
+    key = (resolved_device, rounded_size)
     with _g_py_flashinfer_pool_lock:
-        if _g_py_flashinfer_workspace_pool:
-            return _g_py_flashinfer_workspace_pool.pop()
+        buffers = _g_py_flashinfer_workspace_pool.get(key)
+        if buffers:
+            return buffers.pop()
     return torch.zeros(
-        DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB * 1024 * 1024,
+        rounded_size,
         dtype=torch.uint8,
-        device=device,
+        device=resolved_device,
     )
 
 
 def release_py_flashinfer_workspace_buffer(buffer: torch.Tensor) -> None:
     """Release a PyFlashInfer workspace buffer back to the pool."""
+    key = (buffer.device, buffer.numel() * buffer.element_size())
     with _g_py_flashinfer_pool_lock:
-        _g_py_flashinfer_workspace_pool.append(buffer)
+        _g_py_flashinfer_workspace_pool.setdefault(key, []).append(buffer)
+
+
+def _planned_flashinfer_workspace_size(
+    wrapper: Any, num_qo_heads: int, head_dim_vo: int
+) -> Optional[int]:
+    """Return the float-workspace bytes required by a completed graph plan.
+
+    FlashInfer FA2 exposes its split-K allocation through ``PrefillPlanInfo``.
+    FA3 stores scheduling metadata in the integer workspace and does not consume
+    the float workspace. Unknown backends retain FlashInfer's recommended size.
+    """
+    backend = getattr(wrapper, "_backend", None)
+    plan_info = getattr(wrapper, "_plan_info", None)
+    # FA3 tensor-core decode is implemented through the SM90 batch-prefill
+    # planner as well, whose eight-field plan contains only integer-workspace
+    # offsets.  Do not generalize this to future/other FA3 wrappers: their
+    # workspace contract may differ.
+    if backend == "fa3" and plan_info is not None and len(plan_info) == 8:
+        return _FLASHINFER_WORKSPACE_ALIGNMENT
+    if backend != "fa2" or plan_info is None or len(plan_info) != 15:
+        return None
+
+    split_kv = bool(plan_info[14])
+    if not split_kv:
+        return _FLASHINFER_WORKSPACE_ALIGNMENT
+
+    padded_batch_size = int(plan_info[0])
+    cta_tile_q = int(plan_info[3])
+    value_offset = int(plan_info[10])
+    lse_offset = int(plan_info[11])
+    partial_rows = num_qo_heads * padded_batch_size * cta_tile_q
+    required_bytes = max(
+        value_offset
+        + partial_rows * head_dim_vo * _FLASHINFER_ACCUMULATOR_BYTES,
+        lse_offset + partial_rows * _FLASHINFER_ACCUMULATOR_BYTES,
+    )
+    return _round_workspace_size(required_bytes)
+
+
+def _compact_graph_workspace(
+    wrapper: Any,
+    workspace: torch.Tensor,
+    num_qo_heads: int,
+    head_dim_vo: int,
+) -> torch.Tensor:
+    """Replace a graph wrapper's staging workspace with its stable exact size."""
+    required_bytes = _planned_flashinfer_workspace_size(
+        wrapper, num_qo_heads, head_dim_vo
+    )
+    current_bytes = workspace.numel() * workspace.element_size()
+    if required_bytes is None or required_bytes >= current_bytes:
+        return workspace
+
+    # FlashInfer's plan() stages scheduler metadata with raw cudaMemcpyAsync
+    # from its pinned host workspace. reset_workspace_buffer() replaces that
+    # pinned tensor, so its stream work must finish before the old allocation
+    # can be released/reused. This runs once while constructing each graph and
+    # has no steady-state cost.
+    if workspace.is_cuda:
+        torch.cuda.current_stream(workspace.device).synchronize()
+
+    compact = get_py_flashinfer_workspace_buffer(workspace.device, required_bytes)
+    wrapper.reset_workspace_buffer(compact, wrapper._int_workspace_buffer)
+    release_py_flashinfer_workspace_buffer(workspace)
+    return compact
 
 
 def _host_i32(t):
@@ -161,6 +257,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self._workspace_compacted = False
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
@@ -279,6 +376,19 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
+        self._plan_prefill_wrapper(qo_indptr)
+        if self.enable_cuda_graph and not self._workspace_compacted:
+            self.g_workspace_buffer = _compact_graph_workspace(
+                self.prefill_wrapper,
+                self.g_workspace_buffer,
+                self.local_head_num,
+                self.head_dim_vo,
+            )
+            self._workspace_compacted = True
+            self._plan_prefill_wrapper(qo_indptr)
+        return self.fmha_params
+
+    def _plan_prefill_wrapper(self, qo_indptr: torch.Tensor) -> None:
         self.prefill_wrapper.plan(
             qo_indptr,
             self.fmha_params.decode_page_indptr_d,
@@ -293,7 +403,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
         )
-        return self.fmha_params
 
     @staticmethod
     def support(attn_inputs: PyAttentionInputs) -> bool:
@@ -1029,6 +1138,7 @@ class PyFlashinferDecodeAttnOp(object):
             attn_q_dtype(attn_configs) if self.use_tensor_core else self.dtype
         )
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self._workspace_compacted = False
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -1131,6 +1241,15 @@ class PyFlashinferDecodeAttnOp(object):
                 )
 
         self._plan_decode_wrapper(attn_inputs)
+        if self.enable_cuda_graph and not self._workspace_compacted:
+            self.g_workspace_buffer = _compact_graph_workspace(
+                self.decode_wrapper,
+                self.g_workspace_buffer,
+                self.local_head_num,
+                self.head_dim_vo,
+            )
+            self._workspace_compacted = True
+            self._plan_decode_wrapper(attn_inputs)
         return self.fmha_params
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:

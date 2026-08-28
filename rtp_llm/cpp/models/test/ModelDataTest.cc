@@ -109,14 +109,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
@@ -125,6 +125,78 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
+    GptModelInputs inputs;
+    inputs.combo_tokens             = torch::zeros({8}, torch::kInt32).cuda();
+    inputs.input_lengths            = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.sequence_lengths         = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.prefix_lengths           = torch::zeros({1}, torch::kInt32).cuda();
+    inputs.kv_cache_kernel_block_id = torch::zeros({4, 1, 93}, torch::kInt32).cuda();
+    inputs.kv_cache_block_id        = torch::zeros({4, 1, 93}, torch::kInt32);
+    inputs.kv_cache_group_types     = torch::zeros({4}, torch::kInt32);
+    inputs.kv_cache_update_mapping  = torch::zeros({2, 3}, torch::kInt32).cuda();
+    inputs.request_id               = torch::zeros({1}, torch::kInt64);
+    inputs.request_pd_separation    = torch::zeros({1}, torch::kBool);
+    inputs.lm_output_indexes        = torch::zeros({7}, torch::kInt32).cuda();
+    // This is the exact mixed-device DSpARK TP2 case that previously made
+    // rank 0 send 1504 CPU bytes while rank 1 waited for 1600.
+    inputs.combo_position_ids = torch::zeros({24}, torch::kInt32).cuda();
+
+    const auto hints     = getModelInputShapeHints(inputs);
+    const auto map       = static_cast<uint32_t>(hints[GptModelInputIndex::tensorDeviceMap]);
+    auto       is_device = [&](GptModelInputDeviceBit bit) { return (map & bit) != 0; };
+
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitComboTokens));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitInputLengths));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitKernelBlockId));
+    EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitBlockId));
+    EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitCacheGroupTypes));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping));
+    EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitRequestId));
+    EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
+    EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
+}
+
+TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
+    GptModelInputs inputs;
+    inputs.need_all_logits           = true;
+    inputs.need_all_hidden_states    = true;
+    inputs.need_moe_gating           = true;
+    inputs.warmup                    = true;
+    inputs.skip_run                  = true;
+    inputs.is_fake_stream            = true;
+    inputs.is_target_verify          = true;
+    inputs.pd_separation             = true;
+    inputs.decode_entrance           = true;
+    inputs.use_opaque_kv_cache_store = true;
+    inputs.kv_block_stride_bytes     = 4096;
+    inputs.kv_scale_stride_bytes     = 256;
+    inputs.seq_size_per_block        = 64;
+    inputs.kernel_seq_size_per_block = 16;
+
+    const auto hints = getModelInputShapeHints(inputs);
+    const auto flags = static_cast<uint32_t>(hints[GptModelInputIndex::modelControlFlags]);
+    auto       has   = [&](GptModelInputControlFlag flag) { return (flags & flag) != 0; };
+
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedAllLogits));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedAllHiddenStates));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlNeedMoeGating));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlWarmup));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlSkipRun));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlFakeStream));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlTargetVerify));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlPdSeparation));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlDecodeEntrance));
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlOpaqueKvCacheStore));
+    EXPECT_EQ(hints[GptModelInputIndex::kvBlockStrideBytes], 4096);
+    EXPECT_EQ(hints[GptModelInputIndex::kvScaleStrideBytes], 256);
+    EXPECT_EQ(hints[GptModelInputIndex::seqSizePerBlock], 64);
+    EXPECT_EQ(hints[GptModelInputIndex::kernelSeqSizePerBlock], 16);
 }
 
 }  // namespace rtp_llm

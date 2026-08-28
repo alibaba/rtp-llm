@@ -366,10 +366,17 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Optional model-side features consumed by speculative decoders.  This is
+    // a first-class forward output because CUDA graph replay does not execute
+    // Python and therefore cannot safely recover it from mutable model state.
+    torch::Tensor mtp_target_hidden_states;
 
     PyModelOutputs() = default;
 
     PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+
+    PyModelOutputs(torch::Tensor hidden_states, torch::Tensor mtp_target_hidden_states):
+        hidden_states(std::move(hidden_states)), mtp_target_hidden_states(std::move(mtp_target_hidden_states)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);

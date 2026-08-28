@@ -50,6 +50,21 @@ def optional_tensor(value: Any) -> Optional[torch.Tensor]:
     return value if value.numel() > 0 else None
 
 
+def device_metadata_tensor(attention_inputs: Any, name: str) -> Optional[torch.Tensor]:
+    """Prefer framework-owned device metadata over its host mirror.
+
+    CUDA Graph replay updates the ``*_device`` tensors in place. Falling back
+    to the host field keeps eager and unit-test callers compatible, while the
+    preferred path avoids introducing a host-to-device copy inside capture.
+    """
+    device_value = optional_tensor(
+        getattr(attention_inputs, f"{name}_device", None)
+    )
+    if device_value is not None:
+        return device_value
+    return optional_tensor(getattr(attention_inputs, name, None))
+
+
 def map_context_rows(
     starts: torch.Tensor,
     lengths: torch.Tensor,
@@ -104,6 +119,7 @@ class DSparkProposerMixin:
         self,
         *,
         width: int,
+        query_width: Optional[int] = None,
         noise_token_id: int,
         aux_feature_dim: int,
         hidden_dim: int,
@@ -122,6 +138,12 @@ class DSparkProposerMixin:
                 raise ValueError(f"DSpark {name} must be positive, got {value}")
 
         self._dspark_width = int(width)
+        self._dspark_query_width = int(width if query_width is None else query_width)
+        if self._dspark_query_width < self._dspark_width:
+            raise ValueError(
+                "DSpark query width cannot be smaller than proposal width: "
+                f"query={self._dspark_query_width}, proposal={self._dspark_width}"
+            )
         self._dspark_noise_token_id = int(noise_token_id)
         self._dspark_aux_feature_dim = int(aux_feature_dim)
         self._dspark_hidden_dim = int(hidden_dim)
@@ -185,8 +207,8 @@ class DSparkProposerMixin:
         raise NotImplementedError
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:
-        """Reduce and normalize backbone output to ``[B*width, dim]``."""
-        raise NotImplementedError
+        """Reduce backbone output to ``[B*width, dim]`` when needed."""
+        return hidden.contiguous()
 
     # ------------------------------------------------------------------
     # Shared per-round flow
@@ -196,7 +218,7 @@ class DSparkProposerMixin:
         self, batch_size: int, device: torch.device
     ) -> PyModelOutputs:
         """Zero-filled normalized hidden states with serving geometry."""
-        width = self._dspark_width
+        width = self._dspark_query_width
         return PyModelOutputs(
             torch.zeros(
                 (batch_size * width, self._dspark_hidden_dim),
@@ -222,9 +244,7 @@ class DSparkProposerMixin:
         attention_inputs = primary_attention_inputs(
             inputs.attention_inputs, getattr(self, "kv_cache", None)
         )
-        input_lengths = optional_tensor(
-            getattr(attention_inputs, "input_lengths", None)
-        )
+        input_lengths = device_metadata_tensor(attention_inputs, "input_lengths")
         batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
         hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
 
@@ -249,12 +269,19 @@ class DSparkProposerMixin:
         features = hidden.reshape(-1, aux_dim).to(device=device)
         row_count = int(features.shape[0])
 
-        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
-        if prefix is None or int(prefix.numel()) < batch_size:
+        prefix_lengths_source = device_metadata_tensor(
+            attention_inputs, "prefix_lengths"
+        )
+        if (
+            prefix_lengths_source is None
+            or int(prefix_lengths_source.numel()) < batch_size
+        ):
             raise RuntimeError(
                 "DSpark commit requires prefix_lengths with one value per request"
             )
-        prefix_lengths = prefix[:batch_size].to(device=device, dtype=torch.long)
+        prefix_lengths = prefix_lengths_source[:batch_size].to(
+            device=device, dtype=torch.long
+        )
         lengths = input_lengths[:batch_size].to(device=device, dtype=torch.long)
         starts = lengths.cumsum(0) - lengths
 
@@ -307,31 +334,32 @@ class DSparkProposerMixin:
 
         The query block reads the committed feature KV written by
         :meth:`run_commit_step`; the call carries no feature input."""
-        width = self._dspark_width
+        width = self._dspark_query_width
 
         attention_inputs = primary_attention_inputs(
             inputs.attention_inputs, getattr(self, "kv_cache", None)
         )
-        input_lengths = optional_tensor(
-            getattr(attention_inputs, "input_lengths", None)
-        )
-        batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
-        expected_tokens = batch_size * width
-        if int(inputs.input_ids.numel()) != expected_tokens:
+        token_count = int(inputs.input_ids.numel())
+        if token_count % width != 0:
             raise RuntimeError(
                 "DSpark input_ids must contain exactly B*gamma tokens: "
-                f"numel={inputs.input_ids.numel()}, batch={batch_size}, "
-                f"gamma={width}"
+                f"numel={token_count}, gamma={width}"
             )
+        batch_size = token_count // width
 
-        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
-        if batch_size > 0 and (prefix is None or int(prefix.numel()) < batch_size):
+        prefix_lengths_source = device_metadata_tensor(
+            attention_inputs, "prefix_lengths"
+        )
+        if batch_size > 0 and (
+            prefix_lengths_source is None
+            or int(prefix_lengths_source.numel()) < batch_size
+        ):
             raise RuntimeError(
                 "DSpark requires prefix_lengths with one value per request"
             )
         prefix_lengths = (
-            prefix[:batch_size].to(device=device, dtype=torch.int32)
-            if prefix is not None
+            prefix_lengths_source[:batch_size].to(device=device, dtype=torch.int32)
+            if prefix_lengths_source is not None
             else torch.empty(0, dtype=torch.int32, device=device)
         )
 

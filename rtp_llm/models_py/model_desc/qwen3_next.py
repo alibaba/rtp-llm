@@ -1246,6 +1246,9 @@ class Qwen3NextModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        capture_aux_hidden = bool(self._mtp_aux_capture_layer_ids)
+        if capture_aux_hidden:
+            self.begin_aux_hidden_capture(hidden_states, is_target_verify)
 
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
@@ -1264,8 +1267,15 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
+            if i in self._mtp_aux_capture_layer_id_set:
+                self.capture_aux_hidden(i, hidden_states, residual)
+        if capture_aux_hidden:
+            self.finish_aux_hidden_capture()
 
         hidden_states, residual = self.norm(hidden_states, residual)
+        if capture_aux_hidden:
+            assert self._mtp_target_hidden_states is not None
+            return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)
         return PyModelOutputs(hidden_states)
 
 

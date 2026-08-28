@@ -269,7 +269,14 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def(pybind11::init<torch::Tensor, torch::Tensor>(),
+             pybind11::arg("hidden_states"),
+             pybind11::arg("mtp_target_hidden_states"),
+             "Initialize with hidden states and speculative target features")
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("mtp_target_hidden_states",
+                       &PyModelOutputs::mtp_target_hidden_states,
+                       "Optional target features consumed by speculative decoding");
 }
 
 }  // namespace torch_ext

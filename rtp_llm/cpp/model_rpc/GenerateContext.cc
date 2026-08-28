@@ -3,9 +3,6 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-    }
     stopStream();
     reportTime();
 }
@@ -84,15 +81,11 @@ void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
 
 void GenerateContext::stopStream() {
     if (stream_) {
-        // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        if (stream_->getStatus() != StreamState::FINISHED) {
-            stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-        }
-        // if is running, waiting util done
-        while (stream_->getStatus() == StreamState::RUNNING) {
-            RTP_LLM_LOG_DEBUG("waiting stream [%d] running done to cancel", stream_->generateInput()->request_id);
-            usleep(1000);
+        if (!stream_->finishOrCancel(kStopStreamWaitTimeoutMs, "cancel stream")) {
+            RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
+                                kStopStreamWaitTimeoutMs,
+                                stream_->generateInput()->request_id);
         }
         stream_.reset();
     }

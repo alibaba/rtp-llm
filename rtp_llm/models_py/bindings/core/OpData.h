@@ -74,9 +74,9 @@ struct GptModelInputs {
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
-    size_t kv_block_stride_bytes;
-    size_t kv_scale_stride_bytes;
-    size_t seq_size_per_block;
+    size_t kv_block_stride_bytes     = 0;
+    size_t kv_scale_stride_bytes     = 0;
+    size_t seq_size_per_block        = 0;
     size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
     bool   pd_separation             = false;
     bool   decode_entrance           = false;
@@ -113,6 +113,11 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
+
+    // Explicit model-forward output for speculative target features.  Keeping
+    // this separate from all_hidden_states lets the executor distinguish a
+    // real graph-instance output from the ordinary decoder hidden tensor.
+    torch::Tensor mtp_target_hidden_states;
 };
 
 struct CopyParams {

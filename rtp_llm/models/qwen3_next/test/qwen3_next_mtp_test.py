@@ -6,6 +6,7 @@ from pathlib import Path
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Dense
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
     Qwen35DenseMTP,
     Qwen35DenseMTPWeight,
@@ -15,6 +16,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
     Qwen3_5MoeMixin,
 )
 from rtp_llm.ops import (
+    DataType,
     HWKernelConfig,
     HybridAttentionType,
     ParallelismConfig,
@@ -23,6 +25,22 @@ from rtp_llm.ops import (
 
 
 class Qwen35DenseMTPTest(unittest.TestCase):
+    def test_target_uses_model_ssm_state_dtype_with_independent_hybrid_pools(self):
+        config_json = self._config()
+        config_json["text_config"]["mamba_ssm_dtype"] = "float32"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "config.json").write_text(json.dumps(config_json))
+            config = Qwen35Dense.create_config(temp_dir)
+
+        # The model keeps MHA pages and recurrent GDN states in their native
+        # per-group physical layouts.
+        self.assertTrue(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertEqual(
+            config.linear_attention_config.ssm_state_dtype, DataType.TYPE_FP32
+        )
+
     def test_dense_mtp_config_and_registration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             Path(temp_dir, "config.json").write_text(json.dumps(self._config()))

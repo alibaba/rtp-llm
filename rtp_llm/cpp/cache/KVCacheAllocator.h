@@ -153,9 +153,9 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool         doInit() = 0;
-    virtual size_t       reservableAvailableBlocksNum() const;
-    MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual bool   doInit() = 0;
+    virtual size_t reservableAvailableBlocksNum() const;
+    MallocResult   initMalloc(const MallocInfo& malloc_info);
     // Classifies an init-malloc shortfall: a total-capacity shortfall is
     // PERMANENT (the request can never fit), an available-capacity shortfall is
     // RETRYABLE (the pools are momentarily full) so the stream stays WAITING
@@ -194,6 +194,13 @@ protected:
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};
+
+    // One allocation spans capacity preflight, optional cache matching and one
+    // or more BlockPool allocations.  BlockPool makes each individual
+    // operation thread-safe, but without this transaction lock concurrent
+    // init-malloc callers can all pass the same reserve check and collectively
+    // consume the forward-progress reserve before any one of them allocates.
+    std::mutex malloc_mutex_;
 };
 
 using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
