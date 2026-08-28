@@ -76,7 +76,8 @@ public class WorkerStatus {
             long batchId,
             TaskPhase phase,
             long executionTimeMs,
-            PriorityPreemptionProgress priorityPreemptionProgress) {
+            PriorityPreemptionProgress priorityPreemptionProgress,
+            long kvTokens) {
 
         private static TaskObservation copyOf(TaskInfo task) {
             return new TaskObservation(
@@ -93,7 +94,8 @@ public class WorkerStatus {
                     task.getBatchId(),
                     task.getPhase(),
                     task.getExecutionTimeMs(),
-                    task.getPriorityPreemptionProgress());
+                    task.getPriorityPreemptionProgress(),
+                    task.getKvTokens());
         }
     }
 
@@ -168,6 +170,7 @@ public class WorkerStatus {
         private final Long statusVersion;
         private final Long latestFinishedVersion;
         private final Map<String, TaskObservation> finishedTasks;
+        private final boolean runningDetailTruncated;
 
         private StatusObservation(
                 WorkerStatus owner,
@@ -175,13 +178,15 @@ public class WorkerStatus {
                 boolean reportedAlive,
                 Long statusVersion,
                 Long latestFinishedVersion,
-                Map<String, TaskObservation> finishedTasks) {
+                Map<String, TaskObservation> finishedTasks,
+                boolean runningDetailTruncated) {
             this.owner = owner;
             this.engine = engine;
             this.reportedAlive = reportedAlive;
             this.statusVersion = statusVersion;
             this.latestFinishedVersion = latestFinishedVersion;
             this.finishedTasks = finishedTasks;
+            this.runningDetailTruncated = runningDetailTruncated;
         }
 
         /** Exact service-discovery generation which issued this observation. */
@@ -215,6 +220,16 @@ public class WorkerStatus {
 
         public Map<String, TaskObservation> finishedTasks() {
             return finishedTasks;
+        }
+
+        /**
+         * True when the Engine truncated the running detail at its reporting
+         * cap. Carried for observation only in this phase: nothing in the
+         * Master may change behavior based on this flag yet (stage-3 guard
+         * rails will consume it). Legacy engines never set it.
+         */
+        public boolean runningDetailTruncated() {
+            return runningDetailTruncated;
         }
 
         public long runningQueryLen() {
@@ -360,7 +375,8 @@ public class WorkerStatus {
                 response.isAlive(),
                 response.getStatusVersion(),
                 response.getLatestFinishedVersion(),
-                finishedTasks);
+                finishedTasks,
+                response.isRunningDetailTruncated());
     }
 
     /** Bind a strictly newer frozen observation to the current commit holder. */

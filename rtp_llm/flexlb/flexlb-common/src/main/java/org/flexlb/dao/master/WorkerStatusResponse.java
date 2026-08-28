@@ -77,6 +77,15 @@ public class WorkerStatusResponse {
     private long maxSeqLen;
 
     /**
+     * True when the Engine truncated {@code running_task_info} at its
+     * reporting cap. While set, the absence of a request from the running
+     * detail is not evidence of completion. Carried for observation only in
+     * this phase; legacy engines never set it.
+     */
+    @JsonProperty("running_detail_truncated")
+    private boolean runningDetailTruncated;
+
+    /**
      * FIFO scheduler's strict aggregate context-token limit for one admitted
      * batch/group. A group whose total context length is greater than or equal
      * to this value cannot be admitted by the Engine.

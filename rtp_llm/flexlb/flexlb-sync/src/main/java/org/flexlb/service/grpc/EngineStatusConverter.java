@@ -44,6 +44,9 @@ public class EngineStatusConverter {
         response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
         response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
         response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
+        // Observational only (stage-0 contract): carries the engine's running-detail
+        // truncation flag through without any behavioral consumer.
+        response.setRunningDetailTruncated(workerStatusPB.getRunningDetailTruncated());
 
         response.setRunningTaskInfo(convertToTaskInfoList(workerStatusPB.getRunningTaskInfoList()));
 
@@ -93,6 +96,9 @@ public class EngineStatusConverter {
             taskInfo.setDpRank(taskInfoPB.getDpRank());
             taskInfo.setBatchId(taskInfoPB.getBatchId());
             taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
+            // Observational only (stage-0 contract): legacy engines omit the
+            // field and the default 0 flows through untouched.
+            taskInfo.setKvTokens(taskInfoPB.getKvTokens());
             taskInfo.setPhase(resolvePhase(taskInfoPB));
             taskInfo.setPriorityPreemptionProgress(switch (
                     taskInfoPB.getPriorityPreemptionProgress()) {

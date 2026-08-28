@@ -41,4 +41,12 @@ public class TaskInfo {
     private PriorityPreemptionProgress priorityPreemptionProgress =
             PriorityPreemptionProgress.NONE;
 
+    /**
+     * Current actual KV tokens occupied by this request (block-aligned).
+     * Observational only: 0 means "not reported" (legacy engine) or "KV not
+     * yet allocated". No scheduling correctness may depend on this value.
+     */
+    @JsonProperty("kv_tokens")
+    private long kvTokens;
+
 }
