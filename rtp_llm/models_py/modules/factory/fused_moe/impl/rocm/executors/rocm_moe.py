@@ -6,6 +6,10 @@ import torch
 from aiter.fused_moe import fused_moe
 
 from rtp_llm.device.device_impl import is_gfx950
+from rtp_llm.models_py.kernel_tuning.aiter import (
+    AiterFmoeWorkloadSignature,
+    require_aiter_fmoe_tuning,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -27,10 +31,42 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 from rtp_llm.utils.model_weight import W
 
 
-def _moe_activation_type(activation: str) -> aiter.ActivationType:
-    if activation in ("silu", "SiGLU"):
+def _moe_activation_type(activation: Any) -> aiter.ActivationType:
+    # ModelConfig canonicalizes activation strings to an RTP ActivationType
+    # enum. Normalize both that representation and the raw strings accepted by
+    # fused_moe so the tuning signature describes the activation actually sent
+    # to AITER.
+    activation_name = str(getattr(activation, "name", activation))
+    activation_name = activation_name.rsplit(".", 1)[-1].lower()
+    if activation_name in ("silu", "siglu"):
         return aiter.ActivationType.Silu
     return aiter.ActivationType.Gelu
+
+
+def _aiter_fmoe_workload_signature(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk: int,
+    activation: Any,
+    output_dtype: torch.dtype,
+) -> AiterFmoeWorkloadSignature:
+    properties = torch.cuda.get_device_properties(w1.device)
+    gfx = str(getattr(properties, "gcnArchName", "")).split(":", 1)[0]
+    return AiterFmoeWorkloadSignature(
+        gfx=gfx,
+        cu_num=properties.multi_processor_count,
+        model_dim=w1.shape[2],
+        inter_dim=w2.shape[2],
+        expert=w1.shape[0],
+        topk=topk,
+        act_type=str(_moe_activation_type(activation)),
+        dtype=str(output_dtype),
+        q_dtype_a=str(w1.dtype),
+        q_dtype_w=str(w2.dtype),
+        q_type=str(aiter.QuantType.per_Token),
+        use_g1u1=int(w1.shape[1] == 2 * w2.shape[2]),
+        doweight_stage1=0,
+    )
 
 
 def build_ep_expert_mask(
@@ -198,6 +234,16 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
 
+        require_aiter_fmoe_tuning(
+            _aiter_fmoe_workload_signature(
+                self.w1,
+                self.w2,
+                config.moe_k,
+                config.activation_type,
+                config.model_config.compute_dtype,
+            )
+        )
+
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
@@ -320,6 +366,7 @@ class RocmExpertsFp8PerBlock(FusedMoeExpertExecutor):
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
+
     @property
     def local_num_experts(self) -> int:
         return self.w1.size(0)
@@ -574,7 +621,9 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
         self.w2_scale = weights[W.moe_s2]
 
         self.hidden_size_raw = config.hidden_size
-        self.intermediate_size_raw = config.model_config.moe_inter_size // config.tp_size
+        self.intermediate_size_raw = (
+            config.model_config.moe_inter_size // config.tp_size
+        )
         packed_factor = 2 if self.w1.dtype == torch.uint8 else 1
         self.hidden_size_padded = self.w1.size(2) * packed_factor
         self.intermediate_size_padded = self.w2.size(1)
@@ -625,7 +674,7 @@ class RocmExpertsMXFp4(FusedMoeExpertExecutor):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
-        
+
         # view w1 and w2 to float4_e2m1fn_x2 if they are uint8
         w1 = self.w1
         w2 = self.w2

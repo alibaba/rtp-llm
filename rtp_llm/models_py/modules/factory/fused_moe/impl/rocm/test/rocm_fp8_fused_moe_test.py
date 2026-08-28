@@ -15,6 +15,8 @@ try:
     from aiter.ops.shuffle import shuffle_weight  # noqa: F401
 
     from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.device.device_impl import RocmImpl
+    from rtp_llm.models_py.kernel_tuning.aiter import is_affected_aiter_fmoe_signature
     from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
         MoEConfigAdapter,
     )
@@ -34,6 +36,7 @@ try:
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
         RocmExpertsFp8PerBlock,
         RocmExpertsFp8PerChannel,
+        _aiter_fmoe_workload_signature,
     )
     from rtp_llm.ops import MoeConfig, ParallelismConfig
     from rtp_llm.utils.model_weight import W
@@ -51,6 +54,17 @@ def _per_channel_quant_fp8(w: torch.Tensor, fp8_dtype: torch.dtype):
     scale = (amax / FP8_E4M3FNUZ_MAX).to(torch.float32)
     wq = (w / scale).to(fp8_dtype)
     return wq, scale.squeeze(-1)
+
+
+def _online_loader_quant_fp8(w: torch.Tensor):
+    from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+        per_channel_cast_to_fp8,
+    )
+
+    wq, scale = per_channel_cast_to_fp8(w)
+    bits = wq.view(torch.int8)
+    bits[bits == -128] = 0
+    return bits.view(torch.float8_e4m3fnuz), scale * 2.0
 
 
 def _per_block_quant_fp8(w: torch.Tensor, fp8_dtype: torch.dtype, block: int = 128):
@@ -78,22 +92,28 @@ def _dequant_per_block(
     return deq.reshape(E, OUT, IN).to(torch.bfloat16)
 
 
-def _make_parallelism_config():
+def _make_parallelism_config(tp_size: int = 1):
     p = ParallelismConfig()
     p.ep_size = 1
     p.ep_rank = 0
-    p.tp_size = 1
+    p.tp_size = tp_size
     p.tp_rank = 0
     p.dp_size = 1
     p.dp_rank = 0
-    p.world_size = 1
+    p.world_size = tp_size
     p.world_rank = 0
     p.local_rank = 0
-    p.local_world_size = 1
+    p.local_world_size = tp_size
     return p
 
 
-def _make_config_adapter(expert_num: int, top_k: int, inter_dim: int):
+def _make_config_adapter(
+    expert_num: int,
+    top_k: int,
+    inter_dim: int,
+    tp_size: int = 1,
+    data_type: str | None = None,
+):
     model_config = ModelConfig()
     model_config.attn_config.head_num = 4
     model_config.attn_config.size_per_head = 64
@@ -104,10 +124,12 @@ def _make_config_adapter(expert_num: int, top_k: int, inter_dim: int):
     model_config.moe_k = top_k
     model_config.inter_size = inter_dim
     model_config.activation_type = "silu"
+    if data_type is not None:
+        model_config.data_type = data_type
 
     return MoEConfigAdapter(
         model_config=model_config,
-        parallelism_config=_make_parallelism_config(),
+        parallelism_config=_make_parallelism_config(tp_size),
         moe_config=MoeConfig(),
     )
 
@@ -224,6 +246,115 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
     def test_apply_router_weight_on_input(self):
         # PR #882 review #7 specifically called out this newly-enabled path.
         self._run(apply_router_weight_on_input=True)
+
+    def test_small_token_tuned_shape_with_loader_postprocess(self):
+        hidden, local_inter, experts, top_k = 2048, 128, 256, 8
+        runtime_device = RocmImpl.__new__(RocmImpl)
+
+        # Reproduce the FP8 loader conversion, [gate, up] reorder, and the
+        # physical ROCm weight shuffle used by a real checkpoint load.
+        w1_checkpoint = (
+            torch.randn(
+                experts,
+                2 * local_inter,
+                hidden,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+            * 0.02
+        )
+        w2_checkpoint = (
+            torch.randn(
+                experts,
+                hidden,
+                local_inter,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+            * 0.02
+        )
+        w1q_checkpoint, s1_checkpoint = _online_loader_quant_fp8(w1_checkpoint)
+        w2q, s2 = _online_loader_quant_fp8(w2_checkpoint)
+        w1q_loader = runtime_device.cat_0(
+            [
+                w1q_checkpoint[:, local_inter:, :],
+                w1q_checkpoint[:, :local_inter, :],
+            ],
+            dim=1,
+        )
+        s1_loader = torch.cat(
+            [
+                s1_checkpoint[:, local_inter:, :],
+                s1_checkpoint[:, :local_inter, :],
+            ],
+            dim=1,
+        )
+        weights = {
+            W.moe_w1: runtime_device.shuffle_moe_weight(
+                w1q_loader, w1q_loader.dtype, W.moe_w1
+            ),
+            W.moe_w2: runtime_device.shuffle_moe_weight(w2q, w2q.dtype, W.moe_w2),
+            W.moe_s1: runtime_device.shuffle_moe_weight(
+                s1_loader, s1_loader.dtype, W.moe_s1
+            ),
+            W.moe_s2: s2,
+        }
+        w1_dequant = (w1q_checkpoint.float() * s1_checkpoint).to(torch.bfloat16)
+        w2_dequant = (w2q.float() * s2).to(torch.bfloat16)
+
+        # TP is deliberately varied while the local AITER dispatch shape stays
+        # fixed. The tuning decision must therefore be identical for both.
+        for tp_size in (2, 4):
+            config = _make_config_adapter(
+                experts,
+                top_k,
+                local_inter * tp_size,
+                tp_size=tp_size,
+                data_type="bf16",
+            )
+            signature = _aiter_fmoe_workload_signature(
+                weights[W.moe_w1],
+                weights[W.moe_w2],
+                config.moe_k,
+                config.activation_type,
+                config.model_config.compute_dtype,
+            )
+            self.assertTrue(is_affected_aiter_fmoe_signature(signature))
+
+            executor = RocmExpertsFp8PerChannel(
+                config,
+                FusedMoEQuantConfig(),
+                weights,
+            )
+            for token_count in (1, 2, 4, 8, 16):
+                with self.subTest(tp_size=tp_size, token_count=token_count):
+                    payload = self._build_payload(token_count, hidden, experts, top_k)
+                    reference = torch_moe_ref(
+                        payload=payload,
+                        activation="silu",
+                        global_num_experts=experts,
+                        expert_map=None,
+                        a2_scale=None,
+                        apply_router_weight_on_input=False,
+                        extra_expert_args=None,
+                        w1=w1_dequant,
+                        w2=w2_dequant,
+                    )
+                    output = executor.execute(
+                        payload=payload,
+                        activation="silu",
+                        expert_map=None,
+                        a2_scale=None,
+                        apply_router_weight_on_input=False,
+                        extra_expert_args=None,
+                    ).fused_expert_output
+                    cosine = torch.nn.functional.cosine_similarity(
+                        output.float(), reference.float(), dim=-1
+                    ).mean()
+
+                    self.assertEqual(output.shape, (token_count, hidden))
+                    self.assertTrue(torch.isfinite(output).all().item())
+                    self.assertGreater(cosine.item(), 0.99)
 
 
 class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
