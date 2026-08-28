@@ -172,6 +172,13 @@ class StrategySelectTest(unittest.TestCase):
                 Sm120FusedMoeStrategy,
             )
 
+    def test_sm120_strategy_rejects_other_sm12x_devices(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe.is_sm120",
+            return_value=False,
+        ):
+            self.assertFalse(Sm120FusedMoeStrategy.can_handle(_cfg(ep_size=4)))
+
     # --- forced override ---------------------------------------------------
 
     def test_forced_known_and_capable_returns_it(self):
