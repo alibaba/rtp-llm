@@ -17,11 +17,44 @@ cc_library(
     copts = copts(),
 )
 
+cc_library(
+    name = "rpc_cpu_tp_broadcaster_hdr",
+    hdrs = ["RpcCpuTpBroadcaster.h"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    ],
+    copts = copts(),
+)
+
+cc_library(
+    name = "rpc_cpu_tp_broadcaster",
+    srcs = ["RpcCpuTpBroadcaster.cc"],
+    hdrs = ["RpcCpuTpBroadcaster.h"],
+    deps = [
+        ":rpc_cpu_tp_broadcaster_hdr",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    copts = copts(),
+)
+
 cc_test(
     name = "cpu_tp_broadcaster_test",
     srcs = ["test/CpuTpBroadcasterTest.cc"],
     deps = [
         ":cpu_tp_broadcaster",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+    timeout = "short",
+)
+
+cc_test(
+    name = "rpc_cpu_tp_broadcaster_test",
+    srcs = ["test/RpcCpuTpBroadcasterTest.cc"],
+    deps = [
+        ":rpc_cpu_tp_broadcaster",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
