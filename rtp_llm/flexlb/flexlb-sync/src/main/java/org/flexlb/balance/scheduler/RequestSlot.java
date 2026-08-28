@@ -39,6 +39,30 @@ final class RequestSlot extends RequestLifecycle {
 
     private BatchItem item;
     private boolean priorityAdmission;
+
+    /**
+     * Explicit placement identity of {@link #item}, frozen at publication
+     * bind. Null exactly when {@link #item} is null; the mirror invariant
+     * is enforced by {@code placementMirrorsItem} at every checkpoint.
+     */
+    private SlotPlacement placement;
+
+    /**
+     * Prefill resource row (pRow): the A-road master reservation ledger
+     * mirror from admission until the KV_ALLOCATED critical point
+     * (v2 C1/C8). Null before publication bind, after the critical point
+     * and after tombstone.
+     */
+    private SlotResourceRow prefillRow;
+
+    /**
+     * Decode resource row (dRow): the B-road engine projection ledger
+     * mirror from the KV_ALLOCATED critical point until terminal. The
+     * engine holds the numeric authority (DecodeEndpoint L3); the row
+     * mirrors the handover identity for reconciliation.
+     */
+    private SlotResourceRow decodeRow;
+
     private StrategyErrorType deadlineErrorType =
             StrategyErrorType.BATCH_SLO_EXPIRED;
 
@@ -136,6 +160,8 @@ final class RequestSlot extends RequestLifecycle {
             return false;
         }
         item = candidate;
+        placement = SlotPlacement.fromItem(candidate);
+        prefillRow = SlotResourceRow.masterReservation(candidate);
         priorityAdmission = priority;
         assertInvariant();
         return true;
@@ -150,6 +176,8 @@ final class RequestSlot extends RequestLifecycle {
                             + requestId);
         }
         item = null;
+        placement = null;
+        prefillRow = null;
         priorityAdmission = false;
         assertInvariant();
     }
@@ -163,6 +191,34 @@ final class RequestSlot extends RequestLifecycle {
     boolean wasPriorityAdmission() {
         requireSlotLock("priority admission lookup");
         return priorityAdmission;
+    }
+
+    /**
+     * Explicit placement identity of the bound item, or null before the
+     * publication bind and after tombstone. Read-only diagnostic view of
+     * the send-once binding (v2 design S5), kept for proto projection.
+     */
+    SlotPlacement placement() {
+        requireSlotLock("placement lookup");
+        return placement;
+    }
+
+    /**
+     * Prefill (A-road master reservation) resource row, or null outside
+     * the admission→critical-point window. Reconciliation view.
+     */
+    SlotResourceRow prefillRow() {
+        requireSlotLock("prefill resource row lookup");
+        return prefillRow;
+    }
+
+    /**
+     * Decode (B-road engine projection) resource row, or null before the
+     * KV_ALLOCATED critical point and after terminal. Reconciliation view.
+     */
+    SlotResourceRow decodeRow() {
+        requireSlotLock("decode resource row lookup");
+        return decodeRow;
     }
 
     boolean ownsActiveGeneration() {
@@ -179,7 +235,9 @@ final class RequestSlot extends RequestLifecycle {
 
     boolean ownsPrefillFact(PrefillEndpoint source, BatchItem expected) {
         requireSlotLock("Prefill fact ownership lookup");
-        return ownsActiveItem(expected) && expected.prefillEp() == source;
+        return ownsActiveItem(expected)
+                && placement != null
+                && placement.prefillEndpoint() == source;
     }
 
     boolean ownsDecodeFact(
@@ -188,8 +246,9 @@ final class RequestSlot extends RequestLifecycle {
         requireSlotLock("Decode fact ownership lookup");
         return ownsActiveGeneration()
                 && item != null
-                && item.decodeEp() == source
-                && reservation.equals(item.decodeReservation());
+                && placement != null
+                && placement.decodeEndpoint() == source
+                && reservation.equals(placement.decodeReservation());
     }
 
     BatchItem activeItemForReservation(long reservationToken) {
@@ -316,6 +375,18 @@ final class RequestSlot extends RequestLifecycle {
     boolean isTombstone() {
         requireSlotLock("tombstone lookup");
         return slotPhase == SlotPhase.TOMBSTONE;
+    }
+
+    /**
+     * Whether this slot has left the ACTIVE track — terminalizing or
+     * already tombstoned.  Read-only signal for off-path reconciliation:
+     * a slot on the terminal track may legitimately still hold its
+     * publication-era placement / resource-row mirrors while the endpoint
+     * layers already settled (the two-phase death window, plan 3.2).
+     */
+    boolean isTerminalizingOrLater() {
+        requireSlotLock("terminal-track lookup");
+        return slotPhase != SlotPhase.ACTIVE;
     }
 
     boolean isRemovableTombstone(long updatedBeforeMs) {
@@ -1537,6 +1608,19 @@ final class RequestSlot extends RequestLifecycle {
             return DecodeAcceptance.STALE;
         }
         engineOwnership = EngineOwnership.DECODE_OWNED;
+        // A→B authority handover (v2 C1/C8): the master reservation row
+        // ends and the engine projection row begins in this exact slot
+        // mutation — the same tick the DecodeEndpoint layers retire the
+        // shadow reservation (inflightRequests/engineLifecycleReservations/
+        // dispatch permits/queued phase) and install the confirmed one.
+        // Repeated accepted facts keep the first handover identity.
+        prefillRow = null;
+        if (decodeRow == null) {
+            decodeRow = SlotResourceRow.engineProjection(
+                    placement == null
+                            ? 0L : placement.decodeReservationToken(),
+                    item == null ? 0 : item.priority());
+        }
         EngineFenceRegistration fence = engineFence;
         if (fence == null) {
             DecodeAcceptance accepted = new DecodeAcceptance(
@@ -1746,6 +1830,9 @@ final class RequestSlot extends RequestLifecycle {
         }
 
         item = null;
+        placement = null;
+        prefillRow = null;
+        decodeRow = null;
         priorityAdmission = false;
         preemption = null;
         engineFence = null;
@@ -1791,6 +1878,16 @@ final class RequestSlot extends RequestLifecycle {
 
     private void assertInvariant() {
         requireSlotLock("request slot invariant");
+        if (!placementMirrorsItem()) {
+            throw new IllegalStateException(
+                    "placement mirror diverged from the item binding for "
+                            + requestId);
+        }
+        if (!resourceRowsMirrorItem()) {
+            throw new IllegalStateException(
+                    "resource rows diverged from the item binding for "
+                            + requestId);
+        }
         if (preemption != null && engineFence != null) {
             throw new IllegalStateException(
                     "preemption and Engine fence cannot directly own request "
@@ -1828,6 +1925,9 @@ final class RequestSlot extends RequestLifecycle {
         RequestLifecycleSnapshot lifecycle = snapshot();
         if (admissionOpen
                 || item != null
+                || placement != null
+                || prefillRow != null
+                || decodeRow != null
                 || priorityAdmission
                 || cancellationReason != null
                 || preemption != null
@@ -1844,6 +1944,60 @@ final class RequestSlot extends RequestLifecycle {
             throw new IllegalStateException(
                     "tombstone lifecycle is not terminal for " + requestId);
         }
+    }
+
+    /**
+     * The explicit placement mirror must stay identical to the bound item's
+     * send-once identity: same nullness, same endpoint references, same
+     * reservation value. Enforced at every invariant checkpoint so the
+     * ownership predicates can safely read the field as a derived view.
+     */
+    private boolean placementMirrorsItem() {
+        if ((item == null) != (placement == null)) {
+            return false;
+        }
+        return item == null
+                || (placement.prefillEndpoint() == item.prefillEp()
+                        && placement.decodeEndpoint() == item.decodeEp()
+                        && Objects.equals(
+                                placement.decodeReservation(),
+                                item.decodeReservation()));
+    }
+
+    /**
+     * The resource rows must mirror the bound item's lifecycle: a bound
+     * item carries exactly one row (pRow before the critical point, dRow
+     * after it), the pRow numerics must equal the frozen admission
+     * reservation, and an unbound item carries no row at all. Enforced at
+     * every invariant checkpoint.
+     */
+    private boolean resourceRowsMirrorItem() {
+        if (item == null) {
+            return prefillRow == null && decodeRow == null;
+        }
+        if (prefillRow == null && decodeRow == null) {
+            return false;
+        }
+        if (prefillRow != null) {
+            return prefillRow.authority()
+                            == SlotResourceRow.RowAuthority.MASTER_RESERVATION
+                    && prefillRow.hardKvTokens()
+                            == Math.max(0L, item.seqLen())
+                    && prefillRow.expectedKvTokens()
+                            == Math.max(0L, item.decodeExpectedKvTokens())
+                    && prefillRow.priority() == item.priority()
+                    && placement != null
+                    && prefillRow.reservationToken()
+                            == placement.decodeReservationToken();
+        }
+        // After the critical point the engine projection row owns the
+        // mirror; numeric authority stays engine-side, so only identity
+        // is checked.
+        return decodeRow.authority()
+                        == SlotResourceRow.RowAuthority.ENGINE_PROJECTION
+                && placement != null
+                && decodeRow.reservationToken()
+                        == placement.decodeReservationToken();
     }
 
     private void requireSlotLock(String operation) {
@@ -1863,6 +2017,119 @@ final class RequestSlot extends RequestLifecycle {
             first.addSuppressed(next);
         }
         return first;
+    }
+
+    /**
+     * Explicit placement identity of one exact bound item.
+     *
+     * <p>Historically the exact ownership predicates
+     * ({@code ownsPrefillFact} / {@code ownsDecodeFact}) derived these facts
+     * on the fly by dereferencing {@code item}; this record freezes the same
+     * send-once identity (v2 design S5: binding is mutable before dispatch,
+     * immutable after) as an explicit slot field for diagnostics and future
+     * proto projection. Maintained at the exact item mutation points
+     * (publication bind / rollback / tombstone) with zero behaviour change;
+     * the predicates read it as a derived view.</p>
+     */
+    record SlotPlacement(
+            PrefillEndpoint prefillEndpoint,
+            DecodeEndpoint decodeEndpoint,
+            DecodeEndpoint.ReservationHandle decodeReservation) {
+
+        static SlotPlacement fromItem(BatchItem bound) {
+            return new SlotPlacement(
+                    bound.prefillEp(),
+                    bound.decodeEp(),
+                    bound.decodeReservation());
+        }
+
+        /** Scalar reservation token (0 when the item never bound Decode). */
+        long decodeReservationToken() {
+            return decodeReservation == null
+                    ? 0L : decodeReservation.reservationToken();
+        }
+    }
+
+    /**
+     * One resource row of the slot-side ledger mirror (plan 3.1 item 2).
+     *
+     * <p>Two authorities share one row schema (v2 C8 two-road accounting):
+     * the pRow is the A-road (master-owned reservation) from admission
+     * until the KV_ALLOCATED critical point (v2 C1); the dRow is the B-road
+     * (engine-synced projection) from the critical point until terminal.
+     * Implementation is incremental mirroring at the exact mutation points
+     * plus periodic full-scope reconciliation as the backstop (M1 task 4
+     * harness); no per-tick constructive rebuild.</p>
+     *
+     * <p>DecodeEndpoint eight-layer consolidation map (phase 2 target; this
+     * phase builds the schema and mirror points only — no layer
+     * retirement):
+     * <ul>
+     *   <li>L1 inflightRequests — shadow reservation
+     *       (kv/expected/priority/token): the account mirrored by pRow.</li>
+     *   <li>L2 engineLifecycleReservations — identities beyond the master
+     *       rollback boundary: the pRow→dRow handover boundary.</li>
+     *   <li>L3 trackedConfirmed — engine-confirmed projection
+     *       (ACCEPTED_NOT_RUNNING / RUNNING, engine-reported KV): the
+     *       account mirrored by dRow (numeric authority stays
+     *       engine-side).</li>
+     *   <li>L4 preemptionClaims / preemptionAttempts — victim accounting
+     *       until a typed terminal settles: preemption registry (slot
+     *       already mirrors via PreemptionRegistration).</li>
+     *   <li>L5 engineFenceProtections — fenced ownership with synthetic
+     *       holds: fence registry (slot already mirrors via
+     *       engineFence).</li>
+     *   <li>L6 settledTombstones — settled request-id fences: unified
+     *       tombstone (slot TOMBSTONE is the reconciliation item).</li>
+     *   <li>L7 queuedPhase (+ queued KV totals) — committed-but-not-yet-
+     *       dispatched sub-state: pRow queued sub-state (phase 2 folds the
+     *       marker into the row).</li>
+     *   <li>L8 engineDispatchPermits (+ permit KV totals) — pre-delivery
+     *       dispatch permits: pRow→dRow dispatch-permit sub-state
+     *       (phase 2).</li>
+     * </ul></p>
+     */
+    record SlotResourceRow(
+            RowAuthority authority,
+            long hardKvTokens,
+            long expectedKvTokens,
+            int priority,
+            long reservationToken,
+            long installedAtMs) {
+
+        /** A-road mirror of the admission reservation (DE layer 1). */
+        static SlotResourceRow masterReservation(BatchItem bound) {
+            return new SlotResourceRow(
+                    RowAuthority.MASTER_RESERVATION,
+                    Math.max(0L, bound.seqLen()),
+                    Math.max(0L, bound.decodeExpectedKvTokens()),
+                    bound.priority(),
+                    bound.decodeReservation() == null
+                            ? 0L : bound.decodeReservation().reservationToken(),
+                    System.currentTimeMillis());
+        }
+
+        /**
+         * B-road mirror installed at the KV_ALLOCATED critical point;
+         * numerics stay with the engine projection (DE layer 3).
+         */
+        static SlotResourceRow engineProjection(
+                long reservationToken,
+                int priority) {
+            return new SlotResourceRow(
+                    RowAuthority.ENGINE_PROJECTION,
+                    0L,
+                    0L,
+                    priority,
+                    reservationToken,
+                    System.currentTimeMillis());
+        }
+
+        /** Authority domain of one row (v2 C8 A-road / B-road). */
+        enum RowAuthority {
+            MASTER_RESERVATION,
+            ENGINE_PROJECTION
+        }
     }
 
     private enum SlotPhase {

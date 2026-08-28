@@ -51,6 +51,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         WorkerEndpoint.GenerationPin decodePin = null;
         DecodeEndpoint.ReservationHandle decodeReservation = null;
         ServerStatus decodeStatus = null;
+        long decodeExpectedKvTokens = 0L;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -97,6 +98,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                             sequenceLength,
                             expectedKv,
                             context.getPriority());
+                    decodeExpectedKvTokens = expectedKv;
                     decodeStatus = status;
                     continue;
                 }
@@ -119,6 +121,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
                             decodeEndpoint,
                             decodePin,
                             decodeReservation,
+                            // Queue admission reserves with the exact
+                            // expected-demand estimate; the eviction
+                            // hand-off path below has no local estimate.
+                            decodeExpectedKvTokens,
                             decodeStatus));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
@@ -191,6 +197,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
                             decodeEndpoint,
                             decodePin,
                             decodeReservation,
+                            // The reservation was created by the eviction
+                            // protocol; its expected-demand estimate stays
+                            // engine-side (0 = unknown on the slot mirror).
+                            0L,
                             decodeStatus));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
@@ -224,6 +234,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 route.prefillEndpoint(),
                 route.decodeEndpoint(),
                 route.decodeReservation(),
+                route.decodeExpectedKvTokens(),
                 enqueuedAtMs);
     }
 
@@ -415,6 +426,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             DecodeEndpoint decodeEndpoint,
             WorkerEndpoint.GenerationPin decodePin,
             DecodeEndpoint.ReservationHandle decodeReservation,
+            long decodeExpectedKvTokens,
             ServerStatus decodeStatus) {
     }
 }

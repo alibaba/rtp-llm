@@ -707,7 +707,7 @@ class DefaultBatchDispatcherTest {
         prefill.setDebugInfo(debugInfo);
 
         return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null,
-                prefillEp, null, null, System.currentTimeMillis());
+                prefillEp, null, null, 0L, System.currentTimeMillis());
     }
 
     private EngineRpcService.EnqueueBatchResponsePB ackResponse(long batchId, List<Long> successIds) {

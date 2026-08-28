@@ -198,6 +198,7 @@ class WorkerBatcherPerformanceTest {
                 endpoint,
                 null,
                 null,
+                0L,
                 enqueuedAtMs);
     }
 

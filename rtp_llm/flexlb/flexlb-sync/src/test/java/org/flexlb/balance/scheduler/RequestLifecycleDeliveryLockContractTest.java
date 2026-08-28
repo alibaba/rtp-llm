@@ -478,6 +478,7 @@ class RequestLifecycleDeliveryLockContractTest {
                 prefillEndpoint,
                 decodeEndpoint,
                 null,
+                0L,
                 System.currentTimeMillis());
         return new Registered(item, future);
     }

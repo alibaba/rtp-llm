@@ -1382,7 +1382,7 @@ class PrefillEndpointTest {
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 60_000));
 
         return new BatchItem(
-                ctx, null, null, null, null, owner, null, null, now);
+                ctx, null, null, null, null, owner, null, null, 0L, now);
     }
 
     private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {
@@ -1484,6 +1484,7 @@ class PrefillEndpointTest {
                 owner,
                 null,
                 null,
+                0L,
                 System.currentTimeMillis());
     }
 

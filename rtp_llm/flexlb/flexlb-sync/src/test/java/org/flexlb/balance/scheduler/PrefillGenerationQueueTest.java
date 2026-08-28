@@ -178,6 +178,7 @@ class PrefillGenerationQueueTest {
                 prefillEndpoint,
                 null,
                 null,
+                0L,
                 enqueuedAtMs);
     }
 

@@ -354,6 +354,7 @@ class WorkerEndpointTest {
                 endpoint,
                 null,
                 null,
+                0L,
                 0L);
     }
 

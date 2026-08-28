@@ -39,6 +39,13 @@ public final class BatchItem implements DeliveryItem, Prioritized {
     private final PrefillEndpoint prefillEp;
     private final DecodeEndpoint decodeEp;
     private final DecodeEndpoint.ReservationHandle decodeReservation;
+    /**
+     * Expected-demand KV frozen at Decode reservation time
+     * (decodeKvReservationTokens estimate); 0 when unknown (eviction
+     * hand-off path or absent Decode reservation). Mirrored by the slot's
+     * pRow resource ledger (plan 3.1 item 2).
+     */
+    private final long decodeExpectedKvTokens;
     private final long enqueuedAtMs;
     private final long enqueueSequence;
     private final long requestId;
@@ -58,6 +65,7 @@ public final class BatchItem implements DeliveryItem, Prioritized {
                      PrefillEndpoint prefillEp,
                      DecodeEndpoint decodeEp,
                      DecodeEndpoint.ReservationHandle decodeReservation,
+                     long decodeExpectedKvTokens,
                      long enqueuedAtMs) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
@@ -67,6 +75,7 @@ public final class BatchItem implements DeliveryItem, Prioritized {
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
         this.decodeReservation = decodeReservation;
+        this.decodeExpectedKvTokens = decodeExpectedKvTokens;
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
         Request request = ctx.getRequest();
@@ -103,6 +112,9 @@ public final class BatchItem implements DeliveryItem, Prioritized {
     public DecodeEndpoint decodeEp() { return decodeEp; }
     public DecodeEndpoint.ReservationHandle decodeReservation() {
         return decodeReservation;
+    }
+    public long decodeExpectedKvTokens() {
+        return decodeExpectedKvTokens;
     }
     @Override
     public long enqueuedAtMs() { return enqueuedAtMs; }
