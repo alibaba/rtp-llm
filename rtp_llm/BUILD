@@ -479,6 +479,7 @@ py_library(
         ":utils",
         ":config_ops",
         ":jit_cache_manager_lib",
+        "//rtp_llm/models_py/kernel_tuning",
     ],
     data = jit_deps(),
     imports = ["."],
