@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -31,6 +32,11 @@ class EngineContractProtocolTest {
         Descriptors.Descriptor task = EngineRpcService.TaskInfoPB.getDescriptor();
         Descriptors.Descriptor worker = EngineRpcService.WorkerStatusPB.getDescriptor();
 
+        // Guard first: without these the assertEquals below would die on an
+        // NPE from a null FieldDescriptor and hide the actual intent (field
+        // missing from the descriptor).
+        assertNotNull(task.findFieldByNumber(16), "kv_tokens field 16 must exist on TaskInfoPB");
+        assertNotNull(worker.findFieldByNumber(23), "running_detail_truncated field 23 must exist on WorkerStatusPB");
         assertEquals(Descriptors.FieldDescriptor.Type.INT64,
                 task.findFieldByNumber(16).getType());
         assertEquals("kv_tokens", task.findFieldByNumber(16).getName());

@@ -2168,8 +2168,13 @@ public final class JavaMockEngineCluster {
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
                     .setDpRank(dpRank)
-                    // Terminal-time KV snapshot: input + generated output is
-                    // what the request occupied when it finished.
+                    // Terminal kv_tokens: the mock approximates the PEAK
+                    // occupancy (input + generated output). A real engine most
+                    // often reports 0 here (resource already released at
+                    // terminal time) or a timing-dependent value — both are
+                    // within the best-effort contract, and the Stage-3
+                    // evidence channel must not assume a non-zero terminal
+                    // kv_tokens (see model_rpc_service.proto).
                     .setKvTokens(shape.inputLen() + shape.outputLen())
                     .build();
             publishCompletion(task);

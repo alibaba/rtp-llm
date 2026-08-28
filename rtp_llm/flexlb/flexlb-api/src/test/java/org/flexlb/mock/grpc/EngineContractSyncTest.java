@@ -29,7 +29,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       response (transport success but no publish), its finished cursor stays
  *       behind, the engine's finished window replays the terminal on the next
  *       pull, and one successful publish converges the cursor — terminal
- *       delivery is state-based, not one-shot</li>
+ *       delivery is state-based, not one-shot.
+ *       Scope note: the 30s convergence bound is the engineering conversion
+ *       of the master's poll period plus the engine-side finished-window
+ *       capacity (1000 terminal records, capacity-based eviction only);
+ *       this test locks the MECHANISM — a single lost increment converges
+ *       while polling stays alive. A master outage long enough to overflow
+ *       the window (30s of accumulated terminals or more) requires
+ *       window-capacity adaptation and is tracked as a separate item outside
+ *       this acceptance.</li>
  * </ul>
  */
 class EngineContractSyncTest extends FlexLBMockTestBase {
