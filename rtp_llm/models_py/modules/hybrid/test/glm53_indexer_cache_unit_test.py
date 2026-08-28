@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     fp32_state_pool_view,
     fp8_pool_view,
 )
-from rtp_llm.models_py.modules.hybrid.indexer_grouping import (
+from rtp_llm.models_py.modules.indexer_grouping import (
     IndexerGroupingGeometry,
     append_incomplete_tail_indices,
     expand_indexer_group_indices,

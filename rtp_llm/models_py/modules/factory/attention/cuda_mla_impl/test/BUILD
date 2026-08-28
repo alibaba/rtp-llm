@@ -55,6 +55,20 @@ py_test(
 )
 
 py_test(
+    name = "glm53_sparse_mla_registry_test",
+    srcs = ["sparse_mla_registry_test.py"],
+    main = "sparse_mla_registry_test.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {
+        'gpu': 'L20D_DEV',
+        'gpu_count': '1',
+    },
+)
+
+py_test(
     name = "sparse_mla_fp8_decode_op_test",
     srcs = ["sparse_mla_decode_op_test.py"],
     deps = [

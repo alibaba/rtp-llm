@@ -144,6 +144,11 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 build:cuda13 --config=cuda13_base
 build:cuda13 --action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 build:cuda13 --host_action_env PATH="/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Repository rules run before action/test environments are applied.  Keep the
+# GCC toolset's matching libctf visible while local_config_cuda probes CUDA
+# libraries with its objdump; otherwise the CUDA 13 image picks /lib64/libctf
+# and fails with a LIBCTF_1.1 version error.
+build:cuda13 --repo_env=LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/lib64"
 # Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is
 # strict enough to flag warnings in third-party code (grpc tcp_posix.cc:
 # `(flag & MSG_CTRUNC) == 1` triggers -Werror=tautological-compare; etc.).

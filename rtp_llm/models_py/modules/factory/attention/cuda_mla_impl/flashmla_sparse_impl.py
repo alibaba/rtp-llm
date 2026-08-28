@@ -35,7 +35,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
-from rtp_llm.models_py.modules.hybrid.indexer_grouping import (
+from rtp_llm.models_py.modules.indexer_grouping import (
     IndexerGroupingGeometry,
     append_incomplete_tail_indices,
     expand_indexer_group_indices,
