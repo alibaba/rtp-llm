@@ -87,8 +87,11 @@ def is_ok(d):
 #   err_internal        gRPC INTERNAL（引擎侧内部错误）
 #   err_empty_response  流完成零输出（status=empty_response / "zero outputs"）
 #   err_duplicate_rid   "duplicate request_id: N"（replay 前缀未生效的基建信号）
-# 匹配不上任何具名桶的才落 err_other 残渣（如 NO_PREFILL_WORKER、
-# BATCH_SLO_EXPIRED 等 enum 名、"interrupted"、纯码 "code=84xx"）。
+#   err_no_prefill      master 准入层 "NO_PREFILL_WORKER"（8400 族 P 侧无
+#                       可用 worker；20P 小集群排水不足时主导拒绝，750P
+#                       时代罕见故 20260828 补桶；与 err_no_decode 同族）
+# 匹配不上任何具名桶的才落 err_other 残渣（如 BATCH_SLO_EXPIRED 等 enum
+# 名、纯 gRPC "UNKNOWN"、"interrupted"、纯码 "code=84xx"）。
 # 8xxx 码匹配要求 code= 前缀（JavaLoadClient 纯码回退恒为 "code=NNNN"
 # 形态，行 477-479），避免误命中时间戳/地址端口里的连续数字子串。
 ERR_ADMISSION_CODE_RE = re.compile(r"code\s*[=:]\s*843[012]\b")
@@ -110,7 +113,12 @@ def classify_error(status, err):
         return "err_priority"
     if "NO_DECODE_WORKER" in err or "NO_AVAILABLE_WORKER" in err:
         return "err_no_decode"
-    if "queue full" in err:
+    if "NO_PREFILL_WORKER" in err:
+        # 8400 族 P 侧无可用 worker（20P 小集群排水不足时主导拒绝）。
+        return "err_no_prefill"
+    if "queue full" in err or "Worker scheduling queue rejected" in err:
+        # 后者：RequestLifecycleCoordinator offer 拒绝（batcher 队列满），
+        # 实测文本无 ": queue full" 后缀，需单独子串。
         return "err_queue_full"
     if "SLO expired" in err or "deadline" in err:
         # 8511 SLO expired + gRPC DEADLINE_EXCEEDED（文本含小写
@@ -211,6 +219,7 @@ per_sec = defaultdict(
         "success": 0,
         "errors": 0,
         "err_no_decode": 0,
+        "err_no_prefill": 0,
         "err_queue_full": 0,
         "err_deadline": 0,
         "err_priority": 0,
@@ -274,6 +283,7 @@ for t in sorted(per_sec):
             "success": b["success"],
             "errors": b["errors"],
             "err_no_decode": b["err_no_decode"],
+            "err_no_prefill": b["err_no_prefill"],
             "err_queue_full": b["err_queue_full"],
             "err_deadline": b["err_deadline"],
             "err_priority": b["err_priority"],

@@ -385,6 +385,7 @@ def main():
     # -> 图/表自适应跳过，输出与旧版一致（向后兼容）。
     ERR_DEFS = [
         ("err_no_decode", "no worker", "danger"),
+        ("err_no_prefill", "no prefill worker", "danger"),
         ("err_queue_full", "queue full", "warning"),
         ("err_deadline", "deadline", "info"),
         ("err_priority", "priority ahead", "warning"),
