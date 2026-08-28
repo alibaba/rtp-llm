@@ -1,8 +1,19 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.PrefillActiveIndex;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
+import org.flexlb.balance.prediction.PrefillPredictionBoundary;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
+import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityOrdering;
 
@@ -11,34 +22,125 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
- * Per-worker scheduling queue that owns request grouping and delivery staging,
- * delegating grouping decisions to a pluggable {@link BatcherAlgorithm}.
+ * Per-worker scheduling queue that owns queue state, grouping, hard-capacity
+ * admission and delivery handoff.
  *
- * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and grouped by the configured algorithm. A group
- * may be delivered through EnqueueBatch or as individual route decisions.
+ * <p>One instance belongs to each Prefill worker. Exact requests enter this
+ * concrete runtime and are grouped by the configured decision mode. A group
+ * may independently be delivered through
+ * EnqueueBatch or as individual route decisions.
  *
- * <p>The context-owned active queue and ready-delivery backlog together are
- * the single source of truth for pending requests. PRIORITY ordering uses
+ * <p>The active queue is the single source of truth for queued requests.
+ * PRIORITY ordering uses
  * the explicit priority comparator ({@link #PRIORITY_QUEUE_ORDER}); FIFO uses
- * a unique monotonic enqueue sequence. All mutations go through
- * {@link BatcherContext} (or the
- * lock-holding methods here). A monotonic mutation generation lets snapshots
- * and diagnostics identify queue-state changes.
+ * a unique monotonic enqueue sequence. A monotonic mutation generation lets
+ * snapshots and diagnostics identify queue-state changes.
  */
-public class WorkerBatcher {
+public final class WorkerBatcher {
 
-    private static final long DELIVERY_CAPACITY_RETRY_NANOS =
-            TimeUnit.MILLISECONDS.toNanos(1);
+    /** Immutable queue state materialized under this runtime's queue lock. */
+    public record QueueSnapshot(
+            String endpointId,
+            long queueVersion,
+            int queueCapacity,
+            List<ScheduledRequest> items) {
+        public QueueSnapshot {
+            if (queueVersion < 0L) {
+                throw new IllegalArgumentException(
+                        "queueVersion must be non-negative");
+            }
+            if (queueCapacity < 0) {
+                throw new IllegalArgumentException(
+                        "queueCapacity must be non-negative");
+            }
+            items = List.copyOf(items);
+        }
+    }
+
+    public enum QueueReplacementStatus {
+        SUCCESS,
+        CONFLICT,
+        DECLINED
+    }
+
+    private enum RuntimeState {
+        NEW,
+        STARTING,
+        RUNNING,
+        STOPPING,
+        STOPPED
+    }
+
+    /** Result of one queue-lock-scoped ACTIVE publication transaction. */
+    private record EnqueueAttempt(
+            boolean accepted,
+            PrefillState.RouteReservation rollback,
+            Throwable failure) {
+    }
+
+    /** Exact predicate captured by one scheduling cycle. */
+    private record BatcherCycleResult(
+            boolean placementCapacityChanged,
+            ScheduledRequest request,
+            CapacityBoundary unavailable,
+            long queueVersion,
+            long schedulingInputVersion,
+            long wakeAtMs) {
+
+        private static final BatcherCycleResult NO_ACTION = simple(false);
+        private static final BatcherCycleResult CAPACITY_CHANGED = simple(true);
+
+        private BatcherCycleResult {
+            boolean waiting = request != null;
+            if ((placementCapacityChanged && waiting)
+                    || (!waiting && unavailable != null)) {
+                throw new IllegalArgumentException(
+                        "worker cycle requires either a capacity change or an exact wait predicate");
+            }
+        }
+
+        private static BatcherCycleResult capacityBlocked(
+                ScheduledRequest item,
+                CapacityBoundary unavailable) {
+            return new BatcherCycleResult(false,
+                    Objects.requireNonNull(item, "item"),
+                    Objects.requireNonNull(unavailable, "unavailable"),
+                    0L, 0L, 0L);
+        }
+
+        private static BatcherCycleResult awaitingSchedulingChange(
+                ScheduledRequest head,
+                long queueVersion,
+                long schedulingInputVersion,
+                long wakeAtMs) {
+            return new BatcherCycleResult(false,
+                    Objects.requireNonNull(head, "head"), null,
+                    queueVersion, schedulingInputVersion, wakeAtMs);
+        }
+
+        private static BatcherCycleResult simple(boolean capacityChanged) {
+            return new BatcherCycleResult(
+                    capacityChanged, null, null, 0L, 0L, 0L);
+        }
+
+        private boolean capacityBlocked() {
+            return unavailable != null;
+        }
+
+        private boolean awaitingSchedulingChange() {
+            return request != null && unavailable == null;
+        }
+    }
 
     /**
      * PRIORITY queue order: delegates to
@@ -48,26 +150,64 @@ public class WorkerBatcher {
      *
      * <p>{@link #FIFO_QUEUE_ORDER} preserves enqueue order.
      */
-    public static final Comparator<BatchItem> PRIORITY_QUEUE_ORDER =
+    public static final Comparator<ScheduledRequest> PRIORITY_QUEUE_ORDER =
             (left, right) -> PriorityOrdering.compareWithRequestId(
                     left.priority(), left.enqueueSeq(), left.requestId(),
                     right.priority(), right.enqueueSeq(), right.requestId());
 
     /** FIFO order: unique monotonic enqueue sequence. */
-    public static final Comparator<BatchItem> FIFO_QUEUE_ORDER =
-            Comparator.comparingLong(BatchItem::enqueueSeq);
+    public static final Comparator<ScheduledRequest> FIFO_QUEUE_ORDER =
+            Comparator.comparingLong(ScheduledRequest::enqueueSeq);
+
+    private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
+            (left, right) -> PriorityOrdering.compareWithRequestId(
+                    left.priority(), left.enqueueSeq(), left.requestId(),
+                    right.priority(), right.enqueueSeq(), right.requestId());
+    private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
+            Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
+                    .thenComparingLong(GroupPlanner.Item::requestId);
+    private static final GroupPlanner.ItemAccess<ScheduledRequest>
+            PLANNER_ITEM_ACCESS = new GroupPlanner.ItemAccess<>() {
+                @Override
+                public long enqueuedAtMs(ScheduledRequest item) {
+                    return item.enqueuedAtMs();
+                }
+
+                @Override
+                public long seqLen(ScheduledRequest item) {
+                    return item.seqLen();
+                }
+            };
+    private static final String SINGLE_DECISION_REASON = "single_request";
+    /** Allocation hint only; the configured queue capacity remains authoritative. */
+    private static final int INITIAL_QUEUE_CAPACITY = 16;
 
     private final String key;
-    private final FlexlbConfig cfg;
-    private final DecisionGroupHandler decisionHandler;
-    private final boolean priorityOrdering;
-    private final PriorityBlockingQueue<BatchItem> queue;
-    private final AtomicInteger queueDepth = new AtomicInteger();
+    private final PrefillEndpoint prefillEndpoint;
+    private final EndpointEventProjector endpointEvents;
+    private final FlexlbConfig config;
+    private final DecisionPolicyConfig fixedWindowDecision;
+    private final boolean singleDecision;
+    private final boolean queueScheduling;
+    private final DeliveryStrategy deliveryStrategy;
+    private final DeliveryCreditPolicy deliveryCredits;
+    private final PrefillActiveIndex activeIndex;
+    private final Comparator<ScheduledRequest> queueOrder;
+    private final Comparator<GroupPlanner.Item> projectionOrder;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
      * delivery and drain. It is exposed in diagnostic snapshots.
      */
     private final AtomicLong queueVersion = new AtomicLong();
+    /** Worker-status and predictor generation used by optimistic decisions. */
+    private final AtomicLong schedulingInputVersion = new AtomicLong();
+    /**
+     * Immutable projection inputs reused while this endpoint's queue and
+     * scheduling inputs are unchanged. Route decisions still evaluate every
+     * live endpoint, but do not rebuild identical queue snapshots for each
+     * request in the global planner.
+     */
+    private volatile ProjectionCache projectionCache;
     /**
      * Guards queue mutations and atomic victim replacement.
      *
@@ -75,326 +215,1626 @@ public class WorkerBatcher {
      * every ordering mode has the same mutation guarantees.
      */
     private final ReentrantLock queueLock = new ReentrantLock();
+    /** Canonical request ownership guarded exclusively by {@link #queueLock}. */
+    private final PrefillState prefillState;
     /**
-     * One per-worker condition for both new queue work and route-slot release.
+     * One per-worker condition for new queue work and endpoint-capacity release.
      * Every predicate transition and signal is serialized by queueLock, so a
      * release cannot race between the cap re-check and await.
      */
     private final Condition stateChanged = queueLock.newCondition();
+    /** QUEUE-only serialized runtime; DIRECT owns no queue execution thread. */
     private final Thread workerThread;
+    /** Constructed before this endpoint generation can begin retirement. */
+    private final CancellationException normalStopFailure;
+    /** Fixed diagnostic for an impossible exact stop acknowledgement loss. */
+    private final IllegalStateException stopAcknowledgementFailure;
+    private boolean terminationStarted;
+    private boolean terminationFinished;
+    private Thread terminationOwner;
+    private volatile RuntimeState runtimeState = RuntimeState.NEW;
+    private Throwable stopFailure;
     private volatile boolean stopped;
-    private volatile boolean waitingForSignal;
-    private final BatcherAlgorithm algorithm;
-    private final BatcherContext ctx;
-    private final PrefillQueueManager queueManager;
-    private volatile long deliveryRetryNotBeforeNanos;
+    private final Runnable capacityAvailableSignal =
+            this::signalCapacityAvailable;
+    /** Exact resource event source for the currently blocked active head. */
+    private CapacityBoundary.Availability
+            subscribedCapacityAvailability;
+    /** Exact active head for which this worker is waiting on a capacity event. */
+    private BatcherCycleResult capacityBlockedHead;
 
-    public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                         DecisionGroupHandler decisionHandler,
-                         BatchSchedulerReporter reporter) {
+    public WorkerBatcher(
+            String key,
+            PrefillEndpoint prefillEp,
+            FlexlbConfig config,
+            DeliveryStrategy deliveryStrategy,
+            EndpointEventProjector endpointEvents) {
         this.key = key;
-        this.cfg = cfg;
-        this.decisionHandler = decisionHandler;
-        this.priorityOrdering = cfg.isPriorityOrdering();
-        Comparator<BatchItem> queueOrder = priorityOrdering
+        this.prefillEndpoint = prefillEp;
+        this.config = config;
+        this.queueScheduling = config.isQueue();
+        this.singleDecision = config.isSingleDecision();
+        DecisionPolicyConfig resolvedDecision = queueScheduling
+                ? config.decisionPolicy() : null;
+        this.fixedWindowDecision = resolvedDecision != null
+                && resolvedDecision.getType()
+                == DecisionPolicyConfig.Type.FIXED_WINDOW
+                ? resolvedDecision : null;
+        boolean priorityOrdering = config.isPriorityOrdering();
+        this.endpointEvents = Objects.requireNonNull(
+                endpointEvents, "endpointEvents");
+        this.deliveryStrategy = Objects.requireNonNull(
+                deliveryStrategy, "deliveryStrategy");
+        this.deliveryCredits = queueScheduling
+                ? DeliveryCreditPolicy.from(
+                        Objects.requireNonNull(
+                                config.getDispatcher(), "dispatcher"),
+                        maxQueueCapacity(),
+                        maxDecisionRequests())
+                : null;
+        this.queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
-        this.queue = new PriorityBlockingQueue<>(11, queueOrder);
-        this.algorithm = cfg.isBatchDispatch()
-                ? new FixedWindowBatcherAlgorithm()
-                : new ImmediateNonBatchAlgorithm();
-        this.ctx = new BatcherContext(
-                key, prefillEp, cfg, decisionHandler, queue, queueDepth, queueVersion, queueLock,
-                queueOrder, reporter);
-        this.queueManager = new PrefillQueueManager(this, ctx);
-        this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
-        this.workerThread.setDaemon(true);
-        this.workerThread.setUncaughtExceptionHandler((t, e) ->
-                Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, e));
+        this.projectionOrder =
+                priorityOrdering
+                        ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
+        this.activeIndex = queueScheduling
+                ? PrefillActiveIndex.ordered(INITIAL_QUEUE_CAPACITY, queueOrder)
+                : PrefillActiveIndex.disabled();
+        this.prefillState = new PrefillState(
+                queueLock, activeIndex, capacityAvailableSignal);
+        this.normalStopFailure = new CancellationException(
+                "FlexLB worker scheduling queue stopped: " + key);
+        this.stopAcknowledgementFailure = new IllegalStateException(
+                "FlexLB worker stop callback lost its exact retained owner: "
+                        + key);
+        // Waiting QUEUE runtimes use virtual threads so a large endpoint fleet
+        // does not consume one OS thread per worker. DIRECT never constructs a
+        // scheduler thread.
+        this.workerThread = queueScheduling
+                ? Thread.ofVirtual()
+                        .name("flexlb-batcher-" + key)
+                        .uncaughtExceptionHandler((thread, failure) -> Logger.error(
+                                "WorkerBatcher[{}] thread died unexpectedly",
+                                key, failure))
+                        .unstarted(this::runLoop)
+                : null;
     }
 
-    public void start() {
-        workerThread.start();
-    }
-
-    public void offer(BatchItem item) {
-        if (stopped) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
+    public synchronized void start() {
+        if (runtimeState != RuntimeState.NEW) {
+            throw new IllegalStateException(
+                    "Worker batcher cannot start from "
+                            + runtimeState);
+        }
+        runtimeState = RuntimeState.STARTING;
+        if (!queueScheduling) {
+            // DIRECT uses only the shared Prefill ownership/projection ledger.
+            // It has no admission queue and therefore owns no scheduler thread.
+            runtimeState = RuntimeState.RUNNING;
             return;
         }
-        int maxSize = ctx.maxQueueCapacity();
-        if (!reserveQueueSlot(maxSize)) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException(
-                            "FlexLB worker scheduling queue full, maxSize=" + maxSize));
-            return;
-        }
-        if (!enqueue(item)) {
-            decisionHandler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB worker scheduling queue stopped"));
-        }
-    }
-
-    /**
-     * priority scheduling variant of {@link #offer(BatchItem)} that reports failure via
-     * return value instead of the {@link DecisionGroupHandler#onOfferFailure}
-     * callback, letting the caller (PlanCommitter) roll back its decode
-     * reservation and decide on retry.
-     *
-     * @return true when the item was enqueued; false when the worker queue is
-     *         stopped or the queue is full (item not enqueued)
-     */
-    public boolean tryOffer(BatchItem item) {
-        if (stopped) {
-            return false;
-        }
-        if (!reserveQueueSlot(ctx.maxQueueCapacity())) {
-            return false;
-        }
-        return enqueue(item);
-    }
-
-    private boolean enqueue(BatchItem item) {
         try {
-            algorithm.onOffer(ctx, item, System.currentTimeMillis());
-            queueLock.lock();
-            try {
-                // Linearize the final stopped check with shutdown/drain. An
-                // offer that reserved capacity just before shutdown must not
-                // enqueue after the drain has completed.
-                if (stopped) {
-                    queueDepth.decrementAndGet();
-                    return false;
-                }
-                queue.add(item);
-                queueVersion.incrementAndGet();
-                stateChanged.signal();
-                return true;
-            } finally {
-                queueLock.unlock();
-            }
-        } catch (RuntimeException | Error e) {
-            queueDepth.decrementAndGet();
-            throw e;
+            Objects.requireNonNull(
+                    workerThread, "QUEUE worker thread").start();
+            runtimeState = RuntimeState.RUNNING;
+        } catch (RuntimeException | Error startFailure) {
+            Throwable cleanupFailure = stopAndDrain(
+                    startFailure,
+                    false);
+            runtimeState = RuntimeState.STOPPED;
+            notifyAll();
+            addSuppressedNoFail(startFailure, cleanupFailure);
+            throw startFailure;
         }
+    }
+
+    public boolean offer(ScheduledRequest exactItem) {
+        if (!queueScheduling) {
+            throw new IllegalStateException(
+                    "DIRECT Prefill generation cannot accept queued work");
+        }
+        ScheduledRequest item = exactItem;
+        requireExactEndpoint(item, "incoming item");
+        if (runtimeState != RuntimeState.RUNNING || stopped) {
+            return false;
+        }
+        return enqueue(item, maxQueueCapacity());
+    }
+
+    private boolean enqueue(ScheduledRequest item, int maximumQueueSize) {
+        EnqueueAttempt attempt;
+        queueLock.lock();
+        try {
+            attempt = enqueueUnderLock(item, maximumQueueSize);
+        } finally {
+            queueLock.unlock();
+        }
+        Throwable failure = attempt.failure();
+        if (attempt.rollback() != null) {
+            try {
+                attempt.rollback().close();
+            } catch (Throwable rollbackFailure) {
+                failure = appendFailure(failure, rollbackFailure);
+            }
+        }
+        if (failure != null) {
+            throw propagateCommitFailure(failure);
+        }
+        return attempt.accepted();
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private EnqueueAttempt enqueueUnderLock(
+            ScheduledRequest item,
+            int maximumQueueSize) {
+        if (stopped) {
+            return new EnqueueAttempt(false, null, null);
+        }
+        if (maximumQueueSize > 0 && activeIndex.size() >= maximumQueueSize) {
+            return new EnqueueAttempt(false, null, null);
+        }
+        if (!publishActiveIndexUnderLock(item)) {
+            return new EnqueueAttempt(false, null, null);
+        }
+        if (!item.requiresRouteReservation()) {
+            stateChanged.signal();
+            return new EnqueueAttempt(true, null, null);
+        }
+
+        PrefillState.ReservationResult<PrefillState.RouteReservation> result;
+        try {
+            // queueLock is reentrant and is also PrefillState's ownership lock,
+            // so ACTIVE publication and exact request-credit acquisition are
+            // one endpoint-local transaction.
+            result = prefillEndpoint.reservePublishedRouteCredit(
+                    item,
+                    0L,
+                    item.maxInflightDeliveriesPerPrefillWorker());
+        } catch (Throwable failure) {
+            rollbackFreshActiveUnderLock(item, null);
+            return new EnqueueAttempt(false, null, failure);
+        }
+        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+            rollbackFreshActiveUnderLock(item, null);
+            return new EnqueueAttempt(false, null, null);
+        }
+
+        PrefillState.RouteReservation reservation = result.reservation();
+        if (!item.bindPublishedRouteReservation(reservation)) {
+            rollbackFreshActiveUnderLock(item, reservation);
+            return new EnqueueAttempt(
+                    false,
+                    null,
+                    new IllegalStateException(
+                            "ACTIVE request already owns a route reservation: request_id="
+                                    + item.requestId()));
+        }
+        stateChanged.signal();
+        return new EnqueueAttempt(true, null, null);
+    }
+
+    /** Undo an ACTIVE publication which never escaped queueLock. */
+    private void rollbackFreshActiveUnderLock(
+            ScheduledRequest item,
+            PrefillState.RouteReservation reservation) {
+        boolean removed = reservation == null
+                ? prefillState.terminalizeActiveUnderLock(item)
+                : prefillState.terminalizeActiveRouteUnderLock(
+                        item, reservation);
+        if (!removed) {
+            throw new IllegalStateException(
+                    "fresh ACTIVE publication could not roll back: request_id="
+                            + item.requestId());
+        }
+        queueVersion.incrementAndGet();
     }
 
     public int queueSize() {
-        return queueDepth.get();
+        queueLock.lock();
+        try {
+            return activeIndex.size();
+        } finally {
+            queueLock.unlock();
+        }
     }
 
     /**
-     * Snapshot of the current queue depth bucketed by normalized priority scheduling
-     * priority. The active queue uses its
-     * weakly-consistent iterator; the usually small ready-delivery backlog is
-     * copied under {@link #queueLock} so a staged route decision remains
-     * visible without racing removal or delivery. Only priorities present in
-     * either queue appear in the result — the same empty-bucket behavior as
-     * the batch wait-time-by-priority series.
+     * Snapshot of the current active queue depth bucketed by normalized
+     * scheduling priority. Only priorities present in the queue appear in the
+     * result, matching the tagged queue-depth metric behavior.
      */
     public Map<Integer, Integer> queueSizeByPriority() {
         Map<Integer, Integer> sizeByPriority = new HashMap<>();
-        for (BatchItem item : queue) {
-            sizeByPriority.merge(item.priority(), 1, Integer::sum);
+        queueLock.lock();
+        try {
+            for (ScheduledRequest item : activeIndex) {
+                sizeByPriority.merge(item.priority(), 1, Integer::sum);
+            }
+        } finally {
+            queueLock.unlock();
         }
-        ctx.addReadyQueueSizeByPriority(sizeByPriority);
         return sizeByPriority;
     }
 
-    /** Current active/ready queue mutation generation. */
-    public long queueVersion() {
-        return queueVersion.get();
+    public PrefillState ownedState() {
+        return prefillState;
+    }
+
+    public RouteProjection.Inputs captureRouteProjectionInputs() {
+        return captureRouteProjectionInputs(this::admissionBlockUnderLock);
+    }
+
+    /** Immutable delivery semantics used by a pure route projection. */
+    public RouteProjection.DeliveryProjection deliveryProjection() {
+        return deliveryStrategy.projectionPolicy();
     }
 
     /**
-     * Estimated time a new request would wait in the queue before delivery.
-     * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
+     * Capture only an admission rejection whose worker wait predicate still
+     * holds. The availability read is the already-subscribed wait predicate;
+     * it neither previews nor reserves capacity.
+     *
+     * <p>Caller holds {@link #queueLock}.
      */
-    public long queueWaitMs() {
-        return algorithm.queueWaitMs(ctx);
-    }
-
-    /** priority scheduling queue facade (snapshot / estimateWait / atomic replace). */
-    public PrefillQueueManager queueManager() {
-        return queueManager;
-    }
-
-    /** Resolve a staged item as delivered or terminal and release its queue slot. */
-    boolean completePendingDelivery(BatchItem item) {
-        return ctx.completePendingDelivery(item);
-    }
-
-    /** Claim callback ownership, atomically fenced against batcher shutdown. */
-    BatcherContext.PendingClaimResult claimPendingDelivery(BatchItem item) {
-        // Do not consult WorkerBatcher.stopped outside queueLock. shutdown()
-        // publishes that flag immediately before ctx.stopAndDrainTo(); an
-        // out-of-lock early return in that window would leave the item STAGED
-        // while the callback incorrectly assumes shutdown already drained it.
-        // BatcherContext is the authoritative atomic claim-vs-drain fence.
-        return ctx.claimPendingDelivery(item);
-    }
-
-    /**
-     * Restore a temporarily capacity-blocked item without recomputing its
-     * ordering metadata. Returns false when it was not pending or shutdown
-     * already owns the batcher.
-     */
-    BatcherContext.PendingRestoreResult restorePendingDelivery(BatchItem item) {
-        BatcherContext.PendingRestoreResult result = ctx.restorePendingDelivery(item);
-        if (result == BatcherContext.PendingRestoreResult.RESTORED) {
-            long retryAt = System.nanoTime() + DELIVERY_CAPACITY_RETRY_NANOS;
-            deliveryRetryNotBeforeNanos = Math.max(deliveryRetryNotBeforeNanos, retryAt);
+    private AdmissionBlock admissionBlockUnderLock() {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "capacity block snapshot requires queueLock");
         }
-        return result;
+        BatcherCycleResult blocked = capacityBlockedHead;
+        if (blocked == null
+                || activeIndex.peek() != blocked.request()
+                || blocked.request().requestExpired(now())
+                || blocked.unavailable().availability().isAvailable()) {
+            return null;
+        }
+        return new AdmissionBlock(
+                blocked.request().requestId(),
+                blocked.request().enqueueSeq(),
+                blocked.unavailable().projectionSemantics());
     }
 
-    int pendingDeliveryCount() {
-        return ctx.pendingDeliveryCount();
+    public Throwable stopAndAwait() {
+        if (workerThread != null && Thread.currentThread() == workerThread) {
+            throw new IllegalStateException(
+                    "Prefill runtime cannot await its own worker thread");
+        }
+        Throwable failure = stopAndDrain(
+                normalStopFailure,
+                true);
+        boolean interrupted = false;
+        if (workerThread != null) {
+            while (true) {
+                try {
+                    workerThread.join();
+                    break;
+                } catch (InterruptedException interruption) {
+                    interrupted = true;
+                }
+            }
+        }
+        synchronized (this) {
+            runtimeState = RuntimeState.STOPPED;
+            notifyAll();
+            failure = stopFailure;
+        }
+        if (interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        return failure;
     }
 
-    public void shutdown() {
-        List<BatchItem> remaining = new ArrayList<>();
+    private void stopAfterUnexpectedLoopFailure(Throwable loopFailure) {
+        try {
+            Logger.error("WorkerBatcher[{}] stopped after an unexpected loop failure",
+                    key, loopFailure);
+        } catch (Throwable ignoredLoggingFailure) {
+            // The exact stop transaction must still run.
+        }
+        Throwable cleanupFailure = stopAndDrain(
+                loopFailure,
+                false);
+        if (cleanupFailure != null) {
+            try {
+                Logger.error("WorkerBatcher[{}] failure cleanup exposed invariants",
+                        key, cleanupFailure);
+            } catch (Throwable ignoredLoggingFailure) {
+                // Cleanup is already complete.
+            }
+        }
+    }
+
+    private Throwable stopAndDrain(
+            Throwable terminalFailure,
+            boolean interruptWorker) {
+        boolean interrupted = false;
+        synchronized (this) {
+            stopped = true;
+            if (terminationStarted) {
+                if (!terminationFinished
+                        && terminationOwner == Thread.currentThread()) {
+                    throw new IllegalStateException(
+                            "Prefill runtime cannot await its active stop transaction");
+                }
+                while (!terminationFinished) {
+                    try {
+                        wait();
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
+                }
+                Throwable completedFailure = stopFailure;
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return completedFailure;
+            }
+            terminationStarted = true;
+            terminationOwner = Thread.currentThread();
+            runtimeState = runtimeState == RuntimeState.NEW
+                    ? RuntimeState.STOPPED : RuntimeState.STOPPING;
+        }
+
+        Throwable cleanupFailure = null;
+        try {
+            boolean queueLocked = false;
+            try {
+                queueLock.lock();
+                queueLocked = true;
+                stopAcceptingUnderLock();
+                try {
+                    unsubscribeFromBlockedCapacity();
+                } catch (Throwable subscriptionFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, subscriptionFailure);
+                }
+                setCapacityBlockedHeadUnderLock(null);
+                stateChanged.signalAll();
+            } catch (Throwable wakeFailure) {
+                cleanupFailure = appendCleanupFailure(
+                        cleanupFailure, wakeFailure);
+            } finally {
+                if (queueLocked) {
+                    try {
+                        queueLock.unlock();
+                    } catch (Throwable unlockFailure) {
+                        cleanupFailure = appendCleanupFailure(
+                                cleanupFailure, unlockFailure);
+                    }
+                }
+            }
+
+            if (interruptWorker && workerThread != null
+                    && Thread.currentThread() != workerThread) {
+                try {
+                    workerThread.interrupt();
+                } catch (Throwable interruptFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, interruptFailure);
+                }
+            }
+
+            while (true) {
+                ScheduledRequest item;
+                try {
+                    item = detachNextStoppedItem();
+                } catch (Throwable claimFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, claimFailure);
+                    break;
+                }
+                if (item == null) {
+                    break;
+                }
+                try {
+                    releaseUnconsumedRouteReservation(item);
+                } catch (Throwable reservationFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, reservationFailure);
+                }
+                try {
+                    endpointEvents.onQueueOfferFailure(
+                            item, terminalFailure);
+                } catch (Throwable callbackFailure) {
+                    try {
+                        Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",
+                                key, item.requestId(), callbackFailure);
+                    } catch (Throwable ignoredLoggingFailure) {
+                        // Cleanup ownership cannot depend on diagnostics.
+                    }
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, callbackFailure);
+                    // Do not acknowledge: generation retirement still owns
+                    // this exact pending identity and will project it again.
+                    continue;
+                }
+                try {
+                    if (!acknowledgeStoppedItem(item)) {
+                        cleanupFailure = appendCleanupFailure(
+                                cleanupFailure,
+                                stopAcknowledgementFailure);
+                    }
+                } catch (Throwable acknowledgementFailure) {
+                    // The terminal fact was already delivered. If the exact
+                    // entry remains, generation retirement converges it as a
+                    // stale/idempotent replay.
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, acknowledgementFailure);
+                }
+            }
+        } catch (Throwable unexpectedCleanupFailure) {
+            cleanupFailure = appendCleanupFailure(
+                    cleanupFailure, unexpectedCleanupFailure);
+        } finally {
+            synchronized (this) {
+                stopFailure = cleanupFailure;
+                terminationFinished = true;
+                terminationOwner = null;
+                notifyAll();
+            }
+        }
+        return cleanupFailure;
+    }
+
+    /**
+     * Detach one exact ACTIVE queue index after the stop gate is closed while
+     * retaining its canonical entry. The callback result decides whether that
+     * entry is acknowledged or carried into generation retirement.
+     */
+    private ScheduledRequest detachNextStoppedItem() {
+        ScheduledRequest item;
         queueLock.lock();
         try {
-            stopped = true;
-            // Reentrant on the same per-worker lock: drain and wake publish as
-            // one state transition to both empty and capacity waiters.
-            ctx.stopAndDrainTo(remaining);
+            item = detachNextStopTerminalUnderLock();
             stateChanged.signalAll();
         } finally {
             queueLock.unlock();
         }
-        workerThread.interrupt();
-        algorithm.onShutdown(ctx);
-        for (BatchItem item : remaining) {
-            try {
-                decisionHandler.onOfferFailure(item,
-                        new CancellationException(
-                                "FlexLB worker scheduling queue stopped: " + key));
-            } catch (Throwable callbackFailure) {
-                Logger.error("WorkerBatcher[{}] shutdown callback failed request_id={}",
-                        key, item.requestId(), callbackFailure);
-            }
-        }
+        return item;
     }
 
-    // ==================== priority scheduling queue operations ====================
-
-    /** Idempotently remove queued requests during cancellation or expiration. */
-    List<BatchItem> tryRemove(List<Long> requestIds, String reason) {
+    /** Acknowledge only the retained owner whose terminal callback returned. */
+    private boolean acknowledgeStoppedItem(ScheduledRequest item) {
         queueLock.lock();
         try {
-            List<BatchItem> removed = new ArrayList<>(requestIds.size());
-            for (long requestId : requestIds) {
-                BatchItem item = findQueued(requestId);
-                if (item != null && ctx.remove(item)) {
-                    removed.add(item);
-                }
-            }
-            if (!removed.isEmpty()) {
-                Logger.debug("[priority-scheduler] queue remove: worker={} reason={} removed={}",
-                        key, reason, removed.size());
-            }
-            return removed;
+            return acknowledgeStopTerminalUnderLock(item);
         } finally {
             queueLock.unlock();
         }
     }
 
-    private BatchItem findQueued(long requestId) {
-        return ctx.findQueued(requestId);
+    private static Throwable appendCleanupFailure(
+            Throwable first,
+            Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        // Preserve cleanup totality under allocation failure. The first causal
+        // failure is sufficient; later leaves were still all attempted.
+        return first;
     }
 
-    /**
-     * Atomic victim replacement with a victim-level presence guard: under the queue
-     * lock, verify every victim is still queued — any missing victim aborts
-     * with a zero-side-effect {@code VICTIM_GONE} (nothing removed, incoming
-     * not enqueued) — then remove all victims and enqueue the incoming item.
-     *
-     * <p>"Still queued" is a sufficient guard: a BatchItem leaves the queue
-     * only via delivery / eviction / drop, all under {@link #queueLock} and
-     * all removing it from the queue — so an in-lock {@code findQueued} hit
-     * proves the victim has not been delivered. Unrelated queue mutations do
-     * not abort the commit.
-     */
-    PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
-            List<Long> victimIds, BatchItem incoming) {
+    private static void addSuppressedNoFail(
+            Throwable primary,
+            Throwable leaf) {
+        if (primary == null || leaf == null || primary == leaf) {
+            return;
+        }
+        try {
+            primary.addSuppressed(leaf);
+        } catch (Throwable ignoredAggregationFailure) {
+            // The start transaction already drained every acquired leaf.
+        }
+    }
+
+    // ==================== endpoint queue operations ====================
+
+    public boolean removeQueued(
+            ScheduledRequest exactItem,
+            String reason) {
+        ScheduledRequest item = exactItem;
+        requireExactEndpoint(item, "queued item");
+        boolean removed;
+        queueLock.lock();
+        try {
+            removed = runtimeState == RuntimeState.RUNNING
+                    && !stopped
+                    && removeUnderLock(item);
+            if (removed) {
+                stateChanged.signal();
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        if (removed) {
+            signalCapacityAvailable();
+            try {
+                Logger.debug(
+                        "[request-scheduler] exact queue remove: worker={} reason={} request_id={}",
+                        key, reason, item.requestId());
+            } catch (Throwable ignoredLoggingFailure) {
+                // Diagnostics cannot turn a committed exact removal into failure.
+            }
+        }
+        return removed;
+    }
+
+    private void requireExactEndpoint(
+            ScheduledRequest item, String operation) {
+        if (item.prefillEp() != prefillEndpoint) {
+            throw new IllegalArgumentException(
+                    operation + " belongs to another Prefill generation");
+        }
+    }
+
+    public QueueReplacementStatus replaceQueued(
+            List<ScheduledRequest> exactVictims,
+            ScheduledRequest incoming) {
+        requireExactEndpoint(incoming, "replacement item");
+        if (incoming.requiresRouteReservation()) {
+            return replaceQueuedWithRouteReservation(exactVictims, incoming);
+        }
+        queueLock.lock();
+        try {
+            if (runtimeState != RuntimeState.RUNNING || stopped) {
+                return QueueReplacementStatus.DECLINED;
+            }
+            int maximumQueueSize = maxQueueCapacity();
+            int victimsRequiredNow = maximumQueueSize <= 0
+                    ? 0
+                    : Math.max(0, activeIndex.size() + 1 - maximumQueueSize);
+            if (victimsRequiredNow == 0
+                    || exactVictims.size() != victimsRequiredNow) {
+                return QueueReplacementStatus.DECLINED;
+            }
+            int postSwapSize = activeIndex.size() - exactVictims.size() + 1;
+            if (postSwapSize < 0
+                    || (maximumQueueSize > 0
+                    && postSwapSize > maximumQueueSize)) {
+                return QueueReplacementStatus.DECLINED;
+            }
+            if (!prefillState.replaceActiveExact(exactVictims, incoming)) {
+                return QueueReplacementStatus.CONFLICT;
+            }
+            queueVersion.incrementAndGet();
+            stateChanged.signal();
+            return QueueReplacementStatus.SUCCESS;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    /** Atomic PRIORITY replacement with one net publish-time route credit. */
+    private QueueReplacementStatus replaceQueuedWithRouteReservation(
+            List<ScheduledRequest> exactVictims,
+            ScheduledRequest incoming) {
+        List<PrefillState.RouteReservation> victimReservations =
+                new ArrayList<>(exactVictims.size());
+        boolean routeCapacityReleased = false;
+        QueueReplacementStatus status = QueueReplacementStatus.CONFLICT;
+        Throwable failure = null;
+        queueLock.lock();
+        try {
+            QueueReplacementStatus precondition =
+                    replacementPreconditionUnderLock(exactVictims);
+            if (precondition != null) {
+                status = precondition;
+            } else if (!takeVictimRouteReservations(
+                    exactVictims, victimReservations)) {
+                restoreVictimRouteReservations(
+                        exactVictims, victimReservations);
+                status = QueueReplacementStatus.CONFLICT;
+            } else {
+                PrefillState.RouteReservation incomingReservation;
+                try {
+                    incomingReservation = prefillState.replaceActiveRoutesExact(
+                            exactVictims,
+                            victimReservations,
+                            incoming,
+                            incoming.maxInflightDeliveriesPerPrefillWorker());
+                } catch (RuntimeException | Error preparationFailure) {
+                    restoreVictimRouteReservations(
+                            exactVictims, victimReservations);
+                    throw preparationFailure;
+                }
+                if (incomingReservation == null) {
+                    restoreVictimRouteReservations(
+                            exactVictims, victimReservations);
+                    status = QueueReplacementStatus.CONFLICT;
+                } else {
+                    if (!incoming.bindPublishedRouteReservation(
+                            incomingReservation)) {
+                        throw new IllegalStateException(
+                                "replacement could not bind its prepared route credit:"
+                                        + " request_id=" + incoming.requestId());
+                    }
+                    routeCapacityReleased = victimReservations.size() > 1;
+                    queueVersion.incrementAndGet();
+                    stateChanged.signal();
+                    status = QueueReplacementStatus.SUCCESS;
+                }
+            }
+        } catch (Throwable replacementFailure) {
+            failure = replacementFailure;
+        } finally {
+            queueLock.unlock();
+        }
+        if (routeCapacityReleased) {
+            signalCapacityAvailable();
+        }
+        if (failure != null) {
+            throw propagateCommitFailure(failure);
+        }
+        return status;
+    }
+
+    /** Null means the exact replacement may proceed. Caller holds queueLock. */
+    private QueueReplacementStatus replacementPreconditionUnderLock(
+            List<ScheduledRequest> exactVictims) {
+        if (runtimeState != RuntimeState.RUNNING || stopped) {
+            return QueueReplacementStatus.DECLINED;
+        }
+        int maximumQueueSize = maxQueueCapacity();
+        int victimsRequiredNow = maximumQueueSize <= 0
+                ? 0 : Math.max(0, activeIndex.size() + 1 - maximumQueueSize);
+        if (victimsRequiredNow == 0
+                || exactVictims.size() != victimsRequiredNow) {
+            return QueueReplacementStatus.DECLINED;
+        }
+        int postSwapSize = activeIndex.size() - exactVictims.size() + 1;
+        if (postSwapSize < 0 || maximumQueueSize > 0
+                && postSwapSize > maximumQueueSize) {
+            return QueueReplacementStatus.DECLINED;
+        }
+        return null;
+    }
+
+    private static boolean takeVictimRouteReservations(
+            List<ScheduledRequest> victims,
+            List<PrefillState.RouteReservation> reservations) {
+        for (ScheduledRequest victim : victims) {
+            PrefillState.RouteReservation reservation =
+                    victim.takePublishedRouteReservation();
+            if (reservation == null) {
+                return false;
+            }
+            reservations.add(reservation);
+        }
+        return true;
+    }
+
+    private static void restoreVictimRouteReservations(
+            List<ScheduledRequest> victims,
+            List<PrefillState.RouteReservation> reservations) {
+        for (int index = 0; index < reservations.size(); index++) {
+            if (!victims.get(index).restorePublishedRouteReservation(
+                    reservations.get(index))) {
+                throw new IllegalStateException(
+                        "victim route credit changed during replacement: request_id="
+                                + victims.get(index).requestId());
+            }
+        }
+        reservations.clear();
+    }
+
+    public QueueSnapshot captureQueueSnapshot() {
+        queueLock.lock();
+        try {
+            return new QueueSnapshot(
+                    key,
+                    queueVersion.get(),
+                    maxQueueCapacity(),
+                    activeItemsInSchedulingOrder());
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    // ==================== Queue ownership and projection ====================
+
+    private int maxQueueCapacity() {
+        return config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker();
+    }
+
+    private int maxDecisionRequests() {
+        return fixedWindowDecision == null
+                ? 1 : fixedWindowDecision.resolveMaxRequests();
+    }
+
+    /** Endpoint-local request credits exposed to the global planning pump. */
+    public int availableDeliveryCredits() {
+        return deliveryCredits == null
+                ? 0 : deliveryCredits.availableCredits(prefillState);
+    }
+
+    private long collectionWindowMs() {
+        return fixedWindowDecision == null
+                ? 0L : Math.max(0L,
+                fixedWindowDecision.getMaxCollectionWaitMs());
+    }
+
+    private long predictedExecutionBudgetMs() {
+        if (fixedWindowDecision == null) {
+            return 0L;
+        }
+        Long configured = fixedWindowDecision.getMaxPredictedExecutionMs();
+        return configured == null ? 0L : configured;
+    }
+
+    private static long now() {
+        return System.currentTimeMillis();
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private boolean publishActiveIndexUnderLock(ScheduledRequest item) {
+        boolean published = prefillState.enqueueActiveUnderLock(item);
+        if (published) {
+            queueVersion.incrementAndGet();
+        }
+        return published;
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
+        if (!item.requiresRouteReservation()) {
+            return prefillState.terminalizeActiveUnderLock(item);
+        }
+        PrefillState.RouteReservation reservation =
+                item.takePublishedRouteReservation();
+        if (reservation == null) {
+            return false;
+        }
+        boolean removed;
+        try {
+            removed = prefillState.terminalizeActiveRouteUnderLock(
+                    item, reservation);
+        } catch (Throwable failure) {
+            restoreRouteReservation(item, reservation);
+            throw failure;
+        }
+        if (!removed) {
+            restoreRouteReservation(item, reservation);
+        }
+        return removed;
+    }
+
+    private static void restoreRouteReservation(
+            ScheduledRequest item,
+            PrefillState.RouteReservation reservation) {
+        if (!item.restorePublishedRouteReservation(reservation)) {
+            throw new IllegalStateException(
+                    "ACTIVE route credit could not be restored request_id="
+                            + item.requestId());
+        }
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private void stopAcceptingUnderLock() {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "queue mutation requires queueLock");
+        }
+        stopped = true;
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private ScheduledRequest detachNextStopTerminalUnderLock() {
+        ScheduledRequest item =
+                prefillState.detachNextActiveForStopUnderLock();
+        if (item != null) {
+            queueVersion.incrementAndGet();
+        }
+        return item;
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private boolean acknowledgeStopTerminalUnderLock(
+            ScheduledRequest item) {
+        return prefillState.acknowledgeStopTerminalUnderLock(item);
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private boolean removeUnderLock(ScheduledRequest item) {
+        boolean removed = removeTerminalActiveUnderLock(item);
+        if (removed) {
+            queueVersion.incrementAndGet();
+        }
+        return removed;
+    }
+
+    private List<ScheduledRequest> activeItemsInSchedulingOrder() {
+        List<ScheduledRequest> candidates = new ArrayList<>();
+        activeIndex.forEach(candidates::add);
+        candidates.sort(queueOrder);
+        return candidates;
+    }
+
+    private ActiveQueueSnapshot snapshotActiveQueueHead() {
+        queueLock.lock();
+        try {
+            ScheduledRequest head = activeIndex.peek();
+            return new ActiveQueueSnapshot(
+                    queueVersion.get(), schedulingInputVersion.get(),
+                    head == null ? List.of() : List.of(head));
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private ActiveQueueSnapshot snapshotActiveQueue() {
+        long version;
+        long inputVersion;
+        List<ScheduledRequest> items;
+        queueLock.lock();
+        try {
+            version = queueVersion.get();
+            inputVersion = schedulingInputVersion.get();
+            if (activeIndex.isEmpty()) {
+                return new ActiveQueueSnapshot(
+                        version, inputVersion, List.of());
+            }
+            items = new ArrayList<>();
+            activeIndex.forEach(items::add);
+        } finally {
+            queueLock.unlock();
+        }
+        items.sort(queueOrder);
+        return new ActiveQueueSnapshot(version, inputVersion, items);
+    }
+
+    private record ActiveQueueSnapshot(
+            long queueVersion,
+            long schedulingInputVersion,
+            List<ScheduledRequest> items) {
+        ScheduledRequest head() {
+            return items.isEmpty() ? null : items.get(0);
+        }
+    }
+
+    private record ProjectionCache(
+            long queueVersion,
+            long schedulingInputVersion,
+            long ownershipVersion,
+            RouteProjection.Inputs inputs) {
+    }
+
+    private RouteProjection.Inputs captureRouteProjectionInputs(
+            Supplier<AdmissionBlock> admissionBlockSnapshot) {
+        long observedQueueVersion = queueVersion.get();
+        long observedInputVersion = schedulingInputVersion.get();
+        long observedOwnershipVersion = prefillState.mutationVersion();
+        ProjectionCache observed = projectionCache;
+        if (observed != null
+                && observed.queueVersion() == observedQueueVersion
+                && observed.schedulingInputVersion() == observedInputVersion
+                && observed.ownershipVersion() == observedOwnershipVersion) {
+            return observed.inputs();
+        }
+        queueLock.lock();
+        try {
+            long currentQueueVersion = queueVersion.get();
+            long currentSchedulingInputVersion =
+                    schedulingInputVersion.get();
+            long currentOwnershipVersion =
+                    prefillState.mutationVersionUnderLock();
+            ProjectionCache cached = projectionCache;
+            if (cached != null
+                    && cached.queueVersion() == currentQueueVersion
+                    && cached.schedulingInputVersion()
+                            == currentSchedulingInputVersion
+                    && cached.ownershipVersion()
+                            == currentOwnershipVersion) {
+                return cached.inputs();
+            }
+            BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+            PrefillState.Snapshot ownership =
+                    prefillState.snapshotUnderLock(queueOrder);
+            List<GroupPlanner.Item> items = ownership.activeItems().stream()
+                    .map(WorkerBatcher::projectionItem)
+                    .toList();
+            org.flexlb.balance.projection.QueueSnapshot queueSnapshot =
+                    new org.flexlb.balance.projection.QueueSnapshot(
+                            ownership.capturedAtMs(),
+                            queueScheduling,
+                            projectionOrder,
+                            new GroupPlanner.Constraints(
+                                    maxDecisionRequests(),
+                                    capacity.batchTokenCapacity(),
+                                    capacity.batchKvCapacity(),
+                                    predictedExecutionBudgetMs(),
+                                    collectionWindowMs()),
+                            items,
+                            items.isEmpty()
+                                    ? null : admissionBlockSnapshot.get());
+            RouteProjection.Inputs captured = new RouteProjection.Inputs(
+                    queueSnapshot,
+                    ownership.committedWork(),
+                    ownership.pendingRequestCount(),
+                    currentOwnershipVersion);
+            projectionCache = new ProjectionCache(
+                    currentQueueVersion,
+                    currentSchedulingInputVersion,
+                    currentOwnershipVersion,
+                    captured);
+            return captured;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private static GroupPlanner.Item projectionItem(ScheduledRequest item) {
+        return new GroupPlanner.Item(
+                item.requestId(), item.priority(), item.enqueueSeq(),
+                item.enqueuedAtMs(), item.expiresAtMs(), item.seqLen(),
+                item.hitCache());
+    }
+
+    private BatchCapacitySnapshot batchCapacitySnapshot() {
+        WorkerStatus status = prefillEndpoint != null
+                ? prefillEndpoint.getStatus() : null;
+        if (status == null) {
+            return new BatchCapacitySnapshot(
+                    Long.MAX_VALUE, Long.MAX_VALUE);
+        }
+        WorkerStatus.EngineObservation engineStatus =
+                status.committedEngineObservation();
+        long engineCapacity = engineStatus.maxBatchTokensSize();
+        if (engineCapacity <= 0) {
+            engineCapacity = engineStatus.maxSeqLen();
+        }
+        long batchTokenCapacity = positiveOrUnlimited(engineCapacity);
+        long total = engineStatus.totalKvCacheTokens();
+        if (total <= 0) {
+            return new BatchCapacitySnapshot(
+                    batchTokenCapacity, Long.MAX_VALUE);
+        }
+        long available = Math.max(
+                0, engineStatus.availableKvCacheTokens());
+        return new BatchCapacitySnapshot(
+                batchTokenCapacity, Math.min(total, available));
+    }
+
+    private record BatchCapacitySnapshot(
+            long batchTokenCapacity,
+            long batchKvCapacity) {
+    }
+
+    private static long positiveOrUnlimited(long value) {
+        return value > 0 ? value : Long.MAX_VALUE;
+    }
+
+    // ==================== Delivery ownership ====================
+
+    private BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(
+            List<ScheduledRequest> candidates,
+            String decisionReason,
+            PrefillTimePredictor.Evaluator evaluator,
+            OptionalLong plannedCommittedPredictionMs) {
+        if (candidates.isEmpty() || !selectionStillOwned(candidates)) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+        try (DeliveryStrategy.Transaction transaction =
+                deliveryStrategy.prepare(
+                        candidates, evaluator,
+                        plannedCommittedPredictionMs)) {
+            if (transaction.items().isEmpty()) {
+                return commitBoundary(
+                        transaction.blockedItem(),
+                        transaction.blockedResult());
+            }
+            BatcherCycleResult admitted = commitPreparedSelection(
+                    transaction, decisionReason);
+            return admitted == null
+                    ? BatcherCycleResult.NO_ACTION : admitted;
+        }
+    }
+
+    private double projectGroupDurationMs(
+            List<ScheduledRequest> items,
+            PrefillTimePredictor.Evaluator evaluator) {
+        return deliveryStrategy.projectGroupDurationMs(items, evaluator);
+    }
+
+    private void handoff(
+            DeliveryStrategy.Transaction transaction,
+            String decisionReason,
+            int remainingQueueDepth) {
+        Throwable deliveryFailure = null;
+        try {
+            transaction.handoff(decisionReason, remainingQueueDepth);
+        } catch (Throwable failure) {
+            deliveryFailure = failure;
+        }
+        Throwable unresolved = deliveryFailure != null
+                ? deliveryFailure
+                : new IllegalStateException(
+                        "delivery returned without resolving owner");
+        try {
+            transaction.abort(unresolved);
+        } catch (Throwable cleanupFailure) {
+            if (deliveryFailure == null) {
+                deliveryFailure = cleanupFailure;
+            } else if (deliveryFailure != cleanupFailure) {
+                deliveryFailure.addSuppressed(cleanupFailure);
+            }
+        }
+        if (deliveryFailure != null) {
+            Logger.error("WorkerBatcher[{}] committed delivery failed",
+                    key, deliveryFailure);
+        }
+    }
+
+    private BatcherCycleResult runPredictionBound(
+            ScheduledRequest exactHead,
+            Supplier<BatcherCycleResult> operation) {
+        try {
+            return operation.get();
+        } catch (InvalidPrefillPredictionException failure) {
+            return commitBoundary(
+                    exactHead, CapacityBoundary.failed(failure));
+        }
+    }
+
+    private boolean selectionStillOwned(
+            List<ScheduledRequest> candidates) {
         queueLock.lock();
         try {
             if (stopped) {
-                // Shutdown: zero-side-effect abort (caller replans / fails fast).
-                return PrefillQueueManager.ReplaceOutcome.victimGone(List.copyOf(victimIds));
+                return false;
             }
-            List<BatchItem> present = new ArrayList<>(victimIds.size());
-            List<Long> missing = new ArrayList<>();
-            for (long victimId : victimIds) {
-                BatchItem victim = findQueued(victimId);
-                if (victim == null) {
-                    missing.add(victimId);
-                } else {
-                    present.add(victim);
+            long nowMs = now();
+            for (ScheduledRequest item : candidates) {
+                if (!containsIdentity(item)
+                        || item.requestExpired(nowMs)) {
+                    return false;
                 }
             }
-            if (!missing.isEmpty()) {
-                return PrefillQueueManager.ReplaceOutcome.victimGone(missing);
-            }
-            List<BatchItem> removed = new ArrayList<>(present.size());
-            for (BatchItem victim : present) {
-                if (!ctx.remove(victim)) {
-                    // Unreachable under the lock discipline; victims already
-                    // removed stay out (no re-insert, design doc 9.5).
-                    return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
-                }
-                removed.add(victim);
-            }
-            if (!tryOffer(incoming)) {
-                return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
-            }
-            return PrefillQueueManager.ReplaceOutcome.success(removed);
-        } catch (RuntimeException | Error e) {
-            Logger.error("WorkerBatcher[{}] presence-guarded victim replace failed", key, e);
-            return PrefillQueueManager.ReplaceOutcome.partialFailure(List.of());
+            return true;
         } finally {
             queueLock.unlock();
         }
+    }
+
+    private BatcherCycleResult commitPreparedSelection(
+            DeliveryStrategy.Transaction transaction,
+            String decisionReason) {
+        List<ScheduledRequest> items = transaction.items();
+        if (items.isEmpty()) {
+            throw new IllegalStateException(
+                    "prepared selection commit requires a non-empty selection");
+        }
+        String committedReason = null;
+        int remainingQueueDepth = 0;
+        boolean removedTerminalBoundary = false;
+        Throwable postCommitFailure = null;
+        queueLock.lock();
+        try {
+            if (stopped) {
+                return null;
+            }
+            long nowMs = now();
+            for (ScheduledRequest item : items) {
+                if (!containsIdentity(item)
+                        || item.requestExpired(nowMs)) {
+                    return null;
+                }
+            }
+            transaction.commitUnderLock();
+            try {
+                removedTerminalBoundary = removeSelectionBoundaryUnderLock(
+                        transaction.blockedItem(),
+                        transaction.blockedResult(), nowMs);
+                queueVersion.incrementAndGet();
+                committedReason = transaction.blockedResult() != null
+                        && transaction.blockedResult().unavailable()
+                        ? "delivery_capacity_prefix" : decisionReason;
+                remainingQueueDepth = activeIndex.size();
+            } catch (Throwable failure) {
+                postCommitFailure = failure;
+            }
+        } finally {
+            queueLock.unlock();
+        }
+
+        if (postCommitFailure != null) {
+            Throwable failure = postCommitFailure;
+            if (removedTerminalBoundary) {
+                signalCapacityAvailable();
+            }
+            try {
+                notifyTerminalAdmissionFailure(
+                        removedTerminalBoundary,
+                        transaction.blockedItem(),
+                        transaction.blockedResult());
+            } catch (Throwable notificationFailure) {
+                failure = appendFailure(failure, notificationFailure);
+            }
+            try {
+                transaction.abort(failure);
+            } catch (Throwable ownerFailure) {
+                failure = appendFailure(failure, ownerFailure);
+            }
+            throw propagateCommitFailure(failure);
+        }
+        if (removedTerminalBoundary) {
+            signalCapacityAvailable();
+        }
+        notifyTerminalAdmissionFailure(
+                removedTerminalBoundary,
+                transaction.blockedItem(),
+                transaction.blockedResult());
+        handoff(transaction, Objects.requireNonNull(committedReason),
+                remainingQueueDepth);
+        return BatcherCycleResult.CAPACITY_CHANGED;
+    }
+
+    private BatcherCycleResult commitBoundary(
+            ScheduledRequest blockedItem,
+            CapacityBoundary blockedResult) {
+        BatcherCycleResult result = BatcherCycleResult.NO_ACTION;
+        boolean removedTerminalBoundary = false;
+        queueLock.lock();
+        try {
+            if (stopped) {
+                return result;
+            }
+            long nowMs = now();
+            if (blockedResult != null && blockedResult.unavailable()) {
+                result = resolveEmptyCapacityUnderLock(
+                        blockedItem, blockedResult, nowMs);
+            } else {
+                removedTerminalBoundary = removeSelectionBoundaryUnderLock(
+                        blockedItem, blockedResult, nowMs);
+                if (removedTerminalBoundary) {
+                    queueVersion.incrementAndGet();
+                    result = BatcherCycleResult.CAPACITY_CHANGED;
+                }
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        if (removedTerminalBoundary) {
+            signalCapacityAvailable();
+        }
+        notifyTerminalAdmissionFailure(
+                removedTerminalBoundary, blockedItem, blockedResult);
+        return result;
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private BatcherCycleResult resolveEmptyCapacityUnderLock(
+            ScheduledRequest item,
+            CapacityBoundary unavailable,
+            long nowMs) {
+        if (activeIndex.peek() != item
+                || item.requestExpired(nowMs)
+                || !containsIdentity(item)) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+        return BatcherCycleResult.capacityBlocked(item, unavailable);
+    }
+
+    /** Caller holds {@link #queueLock}. */
+    private boolean removeSelectionBoundaryUnderLock(
+            ScheduledRequest blockedItem,
+            CapacityBoundary blockedResult,
+            long nowMs) {
+        if (blockedItem == null
+                || blockedResult.unavailable()
+                || blockedResult == CapacityBoundary.OWNERSHIP_LOST) {
+            return false;
+        }
+        if (!containsIdentity(blockedItem)
+                || blockedItem.requestExpired(nowMs)
+                || !removeTerminalActiveUnderLock(blockedItem)) {
+            return false;
+        }
+        return true;
+    }
+
+    private void notifyTerminalAdmissionFailure(
+            boolean removed,
+            ScheduledRequest item,
+            CapacityBoundary boundary) {
+        if (removed && boundary.status() == CapacityBoundary.Status.FAILED) {
+            notifyAdmissionFailure(item, boundary.cause());
+        }
+    }
+
+    private boolean containsIdentity(ScheduledRequest expected) {
+        for (ScheduledRequest item : activeIndex) {
+            if (item == expected) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void notifyAdmissionFailure(
+            ScheduledRequest item,
+            Throwable cause) {
+        try {
+            endpointEvents.onPreparedDeliveryFailure(item, cause);
+        } catch (Throwable callbackFailure) {
+            Logger.error("WorkerBatcher[{}] delivery-failure callback failed "
+                            + "request_id={}",
+                    key, item.requestId(), callbackFailure);
+        }
+    }
+
+    private void dropHead(ScheduledRequest head) {
+        boolean removed;
+        queueLock.lock();
+        try {
+            removed = removeUnderLock(head);
+        } finally {
+            queueLock.unlock();
+        }
+        if (!removed) {
+            return;
+        }
+        signalCapacityAvailable();
+        try {
+            endpointEvents.onQueuedItemExpired(head);
+        } catch (Throwable callbackFailure) {
+            Logger.error("WorkerBatcher[{}] ACTIVE terminal callback failed "
+                            + "request_id={} reason={}",
+                    key, head.requestId(), "request_expired",
+                    callbackFailure);
+        }
+    }
+
+    private static Throwable appendFailure(
+            Throwable first,
+            Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    /** Release the publish-time credit only while it is still item-owned. */
+    private static void releaseUnconsumedRouteReservation(
+            ScheduledRequest item) {
+        if (item == null) {
+            return;
+        }
+        PrefillState.RouteReservation reservation =
+                item.takePublishedRouteReservation();
+        if (reservation != null) {
+            reservation.close();
+        }
+    }
+
+    private static RuntimeException propagateCommitFailure(
+            Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            return runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        return new IllegalStateException(
+                "delivery selection failed after ownership commit", failure);
+    }
+
+    // ==================== Group decisions ====================
+
+    private BatcherCycleResult processQueue() {
+        return singleDecision
+                ? processSingleRequest()
+                : processFixedWindow();
+    }
+
+    private BatcherCycleResult processSingleRequest() {
+        ActiveQueueSnapshot snapshot = snapshotActiveQueueHead();
+        ScheduledRequest head = snapshot.head();
+        if (head == null) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+
+        long nowMs = now();
+        if (head.requestExpired(nowMs)) {
+            Logger.debug("flexlb_single_drop request_id={} "
+                            + "reason=request_expired expires_at_ms={} now_ms={}",
+                    head.requestId(), head.expiresAtMs(), nowMs);
+            dropHead(head);
+            return BatcherCycleResult.CAPACITY_CHANGED;
+        }
+
+        GroupPlanner.Shape shape =
+                GroupPlanner.Shape.empty().add(head.seqLen());
+        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        if (!shape.fitsKv(capacity.batchKvCapacity())) {
+            return awaitPrefillKvCapacity(
+                    head, snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion());
+        }
+
+        // Worker status and delivery ledgers advance independently. Re-read
+        // the advisory gate immediately before hard-capacity admission.
+        capacity = batchCapacitySnapshot();
+        if (!shape.fitsKv(capacity.batchKvCapacity())) {
+            return awaitPrefillKvCapacity(
+                    head, snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion());
+        }
+
+        return runPredictionBound(head, () -> {
+            PrefillTimePredictor predictor =
+                    prefillEndpoint.getPredictor();
+            PrefillTimePredictor.Evaluator evaluator =
+                    predictor.evaluator();
+            return admitAndDeliverCapacityFeasiblePrefix(
+                    List.of(head), SINGLE_DECISION_REASON,
+                    evaluator, OptionalLong.empty());
+        });
+    }
+
+    private BatcherCycleResult processFixedWindow() {
+        if (activeIndex.isEmpty()) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+
+        // Cheap advisory gates avoid sorting while the worker cannot dispatch.
+        ScheduledRequest observedHead;
+        int observedSize;
+        long observedOldestEnqueuedAtMs = Long.MAX_VALUE;
+        long observedQueueVersion;
+        long observedSchedulingInputVersion;
+        queueLock.lock();
+        try {
+            observedHead = activeIndex.peek();
+            observedSize = activeIndex.size();
+            observedQueueVersion = queueVersion.get();
+            observedSchedulingInputVersion = schedulingInputVersion.get();
+            for (ScheduledRequest item : activeIndex) {
+                observedOldestEnqueuedAtMs = Math.min(
+                        observedOldestEnqueuedAtMs, item.enqueuedAtMs());
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        if (observedHead == null) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+
+        long nowMs = now();
+        long fixedWaitMs = collectionWindowMs();
+        int batchMaxCount = maxDecisionRequests();
+        long predictThresholdMs = predictedExecutionBudgetMs();
+        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        long batchMaxTokens = capacity.batchTokenCapacity();
+
+        if (observedHead.requestExpired(nowMs)) {
+            Logger.debug("flexlb_batch_drop request_id={} "
+                            + "reason=request_expired expires_at_ms={} now_ms={}",
+                    observedHead.requestId(),
+                    observedHead.expiresAtMs(), nowMs);
+            dropHead(observedHead);
+            return BatcherCycleResult.CAPACITY_CHANGED;
+        }
+
+        boolean fullCandidate =
+                observedSize >= batchMaxCount;
+        if (predictThresholdMs <= 0 && !fullCandidate
+                && !GroupPlanner.windowElapsed(
+                observedOldestEnqueuedAtMs, nowMs, fixedWaitMs)) {
+            return awaitCollectionWindow(
+                    observedHead,
+                    observedQueueVersion,
+                    observedSchedulingInputVersion,
+                    observedOldestEnqueuedAtMs, fixedWaitMs);
+        }
+
+        long batchKvTokens = capacity.batchKvCapacity();
+        if (!GroupPlanner.Shape.empty().add(observedHead.seqLen())
+                .fitsKv(batchKvTokens)) {
+            return awaitPrefillKvCapacity(
+                    observedHead,
+                    observedQueueVersion,
+                    observedSchedulingInputVersion);
+        }
+
+        // The ordered snapshot is the selection linearization point;
+        // prediction intentionally runs after releasing queueLock.
+        ActiveQueueSnapshot snapshot = snapshotActiveQueue();
+        ScheduledRequest head = snapshot.head();
+        if (head == null) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+
+        nowMs = now();
+        fixedWaitMs = collectionWindowMs();
+        batchMaxCount = maxDecisionRequests();
+        predictThresholdMs = predictedExecutionBudgetMs();
+        capacity = batchCapacitySnapshot();
+        batchMaxTokens = capacity.batchTokenCapacity();
+        if (head.requestExpired(nowMs)) {
+            Logger.debug("flexlb_batch_drop request_id={} "
+                            + "reason=request_expired expires_at_ms={} now_ms={}",
+                    head.requestId(), head.expiresAtMs(), nowMs);
+            dropHead(head);
+            return BatcherCycleResult.CAPACITY_CHANGED;
+        }
+        ScheduledRequest expiredMember = firstExpiredMember(
+                snapshot.items(), batchMaxCount, nowMs);
+        if (expiredMember != null) {
+            Logger.debug("flexlb_batch_drop request_id={} "
+                            + "reason=request_expired expires_at_ms={} now_ms={}",
+                    expiredMember.requestId(),
+                    expiredMember.expiresAtMs(), nowMs);
+            dropHead(expiredMember);
+            return BatcherCycleResult.CAPACITY_CHANGED;
+        }
+        GroupPlanner.Shape headShape =
+                GroupPlanner.Shape.empty().add(head.seqLen());
+        batchKvTokens = capacity.batchKvCapacity();
+        if (!headShape.fitsKv(batchKvTokens)) {
+            return awaitPrefillKvCapacity(
+                    head, snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion());
+        }
+
+        long exactBatchMaxTokens = batchMaxTokens;
+        long exactBatchKvTokens = batchKvTokens;
+        int exactBatchMaxCount = batchMaxCount;
+        long exactPredictThresholdMs = predictThresholdMs;
+        long exactFixedWaitMs = fixedWaitMs;
+        return runPredictionBound(head, () -> {
+            PrefillTimePredictor predictor =
+                    prefillEndpoint.getPredictor();
+            PrefillTimePredictor.Evaluator evaluator = predictor == null
+                    ? null : predictor.evaluator();
+            PrefillTimePredictor.Evaluator planningEvaluator =
+                    exactPredictThresholdMs > 0 ? evaluator : null;
+            GroupPlanner.Constraints plannerConstraints =
+                    new GroupPlanner.Constraints(
+                            exactBatchMaxCount, exactBatchMaxTokens,
+                            exactBatchKvTokens, exactPredictThresholdMs,
+                            exactFixedWaitMs);
+            GroupPlanner.Selection<ScheduledRequest> selection =
+                    GroupPlanner.select(
+                            snapshot.items(), PLANNER_ITEM_ACCESS,
+                            plannerConstraints,
+                            planningEvaluator == null ? null : items ->
+                                    projectGroupDurationMs(
+                                            items, planningEvaluator));
+            GroupPlanner.Plan<ScheduledRequest> plan =
+                    GroupPlanner.evaluateReadiness(
+                            selection, plannerConstraints, now());
+            if (plan.ready()) {
+                return admitDecisionGroup(
+                        plan.items(), plan.shape(), plan.reason(),
+                        evaluator, committedPrediction(plan));
+            }
+            return awaitCollectionWindow(
+                    head, snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion(),
+                    plan.windowOpenedAtMs(), exactFixedWaitMs);
+        });
+    }
+
+    private static BatcherCycleResult awaitCollectionWindow(
+            ScheduledRequest head,
+            long queueVersion,
+            long schedulingInputVersion,
+            long windowOpenedAtMs,
+            long collectionWindowMs) {
+        long collectionDeadline = GroupPlanner.collectionDeadlineMs(
+                windowOpenedAtMs, collectionWindowMs);
+        return BatcherCycleResult.awaitingSchedulingChange(
+                head, queueVersion, schedulingInputVersion,
+                Math.min(collectionDeadline, head.expiresAtMs()));
+    }
+
+    private static BatcherCycleResult awaitPrefillKvCapacity(
+            ScheduledRequest head,
+            long queueVersion,
+            long schedulingInputVersion) {
+        return BatcherCycleResult.awaitingSchedulingChange(
+                head, queueVersion, schedulingInputVersion,
+                head.expiresAtMs());
+    }
+
+    private static ScheduledRequest firstExpiredMember(
+            List<ScheduledRequest> orderedItems,
+            int maxCount,
+            long nowMs) {
+        int inspected = Math.min(
+                Math.max(1, maxCount), orderedItems.size());
+        for (int index = 0; index < inspected; index++) {
+            ScheduledRequest item = orderedItems.get(index);
+            if (item.requestExpired(nowMs)) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    private BatcherCycleResult admitDecisionGroup(
+            List<ScheduledRequest> picked,
+            GroupPlanner.Shape shape,
+            String reason,
+            PrefillTimePredictor.Evaluator evaluator,
+            OptionalLong plannedCommittedPredictionMs) {
+        BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+        if ((picked.size() > 1
+                && !shape.fitsCompute(capacity.batchTokenCapacity()))
+                || !shape.fitsKv(capacity.batchKvCapacity())) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+        return admitAndDeliverCapacityFeasiblePrefix(
+                picked, reason, evaluator,
+                plannedCommittedPredictionMs);
+    }
+
+    private static OptionalLong committedPrediction(
+            GroupPlanner.Plan<ScheduledRequest> plan) {
+        if (plan.selectedPredictionMs().isEmpty()) {
+            return OptionalLong.empty();
+        }
+        return OptionalLong.of(
+                PrefillPredictionBoundary.committedDecisionGroupMs(
+                        plan.selectedPredictionMs().getAsDouble()));
     }
 
     // ==================== Internal: Run loop ====================
 
     private void runLoop() {
-        while (!stopped && !Thread.currentThread().isInterrupted()) {
-            try {
-                waitForNonEmpty();
-                waitForDeliveryRetry();
-                BatcherContext.ReadyDeliveryResult readyDelivery =
-                        ctx.deliverReadyRequests();
-                if (readyDelivery == BatcherContext.ReadyDeliveryResult.CAPACITY_BLOCKED) {
-                    if (ctx.isActiveEmpty()) {
-                        awaitDeliveryCapacityOrActiveWork();
-                        continue;
-                    }
-                    // A live config transition can leave BATCH_ENQUEUE work behind
-                    // a route backlog. Ready route work remains preferred when
-                    // capacity exists, but a full route cap must not HOL-block
-                    // undecided active work.
+        try {
+            while (!stopped && !Thread.currentThread().isInterrupted()) {
+                try {
+                    runOneCycle();
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (Throwable t) {
+                    // Every expected delivery failure is terminalized inside the
+                    // typed cycle. An escaping Throwable is therefore an invariant
+                    // failure; retrying the same ACTIVE state can only spin.
+                    stopAfterUnexpectedLoopFailure(t);
+                    return;
                 }
-                if (readyDelivery == BatcherContext.ReadyDeliveryResult.DELIVERED) {
-                    continue;
-                }
-                algorithm.processQueue(ctx);
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                return;
-            } catch (Throwable t) {
-                Logger.error("WorkerBatcher[{}] loop failed", key, t);
             }
+        } finally {
+            synchronized (this) {
+                runtimeState = RuntimeState.STOPPED;
+                notifyAll();
+            }
+        }
+    }
+
+    private void runOneCycle() throws InterruptedException {
+        waitForNonEmpty();
+        if (stopped) {
+            return;
+        }
+
+        BatcherCycleResult result = processQueue();
+        if (result.placementCapacityChanged()) {
+            // Only a committed removal creates a new queue seat. Advisory
+            // waits and delivery-capacity misses must not feed placement back
+            // into itself.
+            prefillEndpoint.signalPlacementCapacityChanged();
+        }
+        if (result.capacityBlocked()) {
+            awaitBlockedHeadCapacity(result);
+        } else if (result.awaitingSchedulingChange()) {
+            awaitSchedulingChange(result);
         }
     }
 
     private void waitForNonEmpty() throws InterruptedException {
         queueLock.lockInterruptibly();
         try {
-            while (!stopped && !ctx.hasProcessableWork()) {
+            while (!stopped && activeIndex.isEmpty()) {
+                setCapacityBlockedHeadUnderLock(null);
+                unsubscribeFromBlockedCapacity();
                 awaitStateChange();
             }
         } finally {
@@ -403,18 +1843,93 @@ public class WorkerBatcher {
     }
 
     /**
-     * Wait only while ready work is the sole work and the request cap is
-     * still full. Enqueue and slot release both signal under queueLock; the
-     * in-lock predicate re-check closes every missed-wakeup window.
+     * Subscribe to the exact resource which rejected the active head.
+     * Caller holds {@link #queueLock}.
      */
-    private void awaitDeliveryCapacityOrActiveWork() throws InterruptedException {
+    private void subscribeToBlockedCapacity(
+            BatcherCycleResult blocked) {
+        CapacityBoundary.Availability nextSource =
+                blocked.unavailable().availability();
+        if (nextSource != subscribedCapacityAvailability) {
+            unsubscribeFromBlockedCapacity();
+            subscribedCapacityAvailability = nextSource;
+            nextSource.addListener(capacityAvailableSignal);
+        }
+    }
+
+    /** Caller holds queueLock. */
+    private void unsubscribeFromBlockedCapacity() {
+        CapacityBoundary.Availability source =
+                subscribedCapacityAvailability;
+        if (source == null) {
+            return;
+        }
+        subscribedCapacityAvailability = null;
+        source.removeListener(capacityAvailableSignal);
+    }
+
+    /**
+     * Wait while the exact active head is blocked by the exact rejecting
+     * resource. Offers wake the condition: a new higher-priority head exits the
+     * wait immediately, while a tail offer leaves the predicate true. Capacity
+     * is checked after listener installation while queueLock is held, closing
+     * the release-before-await race without polling.
+     */
+    private void awaitBlockedHeadCapacity(
+            BatcherCycleResult blocked)
+            throws InterruptedException {
+        queueLock.lockInterruptibly();
+        try {
+            if (stopped) {
+                return;
+            }
+            setCapacityBlockedHeadUnderLock(blocked);
+            subscribeToBlockedCapacity(blocked);
+            while (!stopped
+                    && activeIndex.peek() == blocked.request()
+                    && !blocked.request().requestExpired(System.currentTimeMillis())
+                    && !blocked.unavailable().availability().isAvailable()) {
+                long expiresAtMs = blocked.request().expiresAtMs();
+                long nowMs = System.currentTimeMillis();
+                if (expiresAtMs <= nowMs) {
+                    return;
+                }
+                if (expiresAtMs == Long.MAX_VALUE) {
+                    awaitStateChange();
+                } else {
+                    awaitStateChangeUntil(expiresAtMs - nowMs);
+                }
+            }
+        } finally {
+            setCapacityBlockedHeadUnderLock(null);
+            unsubscribeFromBlockedCapacity();
+            queueLock.unlock();
+        }
+    }
+
+    /**
+     * Wait for the exact queue/input generation captured by the policy or
+     * for its deadline. Every predicate and signal is serialized by queueLock.
+     */
+    private void awaitSchedulingChange(
+            BatcherCycleResult waiting)
+            throws InterruptedException {
         queueLock.lockInterruptibly();
         try {
             while (!stopped
-                    && ctx.isActiveEmpty()
-                    && ctx.readyDeliveryCount() > 0
-                    && ctx.availableDeliverySlots() == 0) {
-                awaitStateChange();
+                    && activeIndex.peek() == waiting.request()
+                    && queueVersion.get() == waiting.queueVersion()
+                    && schedulingInputVersion.get()
+                    == waiting.schedulingInputVersion()) {
+                long nowMs = System.currentTimeMillis();
+                if (waiting.wakeAtMs() <= nowMs) {
+                    return;
+                }
+                if (waiting.wakeAtMs() == Long.MAX_VALUE) {
+                    awaitStateChange();
+                } else {
+                    awaitStateChangeUntil(waiting.wakeAtMs() - nowMs);
+                }
             }
         } finally {
             queueLock.unlock();
@@ -422,19 +1937,20 @@ public class WorkerBatcher {
     }
 
     private void awaitStateChange() throws InterruptedException {
-        waitingForSignal = true;
-        try {
-            stateChanged.await();
-        } finally {
-            waitingForSignal = false;
-        }
+        stateChanged.await();
     }
 
-    /** Called after Prefill releases a request-mode slot, outside its stripe. */
+    private void awaitStateChangeUntil(long remainingMs) throws InterruptedException {
+        stateChanged.awaitNanos(TimeUnit.MILLISECONDS.toNanos(
+                Math.max(1L, remainingMs)));
+    }
+
+    /** Called after Prefill or Decode capacity changes, outside endpoint locks. */
     public void signalDeliveryCapacityAvailable() {
         queueLock.lock();
         try {
-            if (ctx.readyDeliveryCount() > 0) {
+            if (capacityBlockedHead != null) {
+                projectionCache = null;
                 stateChanged.signal();
             }
         } finally {
@@ -442,31 +1958,34 @@ public class WorkerBatcher {
         }
     }
 
-    /** Package-private deterministic wait-state probe for scheduler tests. */
-    boolean isWaitingForSignal() {
-        return waitingForSignal;
+    /** Publish one real Prefill credit release to local and global waiters. */
+    private void signalCapacityAvailable() {
+        signalDeliveryCapacityAvailable();
+        prefillEndpoint.signalPlacementCapacityChanged();
     }
 
-    private void waitForDeliveryRetry() throws InterruptedException {
-        long remaining = deliveryRetryNotBeforeNanos - System.nanoTime();
-        if (remaining > 0) {
-            TimeUnit.NANOSECONDS.sleep(remaining);
+    /** Caller holds queueLock. Capacity blocks are projection inputs. */
+    private void setCapacityBlockedHeadUnderLock(
+            BatcherCycleResult blocked) {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "capacity block update requires queueLock");
+        }
+        if (capacityBlockedHead != blocked) {
+            capacityBlockedHead = blocked;
+            projectionCache = null;
         }
     }
 
-    private boolean reserveQueueSlot(int maxSize) {
-        if (maxSize <= 0) {
-            queueDepth.incrementAndGet();
-            return true;
-        }
-        while (true) {
-            int current = queueDepth.get();
-            if (current >= maxSize) {
-                return false;
-            }
-            if (queueDepth.compareAndSet(current, current + 1)) {
-                return true;
-            }
+    /** Wake decisions whose advisory worker-status or predictor input changed. */
+    public void signalSchedulingInputsChanged() {
+        queueLock.lock();
+        try {
+            schedulingInputVersion.incrementAndGet();
+            stateChanged.signal();
+        } finally {
+            queueLock.unlock();
         }
     }
+
 }

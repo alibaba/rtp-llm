@@ -1,13 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.BatchDispatcherConfig;
+import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.EngineCancellationConfig;
-import org.flexlb.config.FifoOrderingConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.PriorityOrderingConfig;
-import org.flexlb.config.QueueSchedulerConfig;
+import org.flexlb.config.QueueCapacityConfig;
+import org.flexlb.config.QueueOrderingConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 
 import java.util.EnumSet;
@@ -24,43 +24,72 @@ public final class SchedulingTestConfig {
         return config;
     }
 
-    public static QueueSchedulerConfig usePriorityQueue(FlexlbConfig config) {
-        QueueSchedulerConfig queue = activeQueueOrNew(config);
-        PriorityOrderingConfig priority = queue.getOrdering() instanceof PriorityOrderingConfig active
-                ? active : new PriorityOrderingConfig();
+    public static SchedulerConfig usePriorityQueue(FlexlbConfig config) {
+        SchedulerConfig queue = activeQueueOrNew(config);
+        QueueOrderingConfig priority = queue.getOrdering().getType()
+                == QueueOrderingConfig.Type.PRIORITY
+                ? queue.getOrdering() : QueueOrderingConfig.priority();
         queue.setOrdering(priority);
         config.setScheduler(queue);
         return queue;
     }
 
-    public static QueueSchedulerConfig useFifoQueue(FlexlbConfig config) {
-        QueueSchedulerConfig queue = activeQueueOrNew(config);
-        queue.setOrdering(new FifoOrderingConfig());
+    public static SchedulerConfig useFifoQueue(FlexlbConfig config) {
+        SchedulerConfig queue = activeQueueOrNew(config);
+        queue.setOrdering(new QueueOrderingConfig());
         config.setScheduler(queue);
         return queue;
     }
 
-    public static BatchDispatcherConfig useBatchDispatcher(FlexlbConfig config) {
-        if (config.getDispatcher() instanceof BatchDispatcherConfig batch) {
-            return batch;
+    public static void useSingleDecision(FlexlbConfig config) {
+        SchedulerConfig queue = activeQueueOrNew(config);
+        queue.setDecision(DecisionPolicyConfig.single());
+        config.setScheduler(queue);
+    }
+
+    public static DecisionPolicyConfig useFixedWindowDecision(FlexlbConfig config) {
+        SchedulerConfig queue = activeQueueOrNew(config);
+        if (queue.getDecision().getType()
+                == DecisionPolicyConfig.Type.FIXED_WINDOW) {
+            return queue.getDecision();
         }
-        BatchDispatcherConfig batch = new BatchDispatcherConfig();
+        DecisionPolicyConfig fixedWindow = new DecisionPolicyConfig();
+        queue.setDecision(fixedWindow);
+        config.setScheduler(queue);
+        return fixedWindow;
+    }
+
+    public static QueueCapacityConfig useQueueCapacity(FlexlbConfig config) {
+        SchedulerConfig queue = activeQueueOrNew(config);
+        if (queue.getCapacity() == null) {
+            queue.setCapacity(new QueueCapacityConfig());
+        }
+        config.setScheduler(queue);
+        return queue.getCapacity();
+    }
+
+    public static DispatcherConfig useBatchDispatcher(FlexlbConfig config) {
+        if (config.getDispatcher().getType() == DispatcherConfig.Type.BATCH) {
+            return config.getDispatcher();
+        }
+        DispatcherConfig batch = new DispatcherConfig();
         config.setDispatcher(batch);
         return batch;
     }
 
-    public static NonBatchDispatcherConfig useNonBatchDispatcher(FlexlbConfig config) {
-        if (config.getDispatcher() instanceof NonBatchDispatcherConfig nonBatch) {
-            return nonBatch;
+    public static DispatcherConfig useNonBatchDispatcher(FlexlbConfig config) {
+        if (config.getDispatcher().getType()
+                == DispatcherConfig.Type.NON_BATCH) {
+            return config.getDispatcher();
         }
-        NonBatchDispatcherConfig nonBatch = new NonBatchDispatcherConfig();
+        DispatcherConfig nonBatch = DispatcherConfig.nonBatch();
         config.setDispatcher(nonBatch);
         return nonBatch;
     }
 
     public static PreemptionConfig preemption(FlexlbConfig config) {
         usePriorityQueue(config);
-        PriorityOrderingConfig priority = config.priorityOrdering();
+        QueueOrderingConfig priority = config.priorityOrdering();
         if (priority.getPreemption() == null) {
             priority.setPreemption(new PreemptionConfig());
         }
@@ -100,8 +129,7 @@ public final class SchedulingTestConfig {
         return preemption.getEngineCancellation();
     }
 
-    private static QueueSchedulerConfig activeQueueOrNew(FlexlbConfig config) {
-        return config.getScheduler() instanceof QueueSchedulerConfig queue
-                ? queue : new QueueSchedulerConfig();
+    private static SchedulerConfig activeQueueOrNew(FlexlbConfig config) {
+        return config.isQueue() ? config.getScheduler() : new SchedulerConfig();
     }
 }

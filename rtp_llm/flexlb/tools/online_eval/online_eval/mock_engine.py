@@ -1186,6 +1186,22 @@ class MockRpcServicer:
     async def StartProfileInternal(self, request, context):
         return self.pb2.EmptyPB()
 
+    async def DumpTorchAllocator(self, request, context):
+        import grpc
+
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "torch allocator dump is not implemented by the mock engine",
+        )
+
+    async def DumpTorchAllocatorInternal(self, request, context):
+        import grpc
+
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "torch allocator dump is not implemented by the mock engine",
+        )
+
     async def UpdateSchedulerInfo(self, request, context):
         return self.pb2.EmptyPB()
 

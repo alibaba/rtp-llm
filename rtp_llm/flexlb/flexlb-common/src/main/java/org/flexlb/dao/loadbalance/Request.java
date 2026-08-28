@@ -1,20 +1,22 @@
 package org.flexlb.dao.loadbalance;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 @Getter
 @Setter
 @ToString
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Request {
-    public static final long DEFAULT_GENERATE_TIMEOUT_MS = 60L * 60L * 1000L;
+    public static final long DEFAULT_GENERATE_TIMEOUT_MS =
+            TimeUnit.HOURS.toMillis(1L);
 
     @ToString.Exclude
     @JsonProperty("block_cache_keys")

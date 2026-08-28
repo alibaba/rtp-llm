@@ -19,7 +19,7 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             (run / "flexlb_logs" / "flexlb.log.2026-07-17.0.log").write_text(
                 "\n".join(
                     [
-                        "flexlb_batch_dispatch batch_id=1 reason=predict_threshold "
+                        "flexlb_batch_dispatch batch_id=1 reason=predicted_execution_cap "
                         "batch_size=8 wait_ms=40 predicted_ms=510 threshold_ms=500 "
                         "fixed_wait_ms=160 batch_size_max=32 queue_after=2 worker=127.0.0.1:61000",
                         "flexlb_batch_dispatch batch_id=2 reason=batch_full "
@@ -60,7 +60,7 @@ class AnalyzeSloBatchTest(unittest.TestCase):
                                         "FLEXLB_CONFIG",
                                         json.dumps(
                                             {
-                                                "schemaVersion": 1,
+                                                "schemaVersion": 2,
                                                 "scheduler": {
                                                     "type": "QUEUE",
                                                     "ordering": {"type": "PRIORITY"},
@@ -81,10 +81,12 @@ class AnalyzeSloBatchTest(unittest.TestCase):
 
             self.assertEqual(2, result["decisions"]["count"])
             self.assertEqual(
-                {"batch_full": 1, "predict_threshold": 1},
+                {"batch_full": 1, "predicted_execution_cap": 1},
                 result["decisions"]["reasons"],
             )
-            self.assertEqual(1, result["decisions"]["invariant_violation_count"])
+            # batch_full below batch_size_max, plus a capped group of 8 whose
+            # own prediction already exceeded the budget.
+            self.assertEqual(2, result["decisions"]["invariant_violation_count"])
             self.assertEqual(1, result["completions"]["matched_decision_count"])
             self.assertEqual(500, result["config"]["predict_threshold_ms"])
             self.assertEqual(160, result["config"]["fixed_wait_ms"])
@@ -121,7 +123,7 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             (run / "load_client").mkdir()
             (run / "flexlb_logs").mkdir()
             (run / "flexlb_logs" / "flexlb.log").write_text(
-                "flexlb_batch_dispatch batch_id=1 reason=predict_threshold "
+                "flexlb_batch_dispatch batch_id=1 reason=predicted_execution_cap "
                 "batch_size=8 wait_ms=40 predicted_ms=510 threshold_ms=500 "
                 "fixed_wait_ms=160 batch_size_max=32 queue_after=2 worker=127.0.0.1:61000\n",
                 encoding="utf-8",
@@ -129,10 +131,10 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             (run / "master_prometheus_after.prom").write_text(
                 "flexlb_app_engine_balancing_master_dispatch_reason_total{"
                 'engineIp="127.0.0.1",'
-                'reason="predict_threshold",role="PREFILL"} 70.0\n'
+                'reason="predicted_execution_cap",role="PREFILL"} 70.0\n'
                 "flexlb_app_engine_balancing_master_dispatch_reason_total{"
                 'engineIp="127.0.0.1",'
-                'reason="predict_threshold",role="PREFILL"} 30.0\n'
+                'reason="predicted_execution_cap",role="PREFILL"} 30.0\n'
                 "flexlb_app_engine_balancing_master_dispatch_reason_total{"
                 'engineIp="127.0.0.1",'
                 'reason="fixed_window_timeout",role="PREFILL"} 25.0\n',
@@ -144,7 +146,7 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             self.assertEqual(125, result["decisions"]["count"])
             self.assertEqual("prometheus_counter", result["decisions"]["source"])
             self.assertEqual(
-                {"fixed_window_timeout": 25, "predict_threshold": 100},
+                {"fixed_window_timeout": 25, "predicted_execution_cap": 100},
                 result["decisions"]["reasons"],
             )
             self.assertEqual(1, result["decisions"]["log_count"])

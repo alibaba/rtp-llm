@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,18 +8,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -171,16 +170,13 @@ class PrefillWaitingQueueCapTest {
 
     private MockPerformanceModel model(String prefillFormula, int maxWaitingBatches)
             throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0, "max_waiting_batches", maxWaitingBatches),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(
+                tempDir,
+                prefillFormula,
+                1.0,
+                1.0,
+                Map.of("max_waiting_batches", maxWaitingBatches),
+                Map.of());
     }
 
     private static void awaitInflightZero(JavaMockEngineCluster.FastRpcService service,
@@ -197,76 +193,4 @@ class PrefillWaitingQueueCapTest {
                 + " running=" + service.getRunningCount());
     }
 
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        AtomicReference<EngineRpcService.EnqueueBatchResponsePB> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        service.enqueueBatch(request, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("enqueue response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for enqueue response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "enqueue response");
-        return response.get();
-    }
 }

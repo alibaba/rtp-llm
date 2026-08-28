@@ -98,11 +98,29 @@ final class MockControlServer {
     /** Carries an HTTP error status + message back to the handler wrapper. */
     private static final class ApiException extends Exception {
         final int status;
+        final Map<String, Object> response;
 
         ApiException(int status, String message) {
             super(message);
             this.status = status;
+            this.response = Map.of("error", message);
         }
+
+        ApiException(
+                int status,
+                String message,
+                Map<String, Object> response) {
+            super(message);
+            this.status = status;
+            this.response = response;
+        }
+    }
+
+    @FunctionalInterface
+    private interface ServicePostAction {
+        Map<String, Object> apply(
+                JsonNode body,
+                JavaMockEngineCluster.FastRpcService service) throws Exception;
     }
 
     /**
@@ -134,6 +152,40 @@ final class MockControlServer {
         throw new ApiException(400, "request must contain 'engine' or 'port'");
     }
 
+    private void handleServicePost(
+            HttpExchange exchange,
+            ServicePostAction action) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            sendJson(exchange, 200, action.apply(body, service));
+        } catch (ApiException apiFailure) {
+            sendJson(exchange, apiFailure.status, apiFailure.response);
+        } catch (Exception failure) {
+            // Always answer malformed JSON and unexpected handler failures;
+            // if a response was already committed there is nothing left to do.
+            try {
+                sendJson(exchange, 500,
+                        Map.of("error", String.valueOf(failure)));
+            } catch (IOException ignored) {
+                // Response already committed.
+            }
+        }
+    }
+
+    private static Map<String, Object> successResponse(
+            JavaMockEngineCluster.FastRpcService service) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("engine", service.getEngineName());
+        response.put("port", service.getGrpcPort());
+        return response;
+    }
+
     // ────────────────── Endpoint handlers ──────────────────
 
     private void handleSnapshot(HttpExchange exchange) throws IOException {
@@ -162,14 +214,7 @@ final class MockControlServer {
     }
 
     private void handleInject(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
-
+        handleServicePost(exchange, (body, service) -> {
             if (body.has("type")) {
                 // Original Java fault-injection format ({"port"/"engine", "type", "enabled", ...}).
                 String type = body.path("type").asText();
@@ -185,19 +230,13 @@ final class MockControlServer {
                     case "crash_after" -> builder.crashAfterNRequests(enabled ? body.path("n").asInt(5) : 0);
                     case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
-                    default -> {
-                        sendJson(exchange, 400, Map.of("error", "unknown injection type: " + type));
-                        return;
-                    }
+                    default -> throw new ApiException(
+                            400, "unknown injection type: " + type);
                 }
                 service.setFaultConfig(builder.build());
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("status", "ok");
-                response.put("engine", service.getEngineName());
-                response.put("port", service.getGrpcPort());
+                Map<String, Object> response = successResponse(service);
                 response.put("type", type);
-                sendJson(exchange, 200, response);
-                return;
+                return response;
             }
 
             // Python format (_http_inject / set_injection):
@@ -212,51 +251,15 @@ final class MockControlServer {
                     .noRespond(cfg.path("no_respond").asBoolean(false))
                     .build();
             service.setFaultConfig(injected);
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleClearInject(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             service.clearFaultConfig();
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleHealth(HttpExchange exchange) throws IOException {
@@ -290,13 +293,7 @@ final class MockControlServer {
     }
 
     private void handleSetPerf(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             MockPerformanceModel perf = service.getPerformance();
             // Python fields (_http_set_perf):
             if (body.has("prefill_fixed_ms")) {
@@ -318,33 +315,12 @@ final class MockControlServer {
             if (body.has("jitter_pct")) {
                 perf.setJitterPct(body.get("jitter_pct").asDouble());
             }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleSetKvPressure(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             if (body.has("active_kv_tokens")) {
                 // Python semantics (_http_set_kv_pressure): ABSOLUTE
                 // value — state._active_kv_tokens = value.
@@ -356,33 +332,12 @@ final class MockControlServer {
                 builder.kvPressureTokens(tokens);
                 service.setFaultConfig(builder.build());
             }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleSetQueueDepth(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             // NOTE (intentional divergence): the legacy Python queue_depth was a fake
             // display value (only bumped the snapshot "waiting" counter); Java
             // implements it as real enqueue rejection. Field name kept for compatibility.
@@ -392,67 +347,26 @@ final class MockControlServer {
             FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
             builder.queueDepthLimit(depth);
             service.setFaultConfig(builder.build());
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleStopEngine(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
             service.setStopped(true);
             Server server = serversByPort.get(port);
             if (server != null) {
                 server.shutdownNow();
             }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", port);
+            Map<String, Object> response = successResponse(service);
             response.put("action", "stopped");
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return response;
+        });
     }
 
     private void handleStartEngine(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
             service.clearFaultConfig();
             service.resetEnqueueCount();
@@ -493,24 +407,10 @@ final class MockControlServer {
             }
             service.setStopped(false);
             serversByPort.put(port, server);
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", port);
+            Map<String, Object> response = successResponse(service);
             response.put("action", "started");
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return response;
+        });
     }
 
     /**
@@ -526,18 +426,22 @@ final class MockControlServer {
      * matching the production role contract.
      */
     private void handleCancelRequest(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             if (!body.has("request_id")) {
                 throw new ApiException(400, "request must contain 'request_id'");
             }
             long requestId = parseRequestId(body.get("request_id"));
-            JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
+            JavaMockEngineCluster.CancelResult result;
+            try {
+                result = service.cancelRequest(requestId);
+            } catch (UnsupportedOperationException unsupported) {
+                throw new ApiException(
+                        501,
+                        unsupported.getMessage(),
+                        Map.of(
+                                "status", "UNIMPLEMENTED",
+                                "error", unsupported.getMessage()));
+            }
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("status", result.found() ? "ACCEPTED" : "NOT_FOUND");
             response.put("found", result.found());
@@ -546,23 +450,8 @@ final class MockControlServer {
             response.put("engine", service.getEngineName());
             response.put("port", service.getGrpcPort());
             response.put("request_id", requestId);
-            sendJson(exchange, 200, response);
-        } catch (UnsupportedOperationException e) {
-            sendJson(exchange, 501, Map.of(
-                    "status", "UNIMPLEMENTED",
-                    "error", e.getMessage()));
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return response;
+        });
     }
 
     /**

@@ -213,7 +213,9 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
 
     /**
-     * Engine worker info running query length variance
+     * Variance of each role's observable endpoint load. The metric name is
+     * retained for dashboard compatibility; Prefill reports committed work-ms
+     * while Decode and status-only roles report active task counts.
      */
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
@@ -492,7 +494,7 @@ public class MetricConstant {
      */
     public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
 
-    /* ------------------------ Auto-TPM Priority Scheduler ---------------------------- */
+    /* ------------------------ Auto-TPM Request Scheduler ----------------------------- */
 
     /**
      * Auto-TPM request count by priority (QPS), tags: priority
@@ -503,11 +505,6 @@ public class MetricConstant {
      * Auto-TPM schedule latency in ms (timer), tags: priority, result
      */
     public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
-
-    /**
-     * Auto-TPM normal placement success count (QPS), tags: priority
-     */
-    public static final String AUTO_TPM_NORMAL_PLACEMENT_COUNT = "auto_tpm.normal_placement.count";
 
     /**
      * Auto-TPM eviction plan generation count (QPS), tags: priority, case, result
@@ -523,11 +520,6 @@ public class MetricConstant {
      * Auto-TPM evicted victim count (QPS), tags: victim_priority, incoming_priority, stage, case
      */
     public static final String AUTO_TPM_VICTIM_COUNT = "auto_tpm.victim.count";
-
-    /**
-     * Auto-TPM optimistic plan commit conflict count (QPS), tags: case
-     */
-    public static final String AUTO_TPM_PLAN_CONFLICT_COUNT = "auto_tpm.plan_conflict.count";
 
     /**
      * Auto-TPM prefill batcher queue depth (gauge), tags: endpoint
@@ -552,7 +544,7 @@ public class MetricConstant {
     /**
      * Auto-TPM TTFT approximation in ms (timer), tags: priority.
      * Approximated as request arrival → schedule completion on the Master;
-     * true TTFT (first token on the engine) is not observable here (§19.2).
+     * true TTFT (first token on the engine) is not observable here.
      */
     public static final String AUTO_TPM_TTFT_MS = "auto_tpm.ttft_ms";
 
@@ -564,23 +556,14 @@ public class MetricConstant {
 
     /**
      * Auto-TPM decode confirmed running request count (gauge), tags: endpoint.
-     * Dashboard migration note on the value semantics:
-     * <ul>
-     *   <li>Phase 4 and earlier: equalled confirmedRunningCount, i.e. the
-     *       accepted and running layers merged into one gauge.</li>
-     *   <li>Phase 5+: counts ONLY engine-reported {@code RUNNING} tasks; the
-     *       accepted layer moved to {@link #AUTO_TPM_DECODE_ACCEPTED_COUNT}.
-     *       The former merged value = running.count + accepted.count.</li>
-     * </ul>
+     * Counts only engine-reported {@code RUNNING} tasks. Accepted-not-running
+     * ownership is reported by {@link #AUTO_TPM_DECODE_ACCEPTED_COUNT}.
      */
     public static final String AUTO_TPM_DECODE_RUNNING_COUNT = "auto_tpm.decode.running.count";
 
     /**
      * Auto-TPM decode accepted-not-running (engine KV-allocated) request
-     * count (gauge), tags: endpoint. Introduced by the Phase 5 layered view:
-     * before Phase 5 this layer was folded into
-     * {@link #AUTO_TPM_DECODE_RUNNING_COUNT}; from Phase 5 on, the former
-     * merged value = running.count + accepted.count (dashboard migration).
+     * count (gauge), tags: endpoint.
      */
     public static final String AUTO_TPM_DECODE_ACCEPTED_COUNT = "auto_tpm.decode.accepted.count";
 
@@ -618,23 +601,16 @@ public class MetricConstant {
     public static final String AUTO_TPM_CANCEL_QPS = "auto_tpm.cancel.qps";
 
     /**
-     * Auto-TPM plan age — snapshot/plan build to successful commit, ms
-     * (redesign N3 §3.8 placement_plan_age_ms), tags: priority.
-     * Quantifies how stale a lockfree commit's plan view was.
-     */
-    public static final String AUTO_TPM_PLAN_AGE_MS = "auto_tpm.plan_age_ms";
-
-    /**
      * Auto-TPM decode engine-facing load (gauge): confirmed + dispatched
-     * reservations, excluding queued-phase shadow entries (redesign N2/§3.8
-     * decode_shadow_load vs decode_engine_running), tags: endpoint. Compare
-     * against {@link #AUTO_TPM_DECODE_RESERVED_COUNT} to monitor root cause C.
+     * reservations, excluding queued-phase shadow entries, tags: endpoint.
+     * Compare with {@link #AUTO_TPM_DECODE_RESERVED_COUNT} to distinguish
+     * engine-facing load from Prefill-queued reservations.
      */
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
 
     /**
      * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry (review P2-2), tags: kind (yielded/preempted).
+     * found no inflight entry, tags: kind (yielded/preempted).
      * Harmless in isolation, but a burst points at a registration/cleanup
      * race — alert-worthy where a warn log is not.
      */

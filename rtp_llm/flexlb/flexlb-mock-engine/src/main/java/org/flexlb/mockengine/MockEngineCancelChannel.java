@@ -1,7 +1,8 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
+import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.preemption.CancelTarget;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -16,8 +17,7 @@ import java.util.concurrent.CompletableFuture;
  * tombstone return ACCEPTED; a request not known by the specifically addressed
  * Prefill returns NOT_FOUND; Decode rejects this RPC as unsupported.
  *
- * <p><b>Wiring:</b> this class is NOT a Spring component. Production contexts
- * keep {@code UnsupportedEngineCancelChannel}; tests inject this channel
+ * <p><b>Wiring:</b> this class is NOT a Spring component. Tests inject it
  * explicitly, e.g.:
  * <pre>{@code
  *   Map<Integer, FastRpcService> services = ...; // port -> mock engine
@@ -38,21 +38,21 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelOutcome> cancel(CancelTarget target, long requestId,
-                                                   long timeoutMs) {
+    public CompletableFuture<CancelAck> cancel(CancelTarget target, long requestId,
+                                               long timeoutMs) {
         JavaMockEngineCluster.FastRpcService service = target == null
                 ? null : services.get(target.prefillGrpcPort());
         if (service == null) {
-            return CompletableFuture.completedFuture(CancelOutcome.unsupported());
+            return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
         }
         try {
             // Deliberately inspect only the addressed Prefill. Scanning other
             // workers would hide an incorrect Prefill route in tests.
             JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
             return CompletableFuture.completedFuture(
-                    result.found() ? CancelOutcome.accepted() : CancelOutcome.notFound());
+                    result.found() ? CancelAck.ACCEPTED : CancelAck.NOT_FOUND);
         } catch (UnsupportedOperationException e) {
-            return CompletableFuture.completedFuture(CancelOutcome.failed());
+            return CompletableFuture.completedFuture(CancelAck.FAILED);
         } catch (Exception e) {
             // Contract: never throw synchronously; surface as a failed future.
             return CompletableFuture.failedFuture(e);

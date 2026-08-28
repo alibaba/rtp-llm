@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Module Overview
 
 flexlb-sync is the core load balancing module of FlexLB. It handles:
-- Load balancing strategy execution (RandomStrategy, WeightedCacheLoadBalancer, ShortestTTFTStrategy)
+- Full-fleet cost-based Prefill/Decode selection and VIT random selection
 - Worker node status synchronization via gRPC
 - Master election using ZooKeeper
 - Request routing across different role types (PREFILL, DECODE, PDFUSION, VIT)
@@ -13,11 +13,11 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 
 ## Key Architecture Concepts
 
-### Router and LoadBalanceStrategy Pattern
-- `Router` interface defines routing contract for incoming requests
-- `DefaultRouter` orchestrates routing across multiple role types (e.g., PREFILL → DECODE)
-- `LoadBalanceStrategy` interface handles worker selection for a single role type
-- Each role type can use different load balancing strategies
+### Routing and scheduling
+- `DefaultRouter` performs one multi-role selection and returns exact endpoint-generation capabilities
+- `RequestScheduler` and `GlobalQueueCoordinator` own model-wide QUEUE ordering and commit
+- `WorkerBatcher` is the sole endpoint-local SINGLE/FIXED_WINDOW group owner
+- `DeliveryStrategy` implementations choose NON_BATCH or BATCH delivery without reselecting endpoints
 
 ### Role-Based Routing
 The system routes requests through multiple worker types based on model requirements:
@@ -33,8 +33,8 @@ Key classes:
 
 ### Worker Status Synchronization
 - `GrpcWorkerStatusRunner`: Periodically fetches worker status via gRPC
-- `EngineWorkerStatus`: Maintains global worker status mapping
-- `ModelWorkerStatus`: Per-model worker information
+- `EndpointRegistry`: Publishes generation-fenced Prefill/Decode runtimes
+- `WorkerDirectory`: Exposes immutable full-fleet routing snapshots
 - `GrpcCacheStatusCheckRunner`: Syncs KV cache status with flexlb-cache module
 
 ### Master Election
@@ -81,14 +81,20 @@ mvn spotless:apply -Pspotless-check
 ```
 flexlb-sync/
 ├── balance/
+│   ├── endpoint/                  # exact generation ownership and capacity
+│   ├── eviction/                  # priority-only exact-route preemption
+│   ├── planner/                   # endpoint-local decision-group formation
+│   ├── prediction/                # Prefill execution-time estimators
+│   ├── projection/                # frozen queue/TTFT projections
 │   ├── scheduler/
-│   │   ├── Router.java              # Core routing interface
-│   │   └── DefaultRouter.java       # Multi-role router implementation
+│   │   ├── DefaultRouter.java       # one-pass multi-role routing
+│   │   ├── GlobalQueueCoordinator.java # model-wide ordering/commit
+│   │   ├── RequestRegistry.java     # canonical request lifecycle
+│   │   └── WorkerBatcher.java       # endpoint decision/delivery runtime
 │   └── strategy/
-│       ├── LoadBalanceStrategy.java        # Load balancing interface
-│       ├── RandomStrategy.java      # Random selection strategy
-│       ├── ShortestTTFTStrategy.java   # TTFT-based strategy
-│       └── WeightedCacheLoadBalancer.java  # Cache-aware strategy
+│       ├── RandomStrategy.java             # VIT selection
+│       ├── CostBasedPrefillStrategy.java   # Predicted Prefill cost strategy
+│       └── CostBasedDecodeStrategy.java    # KV-weighted Decode strategy
 ├── consistency/
 │   ├── MasterElectService.java      # Master election interface
 │   └── ZookeeperMasterElectService.java  # ZK implementation
@@ -97,8 +103,7 @@ flexlb-sync/
 │   │   ├── GrpcWorkerStatusRunner.java    # Worker status sync
 │   │   └── GrpcCacheStatusCheckRunner.java # Cache status sync
 │   └── status/
-│       ├── EngineWorkerStatus.java     # Global worker status
-│       └── ModelWorkerStatus.java      # Per-model status
+│       └── WorkerDirectory.java        # Immutable routing views and exact capture
 └── service/
     ├── RouteService.java            # High-level routing service
     └── grpc/
@@ -108,8 +113,8 @@ flexlb-sync/
 ## Key Dependencies
 
 This module depends on:
-- **flexlb-common**: Shared data models (ServerStatus, RoleType, MasterRequest/Response)
-- **flexlb-cache**: KV cache management (FlexCacheManager)
+- **flexlb-common**: Shared data models (`BalanceContext`, `ServerStatus`, `RoleType`, `WorkerStatus`)
+- **flexlb-cache**: KV cache management (`CacheAwareService`, `KvCacheManager`)
 - **flexlb-grpc**: gRPC protocol definitions and clients
 
 External dependencies:
@@ -122,16 +127,24 @@ External dependencies:
 ## Important Implementation Notes
 
 ### Rollback Mechanism
-When routing fails for a later role type (e.g., PREFILL succeeds but DECODE fails), the system must rollback local state updates for previously selected workers. See `DefaultRouter.roolBackRoutingFailure()`.
+When routing fails for a later role type (e.g., PREFILL succeeds but DECODE fails),
+`DefaultRouter` closes the exact `SelectedRole` capabilities already selected and
+rolls back any direct-placement endpoint reservations.
 
-### Load Balancer Registration
-All LoadBalanceStrategy implementations must register themselves with `LoadBalanceStrategyFactory` to be accessible. See Spring bean configuration with `@DependsOn` annotation in DefaultRouter.
+### Load Balancer Selection
+The router calls explicit role selectors. Cost-based Prefill and Decode must
+evaluate the complete live fleet before reducing to the configured policy
+winner. Capacity commit, delivery, and priority preemption must consume that
+winner rather than invoke another selector.
 
 ### Worker Status Updates
-Worker status is updated asynchronously by scheduled runners. The routing logic reads from shared `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP` which is concurrently modified.
+Worker status is updated asynchronously by scheduled runners. `EndpointRegistry`
+owns generation-fenced endpoint publication, while `WorkerDirectory` exposes
+immutable routing snapshots and exact captures to strategies.
 
 ### Cache Integration
-The module calls `FlexCacheManager` from flexlb-cache to update cache information received from workers. See `GrpcCacheStatusCheckRunner`.
+The module calls `CacheAwareService` from flexlb-cache to update cache information
+received from workers. See `GrpcCacheStatusCheckRunner`.
 
 ## Configuration
 

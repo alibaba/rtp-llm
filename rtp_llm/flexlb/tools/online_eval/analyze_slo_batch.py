@@ -182,8 +182,12 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
         reason = decision["reason"]
         invalid = (
             (
-                reason == "predict_threshold"
-                and decision["predicted_ms"] < decision["threshold_ms"]
+                # The cap only admits a member that keeps the group under
+                # budget, so a multi-member group must stay below it. The
+                # mandatory head is exempt: it dispatches alone at any cost.
+                reason == "predicted_execution_cap"
+                and decision["batch_size"] > 1
+                and decision["predicted_ms"] >= decision["threshold_ms"]
             )
             or (
                 reason == "fixed_window_timeout"

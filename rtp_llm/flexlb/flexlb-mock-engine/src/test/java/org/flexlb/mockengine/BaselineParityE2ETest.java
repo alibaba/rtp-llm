@@ -38,9 +38,9 @@ class BaselineParityE2ETest {
     void e_switches_off_priority_has_no_effect_and_dispatch_is_fifo() throws Exception {
         // autoTpm=false：批队列用 LEGACY 序（构造时冻结），全部开关保持默认关闭
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false)) {
-            h.config.batchDispatcher().setMaxCollectionWaitMs(5);
-            h.config.batchDispatcher().setMaxRequests(2);
-            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1024);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
+            h.fixedWindowDecision().setMaxRequests(2);
+            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
             h.startAutoPump(10);
 
             // 预热：首笔请求走冷 gRPC 通道 + JIT，异步发送可能被后续批次超越
@@ -88,9 +88,9 @@ class BaselineParityE2ETest {
                     "with all switches off the dispatch order must be exactly FIFO");
 
             // 无任何抢占痕迹
-            verify(h.priorityReporter, never()).reportVictim(anyInt(), anyInt(),
+            verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());
-            verify(h.priorityReporter, never()).reportPriorityPreempt(anyString());
+            verify(h.requestReporter, never()).reportPriorityPreempt(anyString());
 
             // 对照数据：三档平均调度延迟应该同量级（仅输出，不做脆断言）
             Map<Integer, Double> avgLatencyMs = new HashMap<>();
