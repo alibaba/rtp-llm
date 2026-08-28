@@ -13,8 +13,6 @@
 
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
 
-fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报告](flexlb-master-mock-engine-performance-20260717.md)。500 ms 预测阈值、160 ms 固定等待的评估见 [FlexLB Master SLO Batch 性能评估](flexlb-master-slo-batch-evaluation-20260717.md)。
-
 ## 1. 测试目标和边界
 
 测试链路：
