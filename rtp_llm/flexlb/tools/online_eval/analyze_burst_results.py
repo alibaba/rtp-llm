@@ -166,7 +166,7 @@ _DISPATCH_RE = re.compile(
 )
 _DISPATCH_REASON_RE = re.compile(
     r"(target_batch_size|deadline_guard|window_timeout|batch_ready|"
-    r"max_inflight|predict_threshold|fixed_window_timeout|batch_full|"
+    r"max_inflight|predicted_execution_cap|fixed_window_timeout|batch_full|"
     r"queue_overflow|budget_overrun)",
     re.IGNORECASE,
 )

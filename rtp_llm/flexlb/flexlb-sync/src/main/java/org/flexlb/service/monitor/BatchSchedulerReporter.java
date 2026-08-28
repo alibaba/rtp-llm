@@ -1,9 +1,9 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,19 +11,18 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
-import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
-import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
-import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
-import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
+import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
@@ -31,6 +30,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
+import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
@@ -49,7 +49,7 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 public class BatchSchedulerReporter {
 
     private static final String[] FIXED_WINDOW_DISPATCH_REASONS = {
-            "batch_full", "fixed_window_timeout", "predict_threshold"
+            "batch_full", "fixed_window_timeout", "predicted_execution_cap"
     };
 
     private final FlexMonitor monitor;

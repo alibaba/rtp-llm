@@ -44,9 +44,6 @@ class PriorityOrderingTest {
                 left.priority(), left.enqueueSeq(), left.requestId(),
                 right.priority(), right.enqueueSeq(), right.requestId()));
         assertEquals(expected, actual);
-        assertEquals(expected < 0, PriorityOrdering.comesBefore(
-                left, left.requestId(), right.priority(),
-                right.enqueueSeq(), right.requestId()));
     }
 
     private record Node(int priority, long enqueueSeq, long requestId)

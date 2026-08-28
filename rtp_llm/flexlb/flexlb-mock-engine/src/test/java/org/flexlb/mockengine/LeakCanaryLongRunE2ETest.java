@@ -41,11 +41,11 @@ class LeakCanaryLongRunE2ETest {
         // EngineFence, which is a production safety property rather than a leak.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
             h.allowPreemption(VictimStage.PREFILL_QUEUED);
-            // PR-D: rescue removed — reducer deadline + AdmissionLease handle expiry
+            // PR-D: rescue removed — reducer deadline + exact ownership cleanup
             // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
-            h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(64);
-            h.config.batchDispatcher().setMaxRequests(4);
-            h.config.batchDispatcher().setMaxCollectionWaitMs(5);
+            h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(64);
+            h.fixedWindowDecision().setMaxRequests(4);
+            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             // This canary verifies queue eviction and the two injected
             // EnqueueBatch fault windows. Keep the independent post-success
             // backpressure gate out of the way, otherwise it can reject the
@@ -121,11 +121,11 @@ class LeakCanaryLongRunE2ETest {
             // 掩盖完成游标丢记录。
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
-            assertEquals(0L, h.decodeEndpoint(0).inflightHardKvReserved(),
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
                     "no orphaned hard-KV reservation");
-            assertEquals(0, h.decodeEndpoint(0).getAcceptedLayerCount());
-            assertEquals(0, h.prefillEndpoint(0).getBatcher().queueSize());
-            assertEquals(0, h.prefillEndpoint(1).getBatcher().queueSize());
+            assertEquals(0, h.decodeEndpoint(0).layeredAdmissionView().acceptedCount());
+            assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
+            assertEquals(0, h.prefillEndpoint(1).queuedRequestCount());
 
             long accepted = h.services.values().stream()
                     .mapToLong(JavaMockEngineCluster.FastRpcService::getAcceptedCount).sum();

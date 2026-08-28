@@ -1,17 +1,11 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.file.Path;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -19,16 +13,20 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.activeDecodeRequests;
+import static org.flexlb.mockengine.MockEngineTestSupport.activeDecodeRequestsRef;
+import static org.flexlb.mockengine.MockEngineTestSupport.awaitDecodeQuiescence;
+import static org.flexlb.mockengine.MockEngineTestSupport.decodeModel;
+import static org.flexlb.mockengine.MockEngineTestSupport.requestShape;
+import static org.flexlb.mockengine.MockEngineTestSupport.scheduleDecodeCompletion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Concurrency regression tests for the two decode cancel races fixed in
@@ -56,7 +54,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class DecodeCancelRaceTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63200;
 
     @TempDir
@@ -108,17 +105,17 @@ class DecodeCancelRaceTest {
     void cancelInAdmissionWindowNeverLeaksCounters() throws Exception {
         // decode step 50 × sleep_scale 0.1 = 5 ms — fast completions so the
         // stress loop and the final quiescence stay quick.
-        MockPerformanceModel model = model(50.0, null);
+        MockPerformanceModel model = decodeModel(tempDir, 50.0, null);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 132);
 
         int iterations = 300;
         for (int i = 0; i < iterations; i++) {
             long requestId = 1_000L + i;
-            MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, 16);
+            MockPerformanceModel.RequestShape shape = requestShape(model, requestId, 16);
             CyclicBarrier barrier = new CyclicBarrier(2);
             Future<?> scheduleFuture = workerPool.submit(() -> {
                 barrier.await();
-                invokeScheduleDecodeCompletion(decode, shape, -1, null);
+                scheduleDecodeCompletion(decode, shape, -1, null);
                 return null;
             });
             Future<?> cancelFuture = workerPool.submit(() -> {
@@ -130,9 +127,9 @@ class DecodeCancelRaceTest {
             cancelFuture.get(5, TimeUnit.SECONDS);
         }
 
-        awaitQuiescence(decode, 10_000);
+        awaitDecodeQuiescence(decode, 10_000);
 
-        assertEquals(0, getActiveDecodeRequests(decode),
+        assertEquals(0, activeDecodeRequests(decode),
                 "activeDecodeRequests must settle at 0 (no permanent slot leak)");
         assertEquals(0, decode.getActiveKvTokens(),
                 "activeKvTokens must settle at 0 (no permanent KV leak)");
@@ -158,7 +155,7 @@ class DecodeCancelRaceTest {
     void activeDecodeRequestsNeverExceedsCapUnderCancelStorm() throws Exception {
         // decode step 100 × sleep_scale 0.1 = 10 ms — completions fire while
         // the storm is still running, exercising the completion drain too.
-        MockPerformanceModel model = model(100.0, 0);
+        MockPerformanceModel model = decodeModel(tempDir, 100.0, 0);
         int cap = 4;
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, cap);
 
@@ -179,11 +176,11 @@ class DecodeCancelRaceTest {
         CountDownLatch allDone = new CountDownLatch(nRequests + nRequests / 2);
         for (int i = 0; i < nRequests; i++) {
             long requestId = 5_000L + i;
-            MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, 8);
+            MockPerformanceModel.RequestShape shape = requestShape(model, requestId, 8);
             workerPool.submit(() -> {
                 try {
                     startGate.await();
-                    invokeScheduleDecodeCompletion(decode, shape, -1, null);
+                    scheduleDecodeCompletion(decode, shape, -1, null);
                 } catch (Throwable ignored) {
                     // surfaced via the final counter asserts
                 } finally {
@@ -207,14 +204,14 @@ class DecodeCancelRaceTest {
         assertTrue(allDone.await(30, TimeUnit.SECONDS),
                 "storm should finish within 30s, remaining: " + allDone.getCount());
 
-        awaitQuiescence(decode, 20_000);
+        awaitDecodeQuiescence(decode, 20_000);
         sampling.set(false);
         sampler.join(1_000);
 
         assertTrue(maxObserved.get() <= cap,
                 "activeDecodeRequests must never exceed cap " + cap
                         + " — observed max " + maxObserved.get());
-        assertEquals(0, getActiveDecodeRequests(decode),
+        assertEquals(0, activeDecodeRequests(decode),
                 "activeDecodeRequests must settle at 0");
         assertEquals(0, decode.getActiveKvTokens(),
                 "activeKvTokens must settle at 0");
@@ -232,98 +229,8 @@ class DecodeCancelRaceTest {
     private JavaMockEngineCluster.FastRpcService newDecodeService(
             MockPerformanceModel model, int decodeMaxConcurrency) {
         int port = BASE_PORT + nextPortOffset++;
-        JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                "decode-" + port, "127.0.0.1", "decode",
-                EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                port, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats(), 10_000_000L, decodeMaxConcurrency);
-        services.put(port, service);
-        return service;
+        return MockEngineTestSupport.decodeService(
+                model, port, services, scheduler, decodeMaxConcurrency);
     }
 
-    /**
-     * Builds a performance model with a single-point decode curve and an
-     * optional {@code decode.max_pending_requests} opt-in (null = absent =
-     * legacy soft accounting).
-     */
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests)
-            throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        decodeConfig.put("scale", 1.0);
-        decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 0.1,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", decodeConfig));
-        MockMasterConfig.writeWithPrefillExpression(master, "10");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
-    private static MockPerformanceModel.RequestShape shapeOf(
-            MockPerformanceModel model, long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return model.shape(input.build(), new MockLruBlockCache(100));
-    }
-
-    // ──────────── Quiescence helper ────────────
-
-    private void awaitQuiescence(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
-            throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (service.getInflightCount() == 0 && service.getRunningCount() == 0
-                    && getActiveDecodeRequests(service) == 0) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        fail("engine did not quiesce: inflight=" + service.getInflightCount()
-                + " running=" + service.getRunningCount()
-                + " activeDecode=" + getActiveDecodeRequests(service)
-                + " kv=" + service.getActiveKvTokens());
-    }
-
-    // ──────────── Reflection helpers ────────────
-
-    private static AtomicInteger activeDecodeRequestsRef(
-            JavaMockEngineCluster.FastRpcService service) throws Exception {
-        Field field = JavaMockEngineCluster.FastRpcService.class
-                .getDeclaredField("activeDecodeRequests");
-        field.setAccessible(true);
-        return (AtomicInteger) field.get(service);
-    }
-
-    private static int getActiveDecodeRequests(JavaMockEngineCluster.FastRpcService service)
-            throws Exception {
-        return activeDecodeRequestsRef(service).get();
-    }
-
-    private static boolean invokeScheduleDecodeCompletion(
-            JavaMockEngineCluster.FastRpcService service,
-            MockPerformanceModel.RequestShape shape,
-            long batchId,
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
-            throws Exception {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
-        method.setAccessible(true);
-        return (Boolean) method.invoke(service, shape, batchId, responseQueue);
-    }
 }

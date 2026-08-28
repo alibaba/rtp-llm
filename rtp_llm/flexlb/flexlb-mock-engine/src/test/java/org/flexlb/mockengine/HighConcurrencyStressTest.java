@@ -2,36 +2,29 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * High-concurrency stress test for the Java mock engine.
@@ -52,31 +45,20 @@ class HighConcurrencyStressTest {
     @TempDir
     Path tempDir;
 
-    private ScheduledExecutorService scheduler;
+    private MockEngineTestCluster cluster;
     private ExecutorService workerPool;
-    private MockControlServer controlServer;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private List<JavaMockEngineCluster.FastRpcService> prefillServices;
     private List<JavaMockEngineCluster.FastRpcService> decodeServices;
 
     @AfterEach
     void tearDown() throws InterruptedException {
-        if (controlServer != null) {
-            controlServer.stop();
-            controlServer = null;
-        }
-        if (services != null) {
-            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                service.shutdown();
-            }
+        if (cluster != null) {
+            cluster.close();
         }
         if (workerPool != null) {
             workerPool.shutdownNow();
             workerPool.awaitTermination(3, TimeUnit.SECONDS);
-        }
-        if (scheduler != null) {
-            scheduler.shutdownNow();
-            scheduler.awaitTermination(3, TimeUnit.SECONDS);
         }
     }
 
@@ -194,183 +176,41 @@ class HighConcurrencyStressTest {
 
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
-        scheduler = Executors.newScheduledThreadPool(16, runnable -> {
-            Thread thread = new Thread(runnable, "mock-engine-scheduler");
-            thread.setDaemon(true);
-            return thread;
-        });
+        cluster = MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode, 16);
         workerPool = Executors.newFixedThreadPool(100, runnable -> {
             Thread thread = new Thread(runnable, "stress-test-worker");
             thread.setDaemon(true);
             return thread;
         });
-        services = new ConcurrentHashMap<>();
-        prefillServices = new ArrayList<>();
-        decodeServices = new ArrayList<>();
-
-        for (int i = 0; i < nPrefill; i++) {
-            int port = BASE_PORT + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
-            services.put(port, service);
-            prefillServices.add(service);
-        }
-
-        for (int i = 0; i < nDecode; i++) {
-            int port = BASE_PORT + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
-            services.put(port, service);
-            decodeServices.add(service);
-        }
-
-        controlServer = new MockControlServer(services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
-        controlServer.start();
+        services = cluster.services();
+        prefillServices = cluster.prefills();
+        decodeServices = cluster.decodes();
     }
 
     // ──────────── Polling helpers ────────────
 
     private long totalCompleted() {
-        return services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                .sum();
+        return cluster.totalCompleted();
     }
 
     private void awaitTotalCompleted(int expected, long timeoutMs) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (totalCompleted() >= expected) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        fail("expected " + expected + " completions, got " + totalCompleted());
+        cluster.awaitCompleted(expected, timeoutMs);
     }
 
     private void assertAllInflightZero() {
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertEquals(0, service.getInflightCount(),
-                    "inflight should be 0 for engine on port " + service.getGrpcPort());
-        }
+        cluster.assertAllInflightZero();
     }
 
     // ──────────── HTTP helpers ────────────
 
     private JsonNode snapshot() throws Exception {
-        String body = httpGet(controlServer.getPort(), "/snapshot");
-        return MAPPER.readTree(body).path("engines");
-    }
-
-    private static String httpGet(int port, String path) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "GET " + path + " failed");
-        return response.body();
+        return cluster.snapshot();
     }
 
     // ──────────── Model helper ────────────
 
     private MockPerformanceModel model(String formula) throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
 
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "unary response");
-        return response.get();
-    }
 }

@@ -3,8 +3,8 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -18,8 +18,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -54,22 +53,25 @@ public class HttpLoadBalanceServer {
 
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final ConfigService configService;
-    private final PriorityScheduler priorityScheduler;
+    private final RequestScheduler requestScheduler;
     private final EndpointRegistry endpointRegistry;
+    private final WorkerDirectory workerDirectory;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  ConfigService configService,
-                                 PriorityScheduler priorityScheduler,
+                                 RequestScheduler requestScheduler,
                                  EndpointRegistry endpointRegistry,
+                                 WorkerDirectory workerDirectory,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
-        this.priorityScheduler = priorityScheduler;
+        this.requestScheduler = requestScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
     }
@@ -127,17 +129,16 @@ public class HttpLoadBalanceServer {
     }
 
     private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
-            Map<String, WorkerStatus> statusMap = modelStatus.getRoleStatusMap(role);
-            if (statusMap == null || statusMap.isEmpty()) {
+            Map<String, WorkerStatus> statusMap = workerDirectory.statusSnapshot(role);
+            if (statusMap.isEmpty()) {
                 continue;
             }
             Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
             rs.setDiscovered(statusMap.size());
             for (WorkerStatus ws : statusMap.values()) {
-                if (ws.isAlive()) {
+                if (ws.pollHealth().reportedAlive()) {
                     rs.setAlive(rs.getAlive() + 1);
                 }
             }
@@ -151,7 +152,7 @@ public class HttpLoadBalanceServer {
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(priorityScheduler.getQueuedRequestCount());
+                    result.setQueueLength(requestScheduler.getQueuedRequestCount());
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
@@ -177,7 +178,7 @@ public class HttpLoadBalanceServer {
                     MasterChangeNotifyResp resp = lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), MasterChangeNotifyReq.class);
+                            .body(Mono.just(resp), MasterChangeNotifyResp.class);
                 }).onErrorResume((Function<Throwable, Mono<ServerResponse>>) e -> {
                     Logger.error("notifyParticipant error", e);
                     return ServerResponse.status(500)
@@ -203,8 +204,8 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            List<RequestLifecycleSnapshot> snapshot =
-                    priorityScheduler.snapshotActiveRequests();
+            List<RequestState> snapshot =
+                    requestScheduler.snapshotActiveRequests();
             QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
@@ -218,7 +219,7 @@ public class HttpLoadBalanceServer {
     }
 
     private QueueSnapshotResponse persistSchedulerSnapshot(
-            List<RequestLifecycleSnapshot> snapshot) throws IOException {
+            List<RequestState> snapshot) throws IOException {
         Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
         cleanOldSchedulerSnapshots();
 
@@ -247,25 +248,41 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", priorityScheduler.getInflightSize());
+            result.put("scheduler_inflight", requestScheduler.getInflightSize());
+            result.put("decode_max_engine_requests",
+                    configService.loadBalanceConfig().getRouter().getRoles()
+                            .getDecode().getAvailability().getMaxEngineRequests());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
-            for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
+            for (Map.Entry<String, PrefillEndpoint> entry
+                    : endpointRegistry.snapshotPrefillEndpoints().entrySet()) {
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
                 ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
-                ep.put("inflight_requests", entry.getValue().getInflightRequestCount());
+                ep.put("inflight_requests", entry.getValue().getLocallyOwnedRequestCount());
                 ep.put("inflight_route_requests",
-                        entry.getValue().getInflightRouteRequestCount());
+                        entry.getValue().getIndividuallyTrackedRequestCount());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);
 
             List<Map<String, Object>> decodeList = new ArrayList<>();
-            for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
+            for (Map.Entry<String, DecodeEndpoint> entry
+                    : endpointRegistry.snapshotDecodeEndpoints().entrySet()) {
+                DecodeEndpoint.LayeredAdmissionView view =
+                        entry.getValue().layeredAdmissionView();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_requests", entry.getValue().getInflightCount());
+                ep.put("reserved_total", view.reserved().size());
+                ep.put("master_queued", view.queuedCount());
+                ep.put("engine_may_have_seen",
+                        Math.max(0, view.reserved().size() - view.queuedCount()));
+                ep.put("confirmed_accepted", view.acceptedCount());
+                ep.put("confirmed_running", view.runningCount());
+                ep.put("total_load", view.routing().totalLoad());
+                ep.put("engine_load", view.routing().engineLoad());
+                ep.put("active_dispatch_permits", view.activeDispatchPermits());
+                ep.put("engine_capacity_used", view.engineCapacityUsed());
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);

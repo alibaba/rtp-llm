@@ -45,7 +45,7 @@ MONITOR_INTERVAL="${MONITOR_INTERVAL:-2}"
 # Experiment-profile inputs used only to construct FLEXLB_CONFIG.
 EXPERIMENT_MAX_INFLIGHT_BATCHES="${EXPERIMENT_MAX_INFLIGHT_BATCHES:-2}"
 EXPERIMENT_BATCH_WAIT_MS="${EXPERIMENT_BATCH_WAIT_MS:-220}"
-EXPERIMENT_EARLY_DISPATCH_MS="${EXPERIMENT_EARLY_DISPATCH_MS:-550}"
+EXPERIMENT_MAX_PREDICTED_EXECUTION_MS="${EXPERIMENT_MAX_PREDICTED_EXECUTION_MS:-550}"
 
 # Raised to eliminate NO_AVAILABLE_WORKER rejections during this stress test.
 EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS="${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS:-2000}"
@@ -56,19 +56,19 @@ if [[ -z "${FLEXLB_CONFIG:-}" ]]; then
         "${PROCESS_CONFIG_FILE}" \
         "${EXPERIMENT_MAX_INFLIGHT_BATCHES}" \
         "${EXPERIMENT_BATCH_WAIT_MS}" \
-        "${EXPERIMENT_EARLY_DISPATCH_MS}" \
+        "${EXPERIMENT_MAX_PREDICTED_EXECUTION_MS}" \
         "${EXPERIMENT_DECODE_MAX_ENGINE_REQUESTS}" <<'PY'
 import json
 import sys
 
-path, max_batches, wait_ms, early_ms, decode_limit = sys.argv[1:]
+path, max_batches, wait_ms, max_predicted_ms, decode_limit = sys.argv[1:]
 payload = json.load(open(path, "r", encoding="utf-8"))
 envs = payload["zone_process_setting"]["process_info"]["envs"]
 document = next(value for key, value in envs if key == "FLEXLB_CONFIG")
 config = json.loads(document)
 config["dispatcher"]["maxInflightBatchesPerPrefillWorker"] = int(max_batches)
-config["dispatcher"]["maxCollectionWaitMs"] = int(wait_ms)
-config["dispatcher"]["earlyDispatchPredictedExecutionMs"] = int(early_ms)
+config["scheduler"]["decision"]["maxCollectionWaitMs"] = int(wait_ms)
+config["scheduler"]["decision"]["maxPredictedExecutionMs"] = int(max_predicted_ms)
 config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = int(decode_limit)
 print(json.dumps(config, separators=(",", ":")))
 PY

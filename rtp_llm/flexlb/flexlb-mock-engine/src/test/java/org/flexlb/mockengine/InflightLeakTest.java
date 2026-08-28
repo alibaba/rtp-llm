@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
@@ -9,26 +8,22 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -41,27 +36,21 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class InflightLeakTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final int BASE_PORT = 62000;
 
     @TempDir
     Path tempDir;
 
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(8);
-    private MockControlServer controlServer;
+    private MockEngineTestCluster cluster;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private List<JavaMockEngineCluster.FastRpcService> prefillServices;
     private List<JavaMockEngineCluster.FastRpcService> decodeServices;
 
     @AfterEach
-    void tearDown() throws InterruptedException {
-        if (controlServer != null) {
-            controlServer.stop();
-            controlServer = null;
+    void tearDown() {
+        if (cluster != null) {
+            cluster.close();
         }
-        scheduler.shutdownNow();
-        scheduler.awaitTermination(3, TimeUnit.SECONDS);
     }
 
     // ──────────── Test 1: Normal Completion — No Leak ────────────
@@ -73,17 +62,17 @@ class InflightLeakTest {
 
         int n = 100;
         // Batch all requests: 50 per prefill engine, with decode routing
-        enqueueBatch(prefillServices.get(0), 1000, 1, n / 2, decodeServices);
-        enqueueBatch(prefillServices.get(1), 2000, n / 2 + 1, n / 2, decodeServices);
+        cluster.enqueueBatch(prefillServices.get(0), 1000, 1, n / 2, decodeServices);
+        cluster.enqueueBatch(prefillServices.get(1), 2000, n / 2 + 1, n / 2, decodeServices);
 
         // Wait for all completions
-        awaitTotalCompleted(n, 10_000);
+        cluster.awaitCompleted(n, 10_000);
 
         // Assert inflight == 0 for all engines
-        assertAllInflightZero();
+        cluster.assertAllInflightZero();
 
         // Assert HTTP snapshot shows inflight: 0 and leak_detected: false
-        JsonNode snapshot = snapshot();
+        JsonNode snapshot = cluster.snapshot();
         assertEquals(services.size(), snapshot.size());
         for (JsonNode engine : snapshot) {
             assertEquals(0, engine.get("inflight").asInt(),
@@ -102,22 +91,22 @@ class InflightLeakTest {
 
         int n = 50;
         // Batch 25 requests per prefill engine
-        enqueueBatch(prefillServices.get(0), 2000, 1, n / 2, decodeServices);
-        enqueueBatch(prefillServices.get(1), 2001, n / 2 + 1, n / 2, decodeServices);
+        cluster.enqueueBatch(prefillServices.get(0), 2000, 1, n / 2, decodeServices);
+        cluster.enqueueBatch(prefillServices.get(1), 2001, n / 2 + 1, n / 2, decodeServices);
 
         // Wait for requests to be in-flight on prefill engine 0
-        awaitInflight(prefillServices.get(0), 1, 1_000);
+        cluster.awaitInflight(prefillServices.get(0), 1, 1_000);
 
         // Stop 1 prefill engine via HTTP /stop_engine
-        httpPost(controlServer.getPort(), "/stop_engine",
+        MockEngineTestSupport.httpPost(cluster.controlPort(), "/stop_engine",
                 "{\"port\":" + prefillServices.get(0).getGrpcPort() + "}");
         assertTrue(prefillServices.get(0).isStopped(), "engine should be stopped");
 
         // Wait for all inflight to drain (scheduled completions still fire after stop)
-        awaitAllInflightZero(5_000);
+        cluster.awaitAllInflightZero(5_000);
 
         // Assert all engines have inflight == 0
-        assertAllInflightZero();
+        cluster.assertAllInflightZero();
     }
 
     // ──────────── Test 3: Fault Injection — Enqueue Error, No Leak ────────────
@@ -128,7 +117,7 @@ class InflightLeakTest {
         startCluster(model, 2, 2);
 
         // Inject enqueue_error on 1 prefill engine via HTTP /inject
-        httpPost(controlServer.getPort(), "/inject",
+        MockEngineTestSupport.httpPost(cluster.controlPort(), "/inject",
                 "{\"port\":" + prefillServices.get(0).getGrpcPort()
                         + ",\"type\":\"enqueue_error\",\"enabled\":true}");
         assertTrue(prefillServices.get(0).getFaultConfig().isFailOnEnqueue());
@@ -146,15 +135,15 @@ class InflightLeakTest {
         }
 
         // Clear injection
-        httpPost(controlServer.getPort(), "/clear_inject",
+        MockEngineTestSupport.httpPost(cluster.controlPort(), "/clear_inject",
                 "{\"port\":" + prefillServices.get(0).getGrpcPort() + "}");
         assertFalse(prefillServices.get(0).getFaultConfig().isFailOnEnqueue());
 
         // Wait for non-failed requests to complete
-        awaitTotalCompleted(n - totalErrors, 5_000);
+        cluster.awaitCompleted(n - totalErrors, 5_000);
 
         // Assert all engines have inflight == 0
-        assertAllInflightZero();
+        cluster.assertAllInflightZero();
 
         // Assert some errors occurred
         assertTrue(totalErrors > 0, "some requests should have failed on the injected engine");
@@ -169,10 +158,10 @@ class InflightLeakTest {
 
         int n = 20;
         // Batch all 20 requests on prefill engine 0, with decode routing
-        enqueueBatch(prefillServices.get(0), 4000, 1, n, decodeServices);
+        cluster.enqueueBatch(prefillServices.get(0), 4000, 1, n, decodeServices);
 
         // Wait for requests to be in-flight
-        awaitInflight(prefillServices.get(0), 1, 1_000);
+        cluster.awaitInflight(prefillServices.get(0), 1, 1_000);
 
         // Cancel 5 requests via cancel(requestId)
         List<Long> cancelledIds = List.of(1L, 2L, 3L, 4L, 5L);
@@ -181,10 +170,10 @@ class InflightLeakTest {
         }
 
         // Wait for all inflight to drain
-        awaitAllInflightZero(5_000);
+        cluster.awaitAllInflightZero(5_000);
 
         // Assert inflight == 0 for all engines
-        assertAllInflightZero();
+        cluster.assertAllInflightZero();
 
         // Assert cancelled requests are not in "running" state
         for (long requestId : cancelledIds) {
@@ -217,7 +206,7 @@ class InflightLeakTest {
         enqueue(prefill, batch(5000, slot(0, inputs)));
 
         // Wait for requests to be in-flight
-        awaitInflight(prefill, 1, 1_000);
+        cluster.awaitInflight(prefill, 1, 1_000);
         assertTrue(prefill.getInflightCount() > 0,
                 "prefill should have inflight > 0 after enqueue");
 
@@ -232,7 +221,7 @@ class InflightLeakTest {
                 "leak should be detected when inflight > 0 and grace expired");
 
         // Assert via HTTP snapshot
-        JsonNode snapshot = snapshot();
+        JsonNode snapshot = cluster.snapshot();
         for (JsonNode engine : snapshot) {
             if (engine.get("port").asInt() == prefill.getGrpcPort()) {
                 assertTrue(engine.get("leak_detected").asBoolean(),
@@ -272,10 +261,10 @@ class InflightLeakTest {
         generateStream(decode, inputB);
 
         // Wait for all inflight to drain (prefill 500ms + decode 1000ms + margin)
-        awaitAllInflightZero(5_000);
+        cluster.awaitAllInflightZero(5_000);
 
         // Assert pendingRequests == 0 on every engine (no leak)
-        assertAllInflightZero();
+        cluster.assertAllInflightZero();
 
         // Assert runningTasks is empty on every engine
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
@@ -293,241 +282,16 @@ class InflightLeakTest {
     // ──────────── Cluster setup ────────────
 
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode) throws IOException {
-        services = new ConcurrentHashMap<>();
-        prefillServices = new ArrayList<>();
-        decodeServices = new ArrayList<>();
-
-        for (int i = 0; i < nPrefill; i++) {
-            int port = BASE_PORT + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
-            services.put(port, service);
-            prefillServices.add(service);
-        }
-
-        for (int i = 0; i < nDecode; i++) {
-            int port = BASE_PORT + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
-            services.put(port, service);
-            decodeServices.add(service);
-        }
-
-        controlServer = new MockControlServer(services, new ConcurrentHashMap<>(), null, null, "127.0.0.1", 0);
-        controlServer.start();
-    }
-
-    // ──────────── Polling helpers ────────────
-
-    private long totalCompleted() {
-        return services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
-                .sum();
-    }
-
-    private void awaitTotalCompleted(int expected, long timeoutMs) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (totalCompleted() >= expected) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        fail("expected " + expected + " completions, got " + totalCompleted());
-    }
-
-    private void awaitInflight(JavaMockEngineCluster.FastRpcService service, int min, long timeoutMs)
-            throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (service.getInflightCount() >= min) {
-                return;
-            }
-            Thread.sleep(5);
-        }
-        fail("inflight never reached " + min + " on port " + service.getGrpcPort()
-                + ", got " + service.getInflightCount());
-    }
-
-    private void awaitAllInflightZero(long timeoutMs) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (services.values().stream()
-                    .allMatch(s -> s.getInflightCount() == 0)) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        StringBuilder sb = new StringBuilder("inflight not zero: ");
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            sb.append("port=").append(service.getGrpcPort())
-                    .append(" inflight=").append(service.getInflightCount()).append(" ");
-        }
-        fail(sb.toString());
-    }
-
-    private void assertAllInflightZero() {
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertEquals(0, service.getInflightCount(),
-                    "inflight should be 0 for engine on port " + service.getGrpcPort());
-        }
-    }
-
-    // ──────────── Batch enqueue helper ────────────
-
-    private void enqueueBatch(JavaMockEngineCluster.FastRpcService prefill,
-                              long batchId, int startRequestId, int count,
-                              List<JavaMockEngineCluster.FastRpcService> decodeEngines) {
-        EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[count];
-        for (int i = 0; i < count; i++) {
-            int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
-            inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
-        }
-        enqueue(prefill, batch(batchId, slot(0, inputs)));
-    }
-
-    // ──────────── HTTP helpers ────────────
-
-    private JsonNode snapshot() throws Exception {
-        String body = httpGet(controlServer.getPort(), "/snapshot");
-        return MAPPER.readTree(body).path("engines");
-    }
-
-    private static String httpGet(int port, String path) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "GET " + path + " failed");
-        return response.body();
-    }
-
-    private static String httpPost(int port, String path, String body) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "POST " + path + " failed");
-        return response.body();
+        cluster = MockEngineTestCluster.start(model, BASE_PORT, nPrefill, nDecode);
+        services = cluster.services();
+        prefillServices = cluster.prefills();
+        decodeServices = cluster.decodes();
     }
 
     // ──────────── Model helper ────────────
 
     private MockPerformanceModel model(String formula) throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "unary response");
-        return response.get();
+        return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
 
     private static List<EngineRpcService.GenerateOutputsPB> generateStream(

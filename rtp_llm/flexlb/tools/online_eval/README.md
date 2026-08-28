@@ -34,7 +34,7 @@ REPLAY_SPEED=20 \
 N_PREFILL=4 \
 N_DECODE=16 \
 SLA_TTFT_MS=800 \
-FLEXLB_CONFIG='{"schemaVersion":1,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50}},"dispatcher":{"type":"BATCH","maxRequests":32,"maxCollectionWaitMs":200},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"sum(computeTokens) + 0.3*sum(hitCacheTokens)"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}}}}}' \
+FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":200}},"dispatcher":{"type":"BATCH"},"router":{"roles":{"prefill":{"executionTimeEstimator":{"type":"FORMULA","expression":"sum(computeTokens) + 0.3*sum(hitCacheTokens)"},"candidateChoice":{"type":"LEAST_RECENTLY_USED_IN_POOL","pool":{"type":"RATIO","ratio":0.3,"minimumWorkers":1}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64}}}}}' \
 rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
 

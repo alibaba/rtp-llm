@@ -19,6 +19,8 @@ public final class PriorityNormalizer {
     /** gRPC metadata header carrying the caller QoS level (fallback channel). */
     public static final String QOS_HEADER_NAME = "x-dashscope-inner-qos-level";
 
+    public static final int MIN_PRIORITY = 1;
+    public static final int MAX_PRIORITY = 100;
     public static final int DEFAULT_PRIORITY = 50;
 
     /**
@@ -54,7 +56,7 @@ public final class PriorityNormalizer {
      * values above 100 are invalid.
      */
     public static boolean isValid(int priority) {
-        return priority > 0 && priority <= 100;
+        return priority >= MIN_PRIORITY && priority <= MAX_PRIORITY;
     }
 
     /**

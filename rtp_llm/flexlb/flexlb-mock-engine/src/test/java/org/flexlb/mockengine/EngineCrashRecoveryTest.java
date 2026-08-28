@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
-import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -14,25 +13,22 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -263,123 +259,17 @@ class EngineCrashRecoveryTest {
     // ──────────── HTTP helpers ────────────
 
     private static String httpGet(int port, String path) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "GET " + path + " failed");
-        return response.body();
+        return MockEngineTestSupport.httpGet(port, path);
     }
 
     private static String httpPost(int port, String path, String body) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "POST " + path + " failed");
-        return response.body();
+        return MockEngineTestSupport.httpPost(port, path, body);
     }
 
     // ──────────── Model helper ────────────
 
     private MockPerformanceModel model(String formula) throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
 
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "unary response");
-        return response.get();
-    }
 }

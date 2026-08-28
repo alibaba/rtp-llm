@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Dynamic cache interval interface for cache status checks.
  * Adjusts the prefillCacheStatusCheckInterval based on cache diff statistics
  * to optimize sync efficiency.
- * 
+ *
  * @author FlexLB
  */
 public interface DynamicCacheIntervalService {

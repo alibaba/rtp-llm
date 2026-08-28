@@ -54,6 +54,12 @@ public abstract class MockWorker {
         server = NettyServerBuilder.forPort(port)
                 .addService(rpcService)
                 .maxInboundMessageSize(16 * 1024 * 1024)
+                // Match EngineGrpcClient's production keepalive contract.  The
+                // gRPC server default rejects the client's two-second idle ping
+                // interval, which turns large loopback fleets into GOAWAY storms
+                // before the scheduling benchmark reaches steady state.
+                .permitKeepAliveTime(1, TimeUnit.SECONDS)
+                .permitKeepAliveWithoutCalls(true)
                 .build()
                 .start();
         actualPort = server.getPort();

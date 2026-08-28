@@ -10,10 +10,10 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.config.ConfigService;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -386,11 +386,16 @@ public class FlexlbGrpcForwarder {
             return guard;
         }
 
-        Logger.warn(
-                "event=flexlb_forward_blocked request_id={} operation={} reason={} "
-                        + "forward_hop={} local_ip={} cached_master={} is_master={}",
-                requestId, operation.logValue(), blockReason.name(), incomingHop,
-                localIp, masterHostIpPort, lbStatusConsistencyService.isMaster());
+        // SELF_TARGET is expected briefly while the cached master converges.
+        // Its tagged metric is sufficient; retain a request log only for an
+        // actual hop-limit violation.
+        if (blockReason == ForwardBlockReason.HOP_LIMIT) {
+            Logger.warn(
+                    "event=flexlb_forward_blocked request_id={} operation={} reason={} "
+                            + "forward_hop={} local_ip={} cached_master={} is_master={}",
+                    requestId, operation.logValue(), blockReason.name(), incomingHop,
+                    localIp, masterHostIpPort, lbStatusConsistencyService.isMaster());
+        }
         reportForwardResult(ipOfOrLocal(masterHostIpPort), blockReason.name());
         return guard;
     }

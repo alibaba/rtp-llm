@@ -64,10 +64,16 @@ import sys
 
 stale_ms, max_batches, status_rpc_ms = map(int, sys.argv[1:])
 print(json.dumps({
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "scheduler": {
         "type": "QUEUE",
         "ordering": {"type": "PRIORITY"},
+        "decision": {
+            "type": "FIXED_WINDOW",
+            "maxRequests": 32,
+            "maxCollectionWaitMs": 10,
+            "maxPredictedExecutionMs": 550,
+        },
         "capacity": {"maxOutstandingRequestsGlobal": 5000},
         "lifecycle": {
             "staleInflightTimeoutMs": stale_ms,
@@ -77,24 +83,16 @@ print(json.dumps({
     },
     "dispatcher": {
         "type": "BATCH",
-        "maxRequests": 32,
-        "maxCollectionWaitMs": 10,
-        "earlyDispatchPredictedExecutionMs": 550,
         "maxInflightBatchesPerPrefillWorker": max_batches,
     },
     "router": {
-        "availabilityHysteresisPercent": 0,
         "roles": {
             "prefill": {
-                "availability": {"maxPendingRequests": 100000},
-                "selector": {
-                    "type": "ESTIMATED_TTFT",
-                    "candidateChoice": {
-                        "type": "RANDOM_WITHIN_TOLERANCE",
-                        "outlierRejection": {
-                            "maxPendingVsAverageMultiplier": 1.5,
-                            "maxWaitVsAverageMultiplier": 3.0,
-                        },
+                "candidateChoice": {
+                    "type": "RANDOM_WITHIN_TOLERANCE",
+                    "outlierRejection": {
+                        "maxPendingVsAverageMultiplier": 1.5,
+                        "maxProjectedDrainVsAverageMultiplier": 3.0,
                     },
                 },
             },
