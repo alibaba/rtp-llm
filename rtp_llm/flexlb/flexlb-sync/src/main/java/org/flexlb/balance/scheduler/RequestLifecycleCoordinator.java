@@ -75,18 +75,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
     private static final long DEFAULT_CANCEL_ACK_TIMEOUT_MS = 50L;
     static final int OUTSTANDING_ADMISSION_CLOSED = -1;
 
-    // ── C fence-attribution instrumentation (Jack) ──
-    // Cancels routed to the engine fence instead of a local terminal: these
-    // hold resources until an authoritative terminal arrives, so they are the
-    // candidate population for inflight-slot leaks. Rate-limited info (10s).
-    private static final java.util.concurrent.atomic.AtomicLong FENCE_CANCEL_COUNT =
-            new java.util.concurrent.atomic.AtomicLong();
-    private static final java.util.concurrent.atomic.AtomicLong FENCE_CANCEL_LOCAL_COUNT =
-            new java.util.concurrent.atomic.AtomicLong();
-    private static final java.util.concurrent.atomic.AtomicLong FENCE_CANCEL_LAST_LOG_MS =
-            new java.util.concurrent.atomic.AtomicLong();
-    private static final long FENCE_LOG_INTERVAL_MS = 10_000L;
-
     private final RequestCompletionPublisher completionPublisher;
     /** Sole semantic deadline/retention owner for the canonical slot directory. */
     private final RequestExpirationController expirationController;
@@ -1035,7 +1023,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             BatchItem item = entry.activeItem();
             if (item == null) {
                 entry.rememberCancellation(reason, detail);
-                FENCE_CANCEL_LOCAL_COUNT.incrementAndGet();
                 localCompletion = beginTerminalLocked(
                         entry,
                         false,
@@ -1048,7 +1035,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
                 entry.rememberCancellation(reason, detail);
                 if (entry.canClaimLocalTerminal()
                         && isLocallyReversible(current)) {
-                    FENCE_CANCEL_LOCAL_COUNT.incrementAndGet();
                     localCompletion = beginTerminalLocked(
                             entry,
                             true,
@@ -1060,22 +1046,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
                                     detail));
                 } else {
                     fenceReduction = entry.requestCancellationFence(detail);
-                    // C fence attribution: cancel could not terminate locally
-                    // (delivery already started / irreversible claim kind) — the
-                    // engine fence now owns reconciliation.
-                    long fenceTotal = FENCE_CANCEL_COUNT.incrementAndGet();
-                    long nowMs = System.currentTimeMillis();
-                    long last = FENCE_CANCEL_LAST_LOG_MS.get();
-                    if (nowMs - last >= FENCE_LOG_INTERVAL_MS
-                            && FENCE_CANCEL_LAST_LOG_MS.compareAndSet(last, nowMs)) {
-                        Logger.info(
-                                "cancel routed to engine fence census: fenced={} "
-                                        + "local_terminated={} latest_request_id={} reason={} "
-                                        + "state={} claim_kind={}",
-                                fenceTotal, FENCE_CANCEL_LOCAL_COUNT.get(),
-                                requestId, reason, current.state(),
-                                current.deliveryClaimKind());
-                    }
                 }
             }
             result = entry.snapshot();

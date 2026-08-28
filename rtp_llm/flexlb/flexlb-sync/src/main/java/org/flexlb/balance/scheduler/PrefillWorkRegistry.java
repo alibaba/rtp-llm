@@ -40,7 +40,6 @@ import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.PriorityBlockingQueue;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
@@ -58,25 +57,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
 
     /** Production RTP-LLM raw {@code ErrorCode::PRIORITY_PREEMPTED}. */
     private static final long PRIORITY_PREEMPTED_ERROR_CODE = 8429L;
-
-    // ── Leak-attribution instrumentation (Jack B1/B3) ──
-    // O(1) lock-free counters on the terminal dead-point path; a rate-limited
-    // info summary (10s window) keeps the steady-state logging cost at one
-    // line per window even at full reconcile throughput.
-    private static final AtomicLong DEADPOINT_UNKNOWN_OWNER = new AtomicLong();
-    private static final AtomicLong DEADPOINT_STILL_ACTIVE = new AtomicLong();
-    private static final AtomicLong DEADPOINT_BATCH_MISMATCH = new AtomicLong();
-    private static final AtomicLong DEADPOINT_LAST_LOG_MS = new AtomicLong();
-    private static final AtomicLong RECONCILE_FAILURE_COUNT = new AtomicLong();
-    private static final AtomicLong RECONCILE_FAILURE_LAST_LOG_MS = new AtomicLong();
-    private static final long INSTRUMENT_LOG_INTERVAL_MS = 10_000L;
-
-    private static boolean logIntervalElapsed(AtomicLong lastLogMs) {
-        long nowMs = System.currentTimeMillis();
-        long last = lastLogMs.get();
-        return nowMs - last >= INSTRUMENT_LOG_INTERVAL_MS
-                && lastLogMs.compareAndSet(last, nowMs);
-    }
 
     enum LeaseState {
         OPEN,
@@ -1593,31 +1573,24 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             try {
                 committedPublication.run();
             } catch (Throwable failure) {
-                logReconcileFailureRateLimited("committed_publication", failure);
                 outcome.publicationFailed(failure);
                 try {
                     failedReduction.run();
                 } catch (Throwable failClosedFailure) {
                     // The preallocated outcome uses a fixed first-failure slot;
                     // canonical reduction must not allocate suppressed storage.
-                    logReconcileFailureRateLimited(
-                            "fail_closed_reduction", failClosedFailure);
                     outcome.publicationFailed(failClosedFailure);
                 }
             }
         } catch (RuntimeException | Error failure) {
             if (canonicalMutationStarted && outcome != null) {
-                logReconcileFailureRateLimited("canonical_mutation", failure);
                 outcome.publicationFailed(failure);
                 try {
                     failedReduction.run();
                 } catch (Throwable failClosedFailure) {
-                    logReconcileFailureRateLimited(
-                            "fail_closed_reduction", failClosedFailure);
                     outcome.publicationFailed(failClosedFailure);
                 }
             } else {
-                logReconcileFailureRateLimited("reconcile_prepare", failure);
                 try {
                     failedReduction.run();
                 } catch (Throwable failClosedFailure) {
@@ -1652,9 +1625,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 new IdentityHashMap<>());
         Set<BatchWork> batches = java.util.Collections.newSetFromMap(
                 new IdentityHashMap<>());
-        // D shutdown census: per-batch member accounting for the inflight dump.
-        // counters[0]=members [1]=active [2]=protected [3]=stop_pending
-        IdentityHashMap<BatchWork, long[]> batchCensus = new IdentityHashMap<>();
         Throwable invariantFailure = null;
         Retirement plannedRetirement;
         lock.lock();
@@ -1699,40 +1669,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                 if (entry.batchWork != null) {
                     batches.add(entry.batchWork);
                     leases.add(entry.batchWork.lease);
-                    long[] counters = batchCensus.computeIfAbsent(
-                            entry.batchWork, k -> new long[4]);
-                    counters[0]++;
-                    if (entry.isActive()) {
-                        counters[1]++;
-                    }
-                    if (entry.protection != null) {
-                        counters[2]++;
-                    }
-                    if (entry.stopTerminalPending) {
-                        counters[3]++;
-                    }
-                }
-            }
-
-            // D shutdown dump: every inflight batch that retirement is about to
-            // tear down, with the leak-attribution fields (batchId / age /
-            // members / protected). One-shot at generation retirement — zero
-            // steady-state cost.
-            if (!batchCensus.isEmpty()) {
-                long nowMs = System.currentTimeMillis();
-                org.flexlb.util.Logger.info(
-                        "prefill retirement inflight-batches dump: batch_count={} "
-                                + "(fields: batch_id age_ms members active protected stop_pending)",
-                        batchCensus.size());
-                for (Map.Entry<BatchWork, long[]> batchEntry : batchCensus.entrySet()) {
-                    BatchWork batch = batchEntry.getKey();
-                    long[] counters = batchEntry.getValue();
-                    org.flexlb.util.Logger.info(
-                            "retirement inflight batch: batch_id={} age_ms={} members={} "
-                                    + "active={} protected={} stop_pending={}",
-                            batch.lease.batchId,
-                            Math.max(0L, nowMs - batch.phaseBaseMs),
-                            counters[0], counters[1], counters[2], counters[3]);
                 }
             }
 
@@ -2165,11 +2101,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
             RequestEntry entry = requests.get(task.requestId());
             if (entry == null || entry.isActive()
                     || !matchesObservedBatch(entry, task.batchId())) {
-                // B1 dead-point census (new-base counterpart of the legacy
-                // finishedByBatch[0] drop): an engine terminal that reconcile
-                // silently discards. Sustained non-zero counts ≈ mock A1
-                // tracked cancels means typed terminals leak inflight slots.
-                recordTerminalDeadPoint(entry, task);
                 continue;
             }
             TerminalObservation terminal = TerminalObservation.from(
@@ -2178,34 +2109,6 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
                     task.requestId(), terminal, TerminalObservation::merge);
         }
         return terminals;
-    }
-
-    private static void recordTerminalDeadPoint(
-            RequestEntry entry, WorkerStatus.TaskObservation task) {
-        if (entry == null) {
-            DEADPOINT_UNKNOWN_OWNER.incrementAndGet();
-        } else if (entry.isActive()) {
-            DEADPOINT_STILL_ACTIVE.incrementAndGet();
-        } else {
-            DEADPOINT_BATCH_MISMATCH.incrementAndGet();
-        }
-        if (logIntervalElapsed(DEADPOINT_LAST_LOG_MS)) {
-            org.flexlb.util.Logger.info(
-                    "prefill terminal dead-point census: unknown_owner={} still_active={} "
-                            + "batch_mismatch={} latest_request_id={} latest_batch_id={}",
-                    DEADPOINT_UNKNOWN_OWNER.get(), DEADPOINT_STILL_ACTIVE.get(),
-                    DEADPOINT_BATCH_MISMATCH.get(), task.requestId(), task.batchId());
-        }
-    }
-
-    /** B3 census: reconcile failure paths (publication / fail-closed reduction). */
-    private static void logReconcileFailureRateLimited(String stage, Throwable failure) {
-        long total = RECONCILE_FAILURE_COUNT.incrementAndGet();
-        if (logIntervalElapsed(RECONCILE_FAILURE_LAST_LOG_MS)) {
-            org.flexlb.util.Logger.info(
-                    "prefill reconcile failure census: total={} stage={} failure={}",
-                    total, stage, String.valueOf(failure));
-        }
     }
 
     private static WorkerStatusFact terminalFact(
