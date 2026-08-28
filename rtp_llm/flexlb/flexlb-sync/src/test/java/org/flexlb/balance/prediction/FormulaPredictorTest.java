@@ -1,5 +1,6 @@
 package org.flexlb.balance.prediction;
 
+import org.flexlb.config.RoutingConfig;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -322,6 +323,55 @@ class FormulaPredictorTest {
         }
         long result = (long) p.evaluator().predictBatchMs(batchFeatures(items));
         assertTrue(result > 0, "Large batch should produce positive prediction");
+    }
+
+    // ---- code default (production fit) guard ----
+
+    @Test
+    void defaultExpressionPredictsProductionScalePrefillLatency() {
+        FormulaPredictor p = new FormulaPredictor(
+                RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION);
+
+        // All-miss single requests, verified against the production DSv4 fit:
+        // 512 -> ~219 ms, 32768 -> ~342 ms, 49152 -> ~494 ms. The legacy
+        // 1 ms/token default predicted 32768 -> 32768 ms (96x too slow).
+        long v512 = p.evaluator().estimateMs(512, 0);
+        long v32k = p.evaluator().estimateMs(32768, 0);
+        long v48k = p.evaluator().estimateMs(49152, 0);
+        assertTrue(v512 >= 210 && v512 <= 230,
+                "512 all-miss expected ~219ms, got " + v512);
+        assertTrue(v32k >= 330 && v32k <= 350,
+                "32768 all-miss expected ~342ms, got " + v32k);
+        assertTrue(v48k >= 480 && v48k <= 510,
+                "49152 all-miss expected ~494ms, got " + v48k);
+
+        // Cache hits shorten the prediction: 32768 with half cached ~274ms.
+        long v32kHalf = p.evaluator().estimateMs(32768, 16384);
+        assertTrue(v32kHalf >= 260 && v32kHalf <= 290,
+                "32768 half-cached expected ~274ms, got " + v32kHalf);
+        assertTrue(v32kHalf < v32k, "cache hits must reduce the prediction");
+    }
+
+    @Test
+    void defaultExpressionEvaluatesInBatchModeWithBatchSizeStairs() {
+        FormulaPredictor p = new FormulaPredictor(
+                RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION);
+
+        long single = p.evaluator().estimateMs(512, 0);
+
+        List<PrefillBatchFeatures.Item> items = new ArrayList<>();
+        for (int i = 0; i < 32; i++) {
+            items.add(item(512, 0));
+        }
+        long batch = (long) p.evaluator().predictBatchMs(batchFeatures(items));
+
+        // batchSize stairs engage only in batch mode: a 32-request batch of
+        // 512-token all-miss requests predicts above a single request but
+        // stays in the same order of magnitude (continuous-batching fit).
+        assertTrue(batch > single,
+                "batch of 32 should exceed a single request, got " + batch);
+        assertTrue(batch < single * 4,
+                "batch penalty should stay moderate, got " + batch);
     }
 
     // ---- power operator ----
