@@ -142,25 +142,24 @@ def default_perf() -> dict:
     resolves it from the master-config FORMULA expression (or the
     production-fit code default when the estimator is omitted), so mock
     execution time and master routing predictions always share one formula.
-    The legacy silent ``prefill.fixed_ms`` fallback was removed. Only the
-    decode batch curve is an explicit perf-JSON concern.
+    The legacy silent ``prefill.fixed_ms`` fallback was removed.
+
+    Decode timing is likewise NOT configured (task #69): the mock prices
+    decode per STEP with the production DSv4 fit — step_ms = 19.5 +
+    0.175 x running, 2.6 tokens/step (MTP acceptance fold) — as the code
+    default, aligning throughput/queueing economics with production
+    (low-batch ~515 tok/s at running=4, full-batch ~7900 tok/s at 128).
+    The former explicit ``step_ms_by_batch`` curve approximated the same
+    step latencies but without the MTP fold, overstating decode duration
+    ~2.6x; it was removed so all flexlb_ft cases run on the production
+    caliber. Suites that need custom step pricing still declare
+    ``step_ms_by_batch`` / ``step_base_ms`` explicitly.
     """
     return {
         "block_size": 1024,
         "sleep_scale": 1.0,
         "decode": {
             "scale": 1.0,
-            "step_ms_by_batch": [
-                [1, 20.0],
-                [2, 22.0],
-                [4, 25.0],
-                [8, 28.0],
-                [16, 30.0],
-                [32, 35.0],
-                [64, 40.0],
-                [128, 45.0],
-                [256, 50.0],
-            ],
         },
     }
 

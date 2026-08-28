@@ -44,8 +44,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * client's empty_response detection for zero-frame streams).
  *
  * <p>Topology per test: 1 prefill + 1 decode engine, in-process (no gRPC
- * server), prefill formula 100 ms, decode step 50 ms x 8 output tokens =
- * 400 ms decode — the two frames are ~400 ms apart, comfortably measurable.
+ * server), prefill formula 100 ms, decode step 50 ms x 8 steps (tokens_per_step
+ * pinned to 1 so output_len 8 == 8 steps) = 400 ms decode — the two frames are
+ * ~400 ms apart, comfortably measurable.
  */
 class MultiFrameStreamTtftTest {
 
@@ -188,6 +189,7 @@ class MultiFrameStreamTtftTest {
                 "jitter_pct", 0.0,
                 "prefill", Map.of("scale", 1.0),
                 "decode", Map.of("scale", 1.0,
+                        "tokens_per_step", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
         MockMasterConfig.writeWithPrefillExpression(master, prefillFormulaMs);
         MockPerformanceModel model = MockPerformanceModel.load(performance.toString(), master.toString());

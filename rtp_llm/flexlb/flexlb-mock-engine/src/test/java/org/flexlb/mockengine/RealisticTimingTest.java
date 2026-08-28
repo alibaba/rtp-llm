@@ -31,7 +31,8 @@ import static org.junit.jupiter.api.Assertions.fail;
  * <p>Configures a 1P/2D cluster with:
  * <ul>
  *   <li>Prefill {@code fixed_ms = 100} (100 ms per prefill batch)</li>
- *   <li>Decode {@code step_ms = 5} with {@code outputLen = 10} → 50 ms per decode request</li>
+ *   <li>Decode {@code step_ms = 5} with {@code outputLen = 10} and
+ *       {@code tokens_per_step = 1} → 10 steps × 5 ms = 50 ms per decode request</li>
  * </ul>
  *
  * <p>Enqueues 5 requests and measures the wall-clock completion time of each.
@@ -176,7 +177,8 @@ class RealisticTimingTest {
                 "block_size", 1024,
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 5.0)))));
+                "decode", Map.of("scale", 1.0, "tokens_per_step", 1.0,
+                        "step_ms_by_batch", List.of(List.of(1, 5.0)))));
         MockMasterConfig.writeWithPrefillExpression(master, "100");
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }

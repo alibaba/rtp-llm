@@ -36,11 +36,14 @@ import static org.junit.jupiter.api.Assertions.fail;
  *
  * <p>Model under test: every admitted decode request becomes a DecodeStream in
  * a per-engine running batch; a single chained scheduler tick advances ALL
- * running streams one token per step, with the step duration priced from the
- * step_ms_by_batch curve at the CURRENT running count when the step is armed
- * (a mid-flight joiner waits for the next boundary — awaitsFirstStep). A
- * stream reaching outputLen completes at that boundary and the waiting-queue
- * head is promoted immediately (production top-up).
+ * running streams one step per tick (tokens_per_step tokens per stream; this
+ * suite pins tokens_per_step=1 so the step-count assertions below stay exact
+ * — the MTP fold is covered by ProductionCaliberDecodeTest), with the step
+ * duration priced from the step_ms_by_batch curve at the CURRENT running
+ * count when the step is armed (a mid-flight joiner waits for the next
+ * boundary — awaitsFirstStep). A stream exhausting its step budget completes
+ * at that boundary and the waiting-queue head is promoted immediately
+ * (production top-up).
  *
  * <p>Observation channel: each request is admitted with its OWN
  * LinkedBlockingQueue (the direct generate_stream path), so the terminal
@@ -349,6 +352,9 @@ class ContinuousBatchingDecodeTest {
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
         decodeConfig.put("scale", 1.0);
+        // Pin the MTP fold to 1 token/step: the timeline assertions below
+        // count steps 1:1 with output tokens.
+        decodeConfig.put("tokens_per_step", 1.0);
         decodeConfig.put("step_ms_by_batch", stepCurve);
         MAPPER.writeValue(performance.toFile(), Map.of(
                 "block_size", 1024,

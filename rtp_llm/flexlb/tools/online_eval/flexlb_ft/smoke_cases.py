@@ -214,12 +214,13 @@ def t3_multi_request_isolation(ctx: CaseContext):
     rids = [ops.next_request_id(base) for _ in range(3)]
     cancel_rid = rids[1]  # B
     # B runs a long decode so the cancel lands while it is still decoding.
-    # The default output_len=10 finishes decode in ~200ms and races the
+    # The default output_len=10 finishes decode in ~80ms and races the
     # cancel: the engine finishes first, the master then (correctly) returns
     # the terminal state idempotently without forwarding an engine cancel,
-    # and verify_engine_cancelled flaps.  200 tokens ≈ 4-5s of decode at the
-    # default perf step_ms, comfortably spanning the cancel window.
-    long_output_len = 200
+    # and verify_engine_cancelled flaps.  500 tokens ≈ 3.8s of decode at the
+    # default production-fit step pricing (ceil(500/2.6)=193 steps ×
+    # (19.5+0.175×running) ms), comfortably spanning the cancel window.
+    long_output_len = 500
     try:
 
         def _schedule(rid: int):
@@ -261,24 +262,24 @@ def t3_multi_request_isolation(ctx: CaseContext):
                 # post-mortem): under NON_BATCH dispatch the direct stream's
                 # GenerateInputPB must carry the SAME output_len the
                 # ScheduleRequest carried.  A default-shape rebuild
-                # (output_len=10) finishes B's decode in ~200ms — inside the
+                # (output_len=10) finishes B's decode in ~80ms — inside the
                 # cancel-path latency (~150-250ms) — turning the docstring's
                 # "comfortably spanning" cancel window into a coin flip on
                 # every NON_BATCH run (observed: wn full-run + wn solo FAIL
                 # with B completed before the engine-side cancel landed,
-                # while sn flapped run-dependent).  With output_len=200 the
-                # ~4s decode dwarfs the cancel path on both dispatch modes.
+                # while sn flapped run-dependent).  With output_len=500 the
+                # ~3.8s decode dwarfs the cancel path on both dispatch modes.
                 kwargs = {"output_len": long_output_len} if rid == cancel_rid else {}
                 input_pb = ops.build_generate_input(rid, **kwargs)
             handles.append(ops.start_stream(resp, rid, input_pb=input_pb))
 
         # Wait for the SHORT requests' (A, C) first output only.  In batch
         # mode the mock engine's FetchResponse surfaces the first message
-        # only after decode completes, so waiting for B (output_len=200)
+        # only after decode completes, so waiting for B (output_len=500)
         # would mean B is already terminal when the cancel fires — the
         # master then (correctly) answers REQUEST_STATE_COMPLETED
         # idempotently and never forwards an engine cancel.  A/C finish in
-        # ~1s while B still has ~3.5s of decode left, so cancelling right
+        # ~1s while B still has ~3.3s of decode left, so cancelling right
         # after A/C's first output lands the cancel mid-decode.
         if not all(handles[i].wait_first_output(15.0) for i in (0, 2)):
             for h in handles:
