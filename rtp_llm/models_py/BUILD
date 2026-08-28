@@ -59,6 +59,7 @@ py_library(
         ":utils",
         ":tile_kernels_mhc",
         "//rtp_llm:warmup",
+        "//rtp_llm/models_py/kernel_tuning",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
