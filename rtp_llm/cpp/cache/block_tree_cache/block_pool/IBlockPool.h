@@ -67,6 +67,9 @@ public:
 
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
+    // Blocks that can be reclaimed for a new request: physical free blocks plus
+    // blocks held exclusively by BlockTreeRefType::CACHE.
+    size_t availableBlocksNum() const;
     size_t usedBlocksNum() const;
     size_t activeBlocksNum() const;
 
@@ -80,7 +83,6 @@ protected:
     virtual bool onLastTreeRefNoLock(BlockIdxType) {
         return true;
     }
-    virtual void onCacheRefChangedNoLock(BlockIdxType, bool) {}
     virtual bool hasExternalRefNoLock(BlockIdxType) const {
         return false;
     }
@@ -107,7 +109,9 @@ protected:
     uint32_t treeRefCountNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block, BlockTreeRefType ref_type) const;
     bool     isActiveNoLock(BlockIdxType block) const;
+    bool     isAvailableNoLock(BlockIdxType block) const;
     void     updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active);
+    void     updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available);
     void     freeAllocatedBlockNoLock(BlockIdxType block);
 
     mutable std::mutex mutex_;
@@ -140,6 +144,7 @@ private:
     std::vector<BlockIdxType>                                 released_blocks_;
     size_t                                                    free_head_{0};
     size_t                                                    active_blocks_num_{0};
+    size_t                                                    available_blocks_num_{0};
 };
 
 }  // namespace rtp_llm

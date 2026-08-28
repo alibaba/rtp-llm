@@ -49,7 +49,6 @@ public:
     uint32_t refCount(BlockIdxType block) const;
     using IBlockPool::referencedBlocksNum;
     size_t referencedBlocksNum() const;
-    size_t activeTreeCachedBlocksNum() const;
 
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
@@ -79,7 +78,6 @@ public:
 protected:
     void onFirstTreeRefNoLock(BlockIdxType block) override;
     bool onLastTreeRefNoLock(BlockIdxType block) override;
-    void onCacheRefChangedNoLock(BlockIdxType block, bool cached) override;
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
@@ -128,7 +126,6 @@ private:
 private:
     std::vector<uint32_t> refcounts_;
     size_t                request_referenced_blocks_num_{0};
-    size_t                active_tree_cached_blocks_num_{0};
 
     torch::Tensor cache_aligned_buffer_;
     void*         cache_base_ptr_{nullptr};
