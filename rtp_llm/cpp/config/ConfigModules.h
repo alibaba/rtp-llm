@@ -191,13 +191,13 @@ struct KVCacheConfig {
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
 
-    // DSV4 fixed-allocation pool block count. 0 means the fixed regions
-    // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
-    // linear-step-derived block count.
+    // Legacy DSV4 fixed-allocation pool block count. Kept for compatibility
+    // with older callers; HCA_STATE has its own explicit sizing knob below.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
-    // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
-    // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
+    // DSV4 HCA_STATE is an active-tail ring and does not participate in prefix
+    // reuse. The server CLI supplies the default fixed size (256); zero here
+    // means no explicit override for programmatic callers.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned

@@ -273,6 +273,23 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 
+void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, uint32_t block_num) {
+    if (block_num == 0) {
+        return;
+    }
+    for (auto& descs : layer_descs) {
+        for (auto& desc : descs) {
+            if (desc.tag != "hca_state") {
+                continue;
+            }
+            auto capacity = desc.capacity.value_or(CacheCapacityPolicyDesc{});
+            capacity.explicit_block_num     = block_num;
+            capacity.charge_to_paged_budget = true;
+            desc.capacity                   = capacity;
+        }
+    }
+}
+
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
                                             const KVCacheConfig&     kv_cache_config,
@@ -310,6 +327,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
 
     if (!model_config.kv_cache_spec_descs.empty()) {
         validateHybridPoolDescs(model_config, kernel_tokens_per_block, gen_num_per_cycle);
+        auto layer_descs = model_config.kv_cache_spec_descs;
+        applyDsv4HcaStatePoolCapacity(layer_descs, kv_cache_config.dsv4_hca_state_pool_blocks);
         SpecBuildContext ctx;
         ctx.dtype                   = dtype;
         ctx.seq_size_per_block      = physical_tokens_per_block;
@@ -319,9 +338,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         ctx.kernel_tokens_per_block = kernel_tokens_per_block;
         ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
         auto refreshed_specs        = CacheConfigCreator::buildLayerSpecsFromDescs(
-            model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
+            layer_descs, ctx, model_config.num_layers);
         populateGroupsFromLayerSpecs(
-            config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
+            config, layer_descs, refreshed_specs, model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
