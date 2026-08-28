@@ -35,6 +35,7 @@ import bisect
 import json
 import math
 import os
+import re
 import sys
 
 TAG = "[canvas_report_gen]"
@@ -320,6 +321,25 @@ def load_json(path):
         return json.load(f)
 
 
+def normalize_out_runid(path):
+    """--out 文件名中 RUNID 段（8 位日期_6 位时间）下划线统一转连字符。
+
+    防回归（Canvas 预览 ENOENT 历史坑已复发 4 次）：run 目录本身用
+    下划线 RUNID（如 20260828_155349），而 Canvas 预览引用的报告命名
+    规范是 flexlb-run-<RUNID>-report.canvas.tsx 且 RUNID 用连字符
+    （flexlb-run-20260828-155349-report.canvas.tsx）。生成器在输出处
+    强制规范化文件名，调用方传下划线 RUNID 也不会产出坏文件名。
+    只匹配 8 位日期 + "_" + 6 位时间的 RUNID 形态，不碰文件名其它
+    下划线；报告内部 run_id 展示保留 meta.run_dir 原样（与远端 run
+    目录名对账）。
+    """
+    base = os.path.basename(path)
+    fixed = re.sub(r"(?<!\d)(\d{8})_(\d{6})(?!\d)", r"\1-\2", base)
+    if fixed != base:
+        return os.path.join(os.path.dirname(path), fixed)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="FlexLB 压测纯图表 Canvas 报告生成器（v4 骨架，数据脚本填充）"
@@ -367,6 +387,23 @@ def main():
         help="replay 倍速（数据文件不含此参数，CLI 提供）",
     )
     args = ap.parse_args()
+
+    # RUNID 文件名规范化（防 ENOENT 复发）：详见 normalize_out_runid
+    # 文档字符串；规范化后仍有下划线 RUNID 段则断言失败（自检）。
+    out_normalized = normalize_out_runid(args.out)
+    if out_normalized != args.out:
+        print(
+            TAG
+            + " normalized RUNID in --out filename: "
+            + os.path.basename(args.out)
+            + " -> "
+            + os.path.basename(out_normalized)
+        )
+        args.out = out_normalized
+    assert not re.search(r"(?<!\d)\d{8}_\d{6}(?!\d)", os.path.basename(args.out)), (
+        "--out filename RUNID segment must use hyphen "
+        "(flexlb-run-YYYYMMDD-HHMMSS-report.canvas.tsx), got: " + args.out
+    )
 
     warnings = []
     agg = load_json(args.aggregate)
