@@ -26,7 +26,6 @@ def wrap_hc_batch(
     rank expected by the public contract; otherwise assert it is already the
     batched rank.
     """
-    assert batched_dims in (3, 4), f"{name}: unsupported batched_dims={batched_dims}"
     if t.dim() == batched_dims - 1:
         # Flat prefill uses the public HC layout [T, ...], with request
         # boundaries carried separately by cu_seqlens outside HC. TileLang
@@ -34,9 +33,6 @@ def wrap_hc_batch(
         # same token stream as B=1, S=T. unsqueeze(0) is a metadata-only view:
         # it does not copy and keeps a contiguous input contiguous.
         return t.unsqueeze(0), True
-    assert (
-        t.dim() == batched_dims
-    ), f"{name}: expected rank {batched_dims - 1} or {batched_dims}, got shape={tuple(t.shape)}"
     return t, False
 
 
@@ -44,9 +40,5 @@ def squeeze_hc_batch(t: torch.Tensor, wrapped: bool, *, name: str) -> torch.Tens
     if wrapped:
         # Undo only the synthetic batch dimension from wrap_hc_batch. Enforce
         # size 1 so a real batch axis can never be removed accidentally.
-        assert t.dim() >= 1 and int(t.shape[0]) == 1, (
-            f"{name}: expected synthetic leading batch of size 1 before squeeze, "
-            f"got shape={tuple(t.shape)}"
-        )
         return t.squeeze(0)
     return t

@@ -157,7 +157,6 @@ def tk_mhc_head_fused(
             residual, hc_mult, "vendored TileKernels has no mhc_head_fuse"
         )
     fused = _tk_mhc_head_fused
-    assert fused is not None
     try:
         out = fused(
             residual,
@@ -200,7 +199,6 @@ def tk_mhc_pre(
         if _tk_mhc_pre is None:
             _import_tk()
         pre_fn = _tk_mhc_pre
-        assert pre_fn is not None
         out, (post_mix, comb_mix) = pre_fn(
             residual,
             fn,
@@ -254,7 +252,6 @@ def tk_mhc_post(
         if _tk_mhc_post is None:
             _import_tk()
         post_fn = _tk_mhc_post
-        assert post_fn is not None
         return post_fn(x, residual, post_mix, comb_mix, out=out)
     except Exception as e:
         raise RuntimeError(
@@ -286,7 +283,6 @@ def tk_mhc_head(
         if _tk_mhc_head is None:
             _import_tk()
         head_fn = _tk_mhc_head
-        assert head_fn is not None
         return head_fn(
             residual,
             fn,

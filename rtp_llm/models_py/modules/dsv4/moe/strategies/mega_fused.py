@@ -139,10 +139,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
         self._setup_shared_expert_weights(layer_weights, deep_gemm, W, D, inter)
 
         # --- Symmetric-memory dispatch buffer (fused variant). ---------------
-        assert dist.is_initialized(), (
-            "Mega MoE fused requires torch.distributed initialised; "
-            "_mega_moe_fused_available() should have gated this earlier"
-        )
         group = dist.group.WORLD
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_fused_buf(
@@ -329,7 +325,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
         with record_function_range("dsv4.moe.mega_gate_pack"):
             if gate.hash:
-                assert input_ids is not None
                 fused_mega_moe_gate_pack_hash(
                     x,
                     scores_bf16.contiguous(),
@@ -343,7 +338,6 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
                     norm_eps=1.0e-12,
                 )
             else:
-                assert gate.bias is not None
                 fused_mega_moe_gate_pack_nonhash(
                     x,
                     scores_bf16.contiguous(),

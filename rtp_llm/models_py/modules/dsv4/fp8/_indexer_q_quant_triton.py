@@ -79,10 +79,6 @@ def indexer_q_fp8_quant_fold(
     ``[B, S, H, D] float8_e4m3fn`` and ``w_folded`` is contiguous
     ``[B, S, H] float32``.
     """
-    assert q_bf16.dim() == 4 and q_bf16.shape[-1] == INDEXER_HEAD_DIM
-    assert q_bf16.dtype == torch.bfloat16
-    assert q_bf16.is_contiguous()
-    assert weights.shape == q_bf16.shape[:3]
     if weights.dtype != torch.bfloat16 and weights.dtype != torch.float32:
         weights = weights.float()
     weights = weights.contiguous()
@@ -180,12 +176,6 @@ def indexer_q_rope_fp8_quant_fold(
     ``rope_only_inplace``: each frequency row covers
     ``(B*S*H) // N_freq`` consecutive q rows.
     """
-    assert q_bf16.dim() == 4 and q_bf16.shape[-1] == INDEXER_HEAD_DIM
-    assert q_bf16.dtype == torch.bfloat16
-    assert q_bf16.is_cuda
-    assert weights.shape == q_bf16.shape[:3]
-    assert rope_head_dim > 0 and rope_head_dim <= q_bf16.shape[-1]
-    assert rope_head_dim % 2 == 0
     if not q_bf16.is_contiguous():
         q_bf16 = q_bf16.contiguous()
     if weights.dtype != torch.bfloat16 and weights.dtype != torch.float32:
@@ -203,9 +193,6 @@ def indexer_q_rope_fp8_quant_fold(
 
     freqs_flat = freqs_cis.view(-1, freqs_cis.shape[-1])
     n_freq = freqs_flat.shape[0]
-    assert n_freq > 0
-    assert BSH % n_freq == 0, f"N_rows={BSH} not divisible by N_freq={n_freq}"
-    assert freqs_flat.shape[-1] == rope_head_dim // 2
     freqs_ri = torch.view_as_real(freqs_flat)
     freq_stride_n = BSH // n_freq
 

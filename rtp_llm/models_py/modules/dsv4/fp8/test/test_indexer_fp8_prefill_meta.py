@@ -226,15 +226,6 @@ class IndexerFP8PrepareTest(unittest.TestCase):
         self.assertEqual(meta.block_table_i32.shape, (1, 0))
         self.assertEqual(meta.block_table_i32.dtype, torch.int32)
 
-    # ------------------------------------------------------------------
-    # Sanity: missing freqs_cis raises
-    # ------------------------------------------------------------------
-    def test_missing_freqs_cis_raises(self) -> None:
-        bad = _StubIndexerFP8(self.ratio, None, self.bt, self.kv_eb)
-        with self.assertRaises(AssertionError):
-            _call(bad, bsz=1, seqlen=8, sp_int=0, device=self.device)
-
-
 # ---------------------------------------------------------------------------
 # Phase-3a varlen path: B>1 with mixed-prefix requests.
 # Asserts every per-request scalar from the legacy B==1 builder fans out

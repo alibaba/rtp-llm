@@ -132,24 +132,6 @@ def quantize_indexer_k(
     """Quantize ``k_bf16`` per-vector and write into ``kv_cache_packed``
     at the positions given by ``slot_mapping``. In-place on the cache;
     no return value. Layout matches vLLM/DeepGEMM (per-block grouped)."""
-    assert (
-        k_bf16.dim() == 2
-        and k_bf16.shape[1] == INDEXER_HEAD_DIM
-        and k_bf16.dtype == torch.bfloat16
-    ), f"k_bf16 expected [T, 128] bf16, got {tuple(k_bf16.shape)}/{k_bf16.dtype}"
-    assert k_bf16.is_contiguous(), "k_bf16 must be contiguous"
-    assert (
-        kv_cache_packed.dim() == 3
-        and kv_cache_packed.shape[-1] == INDEXER_ENTRY_BYTES
-        and kv_cache_packed.dtype == torch.uint8
-    ), (
-        f"kv_cache_packed expected [num_blocks, block_size, 132] uint8, "
-        f"got {tuple(kv_cache_packed.shape)}/{kv_cache_packed.dtype}"
-    )
-    assert slot_mapping.dim() == 1 and slot_mapping.shape[0] == k_bf16.shape[0], (
-        f"slot_mapping shape {tuple(slot_mapping.shape)} doesn't match "
-        f"k_bf16 T={k_bf16.shape[0]}"
-    )
     if slot_mapping.dtype != torch.int64:
         slot_mapping = slot_mapping.to(torch.int64)
     slot_mapping = slot_mapping.contiguous()
@@ -245,12 +227,6 @@ def dequantize_indexer_k(
 ) -> torch.Tensor:
     """Gather packed FP8 slots and dequantize to ``[T, 128] out_dtype``.
     Padded entries (slot==-1) get zeros."""
-    assert (
-        kv_cache_packed.dim() == 3
-        and kv_cache_packed.shape[-1] == INDEXER_ENTRY_BYTES
-        and kv_cache_packed.dtype == torch.uint8
-    )
-    assert slot_mapping.dim() == 1
     if slot_mapping.dtype != torch.int64:
         slot_mapping = slot_mapping.to(torch.int64)
     slot_mapping = slot_mapping.contiguous()
@@ -260,8 +236,6 @@ def dequantize_indexer_k(
         out = torch.empty(
             T, INDEXER_HEAD_DIM, dtype=out_dtype, device=kv_cache_packed.device
         )
-    else:
-        assert out.shape == (T, INDEXER_HEAD_DIM) and out.dtype == out_dtype
     if T == 0:
         return out
 
