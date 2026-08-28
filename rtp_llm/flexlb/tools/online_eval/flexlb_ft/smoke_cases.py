@@ -661,18 +661,23 @@ def bal_overload_avoid_prefill(ctx: CaseContext):
     Hotspot construction (inherited from the S4 port, Java-true — real
     ledger load, not the legacy fake queue_depth knob):
       1. slow BOTH prefill engines to 5s fixed and let the master sync;
-      2. seed one fire-and-forget request with input_len=49152 — the ledger
-         predicts ~49s, so whichever engine it lands on stays heavy for the
-         whole observation window;
+      2. seed one fire-and-forget request with input_len=147456 — the
+         production-fit ledger prices it at ~2.06s, so the landing engine
+         stays heavy through the routing window (the legacy 1ms/token
+         default priced the old 49152 seed at ~49s and could span a serial
+         wave; the fit cannot, so the wave below is compressed into the
+         seed's ledger lifetime);
       3. poll the mock snapshot until a prefill engine reports
          waiting+running >= 1 (engine-side proof the seed was dispatched,
          and identification of the hot engine);
       4. restore the cool engine to 100ms (drains instantly, ledger ~0);
       5. baseline: ONE timed request — deterministically lands on the cool
          engine and anchors the P7 denominator;
-      6. wave: 5 serial timed requests (0.4s spacing) — each is evaluated
-         against live ledger state; every one is consumed to completion so
-         per-request timings are client-observed.
+      6. wave: 5 requests fired back-to-back (0.12s spacing) so ALL five
+         routing decisions happen while the seed's ~2.06s ledger is still
+         live; timings are collected after the last decision — a serial
+         consume-and-fire wave would outlive the ledger and re-open the
+         tie window mid-wave.
 
     P7 dual caliber (profile-dependent measurement, one band table):
       * NON_BATCH dispatch — client TTFT: schedule-return → first stream
@@ -763,9 +768,48 @@ def bal_overload_avoid_prefill(ctx: CaseContext):
                 return name, ttft, dur, (snap.error or "stream did not complete")
             return name, ttft, dur, None
 
-        # -- seed: big ledger footprint, fire-and-forget (~49s predicted wait).
+        def fire_timed(rid: int, **kwargs):
+            """Wave phase 1: schedule + open the stream WITHOUT waiting.
+
+            The routing decision happens here, against the live ledger;
+            returns (engine_name, handle, t_send, err).
+            """
+            t_send = time.monotonic()
+            try:
+                resp = ops.schedule(rid, **kwargs)
+            except Exception as exc:
+                return None, None, t_send, repr(exc)
+            if resp.code != 200 or not resp.success:
+                return None, None, t_send, f"schedule failed: {resp.error_message}"
+            name = addr_map.get(ops.role_addr(resp, "PREFILL"), "")
+            input_pb = (
+                None
+                if resp.enqueued_by_master
+                else ops.build_generate_input(rid, **kwargs)
+            )
+            try:
+                handle = ops.start_stream(resp, rid, input_pb=input_pb)
+            except Exception as exc:
+                return name, None, t_send, f"stream failed to open: {exc!r}"
+            return name, handle, t_send, None
+
+        def collect_timed(handle, name, t_send):
+            """Wave phase 2: consume one fired request, client timings."""
+            if handle is None:
+                return name, None, None, "stream never opened"
+            ended = handle.wait_end(STREAM_TIMEOUT_S)
+            snap = handle.snap
+            ttft = snap.first_received_s - t_send if snap.first_received_s else None
+            dur = snap.terminated_s - t_send if snap.terminated_s else None
+            if not ended or snap.error or not snap.completed:
+                return name, ttft, dur, (snap.error or "stream did not complete")
+            return name, ttft, dur, None
+
+        # -- seed: big ledger footprint, fire-and-forget (~2.06s predicted
+        #    ledger under the production fit; the slow mock keeps it in
+        #    flight far beyond that, but only the prediction drives routing).
         seed_rid = ops.next_request_id(base)
-        seed_name, err = fire(seed_rid, input_len=49152, output_len=2)
+        seed_name, err = fire(seed_rid, input_len=147456, output_len=2)
         if err:
             return False, f"seed request failed: {err}"
         if seed_name not in prefill_names:
@@ -790,7 +834,8 @@ def bal_overload_avoid_prefill(ctx: CaseContext):
         cool = next(n for n in prefill_names if n != hot)
 
         # -- cool engine fast again; baseline anchors the P7 denominator
-        #    (hot carries the ~49s seed prediction → baseline lands cool).
+        #    (hot still carries most of the ~2.06s seed ledger → baseline
+        #    deterministically lands cool, well outside the tie window).
         ops.set_perf(cool, prefill_fixed_ms=100.0)
         time.sleep(0.3)
         base_rid = ops.next_request_id(base)
@@ -799,14 +844,23 @@ def bal_overload_avoid_prefill(ctx: CaseContext):
             report.invariant("P6", False, detail=f"baseline failed: {base_err}")
             return report.finish(f"baseline request failed: {base_err}")
 
-        # -- serial timed wave: every request faces live ledger state.
+        # -- timed wave, two-phase: fire all five back-to-back (each
+        #    routing decision faces the live seed ledger), then collect
+        #    timings once the last decision is made. A serial consume loop
+        #    would spend ~0.3s per request and push the final decisions
+        #    past the ~2.06s ledger lifetime.
         wave = []
+        wave_fired: list[tuple[int, object, object, float]] = []
         for i in range(5):
             rid = ops.next_request_id(base)
-            entry = timed_request(rid, output_len=2)
-            wave.append(entry)
+            name, handle, t_send, err = fire_timed(rid, output_len=2)
+            wave_fired.append((rid, name, handle, t_send))
+            wave.append((name, None, None, err) if err else None)
             if i < 4:
-                time.sleep(0.4)
+                time.sleep(0.12)
+        for idx, (rid, name, handle, t_send) in enumerate(wave_fired):
+            if wave[idx] is None:
+                wave[idx] = collect_timed(handle, name, t_send)
 
         dist = Counter(w[0] for w in wave if w[3] is None)
         hot_count = dist.get(hot, 0)
@@ -860,7 +914,7 @@ def bal_overload_avoid_prefill(ctx: CaseContext):
         # can linger long after the engine finished and poison later balance
         # cases.  The deterministic cleanup is the normal completion path —
         # consume each fired request's stream to terminal state (the seed's
-        # ~5s prefill is the only slow one), with cancel as fallback.
+        # ~5s mock prefill is the only slow one), with cancel as fallback.
         for rid, resp in fired:
             try:
                 if rid in fired_handles:
@@ -1086,9 +1140,10 @@ def aff_prefix_stickiness(ctx: CaseContext):
 
     Construction:
       1. seed A (keys 1001-1008, input_len=8192) fired while both prefills
-         are slowed to 2s — its ~8.2s FORMULA estimate keeps the landing
-         engine's ledger entry live (tie-window override is impossible:
-         the ~8s gap dwarfs the ~0.8s tie window);
+         are slowed to 2s — its ~231ms production-fit estimate keeps the
+         landing engine's ledger entry live (tie-window override is
+         impossible: the doubled ledger ~463ms vs ~231ms dwarfs the
+         ~23ms tie window);
       2. seed B (keys 2001-2008, same shape) scheduled while A is still
          in flight -> deterministically lands on the OTHER engine — the
          family separation the design calls for (a plain serial seeding
@@ -1096,9 +1151,13 @@ def aff_prefix_stickiness(ctx: CaseContext):
       3. after both seeds complete and the master cache syncs
          (KV_CACHE_SYNC_WAIT_S), the main phase runs ~30 serial requests:
          60% family-A continuations (same keys, deterministic stickiness —
-         the 0.7*hitTokens estimate discount ~5s dwarfs the ~0.3s tie
-         window) interleaved with 40% unique-key free requests (no cache
-         affinity on either engine -> uniform tie-window spread).
+         the production-fit estimate prices the hit engine only ~6ms above
+         the all-miss engine, but the bounded cache-affinity gate
+         (maxExtraTtftMs=20) keeps the cache leader preferred; the legacy
+         1ms/token default instead relied on its 0.7*hitTokens discount
+         pushing the hit engine ~5s BELOW the tie window) interleaved
+         with 40% unique-key free requests (no cache lead on either
+         engine -> uniform tie-window spread).
 
     The legacy S5 cache_keys>0 assertion stays demoted to an observational
     log: mock-internal cache accounting is the mock's own unit-tested
@@ -1355,31 +1414,41 @@ def bal_len_mixed(ctx: CaseContext):
     engines take short work), P6 completeness.
 
     Construction (5 waves, each 2 long + 6 short fire-and-forget):
-      * every prefill slowed to 3s fixed — the mock execution time is
-        length-blind (framework fact), so set_perf only widens the window
-        during which the ledger entry of a fired request stays observable;
+      * ONE formula for both sides (task #67): mock execution time and the
+        master's ledger prediction share the production DSv4 fit, so a
+        long request's ledger entry decays on exactly the clock the mock
+        sleeps — the diversion window equals the fitted prefill time;
+      * long ladder 131072..147456: the fit predicts ~1.72-2.06 s all-miss,
+        wide enough to choreograph a wave well inside the window (the old
+        32k ladder predicted ~342 ms — too narrow to orchestrate against,
+        which the retired set_perf(3000ms) crutch used to paper over);
       * wave choreography (S4 ledger technique, symmetric — no single hot
         engine is manufactured):
         1. L_a fired on an empty ledger pair -> uniform tie-window pick (X);
         2. poll X pending (engine-side proof the ledger entry exists);
-        3. 3 shorts fired: X carries ~32s of predicted ledger, Y ~0 ->
-           deterministically diverted to Y;
-        4. L_b fired: still sees X heavy (ledger >> Y's ~1.5s short
-           residue) -> deterministically lands on Y;
-        5. 3 more shorts fired: BOTH engines now carry a long request's
-           ledger (~32s each, ~1s apart) — inside the 10% tie window ->
-           uniform random split;
+        3. L_b fired immediately after that proof: X carries the FULL
+           fitted ledger (~1.72-2.06 s) while Y is still empty — a gap
+           ~20x the 10%/20ms tie window, so L_b deterministically lands
+           on Y with no timing assumption about when shorter requests
+           register their own ledger entries (the t+200ms variant of this
+           step raced the shorts' registration and split the longs 7/3);
+        4. poll Y pending (both longs now provably in flight);
+        5. 6 shorts fired while BOTH longs execute: X has decayed only by
+           the polls' overhead (tens of ms — inside the ~190ms tie window
+           of the ~1.9s ledgers), so the shorts spread across both
+           engines; the exact split does not matter for P3 because the
+           shorts carry ~1% of the wave's tokens;
         6. drain the wave to terminal state + master inflight clean,
            so the next wave starts from a settled (double-zero) ledger.
-      * per wave: X = L_a + ~1.5 shorts, Y = L_b + ~4.5 shorts in tokens;
-        with L_a/L_b drawn from the same 32768..49152 ladder the aggregate
-        token share stays near 0.5 (see the P3 calibration note in
-        grade.GRADE_BANDS).
+      * per wave: X = L_a + ~3 shorts, Y = L_b + ~3 shorts in tokens; the
+        ladder is cyclic (L_a series == L_b series), so the aggregate
+        token share is pinned at ~0.50 for ANY short split (see the P3
+        calibration note in grade.GRADE_BANDS).
 
     Why not request-count uniformity (P1): the wave deliberately lands
-    BOTH long requests' complements asymmetrically (3+~1.5 shorts vs
-    ~1.5 shorts) — token balance and request-count balance genuinely
-    conflict in this scene, and P3 is the property that matters.
+    BOTH long requests' complements asymmetrically in flight order —
+    token balance and request-count balance genuinely conflict in this
+    scene, and P3 is the property that matters.
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
@@ -1391,12 +1460,11 @@ def bal_len_mixed(ctx: CaseContext):
         prefill_names = _prefill_names(ops)
         if len(prefill_names) < 2:
             return False, "need >=2 prefill workers"
-        for name in prefill_names:
-            ops.set_perf(name, prefill_fixed_ms=3000.0)
-        time.sleep(1.5)  # master perf sync
 
-        # deterministic bimodal ladder 32768..49152 (reproducible reruns)
-        long_lens = [32768 + (i % 5) * 4096 for i in range(10)]
+        # deterministic bimodal ladder 131072..147456 (reproducible reruns):
+        # ~1.72-2.06 s fitted all-miss prefill = the ledger window the wave
+        # choreography runs inside (same formula on mock and master sides)
+        long_lens = [131072 + (i % 5) * 4096 for i in range(10)]
         landed: list[tuple[int, str, int]] = []  # (rid, engine_name, input_len)
         failure = None
 
@@ -1415,19 +1483,10 @@ def bal_len_mixed(ctx: CaseContext):
             if not _poll_engine_pending(ops, name_a, 1):
                 failure = f"wave{wave} L_a never appeared on {name_a}"
                 break
-            # 3. 3 shorts deterministically diverted away from L_a's engine.
-            for _ in range(3):
-                rid = ops.next_request_id(base)
-                name, err = _fire_request(
-                    ops, rid, fired, fired_handles, input_len=512, output_len=2
-                )
-                if err:
-                    failure = f"wave{wave} short#1: {err}"
-                    break
-                landed.append((rid, name, 512))
-            if failure:
-                break
-            # 4. L_b deterministically away from L_a's ledger.
+            # 3. L_b immediately after the L_a dispatch proof: X carries the
+            #    full fitted ledger (~1.72-2.06 s) while Y is still empty —
+            #    ~20x the tie window, so L_b deterministically lands on Y
+            #    (no dependency on the shorts' ledger registration timing).
             rid = ops.next_request_id(base)
             name_b, err = _fire_request(
                 ops, rid, fired, fired_handles, input_len=lb, output_len=2
@@ -1439,14 +1498,18 @@ def bal_len_mixed(ctx: CaseContext):
             if not _poll_engine_pending(ops, name_b, 1):
                 failure = f"wave{wave} L_b never appeared on {name_b}"
                 break
-            # 5. 3 shorts split uniformly (both engines carry a long ledger).
-            for _ in range(3):
+            # 4. 6 shorts while BOTH longs are in flight: X has decayed only
+            #    by the polls' overhead (tens of ms, inside the ~190ms tie
+            #    window of the ~1.9s ledgers), so the shorts spread evenly —
+            #    both engines take short work (P2) and the wave stays
+            #    token-symmetric for any exact split.
+            for short_idx in range(6):
                 rid = ops.next_request_id(base)
                 name, err = _fire_request(
                     ops, rid, fired, fired_handles, input_len=512, output_len=2
                 )
                 if err:
-                    failure = f"wave{wave} short#2: {err}"
+                    failure = f"wave{wave} short#{short_idx}: {err}"
                     break
                 landed.append((rid, name, 512))
             if failure:
@@ -1509,11 +1572,6 @@ def bal_len_mixed(ctx: CaseContext):
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
-        try:
-            for name in prefill_names:
-                ops.set_perf(name, prefill_fixed_ms=100.0)
-        except Exception:
-            pass
         if fired or fired_handles:
             _drain_fired(ops, fired, fired_handles)
         try:
