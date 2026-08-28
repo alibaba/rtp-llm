@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -36,8 +37,8 @@ public:
     bool updateIfPresent(TreeNode* node, const CandidateMeta& meta);
     // Remove a node's entry if present. Idempotent.
     void erase(TreeNode* node);
-    // Read the best victim without changing heap membership.
-    std::optional<EvictionEntry> best() const;
+    // Read the best matching victim without changing heap membership.
+    std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict) const;
 
     // Collect all current nodes. Used for read-only capacity queries.
     std::vector<TreeNode*> nodes() const {

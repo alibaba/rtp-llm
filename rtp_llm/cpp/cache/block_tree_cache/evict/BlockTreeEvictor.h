@@ -91,9 +91,8 @@ private:
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
     std::optional<EvictionTask>       prepareEvictionLocked(TransferDescriptor eviction_desc);
-    void runEvictionTask(std::shared_ptr<const EvictionTask> task) noexcept;
-    void scheduleEvictionSettlement(std::shared_ptr<const EvictionTask> task,
-                                    EvictionTaskResult                  task_result) noexcept;
+    void                              runEvictionTask(std::shared_ptr<const EvictionTask> task) noexcept;
+    void scheduleEvictionSettlement(std::shared_ptr<const EvictionTask> task, EvictionTaskResult task_result) noexcept;
     void finalizeEvictionLocked(const EvictionTask& task, const EvictionTaskResult& task_result) noexcept;
     void settleEvictionLocked(const EvictionTask& task, const EvictionTaskResult& task_result);
     void abortEvictionLocked(const EvictionTask& task);
