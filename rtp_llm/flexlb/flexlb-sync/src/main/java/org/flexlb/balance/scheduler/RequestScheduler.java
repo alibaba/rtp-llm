@@ -244,6 +244,17 @@ public final class RequestScheduler {
      * is strictly off the hot path (shadow mode): every pass re-snapshots
      * the registry, captures each ledger under its own short critical
      * section and never nests locks.  The listener may be null.
+     *
+     * <p><b>Confirm-window default warning (stage-1 fix E3):</b> this
+     * overload defaults to {@code realDiffConfirmCycles = 1} — a REAL diff
+     * is reported on the very first single-snapshot pass.  That keeps the
+     * deterministic single-shot semantics the rule-level tests rely on,
+     * but a shadow loop attached this way will surface single-snapshot
+     * tears as immediately-confirmed REAL diffs.  Shadow loops must use
+     * {@link #attachLedgerReconciliation(Listener, int)} and pass 2-3.
+     * The default stays 1 deliberately: no production caller exists yet,
+     * and flipping the default would silently change the single-shot
+     * contract every existing test depends on.</p>
      */
     public LedgerReconciliationHarness attachLedgerReconciliation(
             LedgerReconciliationHarness.Listener listener) {

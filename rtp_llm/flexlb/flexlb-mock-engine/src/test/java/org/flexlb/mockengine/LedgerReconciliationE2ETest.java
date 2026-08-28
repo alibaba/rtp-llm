@@ -15,7 +15,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * M1 三方对拍 E2E（plan 第 6 节阶段 1 验收）：requestSlots 账本 ↔
- * DecodeEndpoint 八层账本 ↔ PrefillWorkRegistry 队列账本，在真实 mock
+ * DecodeEndpoint 八层投影（stage-1 fix C 后规则面实际消费
+ * L1/L3/L4/L4b/L5/L7/L8 + prefill active items；L2 设计性
+ * count-only、L6 仅作终态豁免输入，口径以 LedgerReconciliationHarness
+ * 类 javadoc 为准）↔ PrefillWorkRegistry 队列账本，在真实 mock
  * engine 流量下周期比对，断言：
  *
  * <ol>

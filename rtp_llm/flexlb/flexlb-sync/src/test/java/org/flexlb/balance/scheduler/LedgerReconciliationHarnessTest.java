@@ -412,6 +412,268 @@ class LedgerReconciliationHarnessTest {
         harness.close();
     }
 
+    // ==================== stage-1 fix A: endpoint-left surface ====================
+
+    @Test
+    void endpointLeftSurfaceOnActiveSlotIsItsOwnRealDiff() {
+        // The displaced (retired/replaced) endpoint object is still
+        // referenced by the slot placement, but the reconciliation surface
+        // only sees the successor-generation object — a legal failover
+        // window that must surface under its own rule, not as an unbacked
+        // reservation.
+        DecodeEndpoint retired = mock(DecodeEndpoint.class);
+        DecodeEndpoint successor = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, retired);
+        assertTrue(bind(registered));
+
+        stubDecodeView(successor,
+                auditView(Map.of(), Map.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(successor), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .ENDPOINT_LEFT_RECONCILIATION_SURFACE,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void endpointLeftSurfaceOnTerminalTrackSlotIsExempt() {
+        DecodeEndpoint retired = mock(DecodeEndpoint.class);
+        DecodeEndpoint successor = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, retired);
+        assertTrue(bind(registered));
+        // A terminal-track slot lives in the legal two-stage-death /
+        // failover window: the departure of its endpoint must be skipped
+        // entirely, and the coarse-phase projection that drives the
+        // exemption is the one routed through the adjudication layer.
+        // The claimed publication lease is released immediately: this
+        // test only needs the TERMINALIZING phase flip, and a dangling
+        // lease would block the publisher close in tearDown.
+        RequestSlot slot = lifecycle.requestSlot(REQUEST_ID);
+        TerminalAction terminalized;
+        synchronized (slot) {
+            terminalized = slot.beginExternalTerminalizing(
+                    s -> s.snapshot());
+        }
+        assertNotNull(terminalized);
+        if (terminalized.publicationLease() != null) {
+            terminalized.publicationLease().close();
+        }
+
+        stubDecodeView(successor,
+                auditView(Map.of(), Map.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(successor), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                () -> "real diffs: " + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                () -> "pending diffs: " + report.pendingRealDiffs());
+        assertTrue(report.transientDiffs().isEmpty(),
+                () -> "transient diffs: " + report.transientDiffs());
+        assertEquals(1, report.slotCount());
+        harness.close();
+    }
+
+    // ==================== stage-1 fix C: L4/L5 rules ====================
+
+    @Test
+    void preemptionRegistrationWithoutClaimIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+        // The coordinator side of the L4 install window: the slot holds
+        // the registration, the engine claim ledger does not back it.
+        assertTrue(lifecycle.tryClaim(
+                REQUEST_ID, 77L, 9001L, "rule-test claim").isPresent());
+
+        stubDecodeView(decode, auditView(
+                cleanARoadway(reservation), Map.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .PREEMPTION_REGISTRATION_UNBACKED,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void engineFenceWithoutProtectionIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+        // Install a real cancellation fence on the slot; the mocked
+        // endpoint contributes no layer-5 protection leaf, so the slot
+        // holds a registration the protection ledger does not back.
+        RequestSlot slot = lifecycle.requestSlot(REQUEST_ID);
+        synchronized (slot) {
+            assertTrue(slot.requestCancellationFence("rule-test fence")
+                    instanceof RequestSlot.FenceReduction.Start);
+        }
+
+        stubDecodeView(decode, auditView(
+                cleanARoadway(reservation), Map.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule.ENGINE_FENCE_UNBACKED,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void decodeClaimOrphanIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+
+        // Layer-4 holds a priority claim on a slot that carries no
+        // preemption registration — no single-interleave legal window.
+        stubDecodeView(decode, auditView(
+                cleanARoadway(reservation), Map.of(), Set.of(),
+                Set.of(REQUEST_ID), Set.of(), Set.of(), Set.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_PREEMPTION_CLAIM_ORPHAN,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void decodeFenceProtectionOrphanIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+
+        // Layer-5 holds a fence protection on a slot with neither fence
+        // nor preemption registration.
+        stubDecodeView(decode, auditView(
+                cleanARoadway(reservation), Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(REQUEST_ID), Set.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_FENCE_PROTECTION_ORPHAN,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void preemptionAttemptIncomingOutsideInflightIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Engine-internal invariant, view-only construction: a layer-4b
+        // attempt-incoming reservation with no layer-1 shadow backing.
+        stubDecodeView(decode, auditView(
+                Map.of(), Map.of(), Set.of(),
+                Set.of(), Set.of(701L), Set.of(), Set.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .PREEMPTION_ATTEMPT_INCOMING_UNBACKED,
+                real.get(0).rule());
+        assertEquals(701L, real.get(0).requestId());
+        harness.close();
+    }
+
+    @Test
+    void queuedPhaseOutsideInflightIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        stubDecodeView(decode, auditView(
+                Map.of(), Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of(702L), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .QUEUED_PHASE_OUTSIDE_INFLIGHT,
+                real.get(0).rule());
+        assertEquals(702L, real.get(0).requestId());
+        harness.close();
+    }
+
+    @Test
+    void dispatchPermitOutsideQueuedPhaseIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        stubDecodeView(decode, auditView(
+                Map.of(), Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of(), Set.of(703L)));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE,
+                real.get(0).rule());
+        assertEquals(703L, real.get(0).requestId());
+        harness.close();
+    }
+
     // ==================== fixtures ====================
 
     private Map<Long, RequestInflight> cleanARoadway(
@@ -437,17 +699,33 @@ class LedgerReconciliationHarnessTest {
             Map<Long, RequestInflight> inflight,
             Map<Long, Long> confirmed,
             Set<Long> settledTombstones) {
+        return auditView(inflight, confirmed, settledTombstones,
+                Set.of(), Set.of(), Set.of(), Set.of(), Set.of());
+    }
+
+    /** Full-layer view constructor (stage-1 fix C rule surface). */
+    private static DecodeLedgerAuditView auditView(
+            Map<Long, RequestInflight> inflight,
+            Map<Long, Long> confirmed,
+            Set<Long> settledTombstones,
+            Set<Long> preemptionClaims,
+            Set<Long> preemptionAttemptIncoming,
+            Set<Long> fenceProtected,
+            Set<Long> queuedPhase,
+            Set<Long> dispatchPermits) {
         return new DecodeLedgerAuditView(
                 1L,
                 Map.copyOf(inflight),
                 0,
                 Map.copyOf(confirmed),
-                Set.of(),
-                Set.of(),
-                Set.of(),
+                Set.copyOf(preemptionClaims),
+                Set.copyOf(preemptionAttemptIncoming),
+                Set.copyOf(fenceProtected),
                 Set.copyOf(settledTombstones),
-                Set.of(),
-                Set.of());
+                Set.copyOf(queuedPhase),
+                Set.copyOf(dispatchPermits),
+                0L,
+                0L);
     }
 
     private static void stubDecodeView(
