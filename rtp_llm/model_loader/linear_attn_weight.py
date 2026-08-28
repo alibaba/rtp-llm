@@ -224,6 +224,21 @@ def split_kda_qkvg_fa_beta_sections(
 def split_kda_qkvg_fa_beta(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
+    return split_kda_qkvg_fa_beta_parallel(
+        t,
+        parallel_size=load_config.tp_size,
+        parallel_rank=load_config.tp_rank,
+        linear_config=linear_config,
+    )
+
+
+def split_kda_qkvg_fa_beta_parallel(
+    t: torch.Tensor,
+    *,
+    parallel_size: int,
+    parallel_rank: int,
+    linear_config: LinearAttnConfig,
+) -> torch.Tensor:
     q_size = linear_config.linear_num_key_heads * linear_config.linear_key_head_dim
     k_size = linear_config.linear_num_key_heads * linear_config.linear_key_head_dim
     v_size = linear_config.linear_num_value_heads * linear_config.linear_value_head_dim
@@ -236,10 +251,10 @@ def split_kda_qkvg_fa_beta(
             f"shape={tuple(t.shape)}, qkvg={[q_size, k_size, v_size, g_size]}, "
             f"beta={beta_size}"
         )
-    if any(size % load_config.tp_size for size in (q_size, k_size, v_size, g_size)):
+    if any(size % parallel_size for size in (q_size, k_size, v_size, g_size)):
         raise ValueError(
             "KDA Q/K/V/G widths must be divisible by TP: "
-            f"qkvg={[q_size, k_size, v_size, g_size]}, tp={load_config.tp_size}"
+            f"qkvg={[q_size, k_size, v_size, g_size]}, parallel={parallel_size}"
         )
 
     q, k, v, g, f_a, beta = split_kda_qkvg_fa_beta_sections(
@@ -254,8 +269,8 @@ def split_kda_qkvg_fa_beta(
     )
 
     def _local(section: torch.Tensor) -> torch.Tensor:
-        width = section.shape[1] // load_config.tp_size
-        begin = load_config.tp_rank * width
+        width = section.shape[1] // parallel_size
+        begin = parallel_rank * width
         return section.narrow(1, begin, width)
 
     return torch.cat(
@@ -268,8 +283,22 @@ def split_kda_qkvg_fa_beta(
 def split_kda_tp_dim1(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
 ) -> torch.Tensor:
-    return t.split(t.shape[1] // load_config.tp_size, dim=1)[
-        load_config.tp_rank
+    return split_kda_dim1_parallel(
+        t,
+        parallel_size=load_config.tp_size,
+        parallel_rank=load_config.tp_rank,
+    )
+
+
+def split_kda_dim1_parallel(
+    t: torch.Tensor, *, parallel_size: int, parallel_rank: int
+) -> torch.Tensor:
+    if t.shape[1] % parallel_size:
+        raise ValueError(
+            f"KDA dim-1 width {t.shape[1]} must divide parallel size {parallel_size}"
+        )
+    return t.split(t.shape[1] // parallel_size, dim=1)[
+        parallel_rank
     ].contiguous()
 
 
@@ -324,9 +353,11 @@ class LinearAttnAtomicWeight(AtomicWeight):
         process_fun: Callable[[List[torch.Tensor]], torch.Tensor],
         config: LinearAttnConfig,
         data_type: Optional[torch.dtype] = None,
+        projection_ktp: bool = False,
     ):
         super().__init__(name, weights, process_fun, data_type)
         self.config = config
+        self.projection_ktp = projection_ktp
         self.split_func_factory = _linear_attn_split_stratey
 
     def _split(
@@ -336,6 +367,25 @@ class LinearAttnAtomicWeight(AtomicWeight):
     ) -> Dict[str, torch.Tensor]:
         if isinstance(tensor, dict):
             tensor = tensor[self.name]
+        if self.projection_ktp and load_config.ktp_size > 1:
+            if self.name == W.linear_attn_qkvg_fa_beta_w:
+                result = split_kda_qkvg_fa_beta_parallel(
+                    tensor,
+                    parallel_size=load_config.ktp_size,
+                    parallel_rank=load_config.ktp_rank,
+                    linear_config=self.config,
+                )
+            elif self.name == W.linear_attn_f_b_w:
+                result = split_kda_dim1_parallel(
+                    tensor,
+                    parallel_size=load_config.ktp_size,
+                    parallel_rank=load_config.ktp_rank,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported projection-KTP KDA weight {self.name}"
+                )
+            return {self.name: result}
         if load_config.tp_size <= 1:
             return {self.name: tensor}
         else:

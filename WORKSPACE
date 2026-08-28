@@ -24,7 +24,7 @@ load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 maybe(
     new_git_repository,
     name = "xgrammar",
-    remote = "git@gitlab.alibaba-inc.com:foundation_models/xgrammar_github.git",
+    remote = "https://github.com/mlc-ai/xgrammar.git",
     commit = "ba00e8bd4d85be96a2fe8cdc561cb08bed899db6",  # feat: support kimi-k3 tool call style (#806)
     init_submodules = False,
     patch_cmds = [

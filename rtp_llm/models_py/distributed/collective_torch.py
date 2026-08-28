@@ -25,6 +25,7 @@ class Group(Enum):
 
     DP = "DP"
     TP = "TP"
+    KTP = "KTP"
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -107,6 +108,9 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
             )
         parallelism_config.tp_rank = tp_rank
         parallelism_config.dp_rank = dp_rank
+    ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
+    if ktp_size > 0:
+        parallelism_config.ktp_rank = parallelism_config.world_rank % ktp_size
 
 
 def init_distributed_environment(
@@ -205,7 +209,7 @@ def init_distributed_environment(
         f"[rank: {world_rank}] Created DP_AND_TP group {torch.distributed.group.WORLD} with ranks: {list(range(world_size))}"
     )
 
-    # Create DP and TP groups
+    # Create DP, TP, and projection-only KTP groups.
     _create_process_groups(parallelism_config, backend, timedelta(days=36500))
     _parallelism_config = parallelism_config
     _initialized = True
@@ -233,6 +237,30 @@ def _create_process_groups(
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
+    ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
+
+    if ktp_size > 1:
+        if ktp_size != world_size:
+            raise ValueError(
+                "Projection KTP currently requires ktp_size == world_size, got "
+                f"KTP={ktp_size}, world={world_size}"
+            )
+        # Deliberately create a dedicated communicator even though the rank set
+        # equals WORLD.  KTP collectives must not alias attention TP ordering or
+        # communicator state.
+        ktp_ranks = list(range(world_size))
+        ktp_group = torch.distributed.new_group(
+            ranks=ktp_ranks,
+            backend=backend,
+            timeout=timedelta(days=36500),
+        )
+        _group_map[Group.KTP] = ktp_group
+        logging.info(
+            "[rank: %s] Created dedicated KTP group with ranks: %s",
+            world_rank,
+            ktp_ranks,
+        )
+        torch.distributed.barrier()
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups
@@ -627,7 +655,9 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
     world_size = _parallelism_config.world_size
-    if group == Group.DP and dp_size > 1 and world_size != dp_size:
+    if group == Group.KTP:
+        group_key = Group.KTP
+    elif group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
         group_key = Group.DP.name + str(tp_rank)
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
@@ -772,6 +802,29 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
+def all_to_all_single(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Exchange equal contiguous dim-0 chunks across ``group``.
+
+    Projection KTP lays its input out as ``[destination, rows, payload]``.
+    The returned tensor is ordered by source rank and can therefore be viewed
+    as ``[source, rows, payload]`` by the destination DP owner.
+    """
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "all_to_all_single requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    send = tensor.contiguous()
+    output = torch.empty_like(send)
+    torch.distributed.all_to_all_single(output, send, group=process_group)
+    return output
+
+
 def all_gather_into(
     tensor: torch.Tensor,
     output: torch.Tensor,
@@ -897,6 +950,7 @@ __all__ = [
     "all_gather",
     "all_gather_into",
     "all_gather_trim",
+    "all_to_all_single",
     "reduce_scatter",
     "reduce_scatter_padded",
     "barrier",

@@ -28,8 +28,8 @@ def env_default(name: str, fallback: str | None = None) -> str | None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Start the Kimi K3 Decode smoke role first, wait for readiness, then "
-            "start Prefill on the other SSH host and return a combined exit status."
+            "Start the Kimi K3 Decode and Prefill smoke roles concurrently on "
+            "two SSH hosts and return a combined exit status."
         )
     )
     parser.add_argument("--prefill-ssh-target", default=env_default("PREFILL_SSH_TARGET"))
@@ -124,13 +124,19 @@ def parse_args() -> argparse.Namespace:
         "--prefill-start-delay-s",
         type=float,
         default=float(env_default("SMOKE_PREFILL_START_DELAY_S", "15")),
-        help="start Decode first, then wait this many seconds before checking readiness",
+        help=(
+            "start Decode first, then wait this many seconds before launching "
+            "Prefill; neither role is required to be healthy before its peer starts"
+        ),
     )
     parser.add_argument(
         "--decode-ready-timeout-s",
         type=int,
         default=int(env_default("SMOKE_STARTUP_TIMEOUT_S", "14400")),
-        help="wait at most this many seconds for Decode /health before starting Prefill",
+        help=(
+            "deprecated compatibility option; each role script owns its startup "
+            "health timeout"
+        ),
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -142,8 +148,6 @@ def parse_args() -> argparse.Namespace:
         "decode_repo_root",
         "prefill_checkpoint_path",
         "decode_checkpoint_path",
-        "prefill_sp_checkpoint_path",
-        "decode_sp_checkpoint_path",
         "prefill_endpoint",
         "decode_endpoint",
         "run_id",
@@ -151,6 +155,11 @@ def parse_args() -> argparse.Namespace:
     missing = [name for name in required if not getattr(args, name)]
     if missing:
         parser.error("missing required settings: " + ", ".join(missing))
+    if args.prefill_sp_checkpoint_path or args.decode_sp_checkpoint_path:
+        parser.error(
+            "Projection-KTP ordinary Decode requires Prefill/Decode "
+            "SP_CHECKPOINT_PATH to be unset"
+        )
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):
         parser.error("--run-id may contain only letters, digits, dot, underscore and dash")
     endpoint_pattern = r"[^:]+:[0-9]+"
@@ -190,6 +199,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_CHUNK_TOKENS",
         "SMOKE_LINEAR_STEP",
         "SMOKE_CHUNKWISE_RDMA",
+        "FT_CORE_DUMP_ON_EXCEPTION",
         "RTP_LLM_SKIP_BUILD",
     )
     for name in names:
@@ -213,17 +223,11 @@ def role_launch_parts(
     checkpoint = (
         args.prefill_checkpoint_path if is_prefill else args.decode_checkpoint_path
     )
-    sp_checkpoint = (
-        args.prefill_sp_checkpoint_path
-        if is_prefill
-        else args.decode_sp_checkpoint_path
-    )
     runtime = (
         args.prefill_container_runtime if is_prefill else args.decode_container_runtime
     )
     role_environment = {
         "CHECKPOINT_PATH": checkpoint,
-        "SP_CHECKPOINT_PATH": sp_checkpoint,
         "PREFILL_ENDPOINT": args.prefill_endpoint,
         "DECODE_ENDPOINT": args.decode_endpoint,
         "SMOKE_RUN_ID": args.run_id,
@@ -423,13 +427,39 @@ def run_short_ssh(
     )
 
 
+def build_detached_control_command(
+    args: argparse.Namespace, role: str, inner: str
+) -> str:
+    """Run detached-role control operations in the role's container.
+
+    Detached launchers create their pid/status/log files in the container's
+    ``/tmp``.  Polling the same path on the host silently waits forever when
+    the container does not bind-mount host ``/tmp``.
+    """
+
+    _, runtime, container, _ = role_launch_parts(args, role)
+    return shlex.join(
+        (
+            runtime,
+            "exec",
+            "-u",
+            args.container_user,
+            container,
+            "bash",
+            "-lc",
+            inner,
+        )
+    )
+
+
 def fetch_detached_log(
     args: argparse.Namespace, role: str, destination: pathlib.Path
 ) -> None:
+    inner = f"cat {shlex.quote(detached_control_paths(args, role)['log'])}"
     result = run_short_ssh(
         args,
         role,
-        f"cat {shlex.quote(detached_control_paths(args, role)['log'])}",
+        build_detached_control_command(args, role, inner),
     )
     destination.write_text(
         result.stdout + (result.stderr if result.returncode else ""),
@@ -439,7 +469,6 @@ def fetch_detached_log(
 
 def stop_detached_role(args: argparse.Namespace, role: str) -> None:
     paths = detached_control_paths(args, role)
-    _, runtime, container, _ = role_launch_parts(args, role)
     stop_inner = "\n".join(
         (
             f"test -f {shlex.quote(paths['pid'])} || exit 0",
@@ -448,51 +477,22 @@ def stop_detached_role(args: argparse.Namespace, role: str) -> None:
             "kill -TERM -- \"-$pid\" 2>/dev/null || true",
         )
     )
-    remote_command = shlex.join(
-        (
-            runtime,
-            "exec",
-            "-u",
-            args.container_user,
-            container,
-            "bash",
-            "-lc",
-            stop_inner,
-        )
-    )
+    remote_command = build_detached_control_command(args, role, stop_inner)
     try:
         run_short_ssh(args, role, remote_command)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
 
-def wait_for_decode_ready(args: argparse.Namespace) -> None:
-    decode_port = args.decode_endpoint.rsplit(":", 1)[1]
-    deadline = time.monotonic() + args.decode_ready_timeout_s
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            result = run_short_ssh(
-                args,
-                "decode",
-                (
-                    "curl -fsS --max-time 2 "
-                    f"http://127.0.0.1:{decode_port}/health >/dev/null"
-                ),
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            last_error = str(exc)
-        else:
-            if result.returncode == 0:
-                print("Decode /health is ready; starting Prefill", flush=True)
-                return
-            last_error = result.stderr.strip() or f"curl rc={result.returncode}"
-        time.sleep(2)
-    raise TimeoutError(
-        "Decode did not become ready before Prefill launch "
-        f"({args.decode_ready_timeout_s}s): {last_error}"
-    )
+def start_remote_roles(
+    args: argparse.Namespace, roles: dict[str, RemoteRole]
+) -> None:
+    """Launch both PD peers without creating a cache-store readiness cycle."""
+
+    roles["decode"].start()
+    if args.prefill_start_delay_s:
+        time.sleep(args.prefill_start_delay_s)
+    roles["prefill"].start()
 
 
 def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
@@ -519,19 +519,13 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                 f"{role} detached launch rc={process.returncode}: {output.strip()}"
             )
             break
-        if role == "decode":
-            if args.prefill_start_delay_s:
-                print(
-                    f"Decode launch accepted; waiting {args.prefill_start_delay_s:g}s "
-                    "before readiness check",
-                    flush=True,
-                )
-                time.sleep(args.prefill_start_delay_s)
-            try:
-                wait_for_decode_ready(args)
-            except (OSError, TimeoutError) as exc:
-                launch_errors.append(f"Decode readiness failed: {exc}")
-                break
+        if role == "decode" and args.prefill_start_delay_s:
+            print(
+                f"Decode launch accepted; waiting {args.prefill_start_delay_s:g}s "
+                "before launching Prefill",
+                flush=True,
+            )
+            time.sleep(args.prefill_start_delay_s)
     if launch_errors:
         for role in roles:
             stop_detached_role(args, role)
@@ -553,13 +547,14 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                     continue
                 status_path = detached_control_paths(args, role)["status"]
                 try:
+                    status_inner = (
+                        f"if test -f {shlex.quote(status_path)}; then "
+                        f"cat {shlex.quote(status_path)}; else exit 3; fi"
+                    )
                     result = run_short_ssh(
                         args,
                         role,
-                        (
-                            f"if test -f {shlex.quote(status_path)}; then "
-                            f"cat {shlex.quote(status_path)}; else exit 3; fi"
-                        ),
+                        build_detached_control_command(args, role, status_inner),
                     )
                 except (OSError, subprocess.TimeoutExpired) as exc:
                     poll_failures[role] += 1
@@ -591,6 +586,13 @@ def run_detached(args: argparse.Namespace, run_dir: pathlib.Path) -> int:
                     raise RuntimeError(
                         f"{role} status polling failed {poll_failures[role]} times"
                     )
+            failed = {
+                role: status
+                for role, status in statuses.items()
+                if status is not None and status != 0
+            }
+            if failed and any(status is None for status in statuses.values()):
+                raise RuntimeError(f"detached role failed early: {failed}")
             time.sleep(2)
     except (KeyboardInterrupt, TimeoutError, OSError, RuntimeError) as exc:
         print(f"controller abort: {exc}", file=sys.stderr)
@@ -644,7 +646,7 @@ def main() -> int:
     run_dir = args.artifact_root / args.run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     print(
-        f"starting Decode before Prefill; prefill_start_delay_s="
+        f"starting concurrent Decode and Prefill peers; prefill_start_delay_s="
         f"{args.prefill_start_delay_s:g}; run_id={args.run_id} "
         f"suite={args.suite} controller_artifacts={run_dir} "
         f"remote_detached={args.remote_detached}"
@@ -658,13 +660,10 @@ def main() -> int:
     started_at = time.monotonic()
     controller_error: BaseException | None = None
     try:
-        # HTTP readiness is only the launch-order gate. The Prefill role runs a
-        # batch-sized RDMA prewarm barrier before the formal accuracy suite.
-        roles["decode"].start()
-        if args.prefill_start_delay_s:
-            time.sleep(args.prefill_start_delay_s)
-        wait_for_decode_ready(args)
-        roles["prefill"].start()
+        # Cache-store initialization on each role may require its peer to be
+        # online.  Launch both processes before waiting for either /health;
+        # each role script performs its own local and cross-role health gates.
+        start_remote_roles(args, roles)
         while True:
             statuses = {role: remote.poll() for role, remote in roles.items()}
             if all(status is not None for status in statuses.values()):

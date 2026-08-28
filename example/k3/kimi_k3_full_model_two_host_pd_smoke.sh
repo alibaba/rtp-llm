@@ -14,8 +14,6 @@
 #    DECODE_REPO_ROOT=/data0/user/RTP-LLM/github-opensource \
 #    PREFILL_CHECKPOINT_PATH=/data3/user/Kimi-K3 \
 #    DECODE_CHECKPOINT_PATH=/data0/user/Kimi-K3 \
-#    PREFILL_SP_CHECKPOINT_PATH=/data3/user/Kimi-K3-Eagle3 \
-#    DECODE_SP_CHECKPOINT_PATH=/data0/user/Kimi-K3-Eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -28,7 +26,6 @@
 #
 # 1. Start the Decode role:
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
-#    SP_CHECKPOINT_PATH=/ssd/2/kimi-k3-eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -38,7 +35,6 @@
 # 2. Start Prefill with the same endpoints and run ID (it waits for both the
 #    Decode model and Decode result listener to become ready):
 #    CHECKPOINT_PATH=/ssd/2/kimi-k3 \
-#    SP_CHECKPOINT_PATH=/ssd/2/kimi-k3-eagle3 \
 #    PREFILL_ENDPOINT=xx.xx.xx.xx:27188 \
 #    DECODE_ENDPOINT=xx.xx.xx.xx:28188 \
 #    SMOKE_RUN_ID=my-run \
@@ -57,11 +53,12 @@
 # answers and cache metadata, then reports PASS/FAIL back to Decode. Both
 # commands therefore have a meaningful exit status and clean only their own
 # process group.
-# The full-model profile always enables Kimi K3 Eagle3 MTP on both roles. The
-# role-local draft checkpoint is mandatory; there is no non-MTP fallback.
+# Projection-KTP phase one supports ordinary Decode only. MTP/Eagle3 is
+# intentionally absent and startup must fail if it leaks in from the caller.
 
 set -Eeuo pipefail
 ulimit -c 0
+export PYTHONFAULTHANDLER=1
 
 die() {
     echo "error: $*" >&2
@@ -72,7 +69,6 @@ usage() {
     cat >&2 <<'EOF'
 Usage (run inside lhc_GPU as the normal user):
   CHECKPOINT_PATH=/local/path/to/Kimi-K3 \
-  SP_CHECKPOINT_PATH=/local/path/to/Kimi-K3-Eagle3 \
   PREFILL_ENDPOINT=prefill-host:27188 \
   DECODE_ENDPOINT=decode-host:28188 \
   SMOKE_RUN_ID=my-run \
@@ -82,9 +78,8 @@ The two roles may start concurrently. Prefill waits for both the Decode model
 and result channel. The default result channel is DECODE host at DECODE port +
 100; override SMOKE_RESULT_ENDPOINT on both hosts when that port is unavailable.
 
-The validated BF16 1M model/runtime profile is fixed by this smoke and always
-uses Eagle3 MTP. Only host, target/draft checkpoint, artifact, timeout and
-prebuilt-launcher settings are configurable.
+The validated BF16 1M model/runtime profile is fixed by this smoke and uses
+Prefill TP8/EP8 plus Decode DP8/KTP8/EP8 with ordinary Decode only.
 
 Merge-gate accuracy validation must use SMOKE_SUITE=all. SMOKE_SUITE=flow is
 only a four-layer RDMA connectivity/multi-round preflight and does not satisfy
@@ -100,8 +95,6 @@ Important optional variables:
   SMOKE_IDENTITY_MAX_TOKENS defaults to 256 for the reasoning identity case
   SMOKE_SINGLE_EXACT_MAX_TOKENS
                             defaults to 128 for exact-cache seed/hit answers
-  SMOKE_MTP_CHUNK_MAX_TOKENS
-                            defaults to 128 for MTP chunk-Prefill coverage
   SMOKE_RDMA_PREWARM_ATTEMPTS
                             defaults to 3 bounded batch-sized prewarm attempts
   SMOKE_RDMA_PREWARM_BACKOFF_S
@@ -113,13 +106,17 @@ Important optional variables:
                                   check without semantic-answer assertions
                             all: identity, single miss/hit, partial hit,
                                  concurrent all-miss/all-hit, mixed hit+miss
-                                 batches, MTP acceptance after chunk Prefill,
-                                 and >64K single/batched chunk cases
+                                 batches and >64K single/batched chunk cases
   SMOKE_EXPECTED_LAYERS     checkpoint layer count; defaults to 93. Set to 4
                             only for the required four-layer RDMA flow smoke.
   SMOKE_BLOCK_SIZE          physical cache page size; defaults to 4096
   SMOKE_KERNEL_BLOCK_SIZE   attention kernel page size; defaults to 128
   SMOKE_CHUNK_TOKENS        whole-model chunk budget; defaults to 65536
+  SMOKE_DECODE_KV_CACHE_MEM_MB
+                            Decode hybrid-cache budget; defaults to 20000 MiB.
+                            Projection-KTP replicates DP-local KDA/O-proj
+                            weights, so the older 42000 MiB budget can OOM
+                            before CUDA Graph capture on a 93-layer model.
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
@@ -187,21 +184,8 @@ esac
     || die "missing checkpoint config.json"
 [[ -f "${checkpoint_real}/model.safetensors.index.json" ]] \
     || die "missing checkpoint model.safetensors.index.json"
-sp_checkpoint_real="$(realpath -e "${SP_CHECKPOINT_PATH:?SP_CHECKPOINT_PATH is required}")" \
-    || die "Eagle3 checkpoint does not exist: ${SP_CHECKPOINT_PATH}"
-case "${sp_checkpoint_real}" in
-    /data[0-9]*/* | /data/* | /ssd/*) ;;
-    *) die "Eagle3 checkpoint must be on a local data disk: ${sp_checkpoint_real}" ;;
-esac
-sp_checkpoint_fs="$(findmnt -T "${sp_checkpoint_real}" -n -o FSTYPE)"
-sp_checkpoint_source="$(findmnt -T "${sp_checkpoint_real}" -n -o SOURCE)"
-case "${sp_checkpoint_fs}:${sp_checkpoint_source}" in
-    nfs*:* | cifs:* | smb*:* | fuse.*:* | *[Nn][Aa][Ss]*)
-        die "network/NAS Eagle3 checkpoint is forbidden: ${sp_checkpoint_fs}:${sp_checkpoint_source}"
-        ;;
-esac
-[[ -f "${sp_checkpoint_real}/config.json" ]] \
-    || die "missing Eagle3 checkpoint config.json"
+[[ -z "${SP_TYPE:-}" && -z "${SP_CHECKPOINT_PATH:-}" ]] \
+    || die "Projection-KTP smoke requires MTP/Eagle3 to be unset"
 smoke_expected_layers="${SMOKE_EXPECTED_LAYERS:-93}"
 [[ "${smoke_expected_layers}" =~ ^[1-9][0-9]*$ ]] \
     || die "SMOKE_EXPECTED_LAYERS must be a positive integer"
@@ -232,13 +216,6 @@ if expected_layers not in layer_counts:
     )
 print(f"checkpoint layers={expected_layers}")
 PY
-case "${smoke_expected_layers}" in
-    93) smoke_eagle3_aux_layer_ids=0,44,88 ;;
-    4) smoke_eagle3_aux_layer_ids=0,1,3 ;;
-    *)
-        die "no validated Eagle3 aux-layer profile for ${smoke_expected_layers} target layers"
-        ;;
-esac
 
 artifact_root="${SMOKE_ARTIFACT_ROOT:-/tmp/kimi-k3-two-host-pd-smoke}"
 role_dir="${artifact_root}/${SMOKE_RUN_ID}/${role}"
@@ -261,6 +238,7 @@ done
 smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
 smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
@@ -270,6 +248,7 @@ for size_value in \
     "${smoke_block_size}" \
     "${smoke_kernel_block_size}" \
     "${smoke_chunk_tokens}" \
+    "${smoke_decode_kv_cache_mem_mb}" \
     "${smoke_linear_step}"; do
     [[ "${size_value}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke block/chunk/linear settings must be positive integers"
@@ -397,6 +376,32 @@ verify_rdma_log() {
     fi
 }
 
+verify_projection_ktp_decode_log() {
+    [[ "${role}" == "decode" ]] || return 0
+    local engine_log="${role_dir}/runtime/work/${role}/logs/engine.log"
+    local rank_log_dir="${role_dir}/runtime/logs/${role}"
+    local evidence_file="${role_dir}/projection-ktp-evidence.txt"
+    local rank_logs=("${rank_log_dir}"/main_*.log)
+    if [[ ! -e "${rank_logs[0]}" ]]; then
+        rank_logs=()
+    fi
+    local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
+    : >"${evidence_file}"
+    for marker in \
+        K3_PROJECTION_KTP_LAYOUT \
+        K3_PROJECTION_KTP_STEP \
+        K3_PROJECTION_KTP_GRAPH_REPLAY \
+        K3_PD_FAN_IN; do
+        grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
+            || die "Decode log has no ${marker} evidence"
+    done
+    for bucket in 1 2 4 8; do
+        grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
+            | tail -1 >>"${evidence_file}" \
+            || die "Decode log has no CUDA Graph capture evidence for bucket ${bucket}"
+    done
+}
+
 verify_role_environment() {
     local env_file="${role_dir}/service.env"
     # Never dump the full process environment: it can contain unrelated
@@ -408,10 +413,10 @@ verify_role_environment() {
         "${smoke_block_size}" \
         "${smoke_kernel_block_size}" \
         "${smoke_chunk_tokens}" \
+        "${smoke_decode_kv_cache_mem_mb}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
-        "${sp_checkpoint_real}" \
-        "${smoke_eagle3_aux_layer_ids}" <<'PY'
+        "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
 import pathlib
 import sys
 
@@ -422,10 +427,10 @@ import sys
     block_size,
     kernel_block_size,
     chunk_tokens,
+    decode_kv_cache_mem_mb,
     linear_step,
     chunkwise_rdma,
-    sp_checkpoint_path,
-    eagle3_aux_layer_ids,
+    core_dump_on_exception,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 env = {}
@@ -450,15 +455,18 @@ expected = {
     "ENABLE_CUDA_GRAPH_DEBUG_MODE": "0",
     "FLASHINFER_CUDA_ARCH_LIST": "10.3a",
     "DEEPGEMM_JIT_COMPILER": "auto",
-    "FT_CORE_DUMP_ON_EXCEPTION": "1",
-    "SP_TYPE": "eagle3",
-    "SP_MODEL_TYPE": "kimi_k3_mla_swa_eagle3",
-    "SP_CHECKPOINT_PATH": sp_checkpoint_path,
-    "SP_ACT_TYPE": "BF16",
-    "GEN_NUM_PER_CIRCLE": "3",
-    "KIMI_K3_EAGLE3_AUX_LAYER_IDS": eagle3_aux_layer_ids,
+    "FT_CORE_DUMP_ON_EXCEPTION": core_dump_on_exception,
 }
-absent = ["CUDA_LAUNCH_BLOCKING", "large_segment_size_mb"]
+absent = [
+    "CUDA_LAUNCH_BLOCKING",
+    "large_segment_size_mb",
+    "SP_TYPE",
+    "SP_MODEL_TYPE",
+    "SP_CHECKPOINT_PATH",
+    "SP_ACT_TYPE",
+    "GEN_NUM_PER_CIRCLE",
+    "KIMI_K3_EAGLE3_AUX_LAYER_IDS",
+]
 if role == "prefill":
     expected.update({
         "MAX_SEQ_LEN": "1258294",
@@ -479,13 +487,14 @@ else:
     expected.update({
         "MAX_SEQ_LEN": "1468006",
         "MAX_BATCH_TOKENS_SIZE": "1468006",
-        "KV_CACHE_MEM_MB": "42000",
+        "KV_CACHE_MEM_MB": decode_kv_cache_mem_mb,
         "REUSE_CACHE": "0",
         "KIMI_K3_KDA_POOL_BLOCKS": "112",
         "RESERVER_RUNTIME_MEM_MB": "8000",
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
         "ENABLE_CUDA_GRAPH": "1",
-        "DECODE_CAPTURE_CONFIG": "1,2,3,4",
+        "DECODE_CAPTURE_CONFIG": "1,2,4,8",
+        "KIMI_K3_DECODE_TOPOLOGY": "dp8_ktp8_ep8",
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
@@ -537,13 +546,11 @@ apply_validated_common_profile() {
     export ENABLE_CUDA_GRAPH_DEBUG_MODE=0
     export FLASHINFER_CUDA_ARCH_LIST=10.3a
     export DEEPGEMM_JIT_COMPILER=auto
-    export FT_CORE_DUMP_ON_EXCEPTION=1
-    export SP_TYPE=eagle3
-    export SP_MODEL_TYPE=kimi_k3_mla_swa_eagle3
-    export SP_CHECKPOINT_PATH="${sp_checkpoint_real}"
-    export SP_ACT_TYPE=BF16
-    export GEN_NUM_PER_CIRCLE=3
-    export KIMI_K3_EAGLE3_AUX_LAYER_IDS="${smoke_eagle3_aux_layer_ids}"
+    export FT_CORE_DUMP_ON_EXCEPTION="${FT_CORE_DUMP_ON_EXCEPTION:-1}"
+    [[ "${FT_CORE_DUMP_ON_EXCEPTION}" =~ ^[01]$ ]] \
+        || die "FT_CORE_DUMP_ON_EXCEPTION must be 0 or 1"
+    unset SP_TYPE SP_MODEL_TYPE SP_CHECKPOINT_PATH SP_ACT_TYPE
+    unset GEN_NUM_PER_CIRCLE KIMI_K3_EAGLE3_AUX_LAYER_IDS
     export RTP_LLM_SERVICE_ID="kimi-k3-full-pd-${SMOKE_RUN_ID}"
     # Keep TP Unix-domain sockets below Linux's 107-byte path limit even when
     # the externally visible run ID is descriptive and long.
@@ -575,7 +582,7 @@ apply_validated_prefill_profile() {
 apply_validated_decode_profile() {
     export MAX_SEQ_LEN=1468006
     export MAX_BATCH_TOKENS_SIZE=1468006
-    export KV_CACHE_MEM_MB=42000
+    export KV_CACHE_MEM_MB="${smoke_decode_kv_cache_mem_mb}"
     export REUSE_CACHE=0
     export KIMI_K3_KDA_POOL_BLOCKS=112
     export RESERVER_RUNTIME_MEM_MB=8000
@@ -583,9 +590,10 @@ apply_validated_decode_profile() {
     unset KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD KIMI_K3_PREFILL_CHUNK_TOKENS
     unset ENABLE_MEMORY_CACHE MEMORY_CACHE_SIZE_MB
     export ENABLE_CUDA_GRAPH=1
-    # The smoke issues four concurrent requests. Capture every possible
-    # coalesced Decode batch size instead of aborting above batch size one.
-    export DECODE_CAPTURE_CONFIG=1,2,3,4
+    # Exercise several arbitrary public graph buckets; the coordinator chooses
+    # one common key from the DP-local maximum batch.
+    export DECODE_CAPTURE_CONFIG=1,2,4,8
+    export KIMI_K3_DECODE_TOPOLOGY=dp8_ktp8_ep8
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
@@ -602,7 +610,7 @@ fi
 
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
-echo "[${role}] eagle3_checkpoint=${sp_checkpoint_real} (${sp_checkpoint_fs}:${sp_checkpoint_source})"
+echo "[${role}] projection_ktp=dp8_ktp8_ep8 mtp=disabled"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -677,6 +685,7 @@ PY
     [[ -f "${result_file}" ]] || die "timed out waiting for Prefill result"
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
+    verify_projection_ktp_decode_log
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     exit 0
 fi
@@ -689,12 +698,10 @@ wait_for_result_listener
 max_tokens="${SMOKE_MAX_TOKENS:-128}"
 identity_max_tokens="${SMOKE_IDENTITY_MAX_TOKENS:-256}"
 single_exact_max_tokens="${SMOKE_SINGLE_EXACT_MAX_TOKENS:-128}"
-mtp_chunk_max_tokens="${SMOKE_MTP_CHUNK_MAX_TOKENS:-128}"
 for token_budget in \
     "${max_tokens}" \
     "${identity_max_tokens}" \
-    "${single_exact_max_tokens}" \
-    "${mtp_chunk_max_tokens}"; do
+    "${single_exact_max_tokens}"; do
     [[ "${token_budget}" =~ ^[1-9][0-9]*$ ]] \
         || die "smoke output token budgets must be positive integers"
 done
@@ -716,7 +723,6 @@ python3 "${case_runner}" \
     --max-tokens "${max_tokens}" \
     --identity-max-tokens "${identity_max_tokens}" \
     --single-exact-max-tokens "${single_exact_max_tokens}" \
-    --mtp-chunk-max-tokens "${mtp_chunk_max_tokens}" \
     --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
     --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
     --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \

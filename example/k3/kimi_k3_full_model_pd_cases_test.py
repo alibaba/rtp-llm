@@ -26,6 +26,7 @@ def make_args() -> argparse.Namespace:
         identity_max_tokens=256,
         single_exact_max_tokens=128,
         mtp_chunk_max_tokens=128,
+        require_mtp=True,
         rdma_prewarm_attempts=0,
         rdma_prewarm_backoff_s=0,
         rdma_prewarm_settle_s=0,

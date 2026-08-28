@@ -366,14 +366,17 @@ def _parse_decode_capture_config(config: str) -> List[int]:
     if not config:
         return []
 
-    # Only support comma-separated list format
+    # Decode graph buckets are an ABI contract for replay. Unlike the generic
+    # list helper, do not silently discard invalid entries: a typo must fail at
+    # startup instead of changing the captured key set.
     try:
-        return _parse_comma_separated_ints(
-            config,
-            "decode_capture_config",
-            "decode capture batch sizes",
-            raise_on_empty=False,
-        )
+        values = [int(part.strip()) for part in config.split(",") if part.strip()]
+        if any(value <= 0 for value in values):
+            raise ValueError(
+                "decode_capture_config values must all be positive integers"
+            )
+        return sorted(set(values))
     except ValueError as e:
-        # Convert ValueError to ArgumentTypeError for argparse
-        raise argparse.ArgumentTypeError(str(e))
+        raise argparse.ArgumentTypeError(
+            f"invalid decode_capture_config {config!r}: {e}"
+        ) from e

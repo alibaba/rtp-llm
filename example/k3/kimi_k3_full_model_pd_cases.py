@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--single-exact-max-tokens", type=int, default=128)
     parser.add_argument("--mtp-chunk-max-tokens", type=int, default=128)
     parser.add_argument(
+        "--require-mtp",
+        action="store_true",
+        help="include the Eagle/MTP draft-acceptance case",
+    )
+    parser.add_argument(
         "--rdma-prewarm-attempts",
         type=int,
         default=3,
@@ -611,28 +616,29 @@ class Runner:
             concurrent=True,
         )
 
-        mtp_chunk_prompt = make_whole_chunk_prompt(
-            self.args.namespace,
-            "mtp-chunk-prefill",
-            73,
-        )
-        self.run_stage(
-            "mtp_chunk_prefill_miss",
-            [
-                Case(
-                    "mtp_chunk_prefill_miss",
-                    mtp_chunk_prompt,
-                    numbered_answer_pattern(5329),
-                    "miss",
-                    require_chunk=True,
-                    require_mtp=True,
-                    max_tokens=max(
-                        self.args.max_tokens,
-                        self.args.mtp_chunk_max_tokens,
-                    ),
-                )
-            ],
-        )
+        if getattr(self.args, "require_mtp", False):
+            mtp_chunk_prompt = make_whole_chunk_prompt(
+                self.args.namespace,
+                "mtp-chunk-prefill",
+                73,
+            )
+            self.run_stage(
+                "mtp_chunk_prefill_miss",
+                [
+                    Case(
+                        "mtp_chunk_prefill_miss",
+                        mtp_chunk_prompt,
+                        numbered_answer_pattern(5329),
+                        "miss",
+                        require_chunk=True,
+                        require_mtp=True,
+                        max_tokens=max(
+                            self.args.max_tokens,
+                            self.args.mtp_chunk_max_tokens,
+                        ),
+                    )
+                ],
+            )
 
         single_prompt = make_whole_chunk_prompt(
             self.args.namespace, "whole-chunk-single", 61

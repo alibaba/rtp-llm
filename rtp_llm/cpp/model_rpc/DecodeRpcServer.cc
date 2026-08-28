@@ -154,17 +154,18 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_cache_dtype,
                                 static_cast<int32_t>(cache_config.dtype));
-        // K3 PD is equal-TP only.  Prefill rank i and decode rank i own the same
-        // KDA/MLA attention shard, so the state moves rank-to-rank with no
-        // re-slicing.  The removed P8->D1 fan-in instead required one decode rank
-        // to reassemble all 96 KDA heads, which is what forced the cache layout to
-        // reserve a full-head slot and pad every rank-local block up to it.
         const int decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
-        RTP_LLM_CHECK_WITH_INFO(decode_attention_tp == decode_context.prefill_attention_tp_size,
-                                "request [%s] K3 PD requires equal attention TP on both sides, got P%d->D%d",
+        const int decode_ktp = static_cast<int>(maga_init_params_.parallelism_config.get_ktp_size());
+        const bool projection_ktp = decode_ktp > 1;
+        RTP_LLM_CHECK_WITH_INFO(
+            decode_attention_tp == decode_context.prefill_attention_tp_size
+                || (projection_ktp && decode_attention_tp == 1
+                    && decode_context.prefill_attention_tp_size == 8),
+            "request [%s] K3 PD supports equal attention TP or P8 projection-KTP Decode; got P%d->D%d/KTP%d",
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_attention_tp_size,
-                                decode_attention_tp);
+                                decode_attention_tp,
+                                decode_ktp);
         for (const auto& spec : cache_config.cache_specs) {
             const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(spec.get());
             if (linear_spec == nullptr) {
@@ -179,22 +180,25 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                 decode_context.prefill_conv_state_dtype,
                 static_cast<int32_t>(linear_spec->ssm_state_dtype),
                 static_cast<int32_t>(linear_spec->conv_state_dtype));
-            const uint32_t expected_local_heads = kK3TotalLinearHeads / decode_attention_tp;
+            const uint32_t expected_local_heads =
+                projection_ktp ? kK3TotalLinearHeads : kK3TotalLinearHeads / decode_attention_tp;
             RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == expected_local_heads
                                         && linear_spec->local_num_v_heads == expected_local_heads,
-                                    "request [%s] P%d->D%d K3 PD requires %u local KDA heads, got k=%u v=%u",
+                                    "request [%s] P%d->D%d/KTP%d K3 PD requires %u local KDA heads, got k=%u v=%u",
                                     decode_context.request_key.c_str(),
                                     decode_context.prefill_attention_tp_size,
                                     decode_attention_tp,
+                                    decode_ktp,
                                     expected_local_heads,
                                     linear_spec->local_num_k_heads,
                                     linear_spec->local_num_v_heads);
         }
-        RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu physical_block=%zu "
+        RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d_KTP%d peers=%zu physical_block=%zu "
                          "kernel_block=%zu",
                          decode_context.request_key.c_str(),
                          decode_context.prefill_attention_tp_size,
                          decode_attention_tp,
+                         decode_ktp,
                          decode_context.peer_addrs.size(),
                          cache_config.seq_size_per_block,
                          cache_config.kernel_seq_size_per_block);
@@ -407,20 +411,27 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     const bool  segmented_linear_cache =
         load_context.prefill_cp_size <= 1 && peer_addrs.size() > 1 && hasSegmentedLinearCacheGroup(cache_config);
     const int  decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
+    const int  decode_ktp          = static_cast<int>(maga_init_params_.parallelism_config.get_ktp_size());
+    const bool projection_ktp      = segmented_linear_cache && decode_ktp > 1 && decode_attention_tp == 1;
     const bool equal_attention_tp  = segmented_linear_cache && decode_attention_tp > 1
                                     && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
-    // A segmented linear cache is head-sharded, so it can only be moved
-    // rank-to-rank.  The removed P8->D1 fan-in pulled every prefill peer so one
-    // decode rank could stitch all 96 segments together; with that gone an
-    // unequal mapping must fail loudly instead of silently falling through to the
-    // generic block split below, which would hand decode the wrong head slices.
-    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || equal_attention_tp,
-                            "K3 hybrid cache PD requires equal attention TP, got D%d with %zu prefill peers",
+    // A segmented linear cache is head-sharded. Equal attention TP maps one
+    // Prefill peer to one Decode rank; Projection-KTP Decode instead receives
+    // all ordered Prefill peers and reconstructs its DP-local full-head KDA.
+    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || equal_attention_tp || projection_ktp,
+                            "K3 hybrid cache PD requires equal attention TP or projection KTP, got D%d/KTP%d with %zu prefill peers",
                             decode_attention_tp,
+                            decode_ktp,
                             peer_addrs.size());
 
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
+        for (const auto& addr : peer_addrs) {
+            request.add_peer_addrs(addr);
+        }
+    } else if (projection_ktp) {
+        request.set_partition_count(1);
+        request.set_partition_id(0);
         for (const auto& addr : peer_addrs) {
             request.add_peer_addrs(addr);
         }
@@ -468,17 +479,26 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     const auto& cache_config        = engine_->resourceContext().cache_manager->cacheConfig();
     const bool  k3_hybrid_cache     = cache_config.use_mla && hasSegmentedLinearCacheGroup(cache_config);
     const int   decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
+    const int   decode_ktp          = static_cast<int>(maga_init_params_.parallelism_config.get_ktp_size());
+    const bool  projection_ktp      = k3_hybrid_cache && decode_ktp > 1 && decode_attention_tp == 1;
     const bool  equal_attention_tp =
         k3_hybrid_cache && decode_attention_tp > 1 && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
-    // Same reason as constructRemoteLoadRequestForMla: without the removed
-    // P8->D1 fan-in an unequal mapping would drop through to the generic block
-    // split and give decode the wrong KDA head slices, silently.
-    RTP_LLM_CHECK_WITH_INFO(!k3_hybrid_cache || load_context.prefill_cp_size > 1 || equal_attention_tp,
-                            "K3 hybrid cache PD requires equal attention TP, got D%d with %zu prefill peers",
+    // Keep generic unequal attention topologies rejected. Projection-KTP is
+    // the one explicit P8 fan-in contract and is validated separately.
+    RTP_LLM_CHECK_WITH_INFO(
+        !k3_hybrid_cache || load_context.prefill_cp_size > 1 || equal_attention_tp || projection_ktp,
+                            "K3 hybrid cache PD requires equal attention TP or projection KTP, got D%d/KTP%d with %zu prefill peers",
                             decode_attention_tp,
+                            decode_ktp,
                             peer_addrs.size());
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
+        request.set_partition_count(1);
+        request.set_partition_id(0);
+        for (const auto& addr : peer_addrs) {
+            request.add_peer_addrs(addr);
+        }
+    } else if (projection_ktp) {
         request.set_partition_count(1);
         request.set_partition_id(0);
         for (const auto& addr : peer_addrs) {
@@ -861,13 +881,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    // Receive-side fan-in.  This is deliberately kept even though the P8->D1
-    // sender path is gone: it is still the live path for CP-sharded prefill,
-    // where constructRemoteLoadRequest* adds every peer and peer_cnt stays > 1.
-    // For equal-TP non-CP K3 the sender now adds exactly one peer, so peer_cnt is
-    // 1 and this is unreachable — do not "clean it up" without checking CP.
+    // Receive-side fan-in serves Projection-KTP P8->D8/D16. Each segmented
+    // KDA group is split by its head layout across all ordered Prefill peers;
+    // replicated MLA groups select exactly one source peer below. CP-sharded
+    // Prefill uses the separate page-level RR path.
     const bool hybrid_linear_fan_in =
         use_mla && !is_page_level_rr && peer_cnt > 1 && hasSegmentedLinearCacheGroup(cache_config);
+    const int mla_source_peer = static_cast<int>(maga_init_params_.parallelism_config.dp_rank % peer_cnt);
+    if (hybrid_linear_fan_in) {
+        RTP_LLM_LOG_INFO("[K3_PD_FAN_IN] request=%s prefill_peers=%d kda_head_partitions=%d "
+                         "mla_source_peer=%d decode_dp_rank=%ld",
+                         request_key.c_str(),
+                         peer_cnt,
+                         peer_cnt,
+                         mla_source_peer,
+                         maga_init_params_.parallelism_config.dp_rank);
+    }
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
         std::vector<int> layer_gids;
         if (use_hybrid && layer_id < cfg.layer_to_group_ids.size() && !cfg.layer_to_group_ids[layer_id].empty()) {
@@ -1060,9 +1089,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                     continue;
                 }
-                if (hybrid_linear_fan_in && !segmented_linear_group && i != 0) {
+                if (hybrid_linear_fan_in && !segmented_linear_group && i != mla_source_peer) {
                     // MLA latent cache is replicated across prefill TP ranks;
-                    // one full copy is sufficient. KDA below deliberately
+                    // one full copy selected by Decode DP rank is sufficient. KDA below deliberately
                     // visits every peer because its state is head-sharded.
                     continue;
                 }
