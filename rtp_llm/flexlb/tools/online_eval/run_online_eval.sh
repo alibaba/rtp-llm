@@ -40,8 +40,8 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
 FLEXLB_LOG_PATH="${FLEXLB_LOG_PATH:-${RUN_DIR}/flexlb_logs}"
 
-N_PREFILL="${N_PREFILL:-2}"
-N_DECODE="${N_DECODE:-4}"
+N_PREFILL="${N_PREFILL:-20}"
+N_DECODE="${N_DECODE:-60}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 # NOTE: the three assignments below (JAVA_MOCK_ENGINE_JAR, JAVA_LOAD_CLIENT_JAR,
 # MAVEN_PROFILES) duplicate defaults already applied by lib_load_client.sh at
