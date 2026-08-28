@@ -344,6 +344,28 @@ def h20_oss_suites():
                 },
             ),
             smoke_test(
+                name="dense_dp_sep_tp2_to_tp1_decode_entrance_reuse",
+                task_info="data/model/qwen25/q_r_dp_sep_p2p_reuse.json",
+                gpu_type=["H20"],
+                envs={
+                    "prefill": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                    "decode": [
+                        "DECODE_ENTRANCE=1",
+                        "PYTHONUNBUFFERED=TRUE",
+                        "LOG_LEVEL=INFO",
+                    ],
+                },
+                enable_decode_entrance=True,
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --tp_size 2 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                    "decode": "--warm_up 0 --reuse_cache 1 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --tp_size 1 --load_cache_timeout_ms 120000 --reserver_runtime_mem_mb 8192",
+                },
+            ),
+            smoke_test(
                 name="dense_fp8kv_cudagraph",
                 task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1  --disable_flashinfer_native 1",
