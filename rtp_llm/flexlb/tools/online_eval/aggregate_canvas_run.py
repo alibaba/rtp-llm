@@ -302,6 +302,9 @@ for t in sorted(per_sec):
             "sched_p50": pct(b["sched"], 0.5),
             "sched_p95": pct(b["sched"], 0.95),
             "sched_p99": pct(b["sched"], 0.99),
+            # e2e_n：与 e2e 分位同源的每秒样本数（幸存者口径，只有
+            # status=ok 且带 total_ms 的行才进 e2e 列表）。
+            "e2e_n": len(b["e2e"]),
             "e2e_p50": pct(b["e2e"], 0.5),
             "e2e_p95": pct(b["e2e"], 0.95),
             "ttft_p50": pct(b["ttft"], 0.5),
@@ -322,10 +325,12 @@ else:
     mock_stats = mock_payload.get("stats") or []
 queue_ts = []
 t0 = None
+_raw_ts = []
 for kv in mock_stats:
     ts = int(float(kv.get("ts_epoch_ms", 0)))
     if t0 is None:
         t0 = ts
+    _raw_ts.append(ts)
     queue_ts.append(
         {
             "t_offset_s": round((ts - t0) / 1000),
@@ -344,6 +349,26 @@ for kv in mock_stats:
             "heap_used_mb": int(float(kv.get("heap_used_mb", 0))),
         }
     )
+
+# ---- t_offset_s rebase to client epoch0（口径修复 20260828）----
+# 原锚是 mock 首样本 t0：引擎启动空转期（约 28s）垫在 TQ 轴前段，与
+# TSEC / master / queue_top_bottom 序列（epoch0 锚）不同轴——Prefill
+# 队列图前段四线贴地重叠、x 轴「压测时间」语义失真。改锚聚合早期从
+# per_request send_start_epoch_ms 算出的 epoch0：t = round((ts-epoch0)/1000)，
+# 负值样本（早于首个请求发送 = 启动空转）丢弃，首点从 ~0 起；epoch0 == 0
+# （无 per_request 行）保持旧 mock-t0 锚，兼容旧 run。interval 差分在
+# rebase 之后跑：被丢弃的空转样本 cum 计数为 0，首个保留样本的增量
+# 口径不受影响。
+if epoch0 and queue_ts:
+    _rebased = []
+    for _q, _ts in zip(queue_ts, _raw_ts):
+        _t_new = round((_ts - epoch0) / 1000)
+        if _t_new < 0:
+            continue
+        _q["t_offset_s"] = _t_new
+        _rebased.append(_q)
+    if _rebased:
+        queue_ts = _rebased
 
 # per-interval batch rate / incremental avg batch size from cumulative counters
 prev_b, prev_r = 0, 0

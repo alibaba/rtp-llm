@@ -740,6 +740,7 @@ def main():
     # engine_dist.engine_count 优先）
     TQ = p_run_req = p_run_batch = p_wait = p_master_bq = None
     d_run_req = d_wait = avg_batch = heap_used = None
+    cum_batch_ref = None
     q_step = 5
     if queue_ts:
         tq_vals = [q.get("t_offset_s", i * 5) for i, q in enumerate(queue_ts)]
@@ -791,9 +792,24 @@ def main():
                 ]
             ),
         )
-        avg_batch = const(
-            "avgBatch", num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts])
-        )
+        # 口径修复（Jack 诊断）：主线换区间均值 interval_avg_batch_size
+        # （相邻采样间隔内 enqueued 增量 ÷ batches 增量，反映真实波动），
+        # 集群累计均值降为参照淡线；旧 aggregate 无 interval 键时退回
+        # cum 单线（向后兼容）。
+        has_interval_batch = any("interval_avg_batch_size" in q for q in queue_ts)
+        if has_interval_batch:
+            avg_batch = const(
+                "ivBatch",
+                num_arr([q.get("interval_avg_batch_size", 0) for q in queue_ts]),
+            )
+            cum_batch_ref = const(
+                "cumBatch",
+                num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts]),
+            )
+        else:
+            avg_batch = const(
+                "avgBatch", num_arr([q.get("cum_avg_batch_size", 0) for q in queue_ts])
+            )
         heap_used = const(
             "heapUsed", num_arr([q.get("heap_used_mb", 0) for q in queue_ts])
         )
@@ -802,8 +818,9 @@ def main():
         if batcher_ts_by_role:
             # 第四线：master batcher 队列（avg/engine，master 侧口径）。
             # 数据源与 2.1 节 p_master_batcher 同源（batcher_ts_by_role 的
-            # prefill 集群总量 ÷ P 引擎数）；master 序列 t0 通常为 -10s，
-            # 按 TQ 时间轴前向 step 对齐（尾部超出取尾值，序列尾部已归零）。
+            # prefill 集群总量 ÷ P 引擎数）；master 序列 t0 可为负（启动
+            # warmup），按 TQ 时间轴前向 step 对齐（尾部超出取尾值，序列
+            # 尾部已归零）。TQ 重锚 epoch0 后两轴同源，对齐语义准确。
             btr_pts = [
                 (float(r.get("t", 0) or 0), r.get("prefill", 0) or 0)
                 for r in batcher_ts_by_role
@@ -1350,11 +1367,18 @@ def main():
             e2e_max = max((p.get("e2e_p95", 0) or 0) for p in per_second)
             ttft_max = max((p.get("ttft_p95", 0) or 0) for p in per_second)
             five_max = max(e2e_max, ttft_max, 1)
+            five_cap = (
+                "x = 压测时间（s，1s 采样）；y = 延迟 p95（ms）。口径："
+                "e2e/ttft = 成功请求按发送秒的分位（幸存者口径，过载下慢"
+                "请求已转为错误被排除）；prefill/decode exec = 完成流（含 "
+                "cancel）按完成秒窗口的分位（全量口径）"
+            )
+            if any("e2e_n" in p for p in per_second):
+                five_cap += "；e2e 每秒样本量见 e2e_n"
             latency_containers.append(
                 emit_container(
                     "五延迟：e2e / ttft / schedule / prefill exec / decode exec",
-                    "x = 压测时间（s，1s 采样）；y = 延迟 p95（ms）；"
-                    "prefill / decode exec 为 mock 引擎侧执行窗口",
+                    five_cap,
                     emit_chart(
                         "LineChart",
                         TSEC,
@@ -1439,16 +1463,33 @@ def main():
                 ),
             ),
         ]
-        batch_max = max((q.get("cum_avg_batch_size", 0) or 0) for q in queue_ts)
+        if cum_batch_ref is not None:
+            batch_max = max(
+                max((q.get("interval_avg_batch_size", 0) or 0) for q in queue_ts),
+                max((q.get("cum_avg_batch_size", 0) or 0) for q in queue_ts),
+            )
+            batch_series = [
+                ("iv", "区间均值（interval）", avg_batch, "info"),
+                ("cm", "累计均值（参照）", cum_batch_ref, "neutral"),
+            ]
+            batch_cap = (
+                q_cap + "；y = 请求/批。主线 = 区间均值（interval：相邻采样间隔内 "
+                "enqueued 增量 ÷ batches 增量，反映真实波动）；淡线 = 集群"
+                "累计均值（cum，全程平均，含启动稀释）"
+            )
+        else:
+            batch_max = max((q.get("cum_avg_batch_size", 0) or 0) for q in queue_ts)
+            batch_series = [("bs", "avg batch size", avg_batch, "info")]
+            batch_cap = q_cap + "；y = 请求/批（集群累计均值）"
         queue_containers.append(
             emit_container(
                 "平均 batch size",
-                q_cap + "；y = 请求/批（集群累计均值）",
+                batch_cap,
                 emit_chart(
                     "LineChart",
                     TQ,
                     230,
-                    [("bs", "avg batch size", avg_batch, "info")],
+                    batch_series,
                     suffix=" 请求/批",
                     domain="[0, " + num(nice_max(batch_max * 1.2)) + "]",
                 ),
