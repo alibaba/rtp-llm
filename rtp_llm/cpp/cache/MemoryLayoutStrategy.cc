@@ -1,9 +1,27 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
+
+#if USING_ASCEND
+// torch::from_blob loses the ACL format tag on NPU tensors, which breaks the
+// downstream FIA/scatter attention kernels reading this cache. The torch_npu
+// variant preserves the NPU format (ACL_ND).
+#include "torch_npu/csrc/aten/common/from_blob.h"
+#endif
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 
 #include <algorithm>
+
+namespace {
+// NPU-format-preserving replacement for torch::from_blob (see header comment).
+inline torch::Tensor makeCacheTypedBlob(void* ptr, int64_t numel, const torch::TensorOptions& options) {
+#if USING_ASCEND
+    return at_npu::native::from_blob(ptr, {numel}, options);
+#else
+    return torch::from_blob(ptr, {numel}, options);
+#endif
+}
+}  // namespace
 
 namespace rtp_llm {
 
@@ -52,7 +70,7 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                           .requires_grad(false);
     const int64_t kv_total_bytes = static_cast<int64_t>(kv_cache_tensor.nbytes());
     const int64_t kv_typed_numel = static_cast<int64_t>(static_cast<size_t>(kv_total_bytes) / kv_elem_size);
-    torch::Tensor kv_cache_typed = torch::from_blob(kv_cache_tensor.data_ptr(), {kv_typed_numel}, kv_options);
+    torch::Tensor kv_cache_typed = makeCacheTypedBlob(kv_cache_tensor.data_ptr(), kv_typed_numel, kv_options);
 
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
@@ -117,8 +135,10 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         const size_t scale_bytes_per_token = config_.kv_scale_stride_bytes / config_.seq_size_per_block;
         auto         scale_options =
             torch::TensorOptions().dtype(torch::kUInt8).device(kv_scale_tensor.device()).requires_grad(false);
-        torch::Tensor kv_scale_typed = torch::from_blob(
-            kv_scale_tensor.data_ptr(), {static_cast<int64_t>(config_.kv_scale_pool_size_bytes)}, scale_options);
+        torch::Tensor kv_scale_typed =
+            makeCacheTypedBlob(kv_scale_tensor.data_ptr(),
+                               static_cast<int64_t>(config_.kv_scale_pool_size_bytes),
+                               scale_options);
         torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                       static_cast<int64_t>(config_.block_num),
                                                                       static_cast<int64_t>(config_.seq_size_per_block),
@@ -149,7 +169,7 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
             torch::TensorOptions().dtype(torch::kFloat32).device(kv_scale_tensor.device()).requires_grad(false);
         const int64_t scale_total_bytes = static_cast<int64_t>(kv_scale_tensor.nbytes());
         const int64_t scale_typed_numel = static_cast<int64_t>(static_cast<size_t>(scale_total_bytes) / sizeof(float));
-        torch::Tensor kv_scale_typed = torch::from_blob(kv_scale_tensor.data_ptr(), {scale_typed_numel}, scale_options);
+        torch::Tensor kv_scale_typed = makeCacheTypedBlob(kv_scale_tensor.data_ptr(), scale_typed_numel, scale_options);
         torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
                                                                       static_cast<int64_t>(config_.block_num),
                                                                       static_cast<int64_t>(scale_stride_elems)});
@@ -284,7 +304,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedSubBlocks(const to
 BlockInfo MemoryLayoutStrategy::makeBlockInfo(const torch::Tensor& tensor, void* addr, size_t size_bytes) const {
     auto      dev = tensor.device();
     BlockInfo info;
-    info.is_cuda      = dev.is_cuda();
+    info.is_cuda      = dev.is_cuda() || dev.is_privateuseone();
     info.device_index = dev.index();
     info.scalar_type  = static_cast<int32_t>(tensor.scalar_type());
     info.addr         = addr;

@@ -88,6 +88,12 @@ config_setting(
 )
 
 config_setting(
+    name = "using_ascend",
+    values = {"define": "using_ascend=true"},
+)
+
+
+config_setting(
     name = "rocm_gfx950",
     define_values = {
         "using_rocm": "true",
@@ -143,6 +149,7 @@ cc_binary(
     copts = copts(),
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
+        "-Wl,-Bsymbolic-functions", # Fox CXX abi mismatch issue, import torch_npu would link several CANN libraries, which include library with CXXabi=1 and CXXabi=0, and will cause std::regex memory issue. This linking option will cause the program to use internal symbols at runtime.
     ],
     linkshared = 1,
     visibility = ["//visibility:public"],

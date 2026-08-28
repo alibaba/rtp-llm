@@ -1,10 +1,13 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>
 #include <cstring>
 #include <memory>
+#if USING_CUDA
 #include <cuda_fp16.h>
+#endif
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 
@@ -21,6 +24,8 @@
 using namespace std;
 namespace W = rtp_llm::W;
 
+#define DEVICE_TYPE getTorchCudaDevice()
+
 namespace rtp_llm {
 
 // Mock model that returns random logits for testing NormalEngine without Python
@@ -33,7 +38,8 @@ public:
         // lm_output_indexes tells us how many logits rows to produce
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
         outputs.logits     = torch::randn({num_tokens, (int64_t)vocab_size_},
-                                      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                                       torch::TensorOptions().dtype(torch::kFloat32)
+                                           .device(DEVICE_TYPE));
         return outputs;
     }
 
@@ -87,11 +93,11 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     runtime_config.reserve_runtime_mem_mb     = 1024;
     const size_t hidden_units                 = 128;
 
-    auto opts = torch::TensorOptions().dtype(torch::kHalf).device(torch::kCUDA);
+    auto opts = torch::TensorOptions().dtype(torch::kHalf).device(DEVICE_TYPE);
 
-    // Create a CUDA tensor filled with 0.001 as the backing data for all weights
+    // Create a GPU tensor filled with 0.001 as the backing data for all weights
     auto data = (torch::ones({(long)(inter_size * inter_size)}, torch::TensorOptions().dtype(torch::kHalf)) * 0.001)
-                    .to(torch::kCUDA);
+                    .to(DEVICE_TYPE);
     auto data_ptr = data.data_ptr();
 
     auto make_weight = [&](std::vector<int64_t> shape) -> torch::Tensor {

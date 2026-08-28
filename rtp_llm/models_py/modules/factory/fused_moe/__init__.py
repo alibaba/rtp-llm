@@ -63,6 +63,18 @@ if device_type == DeviceType.ROCm:
     FusedMoeFactory.set_registry(registry)
     if is_gfx950():
         registry.register(RocmMXFp4PureTPStrategy())
+
+elif device_type == DeviceType.Ascend:
+    # ========== Ascend Registry ==========
+
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.ascend.strategy import (
+        AscendBf16FallbackStrategy,
+    )
+
+    registry = StrategyRegistry()
+    registry.register(AscendBf16FallbackStrategy())
+    FusedMoeFactory.set_registry(registry)
+
 else:
     # ========== CUDA Registry ==========
 

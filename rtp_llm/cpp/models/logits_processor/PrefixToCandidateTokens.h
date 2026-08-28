@@ -501,7 +501,8 @@ private:
     // failures (cannot open file, JSON syntax error) where the legacy parser may still be tried.
     bool loadPrefixDictStreaming(const std::string& file_path, bool& schema_error) {
         schema_error = false;
-        auto fp      = std::unique_ptr<FILE, decltype(&fclose)>(fopen(file_path.c_str(), "rb"), &fclose);
+        auto closer  = [](FILE* f) { std::fclose(f); };
+        auto fp      = std::unique_ptr<FILE, decltype(closer)>(fopen(file_path.c_str(), "rb"), closer);
         if (!fp) {
             return false;
         }

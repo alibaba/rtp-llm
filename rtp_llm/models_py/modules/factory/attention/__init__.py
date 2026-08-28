@@ -49,6 +49,17 @@ if device_type == DeviceType.ROCm:
     DECODE_MHA_IMPS.append(AiterDecodeImplTriton)
     DECODE_MHA_IMPS.append(AiterDecodeImplAsm)
     DECODE_MHA_IMPS.append(AiterDecodeImplNonAsm)
+elif device_type == DeviceType.Ascend:
+    # Ascend FMHA: torch_npu paged attention (new, with separate K/V cache)
+    from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_prefill import (
+        AscendPrefillImpl,
+    )
+    from rtp_llm.models_py.modules.factory.attention.ascend_impl.ascend_decode import (
+        AscendDecodeImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(AscendPrefillImpl)
+    DECODE_MHA_IMPS.append(AscendDecodeImpl)
 elif device_type == DeviceType.Cuda:
     # currently append early means impl has higher priority
     from rtp_llm.models_py.modules.factory.attention.cuda_headwise_impl.headwise import (

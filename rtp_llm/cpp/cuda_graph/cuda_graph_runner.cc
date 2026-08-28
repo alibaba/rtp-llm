@@ -1025,7 +1025,9 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 }
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
-    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+    auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32)
+        .device(getTorchCudaDevice())
+        .requires_grad(false);
     // Initialize BertEmbeddingInputs for capture
     // combo_position_ids: empty tensor for capture (will be filled during actual forward)
     inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);

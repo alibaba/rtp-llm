@@ -198,8 +198,15 @@ private:
                                     expected_numel,
                                     layer_id,
                                     group.tag.c_str());
+#if USING_ASCEND
+            // Ascend FIA/scatter ops expect BSND per-block layout:
+            // [blocks, 2, kernel_seq_size, local_kv_heads, head_dim].
+            result.kv_cache_base =
+                buffers.kv_addr.view({kernel_block_num, 2, kernel_seq_size, local_kv_heads, head_dim});
+#else
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
+#endif
             if (buffers.kv_scale_addr.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(buffers.kv_scale_addr.is_contiguous() && buffers.kv_scale_addr.dim() > 0
                                             && buffers.kv_scale_addr.size(0) == physical_block_num
@@ -239,7 +246,7 @@ private:
         return result;
     }
 
-    const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    rtp_llm::GroupedCacheLayerLayout grouped_layout_;
 };
 
 struct PyModelInitResources {
@@ -279,6 +286,7 @@ struct PyContextParallelParams {
 // Naming convention: the host (pinned CPU) tensor uses the bare name; its device (CUDA)
 // counterpart carries a _device suffix.
 struct PyAttentionInputs {
+    std::optional<KVCache> kv_cache;
     bool          is_prefill{false};
     bool          is_target_verify{false};
     torch::Tensor prefix_lengths;

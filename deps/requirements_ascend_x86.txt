@@ -1,0 +1,4 @@
+-r requirements_base.txt
+https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl
+https://files.pythonhosted.org/packages/78/f3/1e957440f30c48077dceadbe6ad92ec6651628db020a958bdf7ecc00558e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl
+numpy==1.26.4

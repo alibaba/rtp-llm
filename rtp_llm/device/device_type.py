@@ -11,6 +11,7 @@ class DeviceType(IntEnum):
     ArmCpu = 3
     ROCm = 4
     Ppu = 5
+    Ascend = 6
 
 
 def get_device_type() -> DeviceType:
@@ -23,6 +24,12 @@ def get_device_type() -> DeviceType:
         ):
             return DeviceType.Ppu
         return DeviceType.Cuda
+    try:
+        import torch_npu
+        if torch.npu.is_available():
+            return DeviceType.Ascend
+    except ImportError:
+        pass
     return DeviceType.Cpu
 
 
@@ -36,3 +43,7 @@ def is_hip() -> bool:
 
 def is_ppu() -> bool:
     return get_device_type() == DeviceType.Ppu
+
+
+def is_ascend() -> bool:
+    return get_device_type() == DeviceType.Ascend

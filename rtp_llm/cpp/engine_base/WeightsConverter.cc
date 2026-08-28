@@ -11,7 +11,8 @@ WeightsConverter::WeightsConverter(bool need_copy, rtp_llm::QuantAlgo quant_alog
 
 torch::Tensor WeightsConverter::CopyTensorToGPU(const torch::Tensor& tensor) {
     if (need_copy_) {
-        auto gpu_tensor = torch::empty_like(tensor, torch::TensorOptions().device(torch::kCUDA));
+        auto gpu_device = tensor.is_privateuseone() ? torch::Device(torch::kPrivateUse1) : torch::Device(torch::kCUDA);
+        auto gpu_tensor = torch::empty_like(tensor, torch::TensorOptions().device(gpu_device));
         gpu_tensor.copy_(tensor, /*non_blocking=*/true);
         return gpu_tensor;
     } else {

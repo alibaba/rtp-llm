@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <atomic>
 #include <unordered_map>
 #include <vector>
@@ -51,9 +52,13 @@ public:
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32)
+            .device(getTorchCudaDevice())
+            .requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
-        options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
+        options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_)
+            .device(getTorchCudaDevice())
+            .requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
             hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",

@@ -102,3 +102,14 @@ compile_pip_requirements(
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
 )
+
+compile_pip_requirements(
+    name = "requirements_ascend_x86",
+    src = "requirements_ascend_x86.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = ["//:requirements_base.txt"],
+    requirements_txt = "requirements_lock_ascend_x86.txt",
+    generate_hashes = False,
+    tags = ["manual"],
+)
+

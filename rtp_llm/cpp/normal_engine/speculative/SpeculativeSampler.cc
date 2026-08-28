@@ -125,7 +125,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
 
     auto target_token_ids_d_t = target_sampler_output.token_ids;
-    if (!target_token_ids_d_t.is_cuda()) {
+    if (!target_token_ids_d_t.is_cuda() && !target_token_ids_d_t.is_privateuseone()) {
         buffer_holder_.hold_host(target_token_ids_d_t);
         target_token_ids_d_t = target_token_ids_d_t.to(target_device, true);
     }
@@ -254,7 +254,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
     sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
-    sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    cuda_graph::graphRecordEvent(*sample_output.transfer_done_event, cuda_graph::graphGetCurrentStream());
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,

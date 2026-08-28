@@ -80,6 +80,26 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_cpu_ascend",
+        sha256 = "",
+        urls = [
+            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.9.0%2Bcpu-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_npu_ascend",
+        sha256 = "",
+        urls = [
+            "https://files.pythonhosted.org/packages/78/f3/1e957440f30c48077dceadbe6ad92ec6651628db020a958bdf7ecc00558e/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl"
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.torch_npu"),
+    )
+
+    http_archive(
         name = "aiter",
         sha256 = "b6bce60a81cbc2de6eda78c3f75506337cec921e62224d0d2a5e0475a2aba9a1",
         urls = [
