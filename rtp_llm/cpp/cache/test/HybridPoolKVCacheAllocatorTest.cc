@@ -135,7 +135,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
-    config.finalizeBlockNums(block_num, RuntimeConfig{});
+    config.finalizeBlockNums(block_num);
     return config;
 }
 
@@ -149,26 +149,6 @@ static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint
     policies[group_id].explicit_block_num     = block_num;
     policies[group_id].charge_to_paged_budget = block_num > 0;
     config.setGroupPolicies(policies);
-}
-
-// Move every explicitly-sized independent group (DSV4's fixed state pools) onto pinned host
-// memory. Residency and budget are independent knobs, so a host-resident pool must also drop
-// charge_to_paged_budget -- checkGroupResidencyBudget() enforces exactly that pairing.
-static std::vector<size_t> setPinnedHostPlacementForExplicitIndependentGroups(CacheConfig& config) {
-    std::vector<CacheGroupPolicy> policies;
-    std::vector<size_t>           pinned_gids;
-    policies.reserve(static_cast<size_t>(config.groupNums()));
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        auto policy = config.policyForGroup(gid);
-        if (policy.evict_policy == CacheEvictPolicy::INDEPENDENT && policy.explicit_block_num > 0) {
-            policy.memory_placement       = CacheMemoryPlacement::HOST_PINNED;
-            policy.charge_to_paged_budget = false;
-            pinned_gids.push_back(gid);
-        }
-        policies.push_back(policy);
-    }
-    config.setGroupPolicies(policies);
-    return pinned_gids;
 }
 
 static size_t firstExplicitIndependentGroup(const CacheConfig& config) {
@@ -232,8 +212,7 @@ static size_t validBlockCount(const BlockIndicesType& blocks) {
 // Create HybridPoolKVCacheAllocator with SharedBlockCache injected (required before init()).
 static HybridPoolKVCacheAllocatorPtr
 makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION, int64_t reserve_block_ratio = 0) {
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
-        config, AllocationType::DEVICE, nullptr, reserve_block_ratio, role_type);
+    auto allocator    = std::make_shared<HybridPoolKVCacheAllocator>(config, nullptr, reserve_block_ratio, role_type);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     return allocator;
@@ -1076,27 +1055,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUseGpuBacking) {
     }
 }
 
-// memory_placement=HOST_PINNED must move only the opted-in pools off HBM; every other pool of
-// the same DSV4 config stays on the device.
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FixedTagPoolsUsePinnedHostBackingWhenPlacementIsHostPinned) {
-    auto       config      = makeDSV4HybridPoolConfig(/*block_num=*/200);
-    const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
-    ASSERT_FALSE(pinned_gids.empty());
-    ASSERT_LT(pinned_gids.size(), static_cast<size_t>(config.groupNums()));
-
-    auto allocator = makeAllocator(config);
-    ASSERT_TRUE(allocator->init());
-
-    ASSERT_EQ(allocator->groupBlockPools().size(), 7u);
-    const std::unordered_set<size_t> pinned_set(pinned_gids.begin(), pinned_gids.end());
-    for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
-        const bool expect_pinned = pinned_set.count(gid) > 0;
-        EXPECT_EQ(allocator->groupBlockPools()[gid]->where(),
-                  expect_pinned ? MemoryType::MEMORY_CPU_PINNED : MemoryType::MEMORY_GPU)
-            << "gid=" << gid << " tag=" << config.tagForGroup(gid);
-    }
-}
-
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly) {
     auto config        = makeDSV4HybridPoolConfig(/*block_num=*/200);
     config.linear_step = 4;
@@ -1209,8 +1167,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBloc
     const size_t explicit_gid = firstExplicitIndependentGroup(config);
     setExplicitBlocksForGroup(config, explicit_gid, 50);
 
-    RuntimeConfig rt;  // unused inside finalizeBlockNums today
-    config.finalizeBlockNums(/*global_block_num=*/200, rt);
+    config.finalizeBlockNums(/*global_block_num=*/200);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
@@ -1218,20 +1175,19 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesHcaStatePoolBloc
     }
 
     const size_t expected_reserve = 50u * config.blockSizeBytesForGroup(explicit_gid);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
+    EXPECT_EQ(config.explicitPoolReserveBytes(), expected_reserve);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4FinalizeBlockNumsUsesGlobalBlocksWhenHcaStateBlocksDisabled) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/123);
     setExplicitBlocksForGroup(config, firstExplicitIndependentGroup(config), 0);
 
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/123, rt);
+    config.finalizeBlockNums(/*global_block_num=*/123);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         EXPECT_EQ(config.blockNumForGroup(gid), 123u);
     }
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(config.explicitPoolReserveBytes(), 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) {
@@ -1239,38 +1195,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
     const size_t explicit_gid = firstExplicitIndependentGroup(config);
     setExplicitBlocksForGroup(config, explicit_gid, 50);
 
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/200, rt);
+    config.finalizeBlockNums(/*global_block_num=*/200);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
     const size_t expected_reserve = 50u * config.blockSizeBytesForGroup(explicit_gid);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve);
-}
-
-// Mirror image of DSV4GpuHcaStatePoolIncludesFixedReserve: a pinned-host pool keeps its explicit
-// block count but must NOT be deducted from the device paged budget, otherwise the KV cache
-// silently shrinks by bytes that never live in HBM.
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4PinnedHcaStatePoolExcludesFixedReserve) {
-    auto         config       = makeDSV4HybridPoolConfig(/*block_num=*/50);
-    const size_t explicit_gid = firstExplicitIndependentGroup(config);
-    setExplicitBlocksForGroup(config, explicit_gid, 50);
-    const auto pinned_gids = setPinnedHostPlacementForExplicitIndependentGroups(config);
-    ASSERT_EQ(pinned_gids.size(), 1u);
-    ASSERT_EQ(pinned_gids.front(), explicit_gid);
-
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/200, rt);
-
-    // Block counts are unaffected by residency: the explicit pool still gets its 50 blocks.
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        const uint32_t expected = config.policyForGroup(gid).explicit_block_num > 0 ? 50u : 200u;
-        EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
-    }
-    EXPECT_GT(config.blockSizeBytesForGroup(explicit_gid), 0u);
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(config.explicitPoolReserveBytes(), expected_reserve);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
@@ -1282,35 +1214,32 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksSca
     auto config        = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     config.linear_step = 4;
 
-    RuntimeConfig rt;
-    config.finalizeBlockNums(/*global_block_num=*/128, rt);
+    config.finalizeBlockNums(/*global_block_num=*/128);
 
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         const uint32_t expected = config.typeForGroup(gid) == CacheGroupType::SWA ? 32u : 128u;
         EXPECT_EQ(config.blockNumForGroup(gid), expected) << "gid=" << gid;
     }
-    EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(config.explicitPoolReserveBytes(), 0u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, FinalizeNonExplicitSwaBlocksUsesCeilDivision) {
     auto config        = makeTinySwaMultiPoolHybridConfig();
     config.linear_step = 4;
-    RuntimeConfig rt;
-
-    config.finalizeBlockNums(/*global_block_num=*/1, rt);
+    config.finalizeBlockNums(/*global_block_num=*/1);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 1u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 1u);
 
-    config.finalizeBlockNums(/*global_block_num=*/8, rt);
+    config.finalizeBlockNums(/*global_block_num=*/8);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 8u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 2u);
 
-    config.finalizeBlockNums(/*global_block_num=*/9, rt);
+    config.finalizeBlockNums(/*global_block_num=*/9);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 9u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 3u);
 
     config.linear_step = 1;
-    config.finalizeBlockNums(/*global_block_num=*/9, rt);
+    config.finalizeBlockNums(/*global_block_num=*/9);
     EXPECT_EQ(config.blockNumForGroup(/*linear gid=*/0), 9u);
     EXPECT_EQ(config.blockNumForGroup(/*swa gid=*/1), 9u);
 }

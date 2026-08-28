@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -192,14 +192,13 @@ inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
     const auto block_elems = static_cast<uint32_t>(block_bytes / dtype_size);
 
     KVCacheSpecDesc desc;
-    desc.tag                         = tag.empty() ? "opaque" : tag;
-    desc.cache_type                  = state_cache ? KVCacheSpecType::OpaqueState : KVCacheSpecType::OpaqueKV;
-    desc.dtype                       = dtype;
-    desc.entry_dtype                 = dtype;
-    desc.entry_elems                 = 1;
-    desc.explicit_entry_count        = block_elems;
-    desc.block_stride_bytes_override = block_bytes;
-    desc.is_state_cache              = state_cache;
+    desc.tag                  = tag.empty() ? "opaque" : tag;
+    desc.cache_type           = state_cache ? KVCacheSpecType::SWAState : KVCacheSpecType::CompressedKVCache;
+    desc.dtype                = dtype;
+    desc.entry_dtype          = dtype;
+    desc.entry_elems          = 1;
+    desc.explicit_entry_count = block_elems;
+    desc.is_state_cache       = state_cache;
 
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
@@ -218,9 +217,9 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
     desc.entry_elems = entry_elems;
     desc.entry_dtype = dtype;
     if (kind == "compressed_kv") {
-        desc.cache_type        = KVCacheSpecType::OpaqueKV;
+        desc.cache_type        = KVCacheSpecType::CompressedKVCache;
         desc.is_state_cache    = false;
-        desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+        desc.entry_count_mode  = BlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
         desc.compression_ratio = compression_ratio;
         if (desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
@@ -228,23 +227,19 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         return desc;
     }
 
-    desc.cache_type          = KVCacheSpecType::OpaqueState;
+    desc.cache_type          = KVCacheSpecType::SWAState;
     desc.is_state_cache      = true;
-    desc.entry_count_mode    = OpaqueBlockEntryCountMode::STATE_RING;
+    desc.entry_count_mode    = BlockEntryCountMode::STATE_RING;
     desc.reuse               = CacheReusePolicyDesc{};
     desc.reuse->evict_policy = CacheEvictPolicy::INDEPENDENT;
     desc.cp                  = CacheCpPolicyDesc{};
     if (desc.tag == "indexer_state" || desc.tag == "csa_state") {
-        desc.compression_ratio        = 4;
-        desc.state_ring_overlap       = 1;
-        desc.cp->align_payload        = true;
-        desc.cp->prefill_slice_layout = CpPrefillSliceLayout::PAYLOAD;
-        desc.cp->slice                = CpBlockSliceMode::PAYLOAD_BYTES;
+        desc.compression_ratio  = 4;
+        desc.state_ring_overlap = 1;
+        desc.cp->slice          = true;
     } else if (desc.tag == "hca_state") {
         desc.compression_ratio                = 128;
-        desc.cp->align_payload                = true;
-        desc.cp->prefill_slice_layout         = CpPrefillSliceLayout::PAYLOAD;
-        desc.cp->slice                        = CpBlockSliceMode::PAYLOAD_BYTES;
+        desc.cp->slice                        = true;
         desc.capacity                         = CacheCapacityPolicyDesc{};
         desc.capacity->explicit_block_num     = 256;
         desc.capacity->charge_to_paged_budget = true;
@@ -253,17 +248,14 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         desc.tail->active_tail_blocks         = 1;
         desc.tail->validate_tail_blocks       = false;
     } else if (desc.tag == "swa_kv") {
-        desc.compression_ratio        = DSV4_SWA_WINDOW_ENTRIES;
-        desc.cp->align_payload        = true;
-        desc.cp->prefill_slice_layout = CpPrefillSliceLayout::BLOCK_STRIDE;
-        desc.cp->slice                = CpBlockSliceMode::EQUAL_BYTES;
+        desc.compression_ratio = DSV4_SWA_WINDOW_ENTRIES;
+        desc.cp->slice         = true;
         if (desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
         }
     }
     desc.state_ring_include_gen_num_per_cycle = true;
     desc.cp->scale_seq_size                   = true;
-    desc.block_stride_alignment_min_entries   = DSV4_SWA_WINDOW_ENTRIES;
     return desc;
 }
 
@@ -308,7 +300,7 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
 
     KVCacheSpecDesc swa_desc = full_desc;
     swa_desc.tag             = "swa";
-    swa_desc.cache_type      = KVCacheSpecType::OpaqueState;
+    swa_desc.cache_type      = KVCacheSpecType::SWAState;
     swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
     swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);

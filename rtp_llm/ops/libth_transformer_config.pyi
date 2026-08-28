@@ -690,7 +690,6 @@ class KVCacheConfig:
     enable_remote_cache: bool
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
-    dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
@@ -924,8 +923,8 @@ class KVCacheSpecType:
     MHA: typing.ClassVar[KVCacheSpecType]
     MLA: typing.ClassVar[KVCacheSpecType]
     LINEAR: typing.ClassVar[KVCacheSpecType]
-    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]
-    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]
+    COMPRESSED_KV_CACHE: typing.ClassVar[KVCacheSpecType]
+    SWA_STATE: typing.ClassVar[KVCacheSpecType]
     @property
     def name(self) -> str: ...
     @property
@@ -945,57 +944,36 @@ class CacheEvictPolicy:
     INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
     NONE: typing.ClassVar[CacheEvictPolicy]
 
-class CacheMemoryPlacement:
-    DEVICE: typing.ClassVar[CacheMemoryPlacement]
-    HOST: typing.ClassVar[CacheMemoryPlacement]
-    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
-
 class CpBlockMappingMode:
     NONE: typing.ClassVar[CpBlockMappingMode]
     BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
     COMPACT_LAST_RANK: typing.ClassVar[CpBlockMappingMode]
 
-class CpBlockSliceMode:
-    NONE: typing.ClassVar[CpBlockSliceMode]
-    EQUAL_BYTES: typing.ClassVar[CpBlockSliceMode]
-    PAYLOAD_BYTES: typing.ClassVar[CpBlockSliceMode]
-
-class OpaqueBlockEntryCountMode:
-    EXPLICIT: typing.ClassVar[OpaqueBlockEntryCountMode]
-    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
-    STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
-
-class CpPrefillSliceLayout:
-    NONE: typing.ClassVar[CpPrefillSliceLayout]
-    PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
-    BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]
+class BlockEntryCountMode:
+    EXPLICIT: typing.ClassVar[BlockEntryCountMode]
+    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[BlockEntryCountMode]
+    STATE_RING: typing.ClassVar[BlockEntryCountMode]
 
 class CacheReusePolicyDesc:
-    enable_prefix_reuse: typing.Any
-    evict_policy: typing.Any
+    enable_prefix_reuse: typing.Optional[bool]
+    evict_policy: typing.Optional[CacheEvictPolicy]
     def __init__(self) -> None: ...
 
 class CacheCapacityPolicyDesc:
-    reservable: typing.Any
-    explicit_block_num: typing.Any
-    charge_to_paged_budget: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheMemoryPolicyDesc:
-    placement: typing.Any
+    reservable: typing.Optional[bool]
+    explicit_block_num: typing.Optional[int]
+    charge_to_paged_budget: typing.Optional[bool]
     def __init__(self) -> None: ...
 
 class CacheTailPolicyDesc:
-    active_tail_blocks: typing.Any
-    validate_tail_blocks: typing.Any
+    active_tail_blocks: typing.Optional[int]
+    validate_tail_blocks: typing.Optional[bool]
     def __init__(self) -> None: ...
 
 class CacheCpPolicyDesc:
-    mapping: typing.Any
-    slice: typing.Any
-    scale_seq_size: typing.Any
-    align_payload: typing.Any
-    prefill_slice_layout: typing.Any
+    mapping: typing.Optional[CpBlockMappingMode]
+    slice: typing.Optional[bool]
+    scale_seq_size: typing.Optional[bool]
     def __init__(self) -> None: ...
 
 class KVCacheSpecDesc:
@@ -1005,20 +983,17 @@ class KVCacheSpecDesc:
     is_state_cache: bool
     entry_elems: int
     entry_dtype: DataType
-    entry_count_mode: OpaqueBlockEntryCountMode
+    entry_count_mode: BlockEntryCountMode
     explicit_entry_count: int
     compression_ratio: int
     state_ring_overlap: int
     state_ring_include_gen_num_per_cycle: bool
-    block_stride_bytes_override: int
     block_stride_bytes_alignment: int
-    block_stride_alignment_min_entries: int
-    group_type: typing.Any
-    reuse: typing.Any
-    capacity: typing.Any
-    memory: typing.Any
-    tail: typing.Any
-    cp: typing.Any
+    group_type: typing.Optional[CacheGroupType]
+    reuse: typing.Optional[CacheReusePolicyDesc]
+    capacity: typing.Optional[CacheCapacityPolicyDesc]
+    tail: typing.Optional[CacheTailPolicyDesc]
+    cp: typing.Optional[CacheCpPolicyDesc]
     def __init__(self) -> None: ...
 
 

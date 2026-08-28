@@ -636,9 +636,9 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
         if (cache_config_.kvBlockStrideBytesForGroup(gid) + cache_config_.kvScaleStrideBytesForGroup(gid) == 0) {
             return false;
         }
-        if (spec->type == KVCacheSpecType::OpaqueKV) {
+        if (spec->type == KVCacheSpecType::CompressedKVCache) {
             has_compressed = true;
-        } else if (spec->type == KVCacheSpecType::OpaqueState) {
+        } else if (spec->type == KVCacheSpecType::SWAState) {
             has_state = true;
         } else {
             return false;
@@ -867,10 +867,10 @@ bool KVCacheMemoryConnector::usePrefixTreeMemoryCache() const {
 CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerTagSlot& slot) const {
     if (slot.group_id >= 0 && static_cast<size_t>(slot.group_id) < static_cast<size_t>(cache_config_.groupNums())) {
         const auto& spec = cache_config_.specForGroup(static_cast<size_t>(slot.group_id));
-        if (spec && spec->type == KVCacheSpecType::OpaqueKV) {
+        if (spec && spec->type == KVCacheSpecType::CompressedKVCache) {
             return CacheBlockKind::COMPRESSED_KV;
         }
-        if (spec && spec->type == KVCacheSpecType::OpaqueState) {
+        if (spec && spec->type == KVCacheSpecType::SWAState) {
             return CacheBlockKind::STATE_SWA_KV;
         }
     }

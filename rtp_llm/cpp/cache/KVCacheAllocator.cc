@@ -290,7 +290,7 @@ void KVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>&
         return;
     }
 
-    const auto memory_type = allocation_type_ == AllocationType::DEVICE ? rtp_llm::MEMORY_GPU : rtp_llm::MEMORY_CPU;
+    const auto memory_type = rtp_llm::MEMORY_GPU;
     const auto copy_type   = BatchCopyParams::get_copy_type(memory_type, memory_type);
     size_t     copy_count  = 0;
     for (const auto& mapping : copy_mapping) {

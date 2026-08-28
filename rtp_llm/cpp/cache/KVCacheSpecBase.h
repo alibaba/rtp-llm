@@ -8,20 +8,13 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 
 namespace rtp_llm {
-
-enum KVCacheSpecType {
-    MultiHeadAttention,        // MHAKVCacheSpec: standard multi-head attention KV cache
-    MultiHeadLatentAttention,  // MLAKVCacheSpec: MLA compressed latent KV cache
-    LinearAttention,           // LinearKVCacheSpec: linear / SSM attention state cache
-    OpaqueKV,                  // Byte-addressed opaque paged KV pool
-    OpaqueState,               // Fixed-allocation opaque state cache
-};
 
 inline KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
                                               size_t      k_block_bytes,
@@ -70,23 +63,6 @@ inline KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
     return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
 }
 
-inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
-    switch (t) {
-        case KVCacheSpecType::MultiHeadAttention:
-            return "MultiHeadAttention";
-        case KVCacheSpecType::MultiHeadLatentAttention:
-            return "MultiHeadLatentAttention";
-        case KVCacheSpecType::LinearAttention:
-            return "LinearAttention";
-        case KVCacheSpecType::OpaqueKV:
-            return "OpaqueKV";
-        case KVCacheSpecType::OpaqueState:
-            return "OpaqueState";
-        default:
-            return "Unknown";
-    }
-}
-
 struct KVCacheSpec;
 using KVCacheSpecPtr    = std::shared_ptr<KVCacheSpec>;
 using LayerKVCacheSpecs = std::vector<std::vector<KVCacheSpecPtr>>;
@@ -96,6 +72,10 @@ struct KVCacheSpec {
     uint32_t    seq_size_per_block = 1;
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
+
+    bool cpSlice() const {
+        return cp_slice_;
+    }
 
     virtual size_t block_size() const   = 0;
     virtual size_t k_block_size() const = 0;
@@ -139,7 +119,7 @@ struct KVCacheSpec {
            << ";k_block_payload_bytes=" << k_block_payload_bytes()
            << ";v_block_payload_bytes=" << v_block_payload_bytes() << ";scale_block_bytes=" << scale_block_size_bytes()
            << ";k_scale_block_bytes=" << k_scale_block_size_bytes()
-           << ";v_scale_block_bytes=" << v_scale_block_size_bytes();
+           << ";v_scale_block_bytes=" << v_scale_block_size_bytes() << ";cp_slice=" << cp_slice_;
         return os.str();
     }
 
@@ -156,6 +136,7 @@ protected:
         os << indent1 << "type=" << KVCacheSpecTypeToString(type) << "(" << static_cast<int>(type) << ")\n";
         os << indent1 << "dtype=" << static_cast<int>(memoryLayoutDType()) << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "cp_slice=" << cp_slice_ << "\n";
         os << indent1 << "block_size=" << block_size() << "\n";
         os << indent1 << "k_block_size=" << k_block_size() << "\n";
         os << indent1 << "v_block_size=" << v_block_size() << "\n";
@@ -170,6 +151,12 @@ protected:
         os << indent1 << "v_scale_block_size_bytes=" << v_scale_block_size_bytes() << "\n";
         return os.str();
     }
+
+private:
+    // Derived once from CacheCpPolicyDesc::slice by SpecBuilder.
+    bool cp_slice_ = false;
+
+    friend class SpecBuilder;
 };
 
 }  // namespace rtp_llm

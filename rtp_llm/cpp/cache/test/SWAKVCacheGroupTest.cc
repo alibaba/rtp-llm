@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -16,8 +16,8 @@ namespace test {
 
 namespace {
 
-std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(const std::string& tag, int seq_size_per_block) {
-    return std::dynamic_pointer_cast<FixedStateCacheSpec>(
+std::shared_ptr<SWAStateCacheSpec> makeDsv4StateSpec(const std::string& tag, int seq_size_per_block) {
+    return std::dynamic_pointer_cast<SWAStateCacheSpec>(
         makeResolvedOpaqueSpec(true, tag, DataType::TYPE_FP32, 1024u * 128u * sizeof(float), seq_size_per_block));
 }
 
@@ -91,7 +91,6 @@ TEST_F(SWAKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
     EXPECT_FALSE(group.hasKernelBlockSubdiv());
     EXPECT_TRUE(group.transferTailBlocks());
     EXPECT_TRUE(group.isReservable());
-    EXPECT_FALSE(group.memoryPlacement() == CacheMemoryPlacement::HOST_PINNED);
 }
 
 // ==================== needBlocksNum ====================

@@ -26,11 +26,9 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", evict=" << static_cast<int>(policy.evict_policy) << ", reservable=" << policy.reservable
        << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
-       << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
-       << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
-       << '}';
+       << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << '}';
     return os.str();
 }
 
@@ -129,9 +127,9 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
            && lhs.explicit_block_num == rhs.explicit_block_num
-           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
-           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
+           && lhs.cp_mapping == rhs.cp_mapping;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
@@ -461,20 +459,30 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
     setTopology(std::move(new_groups), std::move(new_layers));
 }
 
-void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
-    // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
-    (void)runtime_config;
-    if (global_block_num > 0) {
-        block_num = global_block_num;
-        for (auto& sub_cfg : mtp_sub_configs) {
-            if (sub_cfg != nullptr) {
-                sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
+size_t CacheConfig::explicitPoolReserveBytes() const {
+    size_t reserve = 0;
+    if (use_independent_block_pools && group_block_layout_initialized) {
+        for (const auto& group : topology().groups()) {
+            const auto explicit_blocks = group.policy.explicit_block_num;
+            if (explicit_blocks > 0 && group.policy.charge_to_paged_budget) {
+                reserve += static_cast<size_t>(explicit_blocks) * group.layer_ids.size()
+                           * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
             }
+        }
+    }
+    return reserve;
+}
+
+void CacheConfig::finalizeBlockNums(uint32_t global_block_num) {
+    RTP_LLM_CHECK_WITH_INFO(global_block_num > 0, "finalizeBlockNums requires positive global_block_num");
+    block_num = global_block_num;
+    for (auto& sub_cfg : mtp_sub_configs) {
+        if (sub_cfg != nullptr) {
+            sub_cfg->finalizeBlockNums(global_block_num);
         }
     }
 
     if (!use_independent_block_pools || !group_block_layout_initialized || groupNums() == 0) {
-        explicitly_sized_pool_reserve_bytes = 0;
         if (groupNums() > 0) {
             auto groups = topology().groups();
             for (auto& group : groups) {
@@ -485,9 +493,8 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         return;
     }
 
-    size_t     reserve = 0;
-    const auto step    = static_cast<uint32_t>(std::max(1, linear_step));
-    auto       groups  = topology().groups();
+    const auto step   = static_cast<uint32_t>(std::max(1, linear_step));
+    auto       groups = topology().groups();
     for (size_t gid = 0; gid < groups.size(); ++gid) {
         const auto explicit_independent_blocks = groups[gid].policy.explicit_block_num;
         uint32_t   rule_blocks                 = global_block_num;
@@ -497,14 +504,7 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
         groups[gid].block_num = rule_blocks;
-
-        // Only groups that opt in reserve paged-pool budget for explicit blocks.
-        if (explicit_independent_blocks > 0 && groups[gid].policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(rule_blocks) * groups[gid].layer_ids.size()
-                       * (groups[gid].kv_block_stride_bytes + groups[gid].kv_scale_stride_bytes);
-        }
     }
-    explicitly_sized_pool_reserve_bytes = reserve;
     setTopology(std::move(groups), topology().layers());
 }
 

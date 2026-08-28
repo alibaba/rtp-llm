@@ -1,3 +1,4 @@
+import pickle
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
@@ -9,10 +10,86 @@ from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
+    CacheCpPolicyDesc,
+    CacheEvictPolicy,
+    CacheGroupType,
+    CacheReusePolicyDesc,
+    CacheTailPolicyDesc,
+    CpBlockMappingMode,
+    DataType,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+    BlockEntryCountMode,
+)
 
 
 class HybridKVCacheSpecTest(TestCase):
+    def test_kv_cache_spec_desc_pickle_round_trip(self):
+        reuse = CacheReusePolicyDesc()
+        reuse.enable_prefix_reuse = False
+        reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
+        capacity = CacheCapacityPolicyDesc()
+        capacity.reservable = True
+        capacity.explicit_block_num = 23
+        capacity.charge_to_paged_budget = False
+        tail = CacheTailPolicyDesc()
+        tail.active_tail_blocks = 2
+        tail.validate_tail_blocks = True
+        cp = CacheCpPolicyDesc()
+        cp.mapping = CpBlockMappingMode.COMPACT_LAST_RANK
+        cp.slice = True
+        cp.scale_seq_size = False
+
+        desc = KVCacheSpecDesc()
+        desc.tag = "pickle_round_trip"
+        desc.cache_type = KVCacheSpecType.COMPRESSED_KV_CACHE
+        desc.dtype = DataType.TYPE_BF16
+        desc.is_state_cache = True
+        desc.entry_elems = 64
+        desc.entry_dtype = DataType.TYPE_UINT8
+        desc.entry_count_mode = BlockEntryCountMode.EXPLICIT
+        desc.explicit_entry_count = 17
+        desc.compression_ratio = 2
+        desc.state_ring_overlap = 3
+        desc.state_ring_include_gen_num_per_cycle = True
+        desc.block_stride_bytes_alignment = 576
+        desc.group_type = CacheGroupType.SWA
+        desc.reuse = reuse
+        desc.capacity = capacity
+        desc.tail = tail
+        desc.cp = cp
+
+        restored = pickle.loads(pickle.dumps(desc))
+        for field in (
+            "tag",
+            "cache_type",
+            "dtype",
+            "is_state_cache",
+            "entry_elems",
+            "entry_dtype",
+            "entry_count_mode",
+            "explicit_entry_count",
+            "compression_ratio",
+            "state_ring_overlap",
+            "state_ring_include_gen_num_per_cycle",
+            "block_stride_bytes_alignment",
+            "group_type",
+        ):
+            self.assertEqual(getattr(restored, field), getattr(desc, field))
+        self.assertEqual(restored.reuse.enable_prefix_reuse, False)
+        self.assertEqual(restored.reuse.evict_policy, CacheEvictPolicy.INDEPENDENT)
+        self.assertEqual(restored.capacity.reservable, True)
+        self.assertEqual(restored.capacity.explicit_block_num, 23)
+        self.assertEqual(restored.capacity.charge_to_paged_budget, False)
+        self.assertEqual(restored.tail.active_tail_blocks, 2)
+        self.assertEqual(restored.tail.validate_tail_blocks, True)
+        self.assertEqual(restored.cp.mapping, CpBlockMappingMode.COMPACT_LAST_RANK)
+        self.assertEqual(restored.cp.slice, True)
+        self.assertEqual(restored.cp.scale_seq_size, False)
+
     def _build_model_config(self, layer_types):
         config = ModelConfig()
         config.num_layers = len(layer_types)

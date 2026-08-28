@@ -63,25 +63,6 @@ SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 
-_TRUTHY_ENV_VALUES = ("yes", "true", "t", "1", "on")
-
-
-def _dsv4_fixed_pool_use_host_memory() -> bool:
-    """Read ``--dsv4_fixed_pool_use_memory`` / ``DSV4_FIXED_POOL_USE_MEMORY``.
-
-    ``_post_build_model_config`` only receives ``model_config``, and
-    ``KVCacheConfig`` is not reachable from it, so the env channel that backs
-    the flag (``env_name="DSV4_FIXED_POOL_USE_MEMORY"`` in
-    ``rtp_llm/server/server_args/kv_cache_group_args.py``) is read directly.
-    A CLI-only ``--dsv4_fixed_pool_use_memory`` is therefore not observed here;
-    plumbing ``kv_cache_config`` into the hook would close that gap.
-    """
-    raw = os.environ.get("DSV4_FIXED_POOL_USE_MEMORY")
-    if raw is None:
-        return False
-    return raw.strip().lower() in _TRUTHY_ENV_VALUES
-
-
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 
@@ -571,7 +552,6 @@ class DeepSeekV4(DeepSeekV2):
             fp8_kv=attn_config.kv_cache_dtype == KvCacheDataType.FP8,
             head_dim=int(attn_config.size_per_head),
             indexer_head_dim=int(attn_config.indexer_head_dim),
-            fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(),
         )
 
     def _create_python_model(self):

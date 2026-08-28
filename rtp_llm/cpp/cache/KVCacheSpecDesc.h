@@ -13,16 +13,10 @@
 
 namespace rtp_llm {
 
-enum class OpaqueBlockEntryCountMode : int8_t {
+enum class BlockEntryCountMode : int8_t {
     EXPLICIT                = 0,
     KERNEL_BLOCK_COMPRESSED = 1,
     STATE_RING              = 2,
-};
-
-enum class CpPrefillSliceLayout : int8_t {
-    NONE         = 0,
-    PAYLOAD      = 1,
-    BLOCK_STRIDE = 2,
 };
 
 struct CacheReusePolicyDesc {
@@ -36,21 +30,15 @@ struct CacheCapacityPolicyDesc {
     std::optional<bool>     charge_to_paged_budget;
 };
 
-struct CacheMemoryPolicyDesc {
-    std::optional<CacheMemoryPlacement> placement;
-};
-
 struct CacheTailPolicyDesc {
     std::optional<uint32_t> active_tail_blocks;
     std::optional<bool>     validate_tail_blocks;
 };
 
 struct CacheCpPolicyDesc {
-    std::optional<CpBlockMappingMode>   mapping;
-    std::optional<CpBlockSliceMode>     slice;
-    std::optional<bool>                 scale_seq_size;
-    std::optional<bool>                 align_payload;
-    std::optional<CpPrefillSliceLayout> prefill_slice_layout;
+    std::optional<CpBlockMappingMode> mapping;
+    std::optional<bool>               slice;
+    std::optional<bool>               scale_seq_size;
 };
 
 struct KVCacheSpecDesc {
@@ -62,20 +50,17 @@ struct KVCacheSpecDesc {
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
 
-    OpaqueBlockEntryCountMode entry_count_mode                     = OpaqueBlockEntryCountMode::EXPLICIT;
+    BlockEntryCountMode entry_count_mode                     = BlockEntryCountMode::EXPLICIT;
     uint32_t                  explicit_entry_count                 = 0;
     uint32_t                  compression_ratio                    = 1;
     uint32_t                  state_ring_overlap                   = 0;
     bool                      state_ring_include_gen_num_per_cycle = false;
 
-    size_t   block_stride_bytes_override        = 0;
-    size_t   block_stride_bytes_alignment       = 0;
-    uint32_t block_stride_alignment_min_entries = 0;
+    size_t block_stride_bytes_alignment = 0;
 
     std::optional<CacheGroupType>          group_type;
     std::optional<CacheReusePolicyDesc>    reuse;
     std::optional<CacheCapacityPolicyDesc> capacity;
-    std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
 };

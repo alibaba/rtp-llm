@@ -36,7 +36,7 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
         const auto& layer_descs = model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)];
         RTP_LLM_CHECK_WITH_INFO(!layer_descs.empty(), "hybrid-pool desc config layer %ld has no descs", layer_id);
         for (const auto& desc : layer_descs) {
-            if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
+            if (desc.entry_count_mode == BlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
                 RTP_LLM_CHECK_WITH_INFO(
                     desc.compression_ratio > 0,
                     "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
@@ -61,7 +61,7 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
                     kCompressedKernelSeqSizeAlignment,
                     kCompressedKernelSeqSizeAlignment);
             }
-            if (desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING) {
+            if (desc.entry_count_mode == BlockEntryCountMode::STATE_RING) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
                                         "state ring desc tag=%s requires positive compression_ratio",
                                         desc.tag.c_str());
@@ -102,8 +102,8 @@ uint32_t localKvHeadNumForDesc(const KVCacheSpecDesc&   desc,
         case KVCacheSpecType::LinearAttention:
             return linearLocalKvHeadNum(model_config, parallelism_config);
         case KVCacheSpecType::MultiHeadLatentAttention:
-        case KVCacheSpecType::OpaqueKV:
-        case KVCacheSpecType::OpaqueState:
+        case KVCacheSpecType::CompressedKVCache:
+        case KVCacheSpecType::SWAState:
             return 1;
         default:
             RTP_LLM_FAIL("unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
@@ -156,11 +156,6 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
                                     layer,
                                     spec->tag.c_str());
             const auto policy = SpecBuilder::groupPolicy(desc);
-            // Residency and paged-budget accounting are independent knobs, and
-            // CacheConfig::finalizeBlockNums only looks at charge_to_paged_budget.
-            // A host-resident pool that still charges the budget would silently
-            // shrink the device paged pool by bytes it never occupies.
-            checkGroupResidencyBudget(policy, spec->tag);
             const auto type              = SpecBuilder::groupType(desc);
             const auto local_kv_head_num = localKvHeadNumForDesc(desc, model_config, parallelism_config);
             auto       group_it          = group_by_tag.find(spec->tag);
@@ -269,7 +264,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     } else {
         config.block_size_bytes = paged_block_bytes;
     }
-    config.explicitly_sized_pool_reserve_bytes = 0;
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 
@@ -324,15 +318,16 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
             config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
-            config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
-                                             || spec->type == KVCacheSpecType::OpaqueState;
+            config.use_typed_cache_regions = config.use_typed_cache_regions
+                                             || spec->type == KVCacheSpecType::CompressedKVCache
+                                             || spec->type == KVCacheSpecType::SWAState;
             config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store
-                                               || spec->type == KVCacheSpecType::OpaqueKV
-                                               || spec->type == KVCacheSpecType::OpaqueState;
+                                               || spec->type == KVCacheSpecType::CompressedKVCache
+                                               || spec->type == KVCacheSpecType::SWAState;
         }
         for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
             for (const auto& desc : layer_descs) {
-                config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::OpaqueKV;
+                config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::CompressedKVCache;
             }
         }
         config.disable_decode_first_malloc_device_reuse =

@@ -140,7 +140,7 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
 
 TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
     const auto opaque       = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 64});
-    auto       opaque_group = makeGroup("opaque", KVCacheSpecType::OpaqueKV, CacheGroupType::FULL, 512, 128, 64, 0);
+    auto       opaque_group = makeGroup("opaque", KVCacheSpecType::CompressedKVCache, CacheGroupType::FULL, 512, 128, 64, 0);
     torch_ext::KVCache opaque_cache(makeLayout({std::move(opaque_group)}, {"opaque"}, {{opaque, {}}}));
     const auto         opaque_layer = opaque_cache.getLayerCache(0);
     EXPECT_EQ(opaque_layer.seq_size_per_block, 128);
@@ -150,7 +150,7 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
     for (const auto& [tag, spec_type, policy] : std::vector<std::tuple<std::string, KVCacheSpecType, CacheGroupType>>{
              {"linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR},
              {"swa", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA},
-             {"state", KVCacheSpecType::OpaqueState, CacheGroupType::FULL}}) {
+             {"state", KVCacheSpecType::SWAState, CacheGroupType::FULL}}) {
         auto               group = makeGroup(tag, spec_type, policy, 8, 2, 32, 32);
         torch_ext::KVCache cache(makeLayout({std::move(group)}, {tag}, {{physical, {}}}));
         const auto         layer = cache.getLayerCache(0);
@@ -165,7 +165,7 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     const auto linear     = torch::ones({2, 9}, torch::TensorOptions().dtype(torch::kFloat16));
     auto       full_group = makeGroup("full", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
     auto       linear_group = makeGroup("linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR, 8, 8, 9, 0);
-    auto       empty_group  = makeGroup("empty", KVCacheSpecType::OpaqueState, CacheGroupType::LINEAR, 1, 1, 1, 0);
+    auto       empty_group  = makeGroup("empty", KVCacheSpecType::SWAState, CacheGroupType::LINEAR, 1, 1, 1, 0);
     torch_ext::KVCache cache(makeLayout({std::move(full_group), std::move(linear_group), std::move(empty_group)},
                                         {"full", "linear", "empty"},
                                         {{full, {}}, {linear, {}}, {{}, {}}}));

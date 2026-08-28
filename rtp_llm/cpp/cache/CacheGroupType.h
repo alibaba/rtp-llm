@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+
 namespace rtp_llm {
 
 // Cache group type for hybrid KV-cache:
@@ -28,92 +30,132 @@ enum class CacheEvictPolicy : int8_t {
     NONE        = 2,
 };
 
-enum class CacheMemoryPlacement : int8_t {
-    DEVICE      = 0,
-    HOST        = 1,
-    HOST_PINNED = 2,
-};
-
 enum class CpBlockMappingMode : int8_t {
     NONE              = 0,
     BLOCK_ROUND_ROBIN = 1,
     COMPACT_LAST_RANK = 2,
 };
 
-enum class CpBlockSliceMode : int8_t {
-    NONE          = 0,
-    EQUAL_BYTES   = 1,
-    PAYLOAD_BYTES = 2,
-};
-
 struct CacheGroupPolicy {
-    CacheGroupType       group_type             = CacheGroupType::FULL;
-    bool                 enable_prefix_reuse    = true;
-    CacheEvictPolicy     evict_policy           = CacheEvictPolicy::CHAIN;
-    bool                 reservable             = true;
-    uint32_t             explicit_block_num     = 0;
-    bool                 charge_to_paged_budget = false;
-    CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
-    uint32_t             active_tail_blocks     = 0;
-    bool                 validate_tail_blocks   = true;
-    CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
-    CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    CacheGroupType     group_type             = CacheGroupType::FULL;
+    bool               enable_prefix_reuse    = true;
+    CacheEvictPolicy   evict_policy           = CacheEvictPolicy::CHAIN;
+    bool               reservable             = true;
+    uint32_t           explicit_block_num     = 0;
+    bool               charge_to_paged_budget = false;
+    uint32_t           active_tail_blocks     = 0;
+    bool               validate_tail_blocks   = true;
+    CpBlockMappingMode cp_mapping             = CpBlockMappingMode::NONE;
 };
 
 // One cache-store registration step: pair a cache key from the full logical
 // namespace with a slot in the tag-local physical block table. Under CP,
 // both round-robin FULL groups and compact STATE/SWA groups use local slots.
-struct CacheStoreBlockPair {
-    int key_index;
-    int offset_index;
+struct CacheStoreBlockMapping {
+    int cache_key_index;
+    int block_table_index;
 };
+
+namespace detail {
+
+inline size_t
+resolveTransferStart(size_t block_count, size_t reuse_block_size, size_t active_tail_blocks, bool use_hybrid) {
+    if (!use_hybrid) {
+        return std::min(reuse_block_size, block_count);
+    }
+    if (active_tail_blocks == 0) {
+        return 0;
+    }
+    return block_count > active_tail_blocks ? block_count - active_tail_blocks : 0;
+}
+
+inline std::vector<CacheStoreBlockMapping>
+buildNormalPlan(const CacheGroupPolicy& policy, size_t total_logical_blocks, size_t reuse_block_size, bool use_hybrid) {
+    const size_t start =
+        resolveTransferStart(total_logical_blocks, reuse_block_size, policy.active_tail_blocks, use_hybrid);
+
+    std::vector<CacheStoreBlockMapping> plan;
+    plan.reserve(total_logical_blocks - start);
+    for (size_t logical_idx = start; logical_idx < total_logical_blocks; ++logical_idx) {
+        const int block_idx = static_cast<int>(logical_idx);
+        plan.push_back({block_idx, block_idx});
+    }
+    return plan;
+}
+
+inline std::vector<CacheStoreBlockMapping> buildBlockRoundRobinPlan(const CacheGroupPolicy& policy,
+                                                                    size_t                  total_logical_blocks,
+                                                                    size_t                  reuse_block_size,
+                                                                    bool                    use_hybrid,
+                                                                    int                     cp_rank,
+                                                                    int                     cp_size) {
+    const size_t start =
+        resolveTransferStart(total_logical_blocks, reuse_block_size, policy.active_tail_blocks, use_hybrid);
+    const size_t cp_size_t = static_cast<size_t>(cp_size);
+    const size_t cp_rank_t = static_cast<size_t>(cp_rank);
+
+    std::vector<CacheStoreBlockMapping> plan;
+    plan.reserve(total_logical_blocks - start);
+    for (size_t logical_idx = start; logical_idx < total_logical_blocks; ++logical_idx) {
+        if (logical_idx % cp_size_t != cp_rank_t) {
+            continue;
+        }
+        plan.push_back({static_cast<int>(logical_idx), static_cast<int>(logical_idx / cp_size_t)});
+    }
+    return plan;
+}
+
+inline std::vector<CacheStoreBlockMapping> buildCompactLastRankPlan(const CacheGroupPolicy& policy,
+                                                                    size_t                  total_logical_blocks,
+                                                                    size_t                  reuse_block_size,
+                                                                    bool                    use_hybrid,
+                                                                    int                     cp_size) {
+    const size_t cp_size_t        = static_cast<size_t>(cp_size);
+    const size_t canonical_blocks = (total_logical_blocks + cp_size_t - 1) / cp_size_t;
+    const size_t tail_blocks      = std::max<size_t>(1, policy.active_tail_blocks);
+    const size_t start            = resolveTransferStart(canonical_blocks, reuse_block_size, tail_blocks, use_hybrid);
+
+    std::vector<CacheStoreBlockMapping> plan;
+    plan.reserve(canonical_blocks - start);
+    for (size_t local_idx = start; local_idx < canonical_blocks; ++local_idx) {
+        const size_t logical_idx = std::min((local_idx + 1) * cp_size_t - 1, total_logical_blocks - 1);
+        plan.push_back({static_cast<int>(logical_idx), static_cast<int>(local_idx)});
+    }
+    return plan;
+}
+
+}  // namespace detail
 
 // Keep cache-store projection header-only so bindings that consume ExecOps.cc
 // as a source file do not need to link the full CPSlotMapper implementation.
-inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPolicy& policy,
-                                                            size_t                  total_logical_blocks,
-                                                            size_t                  reuse_block_size,
-                                                            bool                    use_hybrid,
-                                                            int                     cp_rank,
-                                                            int                     cp_size) {
-    std::vector<CacheStoreBlockPair> plan;
+inline std::vector<CacheStoreBlockMapping> buildCacheStorePlan(const CacheGroupPolicy& policy,
+                                                               size_t                  total_logical_blocks,
+                                                               size_t                  reuse_block_size,
+                                                               bool                    use_hybrid,
+                                                               int                     cp_rank,
+                                                               int                     cp_size) {
     if (total_logical_blocks == 0) {
-        return plan;
+        return {};
     }
 
-    const bool block_round_robin = policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    const bool compact_last_rank = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
-    const bool sharded_full      = cp_size > 1 && block_round_robin;
-    const bool compact_swa_by_cp = cp_size > 1 && compact_last_rank;
-    if (compact_swa_by_cp) {
-        const size_t cp_size_t        = static_cast<size_t>(cp_size);
-        const size_t canonical_blocks = (total_logical_blocks + cp_size_t - 1) / cp_size_t;
-        const size_t tail_count       = std::max<size_t>(1, policy.active_tail_blocks);
-        const size_t start = use_hybrid ? (canonical_blocks > tail_count ? canonical_blocks - tail_count : 0) :
-                                          std::min(reuse_block_size, canonical_blocks);
-        plan.reserve(canonical_blocks - start);
-        for (size_t compact_idx = start; compact_idx < canonical_blocks; ++compact_idx) {
-            const size_t key_index = std::min((compact_idx + 1) * cp_size_t - 1, total_logical_blocks - 1);
-            plan.push_back({static_cast<int>(key_index), static_cast<int>(compact_idx)});
-        }
-        return plan;
+    if (cp_size <= 1) {
+        return detail::buildNormalPlan(policy, total_logical_blocks, reuse_block_size, use_hybrid);
     }
 
-    const bool   transfer_tail_blocks = policy.active_tail_blocks > 0;
-    const size_t tail_count           = std::max<size_t>(1, policy.active_tail_blocks);
-    size_t       start                = use_hybrid ? 0 : reuse_block_size;
-    if (use_hybrid && transfer_tail_blocks) {
-        start = total_logical_blocks > tail_count ? total_logical_blocks - tail_count : 0;
+    switch (policy.cp_mapping) {
+        case CpBlockMappingMode::NONE:
+            return detail::buildNormalPlan(policy, total_logical_blocks, reuse_block_size, use_hybrid);
+        case CpBlockMappingMode::BLOCK_ROUND_ROBIN:
+            return detail::buildBlockRoundRobinPlan(
+                policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank, cp_size);
+        case CpBlockMappingMode::COMPACT_LAST_RANK:
+            return detail::buildCompactLastRankPlan(
+                policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_size);
     }
-    plan.reserve(total_logical_blocks - std::min(start, total_logical_blocks));
-    for (size_t pos = start; pos < total_logical_blocks; ++pos) {
-        const int block_pos = static_cast<int>(pos);
-        if (sharded_full && block_pos % cp_size != cp_rank) {
-            continue;
-        }
-        plan.push_back({block_pos, sharded_full ? block_pos / cp_size : block_pos});
-    }
-    return plan;
+    RTP_LLM_CHECK_WITH_INFO(false,
+                            "unhandled CpBlockMappingMode=%d in buildCacheStorePlan",
+                            static_cast<int>(policy.cp_mapping));
+    return {};
 }
 
 inline const char* cacheGroupTypeName(CacheGroupType group_type) {

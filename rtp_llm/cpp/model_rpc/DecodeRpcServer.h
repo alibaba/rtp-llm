@@ -94,6 +94,16 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
+    static bool shouldLoadCpGroupFromPeer(bool           is_page_level_rr,
+                                          CacheGroupType group_type,
+                                          bool           group_uses_cp_slice,
+                                          int            peer_idx);
+    static bool shouldLoadCpBlockFromPeer(bool           is_page_level_rr,
+                                          CacheGroupType group_type,
+                                          size_t         block_pos,
+                                          int            peer_idx,
+                                          int            prefill_cp_size);
+    static ErrorInfo validateRemotePrefillCp(int requested_cp_size, int configured_cp_size, size_t peer_count);
     static void                           logReadFailures(int64_t                         request_id,
                                                           const std::string&              peer_addr,
                                                           ErrorCode                       error_code,

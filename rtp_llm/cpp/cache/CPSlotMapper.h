@@ -13,7 +13,7 @@ struct CacheConfig;
 
 struct CpGroupLayout {
     CpBlockMappingMode mapping            = CpBlockMappingMode::NONE;
-    CpBlockSliceMode   slice              = CpBlockSliceMode::NONE;
+    bool               slice              = false;
     size_t             active_tail_blocks = 0;
 
     bool usesCpCanonicalKeys() const {
@@ -64,19 +64,19 @@ public:
     CacheKeysType canonicalCacheKeys(const CacheKeysType& full_keys) const;
     CacheKeysType localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const;
 
-    std::vector<CacheStoreBlockPair> buildStorePlan(const CacheConfig& config,
-                                                    size_t             gid,
-                                                    size_t             total_logical_blocks,
-                                                    size_t             reuse_block_size,
-                                                    bool               use_hybrid) const;
-    std::vector<CacheStoreBlockPair> buildStorePlan(CacheGroupType group_type,
-                                                    size_t         total_logical_blocks,
-                                                    size_t         reuse_block_size,
-                                                    bool           use_hybrid) const;
-    std::vector<CacheStoreBlockPair> buildStorePlan(const CacheGroupPolicy& policy,
-                                                    size_t                  total_logical_blocks,
-                                                    size_t                  reuse_block_size,
-                                                    bool                    use_hybrid) const;
+    std::vector<CacheStoreBlockMapping> buildStorePlan(const CacheConfig& config,
+                                                       size_t             gid,
+                                                       size_t             total_logical_blocks,
+                                                       size_t             reuse_block_size,
+                                                       bool               use_hybrid) const;
+    std::vector<CacheStoreBlockMapping> buildStorePlan(CacheGroupType group_type,
+                                                       size_t         total_logical_blocks,
+                                                       size_t         reuse_block_size,
+                                                       bool           use_hybrid) const;
+    std::vector<CacheStoreBlockMapping> buildStorePlan(const CacheGroupPolicy& policy,
+                                                       size_t                  total_logical_blocks,
+                                                       size_t                  reuse_block_size,
+                                                       bool                    use_hybrid) const;
 
     std::vector<BlockInfo>
     sliceBlockForPeer(const CacheConfig& config, size_t gid, std::vector<BlockInfo> parts, size_t peer_idx) const;

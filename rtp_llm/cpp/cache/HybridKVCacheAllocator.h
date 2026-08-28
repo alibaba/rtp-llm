@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
@@ -13,7 +14,6 @@ namespace rtp_llm {
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
     HybridKVCacheAllocator(const CacheConfig&                 config,
-                           AllocationType                     allocation_type     = AllocationType::DEVICE,
                            const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                            int64_t                            reserve_block_ratio = 0);
 
@@ -36,6 +36,22 @@ public:
     std::vector<int> independentEvictionGroupIds() const override;
 
 protected:
+    struct GroupKVBlockUpdatePlan {
+        int                                   replacement_count{0};
+        BlockIndicesType                      replacement_blocks;
+        BlockIndicesType                      allocated_replacements;
+        std::unordered_map<BlockIdxType, int> transferred_ref_counts;
+        size_t                                next_replacement{0};
+    };
+
+    struct KVBlockUpdatePlan {
+        int                                 old_batch_size{0};
+        int                                 new_batch_size{0};
+        int                                 group_nums{0};
+        std::vector<int>                    fork_counts;
+        std::vector<GroupKVBlockUpdatePlan> groups;
+    };
+
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
@@ -76,7 +92,22 @@ protected:
                                     const std::vector<std::vector<size_t>>& original_sizes,
                                     int                                     failed_batch);
     virtual void copyBlockMappingForGroup(int gid, const std::vector<BlockIdPair>& block_update_mapping) const;
-    virtual MemoryType memoryTypeForGroup(int gid) const;
+
+    KVBlockUpdatePlan buildKVBlockUpdatePlan(const BatchKVCacheResource& resource,
+                                             const std::vector<int>&     block_src_batch,
+                                             bool                        copy_last_block) const;
+    bool              reserveReplacementBlocks(KVBlockUpdatePlan& plan);
+    void              rollbackAllocatedReplacementBlocks(KVBlockUpdatePlan& plan);
+    void              releaseDroppedBatchBlocks(const BatchKVCacheResource& resource, KVBlockUpdatePlan& plan);
+    void              rebuildBatchResources(const BatchKVCacheResourcePtr&  resource,
+                                            const std::vector<int>&         block_src_batch,
+                                            bool                            copy_last_block,
+                                            KVBlockUpdatePlan&              plan,
+                                            std::vector<TaggedBlockIdPair>& block_update_mapping);
+    void              replaceForkedLastBlock(int                             gid,
+                                             BlockIds&                       block_ids,
+                                             GroupKVBlockUpdatePlan&         group_plan,
+                                             std::vector<TaggedBlockIdPair>& block_update_mapping);
 
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
     std::vector<int>             full_group_ids_;

@@ -180,7 +180,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
+        config_.finalizeBlockNums(/*global_block_num=*/1);
     } else {
         allocateAndSync();
     }
@@ -237,17 +237,14 @@ bool KVCacheManager::init() {
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
-        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
-                                                                           AllocationType::DEVICE,
-                                                                           metrics_reporter_,
-                                                                           kv_cache_config_.reserve_block_ratio,
-                                                                           pd_sep_config_.role_type);
+        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
+            config_, metrics_reporter_, kv_cache_config_.reserve_block_ratio, pd_sep_config_.role_type);
     } else if (is_hybrid) {
         allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+            config_, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
+            config_, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
     }
 
     if (use_cuda_malloc_block_pool_) {
@@ -678,7 +675,7 @@ void KVCacheManager::allocateAndSync() {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num));
     RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
 }
 

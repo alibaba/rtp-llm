@@ -28,10 +28,9 @@ int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) con
 }
 
 SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&                 config,
-                                                       AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    KVCacheAllocator(config, metrics_reporter, reserve_block_ratio) {}
 
 bool SingleTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
@@ -48,7 +47,7 @@ bool SingleTypeKVCacheAllocator::doInit() {
     BlockPoolConfig pool_config;
 
     pool_config = BlockPoolConfigHelper::createConfig(config_);
-    block_pool_ = std::make_shared<BlockPool>(pool_config, allocation_type_);
+    block_pool_ = std::make_shared<BlockPool>(pool_config, AllocationType::DEVICE);
     if (!block_pool_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize block pool for SingleTypeKVCacheAllocator");
         return false;

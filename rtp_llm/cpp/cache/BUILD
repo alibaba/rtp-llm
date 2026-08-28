@@ -22,6 +22,7 @@ cc_library(
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
 )
 
 cc_library(
@@ -42,10 +43,11 @@ cc_library(
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "KVCacheSpecDesc.h",
+        "KVCacheSpecType.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
-        "OpaqueKVCacheSpec.h",
+        "Dsv4KVCacheSpec.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

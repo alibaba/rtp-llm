@@ -38,16 +38,12 @@ from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
     CacheEvictPolicy,
-    CacheMemoryPlacement,
-    CacheMemoryPolicyDesc,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
-    CpBlockSliceMode,
-    CpPrefillSliceLayout,
     DataType,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    OpaqueBlockEntryCountMode,
+    BlockEntryCountMode,
 )
 
 # Byte-exact FP8 entry sizes of the DSv4 MLA/indexer kernels.  The pools are
@@ -80,16 +76,6 @@ _COMPRESSED_KV_KIND = "compressed_kv"
 _FIXED_STATE_KIND = "fixed_state"
 _SLIDING_WINDOW_KV_KIND = "sliding_window_kv"
 
-# The four "fixed" pools that ``--dsv4_fixed_pool_use_memory`` may move to
-# pinned host memory.
-DSV4_FIXED_POOL_TAGS: tuple[str, ...] = (
-    INDEXER_STATE_TAG,
-    CSA_STATE_TAG,
-    HCA_STATE_TAG,
-    SWA_KV_TAG,
-)
-
-
 def _make_dsv4_desc(
     tag: str,
     kind: str,
@@ -105,21 +91,20 @@ def _make_dsv4_desc(
     desc.entry_dtype = dtype
 
     if kind == _COMPRESSED_KV_KIND:
-        desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        desc.cache_type = KVCacheSpecType.COMPRESSED_KV_CACHE
         desc.is_state_cache = False
-        desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
+        desc.entry_count_mode = BlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
         desc.compression_ratio = compression_ratio
         if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
         # Compressed pools deliberately carry no ``cp`` policy and leave
-        # ``block_stride_alignment_min_entries`` at 0.  Their entry count is
-        # kernel_block/ratio (64 entries for CSA, 2 for HCA); raising the
-        # minimum to 128 would silently disable the 576-byte alignment above.
+        # alignment. Their entry count is kernel_block/ratio (64 entries for
+        # CSA, 2 for HCA), and configured stride alignment applies directly.
         return desc
 
-    desc.cache_type = KVCacheSpecType.OPAQUE_STATE
+    desc.cache_type = KVCacheSpecType.SWA_STATE
     desc.is_state_cache = True
-    desc.entry_count_mode = OpaqueBlockEntryCountMode.STATE_RING
+    desc.entry_count_mode = BlockEntryCountMode.STATE_RING
 
     reuse = CacheReusePolicyDesc()
     reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
@@ -128,14 +113,10 @@ def _make_dsv4_desc(
     if tag in (INDEXER_STATE_TAG, CSA_STATE_TAG):
         desc.compression_ratio = CSA_LAYER_COMPRESS_RATIO
         desc.state_ring_overlap = 1
-        cp.align_payload = True
-        cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
-        cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
+        cp.slice = True
     elif tag == HCA_STATE_TAG:
         desc.compression_ratio = HCA_LAYER_COMPRESS_RATIO
-        cp.align_payload = True
-        cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
-        cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
+        cp.slice = True
         capacity = CacheCapacityPolicyDesc()
         capacity.explicit_block_num = DSV4_HCA_STATE_POOL_BLOCKS
         capacity.charge_to_paged_budget = True
@@ -147,45 +128,15 @@ def _make_dsv4_desc(
         desc.tail = tail
     elif tag == SWA_KV_TAG:
         desc.compression_ratio = DSV4_SWA_WINDOW_ENTRIES
-        cp.align_payload = True
-        cp.prefill_slice_layout = CpPrefillSliceLayout.BLOCK_STRIDE
-        cp.slice = CpBlockSliceMode.EQUAL_BYTES
+        cp.slice = True
         if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
 
     desc.state_ring_include_gen_num_per_cycle = True
     cp.scale_seq_size = True
-    desc.block_stride_alignment_min_entries = DSV4_SWA_WINDOW_ENTRIES
     desc.reuse = reuse
     desc.cp = cp
     return desc
-
-
-def _is_host_resident(desc: KVCacheSpecDesc) -> bool:
-    memory = desc.memory
-    return (
-        memory is not None
-        and memory.placement is not None
-        and memory.placement != CacheMemoryPlacement.DEVICE
-    )
-
-
-def _use_host_pinned_memory(desc: KVCacheSpecDesc) -> None:
-    """Move a pool to pinned host memory.
-
-    ``memory.placement`` and ``capacity.charge_to_paged_budget`` must move
-    together: a host-resident pool that still charges the paged HBM budget
-    trips ``checkGroupResidencyBudget`` in ``rtp_llm/cpp/cache/CacheConfig.h``.
-    """
-    memory = CacheMemoryPolicyDesc()
-    memory.placement = CacheMemoryPlacement.HOST_PINNED
-    desc.memory = memory
-
-    capacity = desc.capacity
-    if capacity is None:
-        capacity = CacheCapacityPolicyDesc()
-    capacity.charge_to_paged_budget = False
-    desc.capacity = capacity
 
 
 def apply_dsv4_explicit_pool_blocks(
@@ -199,8 +150,7 @@ def apply_dsv4_explicit_pool_blocks(
     before ``layer_descs`` is assigned to ``model_config.kv_cache_spec_descs``:
     the pybind getter returns a copy, so mutating a read-back list is a no-op.
 
-    Unlike the C++ test helper this never re-enables ``charge_to_paged_budget``
-    on a host-resident pool, so the residency/budget pair stays consistent.
+    Explicit pools continue to charge the paged device-memory budget.
     """
     for descs in layer_descs:
         for desc in descs:
@@ -210,9 +160,7 @@ def apply_dsv4_explicit_pool_blocks(
             if capacity is None:
                 capacity = CacheCapacityPolicyDesc()
             capacity.explicit_block_num = block_num
-            capacity.charge_to_paged_budget = block_num > 0 and not _is_host_resident(
-                desc
-            )
+            capacity.charge_to_paged_budget = block_num > 0
             desc.capacity = capacity
 
 
@@ -222,7 +170,6 @@ def build_dsv4_kv_cache_spec_descs(
     fp8_kv: bool,
     head_dim: int,
     indexer_head_dim: int,
-    fixed_pool_use_host_memory: bool = False,
 ) -> list[list[KVCacheSpecDesc]]:
     """Build the per-layer DSv4 desc lists.
 
@@ -240,9 +187,6 @@ def build_dsv4_kv_cache_spec_descs(
         fp8_kv: ``attn_config.kv_cache_dtype == KvCacheDataType.FP8``.
         head_dim: ``attn_config.size_per_head``.
         indexer_head_dim: ``attn_config.indexer_head_dim``.
-        fixed_pool_use_host_memory: place the four fixed pools
-            (``indexer_state`` / ``csa_state`` / ``hca_state`` / ``swa_kv``) in
-            pinned host memory and take them off the paged HBM budget.
     """
     if layer_num <= 0:
         raise ValueError(f"dsv4 kv cache descs require layer_num > 0, got {layer_num}")
@@ -297,10 +241,6 @@ def build_dsv4_kv_cache_spec_descs(
         kv_entry_elems,
         DataType.TYPE_UINT8,
     )
-
-    if fixed_pool_use_host_memory:
-        for desc in (indexer_state, csa_state, hca_state, swa_kv):
-            _use_host_pinned_memory(desc)
 
     ratios = list(layer_compress_ratios)
     layer_descs: list[list[KVCacheSpecDesc]] = []

@@ -654,15 +654,14 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadO
               reinterpret_cast<uintptr_t>(physical_kv.data_ptr()) + physical_kv.nbytes());
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
+TEST_F(ExecOpsTest, testWriteCacheStoreCpSendsCompleteRankLocalRow) {
     constexpr size_t canonical_tokens_per_block = 4;
     constexpr size_t physical_row_stride        = 40;
     constexpr size_t canonical_block_num        = 4;
 
     auto cache_store      = std::make_shared<MockCacheStore>();
     auto inputs           = makePyCacheStoreInputs(canonical_tokens_per_block, canonical_block_num);
-    auto state_policy     = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    state_policy.cp_slice = CpBlockSliceMode::PAYLOAD_BYTES;
+    auto state_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
     auto config           = makeCacheConfig(canonical_tokens_per_block,
                                   physical_row_stride,
                                   /*physical_scale_stride=*/0,
