@@ -136,11 +136,18 @@ LOAD_CLIENT_ENV_VARS = [
 
 
 def default_perf() -> dict:
-    """Standard smoke perf config (run_matrix_smoke.sh / run_cancel_smoke.sh)."""
+    """Standard smoke perf config (run_matrix_smoke.sh / run_cancel_smoke.sh).
+
+    Prefill duration is deliberately NOT configured here: the mock engine
+    resolves it from the master-config FORMULA expression (or the
+    production-fit code default when the estimator is omitted), so mock
+    execution time and master routing predictions always share one formula.
+    The legacy silent ``prefill.fixed_ms`` fallback was removed. Only the
+    decode batch curve is an explicit perf-JSON concern.
+    """
     return {
         "block_size": 1024,
         "sleep_scale": 1.0,
-        "prefill": {"fixed_ms": 100.0, "scale": 1.0},
         "decode": {
             "scale": 1.0,
             "step_ms_by_batch": [
@@ -155,17 +162,6 @@ def default_perf() -> dict:
                 [256, 50.0],
             ],
         },
-    }
-
-
-def flat_perf(prefill_ms: float = 1000.0, decode_ms: float = 100.0) -> dict:
-    """Chaos perf config (engine_disconnect / master_recovery): flat latencies."""
-    steps = [[n, decode_ms] for n in (1, 2, 4, 8, 16, 32, 64, 128, 256)]
-    return {
-        "block_size": 1024,
-        "sleep_scale": 1.0,
-        "prefill": {"fixed_ms": prefill_ms, "scale": 1.0},
-        "decode": {"scale": 1.0, "step_ms_by_batch": steps},
     }
 
 

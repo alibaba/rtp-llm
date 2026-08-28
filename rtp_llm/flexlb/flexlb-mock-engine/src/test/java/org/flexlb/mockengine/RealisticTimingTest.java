@@ -162,10 +162,12 @@ class RealisticTimingTest {
 
     /**
      * Creates a performance model with realistic timing:
-     * {@code sleep_scale=1.0}, prefill {@code fixed_ms=100}, decode {@code step_ms=5}.
+     * {@code sleep_scale=1.0}, prefill constant 100 ms, decode {@code step_ms=5}.
      *
-     * <p>No FORMULA estimator is supplied through FLEXLB_CONFIG, so the model
-     * falls through to {@code fixed_ms} for prefill duration.
+     * <p>Prefill duration is expressed as an explicit constant FORMULA
+     * ("100" — equivalent to the removed performance-JSON {@code fixed_ms}
+     * fallback); the formula (explicit or the production-fit code default)
+     * is the only prefill source.
      */
     private MockPerformanceModel model() throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
@@ -174,12 +176,8 @@ class RealisticTimingTest {
                 "block_size", 1024,
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0, "fixed_ms", 100),
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 5.0)))));
-        MAPPER.writeValue(master.toFile(), Map.of(
-                "zone_process_setting", Map.of(
-                        "process_info", Map.of(
-                                "envs", List.of()))));
+        MockMasterConfig.writeWithPrefillExpression(master, "100");
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
 
