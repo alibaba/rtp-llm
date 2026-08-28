@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FlexLB 压测报告生成器：v4 骨架纯图表 Canvas 模板，数据全部由脚本填充。
+"""FlexLB 压测报告生成器：直接吐 self-contained Chart.js 4.4.7 HTML。
 
-模板纪律（与 v4 报告 flexlb-run-20260825-201548-report-v4.canvas.tsx 对齐）：
-  * 组件只用 Stack/H1/H2/Text/Grid/Stat/Divider/ChartComparisonGrid/
-    ChartContainer/LineChart/BarChart/Table；仅导入 'qoder/canvas'，默认导出。
-  * 图表高度：延迟节 250，其余 230；所有图表统一挂 valueFormatter={fmt2}。
-  * caption 只写 x/y 轴说明（可含采样粒度）；不写 footer，不含任何
-    分析/解释/归因文字；汇总表两列（指标 / 数值）。
-  * 数值无千分位逗号；JSX 文本节点对 & < > { } 一律实体转义；
-    JS 字符串字面量按 JS 规则转义（反斜杠/单引号/换行）。
+数据管线保持不变：aggregate JSON → 统计 → panel（LineChart / BarChart）+ KPI +
+汇总表。渲染层拆到 canvas_report_render_html.py，页面观感对齐既有
+outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 panel /
+280px chart，legend 单击切换、tooltip x 轴 index 联动，无 zoom 插件）。
+
+内部实现：main() 用 emit_ 系列先在内存拼一份完整 tsx 字符串（保留原有全部
+41 图 / 154 组数据的正确性），末端通过 _extract_spec_from_tsx() 反抽出
+{run_id/title/subtitle/kpis/panels} spec，喂 canvas_report_render_html.render()
+写入 --out 指向的 HTML 文件；不再写 .tsx 中间产物。
 
 用法：
   python3 canvas_report_gen.py --aggregate <agg.json> \
       [--engine-dist <engine_dist.json>] [--summary <summary.json>] \
       [--slo <slo_batch_analysis.json>] \
-      --out <out.canvas.tsx> [--run-id <id>] \
+      --out <out.html> [--run-id <id>] \
       [--p-engines 750] [--d-engines 500] [--shards 8] [--replay 1000]
 
 缺省规则：
@@ -321,6 +322,139 @@ def load_json(path):
         return json.load(f)
 
 
+# ---------------------------------------------------------------------------
+# tsx → spec 反抽（末端渲染桥）
+# ---------------------------------------------------------------------------
+#
+# emit_ 系列在内存里拼一份完整 tsx（保留原 41 图/154 组数据的算法路径不动），
+# 这里从 tsx 字符串反抽出 render_html 需要的 spec dict：
+#   {run_id, title, subtitle, kpis:[{label,value,tone}], panels:[panel]}
+#   panel: {id,title,caption,type('line'|'bar'),x,yMax,unit,series:[{name,data,color,tone}]}
+# 好处：不重构那 2000 行 emit_ 逻辑（碰它风险大），只在末端做一次纯正则/JSON
+# 转换。同一套抽取器也用于 preview_gen.py 手动预览。
+#
+# 注意事项：
+#  * const 命名同时含 UPPER_CASE（X 轴）与 camelCase（Y 轴 series），正则须
+#    放宽到 [A-Za-z_]+。
+#  * ChartContainer body 里可能含多个 LineChart/BarChart（ChartComparisonGrid
+#    形态），因此按"container 开合位定位 + body 内循环抽 chart"两段处理，
+#    不用一个 regex 匹整体。
+#  * chart 属性顺序不稳定（valueSuffix 有时在 domain 前），故 attrs 用独立
+#    子正则各抽（ATTR_CATS/HEIGHT/DOMAIN/SUFFIX）。
+
+
+_TSX_CONST_RE = re.compile(
+    r"^const ([A-Za-z_][A-Za-z0-9_]*) = (\[.*?\])\s*;\s*$", re.M | re.S
+)
+_TSX_STAT_RE = re.compile(
+    r'<Stat value="([^"]*)" label="([^"]*)"(?: tone="([^"]*)")? />'
+)
+_TSX_CONTAINER_OPEN = re.compile(
+    r'<ChartContainer title="([^"]*)" caption="([^"]*)">', re.S
+)
+_TSX_CHART_TAG = re.compile(
+    r"<(LineChart|BarChart)\s+([^>]*?)\s+series=\{\[(.*?)\]\}\s*/>", re.S
+)
+_TSX_ATTR_CATS = re.compile(r"categories=\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_TSX_ATTR_DOMAIN = re.compile(r"domain=\{\[([^\]]+)\]\}")
+_TSX_ATTR_SUFFIX = re.compile(r'valueSuffix="([^"]*)"')
+_TSX_SERIES_RE = re.compile(
+    r"\{\s*key:\s*'([^']*)'\s*,\s*name:\s*'([^']*)'\s*,\s*data:\s*"
+    r"([A-Za-z_][A-Za-z0-9_]*)(?:\s*,\s*tone:\s*'([^']*)')?\s*\}",
+    re.S,
+)
+
+_TSX_TONE_TO_KPI = {
+    "success": "success",
+    "danger": "danger",
+    "warning": "warn",
+    "warn": "warn",
+}
+
+
+def _extract_spec_from_tsx(tsx_src, run_id, subtitle):
+    """从内存 tsx 字符串反抽 render_html.render() 需要的 spec dict。"""
+    # 惰性 import，避免测试或 --help 场景强依赖 render_html
+    import canvas_report_render_html as _rh
+
+    # 1) 抽 const NAME = [...]; → dict[str, list]
+    consts = {}
+    for m in _TSX_CONST_RE.finditer(tsx_src):
+        name, expr = m.group(1), m.group(2)
+        try:
+            consts[name] = json.loads(expr.replace("'", '"'))
+        except Exception:
+            pass
+
+    # 2) 抽 KPI（<Stat …/>）
+    kpis = []
+    for m in _TSX_STAT_RE.finditer(tsx_src):
+        val, label, tone = m.group(1), m.group(2), m.group(3)
+        kpis.append(
+            {"label": label, "value": val, "tone": _TSX_TONE_TO_KPI.get(tone or "", "")}
+        )
+
+    # 3) 抽 ChartContainer + body 内多个 chart
+    panels = []
+    pid = 0
+    for om in _TSX_CONTAINER_OPEN.finditer(tsx_src):
+        close_pos = tsx_src.find("</ChartContainer>", om.end())
+        if close_pos < 0:
+            continue
+        body = tsx_src[om.end() : close_pos]
+        title, caption = om.group(1), om.group(2)
+        for tm in _TSX_CHART_TAG.finditer(body):
+            ctype, attrs, series_body = tm.groups()
+            cats_m = _TSX_ATTR_CATS.search(attrs)
+            if not cats_m:
+                continue
+            dom_m = _TSX_ATTR_DOMAIN.search(attrs)
+            suf_m = _TSX_ATTR_SUFFIX.search(attrs)
+            x_ref = cats_m.group(1)
+            x_vals = consts.get(x_ref, [])
+            series = []
+            for i, sm in enumerate(_TSX_SERIES_RE.finditer(series_body)):
+                _key, s_name, data_ref, tone = sm.groups()
+                data = consts.get(data_ref, [])
+                series.append(
+                    {
+                        "name": s_name,
+                        "data": data,
+                        "color": _rh.series_color(tone, i),
+                        "tone": tone or "",
+                    }
+                )
+            if not series:
+                continue
+            pid += 1
+            y_max = None
+            if dom_m:
+                try:
+                    y_max = float(dom_m.group(1).split(",")[1])
+                except Exception:
+                    y_max = None
+            panels.append(
+                {
+                    "id": "p%d" % pid,
+                    "title": title,
+                    "caption": caption,
+                    "type": "bar" if ctype == "BarChart" else "line",
+                    "x": x_vals,
+                    "yMax": y_max,
+                    "unit": (suf_m.group(1).strip() if suf_m else ""),
+                    "series": series,
+                }
+            )
+
+    return {
+        "run_id": run_id,
+        "title": "FlexLB 压测报告 · run " + run_id,
+        "subtitle": subtitle,
+        "kpis": kpis[:6],
+        "panels": panels,
+    }
+
+
 def normalize_out_runid(path):
     """--out 文件名中 RUNID 段（8 位日期_6 位时间）下划线统一转连字符。
 
@@ -361,7 +495,9 @@ def main():
         "--slo",
         help="slo_batch_analysis.json（缺省取 aggregate 同目录同名文件，存在才读）",
     )
-    ap.add_argument("--out", required=True, help="输出 .canvas.tsx 路径")
+    ap.add_argument(
+        "--out", required=True, help="输出 .html 路径（self-contained Chart.js HTML）"
+    )
     ap.add_argument("--run-id", help="run 标识（缺省取 aggregate meta.run_dir）")
     ap.add_argument(
         "--p-engines",
@@ -402,7 +538,7 @@ def main():
         args.out = out_normalized
     assert not re.search(r"(?<!\d)\d{8}_\d{6}(?!\d)", os.path.basename(args.out)), (
         "--out filename RUNID segment must use hyphen "
-        "(flexlb-run-YYYYMMDD-HHMMSS-report.canvas.tsx), got: " + args.out
+        "(flexlb-run-YYYYMMDD-HHMMSS-report.html), got: " + args.out
     )
 
     warnings = []
@@ -2371,7 +2507,7 @@ def main():
     lines.append("      </Text>")
     lines.append("    </Stack>")
 
-    # ---- 写文件 ----
+    # ---- 拼 in-memory tsx（供末端反抽 spec，不写盘）----
     header = []
     header.append(
         "import { BarChart, ChartComparisonGrid, ChartContainer, Divider, Grid, H1, H2, "
@@ -2386,15 +2522,25 @@ def main():
     header.append("export default function FlexlbRunReport() {")
     header.append("  return (")
 
-    footer = []
-    footer.append("  );")
-    footer.append("}")
+    footer = ["  );", "}"]
+    tsx_src = "\n".join(header + lines + footer) + "\n"
+
+    # ---- 反抽 spec → 渲染 Chart.js HTML ----
+    # canvas_report_render_html.py 是同目录的 sibling 模块；作为脚本运行时
+    # 脚本目录自动在 sys.path 中，作为库被 import 时也依赖同目录可达。
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    if _this_dir not in sys.path:
+        sys.path.insert(0, _this_dir)
+    import canvas_report_render_html  # noqa: E402
+
+    spec = _extract_spec_from_tsx(tsx_src, run_id=str(run_id), subtitle=sources)
+    html_out = canvas_report_render_html.render(spec)
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
-        f.write("\n".join(header + lines + footer) + "\n")
+        f.write(html_out)
 
     # ---- stdout 摘要 ----
     sections = ["qps"] if per_second else []
