@@ -4,10 +4,64 @@ import os
 import pickle
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
+
+from rtp_llm.utils.backend_registry import (
+    register_backend_hook,
+    reset_backend_registrations,
+)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+    def test_internal_backend_registers_moe_choice_before_parser_initialization(self):
+        from rtp_llm.server.server_args import server_args
+
+        loaded = False
+
+        def load_backend():
+            nonlocal loaded
+            if not loaded:
+                register_backend_hook(
+                    "moe_strategy_choices",
+                    lambda parser: next(
+                        action
+                        for action in parser._actions
+                        if "--moe_strategy" in action.option_strings
+                    ).choices.append("external_test_strategy"),
+                )
+                loaded = True
+            return True
+
+        reset_backend_registrations()
+        try:
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(
+                    server_args,
+                    "ensure_backend_entrypoint_loaded",
+                    side_effect=load_backend,
+                ),
+                patch(
+                    "rtp_llm.utils.backend_registry.ensure_backend_entrypoint_loaded",
+                    return_value=True,
+                ),
+            ):
+                first_configs = server_args.setup_args(
+                    ["--moe_strategy", "external_test_strategy"]
+                )
+                second_configs = server_args.setup_args(
+                    ["--moe_strategy", "external_test_strategy"]
+                )
+            self.assertEqual(
+                first_configs.moe_config.moe_strategy, "external_test_strategy"
+            )
+            self.assertEqual(
+                second_configs.moe_config.moe_strategy, "external_test_strategy"
+            )
+        finally:
+            reset_backend_registrations()
 
 
 class ServerArgsSetTest(TestCase):
