@@ -30,6 +30,7 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -67,6 +68,7 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 # ---------------------------------------------------------------------------
 
 _FLASHMLA_TOPK_ALIGNMENT = 128
+_FLASHMLA_SPARSE_Q_HEADS = frozenset((64, 128))
 
 
 def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
@@ -152,6 +154,20 @@ class SparseMlaOp(object):
         ) * _FLASHMLA_TOPK_ALIGNMENT
         self.indexer_top_k = top_k if indexer_top_k is None else indexer_top_k
         self.indexer_group_size = indexer_group_size
+        self.attn_tp_size = (
+            int(parallelism_config.get_attn_tp_size())
+            if parallelism_config is not None
+            else 1
+        )
+        self.attn_tp_rank = (
+            int(
+                parallelism_config.get_attn_tp_rank()
+                if hasattr(parallelism_config, "get_attn_tp_rank")
+                else getattr(parallelism_config, "tp_rank", 0)
+            )
+            if parallelism_config is not None
+            else 0
+        )
         IndexerGroupingGeometry(
             self.indexer_top_k, self.indexer_group_size, self.top_k
         ).validate()
@@ -253,12 +269,37 @@ class SparseMlaOp(object):
 
         Returns [T, H, kv_lora_rank].
         """
-        global_indices = _pad_flashmla_topk(
-            self._convert_topk_indices_to_global(topk_indices), self.kernel_top_k
-        )
+        global_indices = self._convert_topk_indices_to_global(topk_indices)
+        if self.num_heads not in _FLASHMLA_SPARSE_Q_HEADS:
+            # FlashMLA sparse prefill only instantiates Hq=64/128. Tensor
+            # parallelism shards GLM-5.3-Flash's 64 heads to 16 (TP4) or 8
+            # (TP8). Gather rank-major head shards into the checkpoint's 64
+            # heads, run the supported kernel, then return this rank's shard.
+            # Packing as [H_local, T, D] makes all_gather concatenate heads,
+            # rather than concatenating query tokens.
+            gathered_heads = self.num_heads * self.attn_tp_size
+            if gathered_heads not in _FLASHMLA_SPARSE_Q_HEADS:
+                raise RuntimeError(
+                    "FlashMLA sparse attention cannot reconstruct a supported "
+                    f"query-head width: local={self.num_heads}, "
+                    f"attn_tp_size={self.attn_tp_size}, full={gathered_heads}"
+                )
+            q_by_head = q.transpose(0, 1).contiguous()
+            q = (
+                all_gather(q_by_head, group=Group.TP)
+                .view(gathered_heads, q.shape[0], q.shape[2])
+                .transpose(0, 1)
+                .contiguous()
+            )
+
+        global_indices = _pad_flashmla_topk(global_indices, self.kernel_top_k)
         out, _, _ = flash_mla_sparse_fwd(
             q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
         )
+        if self.num_heads not in _FLASHMLA_SPARSE_Q_HEADS:
+            out = out.narrow(
+                1, self.attn_tp_rank * self.num_heads, self.num_heads
+            ).contiguous()
         return out
 
 

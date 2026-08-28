@@ -11,12 +11,13 @@ from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     IndexerCompressorCacheLayout,
     compress_indexer_projection_reference,
     compressor_state_ring_entries,
-    fp32_state_pool_view,
     fp8_pool_view,
+    fp32_state_pool_view,
 )
 from rtp_llm.models_py.modules.indexer_grouping import (
     IndexerGroupingGeometry,
     append_incomplete_tail_indices,
+    completed_group_lengths_i32,
     expand_indexer_group_indices,
 )
 
@@ -67,6 +68,18 @@ class Glm53IndexerGroupingTest(unittest.TestCase):
         self.assertTrue(torch.all(expanded == -1))
         with_tail = append_incomplete_tail_indices(expanded, raw_lengths, 4)
         self.assertEqual(with_tail[0, -3:].tolist(), [0, 1, 2])
+
+    def test_decode_positions_use_int32_completed_group_lengths(self) -> None:
+        for input_dtype in (torch.int32, torch.int64):
+            positions = torch.tensor([[0, 2, 3], [4, 7, 8]], dtype=input_dtype)
+            lengths = completed_group_lengths_i32(positions, 4)
+            self.assertEqual(lengths.dtype, torch.int32)
+            self.assertEqual(tuple(lengths.shape), (2, 3))
+            self.assertEqual(lengths.tolist(), [[0, 0, 1], [1, 2, 2]])
+
+    def test_decode_positions_reject_invalid_group_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "group_size must be positive"):
+            completed_group_lengths_i32(torch.tensor([0], dtype=torch.int64), 0)
 
 
 class Glm53IndexerCacheLayoutTest(unittest.TestCase):

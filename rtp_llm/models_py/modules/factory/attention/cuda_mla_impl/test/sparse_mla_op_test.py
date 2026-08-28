@@ -5,6 +5,7 @@
 import math
 from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main, skipIf
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -469,11 +470,10 @@ class SparseMlaOpTest(TestCase):
         self.assertEqual(expanded[1, -3:].tolist(), [0, 1, 2])
 
     def test_glm53_topk2051_prefill_and_decode_kernel(self):
-        """Run FlashMLA at the checkpoint's 2048+3 raw-token width."""
+        """Run TP-local and unsharded kernels at the checkpoint's 2048+3 width."""
         seq_len = 2051
         page_size = 128
         kv_lora_rank = 512
-        num_heads = 64
         block_table_host = generate_block_table(1, seq_len, page_size)
         block_table_device = block_table_host.to("cuda")
         generator = torch.Generator(device="cuda").manual_seed(20260828)
@@ -490,74 +490,101 @@ class SparseMlaOpTest(TestCase):
         )
         pooled = torch.arange(512, dtype=torch.int32, device="cuda")
 
-        for is_prefill in (True, False):
-            with self.subTest(phase="prefill" if is_prefill else "decode"):
-                query_tokens = 4 if is_prefill else 1
-                prefix_lengths = (
-                    torch.tensor([2047], dtype=torch.int32, device="cpu")
-                    if is_prefill
-                    else torch.empty(0, dtype=torch.int32, device="cpu")
-                )
-                sequence_lengths = torch.tensor(
-                    [seq_len if is_prefill else seq_len - 1],
-                    dtype=torch.int32,
-                    device="cpu",
-                )
-                input_lengths = torch.tensor(
-                    [query_tokens], dtype=torch.int32, device="cpu"
-                )
-                mla_params = rtp_llm_ops.FlashInferMlaAttnParams()
-                mla_params.fill_params(
-                    prefix_lengths,
-                    sequence_lengths,
-                    input_lengths,
-                    block_table_host,
-                    page_size,
-                )
-                expected_positions = [2047, 2048, 2049, 2050] if is_prefill else [2050]
-                self.assertEqual(mla_params.positions_d.tolist(), expected_positions)
-
-                q = (
-                    torch.randn(
-                        query_tokens,
-                        num_heads,
-                        kv_lora_rank,
-                        generator=generator,
-                        dtype=torch.bfloat16,
-                        device="cuda",
-                    )
-                    / 10.0
-                )
-                topk_indices = pooled.view(1, 1, 512).expand(query_tokens, 1, 512)
-                op = SparseMlaOp(
+        for num_heads in (16, 64):
+            for is_prefill in (True, False):
+                with self.subTest(
                     num_heads=num_heads,
-                    kv_lora_rank=kv_lora_rank,
-                    qk_rope_head_dim=0,
-                    qk_nope_head_dim=256,
-                    page_size=page_size,
-                    softmax_extra_scale=1.0,
-                    top_k=2051,
-                    indexer_top_k=512,
-                    indexer_group_size=4,
-                )
-                op.plan(mla_params, block_table_device)
-                output = op.forward(q, kv, topk_indices)
-                global_indices = op._convert_topk_indices_to_global(topk_indices)[
-                    :, 0, :
-                ]
-                self.assertEqual(tuple(global_indices.shape), (query_tokens, 2051))
-                self.assertEqual(global_indices[-1, -3:].tolist(), [2048, 2049, 2050])
-                if is_prefill:
-                    self.assertEqual(global_indices[0, -3:].tolist(), [-1, -1, -1])
+                    phase="prefill" if is_prefill else "decode",
+                ):
+                    query_tokens = 4 if is_prefill else 1
+                    prefix_lengths = (
+                        torch.tensor([2047], dtype=torch.int32, device="cpu")
+                        if is_prefill
+                        else torch.empty(0, dtype=torch.int32, device="cpu")
+                    )
+                    sequence_lengths = torch.tensor(
+                        [seq_len if is_prefill else seq_len - 1],
+                        dtype=torch.int32,
+                        device="cpu",
+                    )
+                    input_lengths = torch.tensor(
+                        [query_tokens], dtype=torch.int32, device="cpu"
+                    )
+                    mla_params = rtp_llm_ops.FlashInferMlaAttnParams()
+                    mla_params.fill_params(
+                        prefix_lengths,
+                        sequence_lengths,
+                        input_lengths,
+                        block_table_host,
+                        page_size,
+                    )
+                    expected_positions = (
+                        [2047, 2048, 2049, 2050] if is_prefill else [2050]
+                    )
+                    self.assertEqual(
+                        mla_params.positions_d.tolist(), expected_positions
+                    )
 
-                expected = ref_sparse_mla_forward_streaming(
-                    q, kv, global_indices, 256**-0.5, kv_lora_rank
-                )
-                self.assertTrue(torch.isfinite(output).all().item())
-                cosine = F.cosine_similarity(
-                    output.float().flatten(), expected.float().flatten(), dim=0
-                ).item()
-                self.assertGreater(cosine, 0.99)
+                    q = (
+                        torch.randn(
+                            query_tokens,
+                            num_heads,
+                            kv_lora_rank,
+                            generator=generator,
+                            dtype=torch.bfloat16,
+                            device="cuda",
+                        )
+                        / 10.0
+                    )
+                    topk_indices = pooled.view(1, 1, 512).expand(query_tokens, 1, 512)
+                    op = SparseMlaOp(
+                        num_heads=num_heads,
+                        kv_lora_rank=kv_lora_rank,
+                        qk_rope_head_dim=0,
+                        qk_nope_head_dim=256,
+                        page_size=page_size,
+                        softmax_extra_scale=1.0,
+                        top_k=2051,
+                        parallelism_config=(
+                            SimpleNamespace(
+                                get_attn_tp_size=lambda: 4,
+                                get_attn_tp_rank=lambda: 2,
+                                tp_rank=0,
+                            )
+                            if num_heads == 16
+                            else None
+                        ),
+                        indexer_top_k=512,
+                        indexer_group_size=4,
+                    )
+                    op.plan(mla_params, block_table_device)
+                    if num_heads == 16:
+                        with patch(
+                            "rtp_llm.models_py.modules.factory.attention."
+                            "cuda_mla_impl.flashmla_sparse_impl.all_gather",
+                            side_effect=lambda tensor, group: tensor.repeat(4, 1, 1),
+                        ):
+                            output = op.forward(q, kv, topk_indices)
+                    else:
+                        output = op.forward(q, kv, topk_indices)
+                    global_indices = op._convert_topk_indices_to_global(topk_indices)[
+                        :, 0, :
+                    ]
+                    self.assertEqual(tuple(global_indices.shape), (query_tokens, 2051))
+                    self.assertEqual(
+                        global_indices[-1, -3:].tolist(), [2048, 2049, 2050]
+                    )
+                    if is_prefill:
+                        self.assertEqual(global_indices[0, -3:].tolist(), [-1, -1, -1])
+
+                    expected = ref_sparse_mla_forward_streaming(
+                        q, kv, global_indices, 256**-0.5, kv_lora_rank
+                    )
+                    self.assertTrue(torch.isfinite(output).all().item())
+                    cosine = F.cosine_similarity(
+                        output.float().flatten(), expected.float().flatten(), dim=0
+                    ).item()
+                    self.assertGreater(cosine, 0.99)
 
     def test_sparse_mla_op_prefill(self):
         """

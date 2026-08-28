@@ -47,6 +47,28 @@ class IndexerGroupingGeometry:
             )
 
 
+def completed_group_lengths_i32(
+    raw_positions: torch.Tensor, group_size: int
+) -> torch.Tensor:
+    """Return completed compressed-group counts in the kernel ABI dtype.
+
+    Decode position tensors are commonly int64, while DeepGEMM's paged MQA
+    metadata and RTP-LLM's persistent top-k kernels require int32 lengths.
+    Keeping this conversion at the grouping boundary prevents CUDA Graph
+    dry-runs from forwarding an int64 ``context_lens`` tensor.
+    """
+
+    if raw_positions.dtype not in (torch.int32, torch.int64):
+        raise TypeError(
+            f"raw_positions must use int32 or int64, got {raw_positions.dtype}"
+        )
+    if group_size <= 0:
+        raise ValueError(f"group_size must be positive, got {group_size}")
+    return torch.div(raw_positions + 1, group_size, rounding_mode="floor").to(
+        dtype=torch.int32
+    )
+
+
 def expand_indexer_group_indices(
     group_indices: torch.Tensor,
     group_size: int,

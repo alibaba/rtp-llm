@@ -55,6 +55,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _CompressorPending,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.indexer_grouping import completed_group_lengths_i32
 
 
 def _use_varlen_prefill() -> bool:
@@ -623,7 +624,9 @@ class IndexerFP8(PoolBackedModule):
                     batched_rope=True,
                     apply_rope=not self.compressor.kpool_mode,
                 )
-                compressed_len = ((start_pos + 1) // ratio).view(bsz, 1, 1)
+                compressed_len = completed_group_lengths_i32(start_pos, ratio).view(
+                    bsz, 1, 1
+                )
             else:
                 assert compressor_meta is not None
                 pos_flat = compressor_meta.positions.reshape(-1)
@@ -641,7 +644,7 @@ class IndexerFP8(PoolBackedModule):
                 assert compressor_meta.compressed_lens_per_token is not None
                 compressed_len = compressor_meta.compressed_lens_per_token.view(
                     bsz, q_len, 1
-                )
+                ).to(dtype=torch.int32)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             weights = self._compute_weights(x)
 
