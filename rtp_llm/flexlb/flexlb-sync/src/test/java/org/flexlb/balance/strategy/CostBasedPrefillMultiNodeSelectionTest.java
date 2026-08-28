@@ -6,7 +6,10 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -35,7 +38,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 
 /**
  * Task34 类别一：策略层复杂多节点选择正确性 —— 3~8 个 endpoint 组成的
@@ -79,8 +81,8 @@ class CostBasedPrefillMultiNodeSelectionTest {
         prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
         Mockito.when(prefillResourceMeasure.isResourceAvailable(any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(new HashMap<>());
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
 
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
