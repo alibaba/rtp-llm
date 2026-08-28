@@ -18,6 +18,7 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
     for (BlockIdxType block = 1; block < static_cast<BlockIdxType>(config_->physical_block_count); ++block) {
         free_blocks_.push_back(block);
     }
+    available_blocks_num_ = free_blocks_.size();
 }
 
 const std::string& IBlockPool::poolName() const {
@@ -30,7 +31,7 @@ std::string IBlockPool::debugString() const {
     const size_t                free_blocks = availableFreeBlocksNoLock();
     const size_t                used_blocks = totalBlocksNumNoLock() - free_blocks;
     oss << "IBlockPool{name=" << config_->pool_name << ", total=" << totalBlocksNumNoLock() << ", used=" << used_blocks
-        << ", free=" << free_blocks
+        << ", free=" << free_blocks << ", available=" << available_blocks_num_
         << ", cache_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::CACHE)]
         << ", load_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::LOAD)]
         << ", eviction_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
@@ -66,11 +67,14 @@ std::optional<BlockIdList> IBlockPool::malloc(size_t n) {
     }
 
     for (const auto block : result) {
+        const bool was_available = isAvailableNoLock(block);
+        assert(was_available);
         allocated_[block]      = 1;
         tree_refcounts_[block] = 0;
         for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
             typed_refcounts[block] = 0;
         }
+        updateAvailableBlocksNumNoLock(block, was_available);
     }
     return result;
 }
@@ -84,8 +88,9 @@ void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
     mutateAllocatedBlocks(
         blocks,
         [](BlockIdxType) {},
-        [this, ref_type, ref_type_index](BlockIdxType block) {
-            const bool was_active = isActiveNoLock(block);
+        [this, ref_type_index](BlockIdxType block) {
+            const bool was_active    = isActiveNoLock(block);
+            const bool was_available = isAvailableNoLock(block);
             if (tree_refcounts_[block] == 0) {
                 onFirstTreeRefNoLock(block);
             }
@@ -96,10 +101,8 @@ void IBlockPool::incTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
                 ++tree_referenced_block_counts_[ref_type_index];
             }
             ++typed_refcount;
-            if (ref_type == BlockTreeRefType::CACHE && typed_refcount == 1) {
-                onCacheRefChangedNoLock(block, true);
-            }
             updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
         });
 }
 
@@ -118,16 +121,14 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
                                     poolName().c_str(),
                                     ref_type_index);
         },
-        [this, ref_type, ref_type_index](BlockIdxType block) {
+        [this, ref_type_index](BlockIdxType block) {
             const bool was_active     = isActiveNoLock(block);
-            uint32_t& typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
+            const bool was_available  = isAvailableNoLock(block);
+            uint32_t&  typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
             --typed_refcount;
             if (typed_refcount == 0) {
                 assert(tree_referenced_block_counts_[ref_type_index] > 0);
                 --tree_referenced_block_counts_[ref_type_index];
-                if (ref_type == BlockTreeRefType::CACHE) {
-                    onCacheRefChangedNoLock(block, false);
-                }
             }
 
             assert(tree_refcounts_[block] > 0);
@@ -136,6 +137,7 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
                 freeAllocatedBlockNoLock(block);
             }
             updateActiveBlocksNumNoLock(block, was_active);
+            updateAvailableBlocksNumNoLock(block, was_available);
         });
 }
 
@@ -178,6 +180,12 @@ size_t IBlockPool::totalBlocksNum() const {
 size_t IBlockPool::freeBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return availableFreeBlocksNoLock();
+}
+
+size_t IBlockPool::availableBlocksNum() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    return available_blocks_num_;
 }
 
 size_t IBlockPool::usedBlocksNum() const {
@@ -279,6 +287,13 @@ bool IBlockPool::isActiveNoLock(BlockIdxType block) const {
     return false;
 }
 
+bool IBlockPool::isAvailableNoLock(BlockIdxType block) const {
+    if (allocated_[block] == 0) {
+        return true;
+    }
+    return tree_refcounts_by_type_[treeRefTypeIndex(BlockTreeRefType::CACHE)][block] > 0 && !isActiveNoLock(block);
+}
+
 void IBlockPool::updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active) {
     const bool is_active = isActiveNoLock(block);
     if (was_active != is_active) {
@@ -288,6 +303,19 @@ void IBlockPool::updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active
             assert(active_blocks_num_ > 0);
             --active_blocks_num_;
         }
+    }
+}
+
+void IBlockPool::updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available) {
+    const bool is_available = isAvailableNoLock(block);
+    if (was_available != is_available) {
+        if (is_available) {
+            ++available_blocks_num_;
+        } else {
+            assert(available_blocks_num_ > 0);
+            --available_blocks_num_;
+        }
+        assert(available_blocks_num_ <= totalBlocksNumNoLock());
     }
 }
 

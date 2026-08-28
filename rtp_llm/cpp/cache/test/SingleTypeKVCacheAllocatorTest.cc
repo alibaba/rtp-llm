@@ -70,8 +70,7 @@ public:
 
 class AlwaysHitSingleTypeStorageBackend: public StorageBackend {
 public:
-    AlwaysHitSingleTypeStorageBackend():
-        StorageBackend(std::make_shared<InlineSingleTypeStorageBackendExecutor>()) {}
+    AlwaysHitSingleTypeStorageBackend(): StorageBackend(std::make_shared<InlineSingleTypeStorageBackendExecutor>()) {}
     ~AlwaysHitSingleTypeStorageBackend() override {
         shutdown();
     }
@@ -132,11 +131,11 @@ private:
 
 KVCacheConfig makeSingleTypeTieredConfig(Tier source_tier, const std::string& disk_path) {
     KVCacheConfig config;
-    config.enable_host_cache         = true;
-    config.host_cache_size_mb        = 1;
-    config.enable_disk_cache         = source_tier == Tier::DISK;
-    config.disk_cache_size_mb        = source_tier == Tier::DISK ? 1 : 0;
-    config.disk_cache_paths          = disk_path;
+    config.enable_host_cache  = true;
+    config.host_cache_size_mb = 1;
+    config.enable_disk_cache  = source_tier == Tier::DISK;
+    config.disk_cache_size_mb = source_tier == Tier::DISK ? 1 : 0;
+    config.disk_cache_paths   = disk_path;
     return config;
 }
 
@@ -488,6 +487,46 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocDistinguishesRetryableCapacityS
     EXPECT_EQ(retry_result.status, MallocStatus::NONE);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, AvailableCapacityUsesFreePlusCacheOnlyBlocks) {
+    constexpr size_t seq_size_per_block = 4;
+    auto             config             = createSingleTypeTestConfig(
+        /*layer_num=*/4, /*block_num=*/6, /*seq_size_per_block=*/seq_size_per_block);
+    allocator_ = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    const DeviceBlockPoolPtr pool = allocator_->getDeviceBlockPool();
+    ASSERT_NE(pool, nullptr);
+    const size_t total_blocks = pool->totalBlocksNum();
+    ASSERT_EQ(allocator_->availableBlocksNum(), total_blocks);
+
+    const std::optional<BlockIdxType> block = pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 1);
+    EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks - 1);
+    EXPECT_EQ(allocator_->availableTokensNum(), (total_blocks - 1) * seq_size_per_block);
+    EXPECT_EQ(allocator_->tokenCapacity(seq_size_per_block).available_tokens, (total_blocks - 1) * seq_size_per_block);
+
+    pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks - 1);
+    EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks);
+    EXPECT_EQ(allocator_->availableTokensNum(), total_blocks * seq_size_per_block);
+    EXPECT_EQ(allocator_->tokenCapacity(seq_size_per_block).available_tokens, total_blocks * seq_size_per_block);
+
+    pool->incRef(*block);
+    EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks - 1);
+    pool->decRef(*block);
+    EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks);
+
+    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots.front().free_blocks, total_blocks - 1);
+    EXPECT_EQ(snapshots.front().available_blocks, total_blocks);
+
+    pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_blocks);
+    EXPECT_EQ(allocator_->availableBlocksNum(), total_blocks);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
@@ -740,13 +779,15 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     ASSERT_EQ(batch_zero_match.matched_device_blocks, 1u);
     ASSERT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_zero_match.matched_device_resources),
               (BlockIndicesType{blocks[0]}));
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), batch_zero_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
+                                                     batch_zero_match.matched_device_resources);
 
     auto batch_one_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{200});
     EXPECT_EQ(batch_one_match.matched_device_blocks, 0u);
     EXPECT_TRUE(
         allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_device_resources).empty());
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), batch_one_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
+                                                     batch_one_match.matched_device_resources);
 
     block_pool->decRef(blocks);
 }
@@ -794,13 +835,15 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
 
     auto noncanonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100, 102});
     EXPECT_EQ(noncanonical_match.matched_device_blocks, 0u);
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), noncanonical_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
+                                                     noncanonical_match.matched_device_resources);
 
     auto canonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(canonical_match.matched_device_blocks, 2u);
     EXPECT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, canonical_match.matched_device_resources),
               seed_blocks);
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(), canonical_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator_->blockTreeCacheOwner(),
+                                                     canonical_match.matched_device_resources);
 
     auto hit = createBatchKVCacheResource(/*batch_size=*/1, config);
     hit->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200, 201});

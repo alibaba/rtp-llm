@@ -33,15 +33,15 @@ public:
 
     GroupedCacheLayerLayout allLayerCacheBase() const override;
 
-    size_t                                  freeBlocksNum() const override;
-    size_t                                  activeTreeCachedBlocksNum() const override;
-    size_t                                  availableTokensNum() const override;
-    size_t                                  totalTokensNum() const override;
-    size_t                                  totalBlocksNum() const override;
-    size_t                                  maxAvailableTokensNum() const override;
-    KVCacheTokenCapacity                    tokenCapacity(size_t default_seq_size_per_block) const override;
-    void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
-    int64_t getMrCostTimeMs() const override;
+    size_t               freeBlocksNum() const override;
+    size_t               availableBlocksNum() const override;
+    size_t               availableTokensNum() const override;
+    size_t               totalTokensNum() const override;
+    size_t               totalBlocksNum() const override;
+    size_t               maxAvailableTokensNum() const override;
+    KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const override;
+    void                 regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
+    int64_t              getMrCostTimeMs() const override;
 
     // Per-pool access for diagnostics / per-pool metrics reporting.
     const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const override {
@@ -57,15 +57,16 @@ private:
     // aggregate base-class classification is not sufficient here.
     MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
-    MallocStatus evaluateInitCapacityImpl(const MallocInfo&                    malloc_info,
-                                          size_t                               reserve_blocks,
-                                          InitCapacityMode                     mode,
+    MallocStatus evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
+                                          size_t                                reserve_blocks,
+                                          InitCapacityMode                      mode,
                                           const std::vector<RequiredPositions>* required_positions) const;
 
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
+
 protected:
-    MallocStatus evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
-                                              size_t                  reserve_blocks,
+    MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
+                                              size_t                 reserve_blocks,
                                               const PreparedKVCache& prepared,
                                               bool                   has_load_context) const override;
 
@@ -79,7 +80,7 @@ private:
 
     int    validateGroupIdForLayer(int layer_id, int group_id) const;
     int    defaultGroupIdForLayer(int layer_id) const;
-    size_t minTokenCapacity(bool use_free_blocks, bool full_groups_only) const;
+    size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
     size_t totalReservableFreeBlocks() const;
     size_t reserveBlocksForPool(size_t group_id) const;
 

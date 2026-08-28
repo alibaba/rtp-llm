@@ -253,28 +253,33 @@ TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 
-TEST(DeviceBlockPoolTest, OuterAndTreeRefsReleaseIndependently) {
+TEST(DeviceBlockPoolTest, RequestAndCacheRefsUpdateAvailableIndependently) {
     auto            config = makeConfig();
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
+    const size_t total_blocks = pool.totalBlocksNum();
+    EXPECT_EQ(pool.availableBlocksNum(), total_blocks - 1);
+
+    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool.availableBlocksNum(), total_blocks);
 
     pool.incRef(*block);
-    pool.incTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_EQ(pool.refCount(*block), 2u);
     EXPECT_EQ(pool.treeRefCount(*block), 1u);
     EXPECT_EQ(pool.referencedBlocksNum(), 1u);
-    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
+    EXPECT_EQ(pool.availableBlocksNum(), total_blocks - 1);
 
     pool.decRef(*block);
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 1u);
-    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 0u);
+    EXPECT_EQ(pool.availableBlocksNum(), total_blocks);
 
     pool.decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(pool.isAllocated(*block));
+    EXPECT_EQ(pool.availableBlocksNum(), total_blocks);
 }
 
 TEST(DeviceBlockPoolTest, ActiveBlocksIncludeRequestAndTreeOperationRefs) {
