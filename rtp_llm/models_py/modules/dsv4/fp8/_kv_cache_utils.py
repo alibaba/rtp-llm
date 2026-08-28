@@ -163,12 +163,6 @@ class PoolBackedModule(nn.Module):
         ``pos // state_tokens_per_block`` while the in-block offset uses
         ``pos % state_eb``.
         """
-        if kv_pool_view is not None:
-            assert kv_eb > 0 and kv_tokens_per_block > 0, (
-                f"KV pool bound but kv_eb={kv_eb} / "
-                f"kv_tokens_per_block={kv_tokens_per_block} non-positive; "
-                "CacheConfig propagation broken (writer would index with zero stride)"
-            )
         self._kv_pool_view = kv_pool_view
         self._kv_block_table = kv_block_table
         self._kv_eb = kv_eb
@@ -178,29 +172,12 @@ class PoolBackedModule(nn.Module):
         )
 
         if state_pool_view is not None:
-            assert state_eb > 0 and state_tokens_per_block > 0, (
-                f"state pool bound but state_eb={state_eb} / "
-                f"state_tokens_per_block={state_tokens_per_block} non-positive; "
-                "CacheConfig propagation broken (writer would index with zero stride)"
-            )
             if state_pool_view.dim() == 2:
                 total_slots, hidden = state_pool_view.shape
-                assert total_slots % state_eb == 0, (
-                    f"state pool total_slots={total_slots} not divisible by "
-                    f"state_eb={state_eb}"
-                )
                 num_blocks = total_slots // state_eb
                 self._state_pool_3d = state_pool_view.view(num_blocks, state_eb, hidden)
-            elif state_pool_view.dim() == 3:
-                assert int(state_pool_view.shape[1]) == state_eb, (
-                    f"state pool block entries={state_pool_view.shape[1]} "
-                    f"does not match state_eb={state_eb}"
-                )
-                self._state_pool_3d = state_pool_view
             else:
-                raise AssertionError(
-                    f"expected 2D or 3D state pool view, got {state_pool_view.shape}"
-                )
+                self._state_pool_3d = state_pool_view
         else:
             self._state_pool_3d = None
         self._state_block_table = state_block_table

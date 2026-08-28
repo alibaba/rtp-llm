@@ -64,9 +64,14 @@ def _stub_modules():
         def _stub_fused_restore(*args, **kwargs):
             return False
 
+        def _stub_direct_flat(*args, **kwargs):
+            return False
+
+        sk.cp_direct_flat_pack_enabled = lambda: False
         sk.dequantize_and_gather_k_cache = _stub_dequant
         sk.gather_k_cache_packed = _stub_gather_packed
         sk.dequantize_packed_k_cache_flat = _stub_dequant_flat
+        sk.try_gather_k_cache_packed_to_flat = _stub_direct_flat
         sk.try_restore_dequantize_scatter_packed_k_cache_flat = _stub_fused_restore
         sys.modules[sk_name] = sk
         for p in (
@@ -290,6 +295,76 @@ def test_pack_padded_to_flat_empty():
     lens = torch.tensor([0])
     flat = PR._pack_padded_to_flat(padded, lens, total=0, D=2)
     assert flat.shape == (0, 2)
+
+
+def test_cp_build_local_flat_prefers_direct_gather():
+    reader = PR.CPShardedPoolReader(
+        PR.CPShardConfig(
+            cp_ctx=_fake_cp_ctx(cp_size=2, cp_rank=0),
+            per_req_total_kv_lens=torch.tensor([1], dtype=torch.int64),
+            restore_indices=torch.tensor([0], dtype=torch.int64),
+            block_size=1,
+            total_local_kv=1,
+            local_seq_lens_padded=torch.tensor([1], dtype=torch.int32),
+            local_seq_lens_actual=torch.tensor([1], dtype=torch.int32),
+            max_local_seq_len_padded=1,
+            has_local_seq_len_actual=True,
+        )
+    )
+    k_cache = torch.zeros((2, 1, PR.ENTRY_BYTES), dtype=torch.uint8)
+    block_table = torch.ones((1, 1), dtype=torch.int32)
+    calls = []
+
+    def fake_direct(
+        out,
+        actual_cache,
+        actual_table,
+        padded_lens,
+        actual_lens,
+        *,
+        block_size,
+        has_actual_tokens,
+    ):
+        calls.append(
+            (
+                actual_cache,
+                actual_table,
+                padded_lens,
+                actual_lens,
+                block_size,
+                has_actual_tokens,
+            )
+        )
+        out.fill_(0x2A)
+        return True
+
+    def fail_fallback(*args, **kwargs):
+        raise AssertionError("old padded gather must not run after direct success")
+
+    old_enabled = PR.cp_direct_flat_pack_enabled
+    old_direct = PR.try_gather_k_cache_packed_to_flat
+    old_gather = PR.gather_k_cache_packed
+    try:
+        PR.cp_direct_flat_pack_enabled = lambda: True
+        PR.try_gather_k_cache_packed_to_flat = fake_direct
+        PR.gather_k_cache_packed = fail_fallback
+        flat = reader._build_local_flat(
+            k_cache=k_cache,
+            block_table=block_table,
+            block_size=1,
+            device=torch.device("cpu"),
+        )
+    finally:
+        PR.cp_direct_flat_pack_enabled = old_enabled
+        PR.try_gather_k_cache_packed_to_flat = old_direct
+        PR.gather_k_cache_packed = old_gather
+
+    assert flat.shape == (1, PR.ENTRY_BYTES)
+    assert torch.equal(flat, torch.full_like(flat, 0x2A))
+    assert len(calls) == 1
+    assert calls[0][0] is k_cache
+    assert calls[0][1] is block_table
+    assert calls[0][4:] == (1, True)
 
 
 def test_scatter_flat_to_workspace():

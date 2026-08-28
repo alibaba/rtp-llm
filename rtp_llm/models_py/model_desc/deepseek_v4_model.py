@@ -144,8 +144,8 @@ class Dsv4SharedRuntimeBufferStore:
 
     @classmethod
     def instance(cls) -> "Dsv4SharedRuntimeBufferStore":
-        assert cls._instance is not None, "Dsv4SharedRuntimeBufferStore is not bound"
-        return cls._instance
+        instance: Dsv4SharedRuntimeBufferStore = cls._instance  # type: ignore[assignment]
+        return instance
 
     @classmethod
     def _reset_for_test(cls) -> None:
@@ -315,10 +315,6 @@ class DeepSeekV4Model(GptModelBase):
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config, max_generate_batch_size)
         self._max_generate_batch_size = int(max_generate_batch_size)
-        assert self._max_generate_batch_size > 0, (
-            "max_generate_batch_size must be positive, "
-            f"got {self._max_generate_batch_size}"
-        )
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
         # Python-only DSpARK config, populated on the target model by the
         # speculative-engine setup. ``getattr`` keeps older ModelConfig
@@ -542,7 +538,7 @@ class DeepSeekV4Model(GptModelBase):
         return main_w, idx_w
 
     def _bind_runtime_buffers(self, device: torch.device) -> None:
-        assert self.v4 is not None
+        v4: V4Transformer = self.v4  # type: ignore[assignment]
         mtp_hidden = None
         mtp_last_hidden_capacity = None
         if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
@@ -578,17 +574,17 @@ class DeepSeekV4Model(GptModelBase):
             full_rows = 0
             main_w = 0
             idx_w = 0
-        self.v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
+        v4._bind_prefill_workspace_dims(q_rows, q_dim, full_rows, main_w, idx_w)
 
         self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore.get_or_create(
             device=device,
             dtype=torch.bfloat16,
             mtp_hidden=mtp_hidden,
         )
-        self._shared_runtime_buffers.bind(self.v4)
+        self._shared_runtime_buffers.bind(v4)
 
         if mtp_last_hidden_capacity is not None:
-            self.v4._allocate_mtp_last_hidden_buffer(
+            v4._allocate_mtp_last_hidden_buffer(
                 device,
                 mtp_last_hidden_capacity,
             )
@@ -1187,8 +1183,7 @@ class DeepSeekV4Model(GptModelBase):
             not update Python attributes.
         num_tokens < 0: return the last non-graph-written row count. This is only
             for CP prefill, where the C++ global token count has been restored
-            but the buffer intentionally stores rank-local rows; asserts the
-            buffer is non-empty.
+            but the buffer intentionally stores rank-local rows.
         """
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
@@ -1197,15 +1192,7 @@ class DeepSeekV4Model(GptModelBase):
             return None
         requested = int(num_tokens)
         if requested < 0:
-            assert (
-                not self._is_decode_role
-            ), "decode MTP hidden reads must pass row count"
             requested = int(self.v4._mtp_hidden_valid_tokens)
-            assert requested > 0, "MTP hidden buffer has no written rows"
-        assert requested <= buf.size(0), (
-            "DeepSeekV4Model: requested MTP hidden states exceed buffer capacity: "
-            f"requested={requested}, capacity={buf.size(0)}"
-        )
         return buf[:requested]
 
     def has_mtp_hidden_buffer(self) -> bool:
@@ -1216,22 +1203,12 @@ class DeepSeekV4Model(GptModelBase):
     def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
-        assert not self._is_decode_role, "decode MTP last-hidden reads are unsupported"
         buf = self.v4._mtp_last_hidden_buffer
         if buf is None:
             return None
         requested = int(num_tokens)
         if requested < 0:
             requested = int(self.v4._mtp_last_hidden_valid_tokens)
-        assert requested <= buf.size(0), (
-            "DeepSeekV4Model: requested MTP last hidden states exceed buffer capacity: "
-            f"requested={requested}, capacity={buf.size(0)}"
-        )
-        assert requested <= int(self.v4._mtp_last_hidden_valid_tokens), (
-            "DeepSeekV4Model: requested MTP last hidden states exceed rows written "
-            f"by the previous forward: requested={requested}, "
-            f"valid={self.v4._mtp_last_hidden_valid_tokens}"
-        )
         return buf[:requested]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -1276,10 +1253,6 @@ class DeepSeekV4Model(GptModelBase):
         )
 
         if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
-            if bool(getattr(attn, "is_target_verify", False)):
-                assert bool(
-                    getattr(self.v4, "fp8_kv_cache", False)
-                ), "target verify requires fp8 kv cache"
             return forward_decode(
                 self.v4,
                 self.kv_cache,

@@ -100,8 +100,7 @@ def test_cp_all_gather_full_rejects_non_2d_and_wrong_t_local():
 def test_cuda_async_cp_gather_impl_fails_fast_on_cpu():
     ctx = _make_cp_ctx()
     local = torch.zeros((2, 6), dtype=torch.float32)
-    # The workspace assert fires first; pass a (minimal) one so the test
-    # exercises the intended CUDA fail-fast rather than the workspace guard.
+    # Pass the required workspace so the test exercises the CUDA fail-fast.
     ws = PrefillWorkspace(
         torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
     )

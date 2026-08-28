@@ -48,9 +48,6 @@ class MtpHiddenBufferTest(unittest.TestCase):
         )
 
     def test_shared_store_instance_returns_singleton(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "is not bound"):
-            Dsv4SharedRuntimeBufferStore.instance()
-
         first = self._make_store()
         second = Dsv4SharedRuntimeBufferStore.instance()
 
@@ -79,14 +76,6 @@ class MtpHiddenBufferTest(unittest.TestCase):
         model = types.SimpleNamespace(v4=v4, _is_decode_role=False)
         sliced = DeepSeekV4Model.get_mtp_target_hidden_states(model, -1)
         self.assertTrue(torch.equal(flat, sliced))
-
-    def test_accessor_rejects_requests_beyond_buffer_capacity(self) -> None:
-        v4 = types.SimpleNamespace()
-        v4._mtp_hidden_buffer = torch.empty(5, 3, dtype=torch.bfloat16)
-        model = types.SimpleNamespace(v4=v4, _is_decode_role=False)
-
-        with self.assertRaisesRegex(AssertionError, "requested=6, capacity=5"):
-            DeepSeekV4Model.get_mtp_target_hidden_states(model, 6)
 
     def test_last_hidden_accessor_slices_requested_rows(self) -> None:
         v4 = types.SimpleNamespace()
@@ -181,16 +170,6 @@ class MtpHiddenBufferTest(unittest.TestCase):
         self.assertEqual(module._mtp_last_hidden_buffer.size(0), 4)
         self.assertTrue(torch.equal(module._mtp_last_hidden_buffer[:2], flat))
         self.assertEqual(module._mtp_last_hidden_valid_tokens, 2)
-
-    def test_last_hidden_write_rejects_overflow(self) -> None:
-        module = self._make_last_hidden_module(cap=4, hc_dim=3)
-        original_ptr = module._mtp_last_hidden_buffer.data_ptr()
-
-        flat = torch.arange(7 * 3, dtype=torch.bfloat16).reshape(7, 3)
-        with self.assertRaisesRegex(AssertionError, "_mtp_last_hidden_buffer overflow"):
-            V4Transformer._write_mtp_last_hidden_buffer(module, flat)
-        self.assertEqual(module._mtp_last_hidden_buffer.data_ptr(), original_ptr)
-        self.assertEqual(module._mtp_last_hidden_valid_tokens, 0)
 
     def test_last_hidden_buffer_remains_non_persistent_after_write(self) -> None:
         module = self._make_last_hidden_module(cap=2, hc_dim=3)

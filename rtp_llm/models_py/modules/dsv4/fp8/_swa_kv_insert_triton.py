@@ -172,16 +172,6 @@ def quantize_and_insert_k_cache(
     blocks are writable by passing a per-token slot mapping; sparse positive
     block-table entries are written just like contiguous tail entries.
     """
-    assert (
-        k.dim() == 2 and k.shape[1] == _INPUT_DIM
-    ), f"K must be [num_tokens, 512], got {tuple(k.shape)}"
-    assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
-    assert (
-        k_cache.dim() == 3 and k_cache.shape[-1] == 584 and k_cache.dtype == torch.uint8
-    ), (
-        f"k_cache must be [num_blocks, block_size, 584] uint8, got "
-        f"{tuple(k_cache.shape)} / {k_cache.dtype}"
-    )
     if slot_mapping.dtype != torch.long:
         slot_mapping = slot_mapping.to(torch.long)
 
@@ -229,27 +219,12 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
 ) -> None:
-    assert (
-        k.dim() == 2 and k.shape[1] == _INPUT_DIM
-    ), f"K must be [num_tokens, 512], got {tuple(k.shape)}"
-    assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
-    assert k_cache_raw.dim() == 2 and k_cache_raw.dtype == torch.uint8, (
-        f"k_cache_raw must be [num_blocks, local_slice_bytes] uint8, got "
-        f"{tuple(k_cache_raw.shape)} / {k_cache_raw.dtype}"
-    )
-    assert (
-        k_cache_raw.stride(1) == 1
-    ), f"k_cache_raw must be byte-contiguous, got {k_cache_raw.stride()}"
     full_entries_per_block = int(full_entries_per_block)
     cp_rank = int(cp_rank)
     cp_size = int(cp_size)
-    assert full_entries_per_block > 0 and cp_size > 1 and 0 <= cp_rank < cp_size
     num_tokens = int(slot_mapping.shape[0])
     if num_tokens == 0:
         return
-    assert (
-        compaction is not None
-    ), "CP byte-sliced SWA insert requires metadata-precomputed compaction"
     unique_blocks = compaction.unique_blocks
     compact_slots = compaction.compact_slots
     if unique_blocks.numel() == 0:

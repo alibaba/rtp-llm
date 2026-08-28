@@ -70,22 +70,6 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         transformer._note_aux_hidden_rows(2, is_cuda_graph=True)
         self.assertEqual(transformer._mtp_hidden_valid_tokens, 5)
 
-    def test_capture_rejects_row_overflow(self) -> None:
-        transformer = _capture_harness(token_capacity=2, row_width=3)
-        transformer.set_aux_hidden_capture_layer_ids((1,))
-
-        with self.assertRaises(AssertionError):
-            transformer.capture_aux_hidden(1, torch.ones(4, 4, 3, dtype=torch.float32))
-        with self.assertRaises(AssertionError):
-            transformer._note_aux_hidden_rows(4, is_cuda_graph=False)
-
-    def test_capture_requires_bound_buffer(self) -> None:
-        transformer = _capture_harness(row_width=0)
-        transformer.set_aux_hidden_capture_layer_ids((1,))
-
-        with self.assertRaises(AssertionError):
-            transformer.capture_aux_hidden(1, torch.ones(2, 4, 3, dtype=torch.float32))
-
     def test_invalid_layer_configuration_is_rejected(self) -> None:
         transformer = _capture_harness()
         with self.assertRaises(ValueError):

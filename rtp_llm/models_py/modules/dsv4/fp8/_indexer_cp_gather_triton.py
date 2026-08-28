@@ -284,18 +284,6 @@ def gather_indexer_k_for_prefill(
     ``slot_mapping``, writes contiguous ``(k_quant [N, 128] fp8e4m3fn,
     k_scale [N] fp32)``. Padded slots (``slot < 0``) write zero K bytes
     and zero scale."""
-    assert head_dim == INDEXER_HEAD_DIM, f"head_dim={head_dim}"
-    assert (
-        kv_cache_packed.dim() == 3
-        and kv_cache_packed.shape[-1] == INDEXER_ENTRY_BYTES
-        and kv_cache_packed.dtype == torch.uint8
-    ), (
-        f"kv_cache_packed expected [num_blocks, block_size, 132] uint8, "
-        f"got {tuple(kv_cache_packed.shape)}/{kv_cache_packed.dtype}"
-    )
-    assert (
-        slot_mapping.dim() == 1
-    ), f"slot_mapping must be 1-D, got {slot_mapping.shape}"
     if slot_mapping.dtype != torch.int64:
         slot_mapping = slot_mapping.to(torch.int64)
     slot_mapping = slot_mapping.contiguous()

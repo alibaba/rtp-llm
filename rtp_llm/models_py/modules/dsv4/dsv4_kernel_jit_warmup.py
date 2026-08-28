@@ -183,6 +183,8 @@ def warmup_cp_metadata_jit(
     from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
         ENTRY_BYTES,
         HEAD_DIM,
+        cp_direct_flat_pack_enabled,
+        try_gather_k_cache_packed_to_flat,
         try_restore_dequantize_scatter_packed_k_cache_flat,
     )
     from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
@@ -194,6 +196,9 @@ def warmup_cp_metadata_jit(
 
     restore_enabled = bool(kv_cache_sharded)
     pool_restore_enabled = bool(fp8_kv_cache and kv_cache_sharded)
+    pool_direct_gather_enabled = bool(
+        fp8_kv_cache and kv_cache_sharded and cp_direct_flat_pack_enabled()
+    )
     indexer_gather_enabled = bool(fp8_kv_cache and kv_cache_sharded)
     swa_slot_enabled = bool(fp8_kv_cache)
     compressor_meta_enabled = bool(
@@ -221,6 +226,7 @@ def warmup_cp_metadata_jit(
         positions = () if batch_size == 1 else None
         forward_metadata = None
         pool_restore = None if pool_restore_enabled else True
+        pool_direct_gather = None if pool_direct_gather_enabled else True
         indexer_gather = None if indexer_gather_enabled else True
         compressor_meta = None if compressor_meta_enabled else ()
 
@@ -259,6 +265,21 @@ def warmup_cp_metadata_jit(
             dtype=torch.bfloat16,
             device=device,
         )
+        pool_cache = torch.zeros(
+            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
+        )
+        pool_block_table = torch.zeros(
+            (batch_size, 1), dtype=torch.int32, device=device
+        )
+        pool_padded_lens = torch.full(
+            (batch_size,), 2, dtype=torch.int32, device=device
+        )
+        pool_actual_lens = torch.ones(
+            batch_size, dtype=torch.int32, device=device
+        )
+        pool_local_flat = torch.empty(
+            (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
+        )
         indexer_cache = torch.zeros(
             (2, 4, INDEXER_ENTRY_BYTES), dtype=torch.uint8, device=device
         )
@@ -293,6 +314,7 @@ def warmup_cp_metadata_jit(
         )
         def _launch() -> None:
             nonlocal restore, positions, forward_metadata, pool_restore
+            nonlocal pool_direct_gather
             nonlocal indexer_gather, compressor_meta
             if restore_enabled:
                 restore = try_build_cp_restore_indices(
@@ -325,6 +347,16 @@ def warmup_cp_metadata_jit(
                     pool_restore_indices,
                     pool_seq_lens,
                     0,
+                )
+            if pool_direct_gather_enabled:
+                pool_direct_gather = try_gather_k_cache_packed_to_flat(
+                    pool_local_flat,
+                    pool_cache,
+                    pool_block_table,
+                    pool_padded_lens,
+                    pool_actual_lens,
+                    block_size=4,
+                    has_actual_tokens=True,
                 )
             if indexer_gather_enabled:
                 indexer_gather = try_gather_indexer_k_to_padded(
@@ -376,6 +408,8 @@ def warmup_cp_metadata_jit(
             missing.append("forward_metadata")
         if pool_restore is not True:
             missing.append("pool_restore")
+        if pool_direct_gather is not True:
+            missing.append("pool_direct_gather")
         if indexer_gather is not True:
             missing.append("indexer_gather")
         if compressor_meta is None:
@@ -729,8 +763,7 @@ def _run_deepgemm_warmup_launch_with_retry(
             _release_cuda_cache(device)
             time.sleep(0.2 * attempt)
 
-    assert last_error is not None
-    raise last_error
+    raise last_error  # type: ignore[misc]
 
 
 def _run_tilelang_warmup_launch_with_retry(
@@ -765,8 +798,7 @@ def _run_tilelang_warmup_launch_with_retry(
             _release_cuda_cache(device)
             time.sleep(0.2 * attempt)
 
-    assert last_error is not None
-    raise last_error
+    raise last_error  # type: ignore[misc]
 
 
 def _run_triton_warmup_launch_with_retry(
@@ -806,8 +838,7 @@ def _run_triton_warmup_launch_with_retry(
     finally:
         _restore_tmpdir(previous_tmpdir)
 
-    assert last_error is not None
-    raise last_error
+    raise last_error  # type: ignore[misc]
 
 
 def _is_cuda_device(device: torch.device) -> bool:
@@ -1057,9 +1088,6 @@ def _warmup_fused_kv_compress_norm_rope_insert(
     kv_slot_mapping = torch.zeros((num_tokens,), dtype=torch.int64, device=device)
     # state_block_size is the kernel block size for state-pool block_table
     state_block_size = DSV4_KERNEL_TOKENS_PER_BLOCK
-    assert (
-        gen_num_per_cycle >= 0
-    ), f"gen_num_per_cycle must be >= 0, got {gen_num_per_cycle}"
     state_ring_entries_values = _state_ring_entries_warmup_values(
         compress_ratio=compress_ratio,
         overlap=overlap,
@@ -2274,7 +2302,11 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
 
     from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
         ENTRY_BYTES,
+        HEAD_DIM,
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked,
+        cp_swa_direct_dequant_scatter_enabled,
         dequantize_slots_to_bf16,
+        try_dequantize_and_gather_k_cache_slots_to_workspace,
     )
 
     full_stride_bytes = int(local_slice_bytes) * cp_size
@@ -2286,7 +2318,13 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             ENTRY_BYTES,
         )
         return
-    warmup_key = (int(full_stride_bytes), int(entries_per_block), str(device))
+    direct_scatter_enabled = cp_swa_direct_dequant_scatter_enabled()
+    warmup_key = (
+        int(full_stride_bytes),
+        int(entries_per_block),
+        bool(direct_scatter_enabled),
+        str(device),
+    )
     if warmup_key in _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS:
         return
 
@@ -2308,6 +2346,36 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     )
     slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
     out = dequantize_slots_to_bf16(full_view, slot_indices)
+    if direct_scatter_enabled:
+        slot_mapping = torch.tensor(
+            [[0, 1], [1, -1]], dtype=torch.long, device=device
+        )
+        gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
+        workspace = torch.empty(
+            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
+        )
+        direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
+            out=workspace,
+            k_cache=full_view,
+            slot_mapping=slot_mapping,
+            gather_lens=gather_lens,
+            offset=1,
+        )
+        if not direct_scatter:
+            raise RuntimeError(
+                "DSV4 SWA direct dequant-scatter is enabled but unsupported during "
+                "JIT warmup"
+            )
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+            workspace,
+            full_raw.view(cp_size, local_slice_bytes),
+            slot_mapping,
+            gather_lens,
+            1,
+            full_entries_per_block=entries_per_block,
+            num_unique_blocks=1,
+        )
+        del slot_mapping, gather_lens, workspace
     del full_raw, full_view, slot_indices, out
     _sync_cuda(device)
     if rank == 0:

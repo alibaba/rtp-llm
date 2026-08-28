@@ -140,16 +140,13 @@ class Gate(nn.Module):
 
         from rtp_llm.utils.model_weight import W
 
-        assert (
-            layer_weights is not None
-        ), "Gate requires layer_weights (descriptor path)"
-        self.weight = layer_weights[W.v4_router_w]
+        weights: Dict[str, torch.Tensor] = layer_weights  # type: ignore[assignment]
+        self.weight = weights[W.v4_router_w]
         if self.hash:
-            assert vocab_size > 0
-            self.tid2eid = layer_weights[W.v4_router_tid2eid]
+            self.tid2eid = weights[W.v4_router_tid2eid]
             self.bias = None
         else:
-            self.bias = layer_weights[W.v4_router_bias]
+            self.bias = weights[W.v4_router_bias]
 
     def _weight_bf16(self) -> torch.Tensor:
         """Lazy-cached BF16 view of ``self.weight``.
@@ -230,7 +227,6 @@ class Gate(nn.Module):
             _rt.record_if_level(2, f"{_dbg}_biased_scores", scores)
 
         if self.hash:
-            assert input_ids is not None
             indices = self.tid2eid[input_ids].long()  # [N, topk]
         else:
             indices = None

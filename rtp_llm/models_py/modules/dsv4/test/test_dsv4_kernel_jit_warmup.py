@@ -117,6 +117,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
         pool_calls = []
+        pool_direct_calls = []
         indexer_calls = []
         compressor_calls = []
         swa_slot_batches = []
@@ -167,6 +168,29 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     tuple(out_q.shape),
                     tuple(out_scale.shape),
                     total_actual_tokens,
+                )
+            )
+            return True
+
+        def fake_pool_direct_gather(
+            out,
+            cache,
+            block_table,
+            padded_lens,
+            actual_lens,
+            *,
+            block_size,
+            has_actual_tokens,
+        ):
+            pool_direct_calls.append(
+                (
+                    tuple(out.shape),
+                    tuple(cache.shape),
+                    tuple(block_table.shape),
+                    tuple(padded_lens.tolist()),
+                    tuple(actual_lens.tolist()),
+                    block_size,
+                    has_actual_tokens,
                 )
             )
             return True
@@ -250,6 +274,14 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             "try_restore_dequantize_scatter_packed_k_cache_flat",
             side_effect=fake_pool_restore,
         ), mock.patch.object(
+            _swa_dequant_triton,
+            "cp_direct_flat_pack_enabled",
+            return_value=True,
+        ), mock.patch.object(
+            _swa_dequant_triton,
+            "try_gather_k_cache_packed_to_flat",
+            side_effect=fake_pool_direct_gather,
+        ), mock.patch.object(
             _indexer_cp_gather_triton,
             "try_gather_indexer_k_to_padded",
             side_effect=fake_indexer_gather,
@@ -288,6 +320,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     (2 * batch_size,),
                     (2,) * batch_size,
                     0,
+                )
+                for batch_size in batch_blocks
+            ],
+        )
+        self.assertEqual(
+            pool_direct_calls,
+            [
+                (
+                    (2 * batch_size, 584),
+                    (2, 4, 584),
+                    (batch_size, 1),
+                    (2,) * batch_size,
+                    (1,) * batch_size,
+                    4,
+                    True,
                 )
                 for batch_size in batch_blocks
             ],
@@ -1333,14 +1380,16 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
     def test_slot_dequant_warmup_uses_padded_cp_full_stride(self):
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton
 
-        calls = []
+        fallback_calls = []
+        direct_calls = []
+        rank_major_calls = []
         local_slice_bytes = 74880
         cp_size = 2
         expected_full_stride = local_slice_bytes * cp_size
         expected_entries = expected_full_stride // _swa_dequant_triton.ENTRY_BYTES
 
         def fake_dequantize(pool_3d, slot_indices):
-            calls.append(
+            fallback_calls.append(
                 (
                     tuple(pool_3d.shape),
                     tuple(pool_3d.stride()),
@@ -1351,6 +1400,48 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 (int(slot_indices.numel()), _swa_dequant_triton.HEAD_DIM),
                 dtype=torch.bfloat16,
                 device=pool_3d.device,
+            )
+
+        def fake_direct_scatter(
+            *, out, k_cache, slot_mapping, gather_lens, offset
+        ):
+            direct_calls.append(
+                (
+                    tuple(k_cache.shape),
+                    tuple(k_cache.stride()),
+                    tuple(slot_mapping.shape),
+                    slot_mapping.dtype,
+                    slot_mapping.tolist(),
+                    gather_lens.dtype,
+                    gather_lens.tolist(),
+                    tuple(out.shape),
+                    out.dtype,
+                    offset,
+                )
+            )
+            return True
+
+        def fake_rank_major(
+            out,
+            gathered,
+            compact_slots,
+            gather_lens,
+            offset,
+            *,
+            full_entries_per_block,
+            num_unique_blocks,
+        ):
+            rank_major_calls.append(
+                (
+                    tuple(gathered.shape),
+                    tuple(gathered.stride()),
+                    tuple(compact_slots.shape),
+                    gather_lens.tolist(),
+                    tuple(out.shape),
+                    offset,
+                    full_entries_per_block,
+                    num_unique_blocks,
+                )
             )
 
         def with_patch(obj, name, value):
@@ -1410,6 +1501,39 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                     ),
                 )
             )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "cp_swa_direct_dequant_scatter_enabled",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "cp_swa_direct_dequant_scatter_enabled",
+                        lambda: True,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "try_dequantize_and_gather_k_cache_slots_to_workspace",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "try_dequantize_and_gather_k_cache_slots_to_workspace",
+                        fake_direct_scatter,
+                    ),
+                )
+            )
+            old_values.append(
+                (
+                    _swa_dequant_triton,
+                    "_launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked",
+                    with_patch(
+                        _swa_dequant_triton,
+                        "_launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked",
+                        fake_rank_major,
+                    ),
+                )
+            )
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
             warmup_module.warmup_dsv4_fp8_swa_slot_dequant_jit(
@@ -1423,7 +1547,7 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             warmup_module._SWA_SLOT_DEQUANT_JIT_WARMED_KEYS.clear()
 
         self.assertEqual(
-            calls,
+            fallback_calls,
             [
                 (
                     (1, expected_entries, _swa_dequant_triton.ENTRY_BYTES),
@@ -1433,6 +1557,42 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                         1,
                     ),
                     [0, -1],
+                )
+            ],
+        )
+        self.assertEqual(
+            direct_calls,
+            [
+                (
+                    (1, expected_entries, _swa_dequant_triton.ENTRY_BYTES),
+                    (
+                        expected_full_stride,
+                        _swa_dequant_triton.ENTRY_BYTES,
+                        1,
+                    ),
+                    (2, 2),
+                    torch.int64,
+                    [[0, 1], [1, -1]],
+                    torch.int32,
+                    [2, 1],
+                    (2, 4, _swa_dequant_triton.HEAD_DIM),
+                    torch.bfloat16,
+                    1,
+                )
+            ],
+        )
+        self.assertEqual(
+            rank_major_calls,
+            [
+                (
+                    (cp_size, local_slice_bytes),
+                    (local_slice_bytes, 1),
+                    (2, 2),
+                    [2, 1],
+                    (2, 4, _swa_dequant_triton.HEAD_DIM),
+                    1,
+                    expected_entries,
+                    1,
                 )
             ],
         )
@@ -1488,6 +1648,21 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertIn('"num_cache_blocks"', dequant_src)
         self.assertNotIn("pool_block_stride: tl.constexpr", dequant_src)
         self.assertNotIn("num_cache_blocks: tl.constexpr", dequant_src)
+
+        self.assertEqual(
+            set(
+                _swa_dequant_triton._dequantize_and_gather_k_slots_kernel.do_not_specialize
+            ),
+            {
+                "out_stride0",
+                "out_stride1",
+                "slot_mapping_stride0",
+                "offset",
+                "max_gather_len",
+                "block_stride",
+                "num_cache_blocks",
+            },
+        )
 
         self.assertEqual(
             set(

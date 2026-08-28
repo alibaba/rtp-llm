@@ -278,9 +278,6 @@ class _CommonReuseAttentionStub:
     from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 
     _build_shared_prefill_meta = AttentionFP8._build_shared_prefill_meta
-    _validate_reusable_prefill_common = (
-        AttentionFP8._validate_reusable_prefill_common
-    )
 
     def __init__(self, compress_ratio: int, freqs_cis: torch.Tensor):
         self.compress_ratio = compress_ratio

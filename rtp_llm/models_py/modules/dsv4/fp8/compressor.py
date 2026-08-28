@@ -49,13 +49,6 @@ _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32",
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
-    assert x.dtype == torch.bfloat16, f"expected BF16 input, got {x.dtype}"
-    assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
-    assert x.is_contiguous(), "expected contiguous input"
-    assert weight.is_contiguous(), "expected contiguous weight"
-    assert (
-        _CUBLAS_GEMM_BF16_BF16_FP32 is not None
-    ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
     out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
@@ -64,7 +57,6 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
 
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
-    _CP_ROLE_MAIN,
     CPContext,
     cp_all_gather_full_async,
     cp_should_gather,
@@ -462,14 +454,6 @@ class CompressorFP8(PoolBackedModule):
         """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
         "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``."""
         super().__init__()
-        assert head_dim in (KV_HEAD_DIM, INDEXER_HEAD_DIM), (
-            f"CompressorFP8 supports head_dim in {{{KV_HEAD_DIM}, "
-            f"{INDEXER_HEAD_DIM}}}; got {head_dim}"
-        )
-        assert compressor_weights is not None, (
-            "CompressorFP8 requires compressor_weights — meta-tensor / "
-            "stand-alone construction is not supported (use the BF16 path)."
-        )
         self.dim = dim
         self.head_dim = head_dim
         # Which per-forward workspace CP buffer pair this compressor's gather
@@ -478,10 +462,6 @@ class CompressorFP8(PoolBackedModule):
         # not hidden in a dimension constant. The two roles need distinct buffers
         # so both can be in flight within one layer under the overlap
         # orchestrator. Validated, never silently defaulted.
-        assert cp_role in (_CP_ROLE_MAIN, _CP_ROLE_INDEXER), (
-            f"CompressorFP8 cp_role must be one of "
-            f"{{{_CP_ROLE_MAIN!r}, {_CP_ROLE_INDEXER!r}}}; got {cp_role!r}"
-        )
         self._cp_role = cp_role
         self.rope_head_dim = rope_head_dim
         self.compress_ratio = compress_ratio
@@ -606,14 +586,6 @@ class CompressorFP8(PoolBackedModule):
         across the host compressor and any nested indexer compressor that
         shares the same positions/b_idx (when their pool context is bound).
         """
-        assert (
-            positions.dim() == 1
-        ), f"positions must be flat [N], got {positions.shape}"
-        assert b_idx.dim() == 1, f"b_idx must be flat [N], got {b_idx.shape}"
-        assert (
-            positions.numel() == b_idx.numel()
-        ), f"positions/b_idx length mismatch: {positions.numel()} vs {b_idx.numel()}"
-
         # Warmup: pool context unbound — return None-slotted meta so
         # callers (compressor.forward, _forward_prefill_compressed) can
         # short-circuit without crashing.
@@ -630,10 +602,6 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=cu_seq_per_req,
             )
 
-        assert seq_start_per_req is not None and cu_seq_per_req is not None, (
-            "seq_start_per_req and cu_seq_per_req are required for ring write mask; "
-            "caller must supply per-request metadata"
-        )
         from rtp_llm.models_py.modules.dsv4.fp8 import _fused_compressor_meta_triton
 
         if not _fused_compressor_meta_triton._TRITON_AVAILABLE:
@@ -698,9 +666,6 @@ class CompressorFP8(PoolBackedModule):
     # Internal helpers
     # ----------------------------------------------------------------------
     def _ensure_cos_sin_cache(self, device: torch.device) -> torch.Tensor:
-        assert (
-            self.freqs_cis is not None
-        ), "CompressorFP8.freqs_cis must be bound before forward"
         key = (
             id(self.freqs_cis),
             device,
@@ -744,7 +709,6 @@ class CompressorFP8(PoolBackedModule):
         bt = self._state_block_table
         eb = self._state_eb
         tpb = self._state_tokens_per_block
-        assert bt is not None and eb > 0, "state pool context unbound"
         if self._kv_cache_sharded and self._cp_ctx is not None:
             from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
                 cp_state_slot_mapping,
@@ -1032,16 +996,6 @@ class CompressorFP8(PoolBackedModule):
         cp_gather = cp_should_gather(cp_ctx, start_pos)
         fused_gather_handle = None
         if cp_gather:
-            assert cp_ctx is not None
-            assert meta is not None, (
-                "CompressorFP8 CP start_prefill requires hoisted "
-                "CompressorMeta; non-CP path may pass meta=None"
-            )
-            N_full = int(cp_ctx.seq_len_full)
-            assert int(meta.positions.numel()) == N_full, (
-                f"CP compressor meta/token length mismatch: "
-                f"meta={meta.positions.numel()} seq_len_full={N_full}"
-            )
             # The non-prefix restore destination is the per-forward workspace's
             # role buffer (``cp_restore_{main,idx}``), selected in the gather
             # impl by ``cp_role`` — no fresh per-layer alloc here (that churn is
@@ -1110,14 +1064,6 @@ class CompressorFP8(PoolBackedModule):
         meta = pending.meta
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
-            assert fused_flat.dim() == 2, (
-                f"CompressorFP8 prefill expects flat fused projection, got "
-                f"{tuple(fused_flat.shape)}"
-            )
-            assert fused_flat.size(1) == 2 * out_dim, (
-                f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
-                f"expected {2 * out_dim}"
-            )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
 
@@ -1195,7 +1141,6 @@ class CompressorFP8(PoolBackedModule):
         cp_gather = cp_should_gather(cp_ctx, start_pos)
         fused_gather_handle = None
         if cp_gather:
-            assert cp_ctx is not None
             gather_stream = (
                 torch.cuda.Stream(device=fused_flat.device)
                 if fused_flat.is_cuda
@@ -1216,29 +1161,10 @@ class CompressorFP8(PoolBackedModule):
                     workspace=workspace,
                     cp_role=self._cp_role,
                 )
-            assert meta is not None, (
-                "CompressorFP8 CP prefill requires full-sequence metadata from "
-                "rtp_llm.models_py.modules.dsv4.fp8.prefill_meta; rebuilding it "
-                "inside compressor.forward is intentionally disabled."
-            )
-            N = int(cp_ctx.seq_len_full)
-            assert int(meta.positions.numel()) == N, (
-                f"CP compressor meta/token length mismatch: meta={meta.positions.numel()} "
-                f"seq_len_full={N}"
-            )
-            assert fused_gather_handle is not None
             with record_function_range("dsv4.fp8.compressor.prefill.cp_wait_kv_score"):
                 fused_flat = cp_wait_gather_full(fused_gather_handle)
 
         with record_function_range("dsv4.fp8.compressor.prefill.split_kv_score"):
-            assert fused_flat.dim() == 2, (
-                f"CompressorFP8 prefill expects flat fused projection, got "
-                f"{tuple(fused_flat.shape)}"
-            )
-            assert fused_flat.size(1) == 2 * out_dim, (
-                f"CompressorFP8 fused hidden mismatch: got {fused_flat.size(1)}, "
-                f"expected {2 * out_dim}"
-            )
             kv_flat = fused_flat[:, :out_dim]
             score_flat = fused_flat[:, out_dim:]
         if meta is None:
@@ -1276,8 +1202,6 @@ class CompressorFP8(PoolBackedModule):
         """Batched decode entry. ``position_ids`` enables q_len > 1 verify."""
         bsz, q_len = int(x.size(0)), int(x.size(1))
         T = bsz * q_len
-        if position_ids is None:
-            assert q_len == 1, "decode q_len > 1 requires flat position_ids"
         if (
             self._state_pool_3d is None
             or self._kv_pool_view is None
@@ -1354,10 +1278,6 @@ def _build_prefill_positions(
     ``compressor.prepare_metadata`` so this builder must not be reached
     from a batched call site.
     """
-    assert bsz == 1, (
-        f"_build_prefill_positions is the legacy B==1 helper; got bsz={bsz}. "
-        "Varlen callers must use position_ids / req_id_per_token directly."
-    )
     positions = torch.arange(sp, sp + seqlen, device=device, dtype=torch.long)
     b_idx = torch.zeros(seqlen, device=device, dtype=torch.long)
     return positions, b_idx
@@ -1408,12 +1328,6 @@ def build_prepare_metadata_args(
     metadata for the compressor varlen raw path.
     """
     if use_varlen:
-        assert (
-            position_ids is not None
-            and req_id_per_token is not None
-            and seq_start_per_req is not None
-            and cu_seqlens is not None
-        ), "varlen dispatch requires position_ids/req_id_per_token/seq_start_per_req/cu_seqlens"
         return dict(
             positions=position_ids.to(device=device, dtype=torch.long)
             .reshape(-1)

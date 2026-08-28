@@ -560,8 +560,8 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
                 "rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton": SimpleNamespace(),
                 "rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton": SimpleNamespace(
                     combine_topk_swa_indices=fake_combine_topk_swa_indices,
-                    combine_topk_swa_indices_cp=MagicMock(
-                        name="combine_topk_swa_indices_cp"
+                    combine_topk_swa_indices_cp_prepared=MagicMock(
+                        name="combine_topk_swa_indices_cp_prepared"
                     ),
                 ),
             },
@@ -596,62 +596,17 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
 
 
 class SwaStreamingOutputProjectionTest(unittest.TestCase):
-    def test_chunk_helper_rejects_empty_q(self) -> None:
+    def test_single_chunk_passes_full_tensors_without_slicing(self) -> None:
         layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
         layer.n_heads = 1
         layer.head_dim = 2
-        workspace = PrefillWorkspace(
-            torch.device("cpu"),
-            q_rows=1,
-            q_dim=2,
-            reserve_cp=False,
-            align_bytes=1,
+        layer.dim = 8
+        layer.softmax_scale = 1.0
+        layer.attn_sink = None
+        layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_all_reduce"
         )
 
-        with self.assertRaisesRegex(
-            AssertionError,
-            "requires at least one Q row",
-        ):
-            layer._flash_mla_sparse_fwd_chunked_projected(
-                q=workspace.prefill_q(0).view(0, 1, 2),
-                kv=torch.zeros(0, 1, 2, dtype=torch.bfloat16),
-                indices=torch.zeros(0, 1, 1, dtype=torch.int32),
-                topk_length=torch.zeros(0, dtype=torch.int32),
-                freqs_cis=torch.zeros(0, 1, dtype=torch.float32),
-                prefill_workspace=workspace,
-                profile_name="test",
-            )
-
-    def test_chunk_helper_rejects_prefill_workspace_overflow(self) -> None:
-        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
-        layer.n_heads = 1
-        layer.head_dim = 2
-        workspace = PrefillWorkspace(
-            torch.device("cpu"),
-            q_rows=4,
-            q_dim=2,
-            reserve_cp=False,
-            align_bytes=1,
-        )
-
-        with self.assertRaisesRegex(
-            AssertionError,
-            "prefill_q overflow: num_tokens=5",
-        ):
-            layer._flash_mla_sparse_fwd_chunked_projected(
-                q=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
-                kv=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
-                indices=torch.zeros(5, 1, 1, dtype=torch.int32),
-                topk_length=torch.ones(5, dtype=torch.int32),
-                freqs_cis=torch.zeros(5, 1, dtype=torch.float32),
-                prefill_workspace=workspace,
-                profile_name="test",
-            )
-
-    def test_chunk_helper_rejects_q_outside_prefill_workspace(self) -> None:
-        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
-        layer.n_heads = 1
-        layer.head_dim = 2
         workspace = PrefillWorkspace(
             torch.device("cpu"),
             q_rows=5,
@@ -659,20 +614,55 @@ class SwaStreamingOutputProjectionTest(unittest.TestCase):
             reserve_cp=False,
             align_bytes=1,
         )
+        q = workspace.prefill_q(5).view(5, 1, 2)
+        indices = torch.zeros(5, 1, 1, dtype=torch.int32)
+        topk_length = torch.ones(5, dtype=torch.int32)
+        freqs_cis = torch.zeros(5, 2, dtype=torch.float32)
+        kv = torch.zeros(5, 1, 2, dtype=torch.bfloat16)
+        flash_args = []
+        projection_args = []
 
-        with self.assertRaisesRegex(
-            AssertionError,
-            "prefill Q must reuse PrefillWorkspace storage",
+        def fake_flash_mla_sparse_fwd(
+            q, kv, indices, sm_scale, attn_sink, topk_length
         ):
-            layer._flash_mla_sparse_fwd_chunked_projected(
-                q=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
-                kv=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
-                indices=torch.zeros(5, 1, 1, dtype=torch.int32),
-                topk_length=torch.ones(5, dtype=torch.int32),
-                freqs_cis=torch.zeros(5, 1, dtype=torch.float32),
-                prefill_workspace=workspace,
+            flash_args.append((q, indices, topk_length))
+            return torch.ones_like(q), None, None
+
+        def fake_output_proj_into(o, freqs, *, out):
+            projection_args.append((freqs, out))
+            out.fill_(1)
+
+        layer._prefill_output_proj_into = MagicMock(  # type: ignore[assignment]
+            side_effect=fake_output_proj_into
+        )
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention." "_FLASH_MLA_SPARSE_Q_CHUNK",
+            16,
+        ), patch.dict(
+            "sys.modules",
+            {
+                "flash_mla": SimpleNamespace(
+                    flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                )
+            },
+        ):
+            out = layer._flash_mla_sparse_fwd_chunked_projected(
+                q=q,
+                kv=kv,
+                indices=indices,
+                topk_length=topk_length,
+                freqs_cis=freqs_cis,
                 profile_name="test",
             )
+
+        self.assertEqual(len(flash_args), 1)
+        self.assertIs(flash_args[0][0], q)
+        self.assertIs(flash_args[0][1], indices)
+        self.assertIs(flash_args[0][2], topk_length)
+        self.assertEqual(len(projection_args), 1)
+        self.assertIs(projection_args[0][0], freqs_cis)
+        self.assertIs(projection_args[0][1], out)
+        layer._prefill_output_all_reduce.assert_called_once_with(out)
 
     def test_swa_forward_does_not_project_chunked_result_twice(self) -> None:
         layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
