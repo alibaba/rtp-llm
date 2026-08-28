@@ -2,9 +2,11 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -22,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -129,6 +132,42 @@ class GrpcWorkerStatusCheckRunnerTest {
         // Version not advanced → runningTaskList should NOT be populated from response
         assertNull(workerStatus.getRunningTaskList(),
                 "runningTaskList should not be updated when status version is unchanged");
+    }
+
+    @Test
+    void should_refresh_scheduler_activity_when_decode_status_version_is_unchanged() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.getStatusVersion().set(100L);
+        PriorityScheduler scheduler = Mockito.mock(PriorityScheduler.class);
+
+        EngineRpcService.TaskInfoPB taskInfo = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(123L)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.DECODE.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                .setStatusVersion(100L)
+                .setAlive(true)
+                .addRunningTaskInfo(taskInfo)
+                .build();
+
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(workerStatusPB));
+
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.DECODE, "test-group",
+                workerStatus, Map.of(ipPort, workerStatus), engineHealthReporter,
+                engineGrpcService, 20L, scheduler, null, Runnable::run);
+        runner.run();
+
+        verify(scheduler).onWorkerStatusHeartbeat(any(WorkerStatusResponse.class));
+        assertNull(workerStatus.getRunningTaskList(),
+                "same-version heartbeats must not replay versioned WorkerStatus mutation");
     }
 
     @Test

@@ -189,6 +189,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         ep = null;
                     }
                 }
+                if (priorityScheduler != null) {
+                    // The running-task payload is a full snapshot even when
+                    // status_version is unchanged. Preserve it as liveness
+                    // evidence without replaying versioned finished tasks.
+                    priorityScheduler.onWorkerStatusHeartbeat(newWorkerStatus);
+                }
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,

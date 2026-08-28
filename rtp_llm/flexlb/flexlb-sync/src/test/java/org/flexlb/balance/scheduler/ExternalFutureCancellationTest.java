@@ -726,13 +726,16 @@ class ExternalFutureCancellationTest {
     }
 
     @Test
-    void ttlWaitsForBatchDeliveryCommitThenFencesTheEngine() throws Exception {
+    void ttlWaitsForBatchDeliveryCommitThenReclaimsLocalLedgers() throws Exception {
         long requestId = 10_142L;
-        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(-1);
+        long ttlMs = 300_000L;
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(ttlMs);
         CountDownLatch dispatchEntered = new CountDownLatch(1);
         CountDownLatch releaseDispatch = new CountDownLatch(1);
         batchDispatcher.blockDispatch(dispatchEntered, releaseDispatch);
         BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
+        long cleanupAtMs = scheduler.getRequestState(requestId, 0).createdAtMs()
+                + ttlMs + 1L;
 
         CompletableFuture<Void> delivery = CompletableFuture.runAsync(() ->
                 scheduler.onDecisionGroupReady(
@@ -741,7 +744,7 @@ class ExternalFutureCancellationTest {
         CountDownLatch cleanupStarted = new CountDownLatch(1);
         CompletableFuture<Void> cleanup = CompletableFuture.runAsync(() -> {
             cleanupStarted.countDown();
-            scheduler.cleanupInflight();
+            scheduler.cleanupInflight(cleanupAtMs);
         });
 
         assertTrue(cleanupStarted.await(1, TimeUnit.SECONDS));
@@ -756,24 +759,19 @@ class ExternalFutureCancellationTest {
         delivery.get(1, TimeUnit.SECONDS);
         cleanup.get(1, TimeUnit.SECONDS);
 
-        assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
-                scheduler.getRequestState(requestId, batchDispatcher.batchId).state());
-        verify(cancelChannel, timeout(1_000)).cancel(any(), eq(requestId), anyLong());
-        assertEquals(1, prefillEndpoint.getInflightBatchCount());
-        assertTrue(decodeEndpoint.reservedView().containsKey(requestId));
-
-        cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(requestId, batchDispatcher.batchId).state());
+        verify(cancelChannel, never()).cancel(any(), eq(requestId), anyLong());
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, prefillEndpoint.getInflightBatchCount());
         assertFalse(decodeEndpoint.reservedView().containsKey(requestId));
     }
 
     @Test
-    void ttlRetainsAcknowledgedBatchAndRouteLedgersUntilEngineProof()
+    void ttlReclaimsStaleAcknowledgedLedgersWithoutEngineCancel()
             throws Exception {
-        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(-1);
+        long ttlMs = 300_000L;
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(ttlMs);
         long batchRequestId = 10_143L;
         long routeRequestId = 10_144L;
         BatchItem batch = admittedItem(batchRequestId, DeliveryMode.BATCH_ENQUEUE);
@@ -784,44 +782,65 @@ class ExternalFutureCancellationTest {
         long batchId = batchDispatcher.batchId;
         batchDispatcher.callback.onSuccess(batch, batchId);
         assertTrue(batch.future().get(1, TimeUnit.SECONDS).isSuccess());
-        scheduler.onWorkerStatusUpdate(
-                runningDecode(batchRequestId, TaskPhase.KV_ALLOCATED));
 
         scheduler.onDecisionGroupReady(
                 List.of(route), new DecisionGroupMetadata("ttl_route_ack", 0));
         routeDelivery.callback.onDelivered(route);
         assertTrue(route.future().get(1, TimeUnit.SECONDS).isSuccess());
 
-        scheduler.cleanupInflight();
-
-        assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
-                scheduler.getRequestState(batchRequestId, batchId).state());
-        assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
-                scheduler.getRequestState(routeRequestId, 0).state());
-        verify(cancelChannel, timeout(1_000).times(2))
-                .cancel(any(), anyLong(), anyLong());
-        assertEquals(2, scheduler.getInflightSize());
-        assertEquals(1, prefillEndpoint.getInflightBatchCount());
-        assertEquals(1, prefillEndpoint.getInflightRouteRequestCount());
-        assertTrue(decodeEndpoint.reservedView().containsKey(batchRequestId));
-        assertTrue(decodeEndpoint.reservedView().containsKey(routeRequestId));
-
-        assertEquals(0, prefillEndpoint.evictExpiredInflight(-1),
-                "pending Engine fences must protect both batch and route ledgers");
-        assertEquals(1, prefillEndpoint.getInflightBatchCount());
-        assertEquals(1, prefillEndpoint.getInflightRouteRequestCount());
-
-        cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
+        long cleanupAtMs = Math.max(
+                scheduler.getRequestState(batchRequestId, batchId).createdAtMs(),
+                scheduler.getRequestState(routeRequestId, 0).createdAtMs()) + ttlMs + 1L;
+        scheduler.cleanupInflight(cleanupAtMs);
 
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(batchRequestId, batchId).state());
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.getRequestState(routeRequestId, 0).state());
+        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, prefillEndpoint.getInflightBatchCount());
         assertEquals(0, prefillEndpoint.getInflightRouteRequestCount());
         assertFalse(decodeEndpoint.reservedView().containsKey(batchRequestId));
         assertFalse(decodeEndpoint.reservedView().containsKey(routeRequestId));
+    }
+
+    @Test
+    void ttlUsesWorkerStatusInactivityInsteadOfTotalRequestAge() throws Exception {
+        long ttlMs = 300_000L;
+        long requestId = 10_145L;
+        config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(ttlMs);
+        BatchItem item = admittedItem(requestId, DeliveryMode.BATCH_ENQUEUE);
+
+        scheduler.onDecisionGroupReady(
+                List.of(item), new DecisionGroupMetadata("ttl_active_decode", 0));
+        long batchId = batchDispatcher.batchId;
+        batchDispatcher.callback.onSuccess(item, batchId);
+        assertTrue(item.future().get(1, TimeUnit.SECONDS).isSuccess());
+
+        long createdAtMs = scheduler.getRequestState(requestId, batchId).createdAtMs();
+        long observedAtMs = createdAtMs + ttlMs + 1_000L;
+        scheduler.onWorkerStatusHeartbeat(
+                runningDecode(requestId, TaskPhase.RUNNING), observedAtMs);
+
+        scheduler.cleanupInflight(observedAtMs + ttlMs - 1L);
+
+        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+                scheduler.getRequestState(requestId, batchId).state());
+        assertEquals(1, scheduler.getInflightSize(),
+                "a request older than TTL remains live after a recent active Decode snapshot");
+        assertEquals(1, prefillEndpoint.getInflightBatchCount());
+        assertTrue(decodeEndpoint.reservedView().containsKey(requestId));
+        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
+
+        scheduler.cleanupInflight(observedAtMs + ttlMs + 1L);
+
+        assertEquals(RequestLifecycleState.TIMED_OUT,
+                scheduler.getRequestState(requestId, batchId).state());
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, prefillEndpoint.getInflightBatchCount());
+        assertFalse(decodeEndpoint.reservedView().containsKey(requestId));
+        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
     }
 
     @Test
