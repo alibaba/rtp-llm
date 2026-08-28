@@ -50,6 +50,7 @@ def test_prefill_q_capacity_boundaries():
     assert tuple(ws.prefill_q(5).shape) == (5, 4)
     assert tuple(ws.prefill_q(0).shape) == (0, 4)
 
+
 def test_prefill_q_storage_is_stable_across_gets():
     ws = PrefillWorkspace(
         torch.device("cpu"), q_rows=5, q_dim=4, reserve_cp=False, align_bytes=1
@@ -73,6 +74,7 @@ def test_cp_region_not_reserved_when_reserve_cp_false():
         ws.cp_restore_idx,
     ):
         _expect_runtime_error(lambda g=getter: g(1, 1, torch.float32))
+
 
 def test_cp_main_idx_are_separately_sized_and_distinct():
     # main sub-region: cp_rows*main_w*4 B (fp32);

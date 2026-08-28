@@ -495,7 +495,7 @@ def per_token_quant_fp8(input: torch.Tensor, output_q: torch.Tensor, output_s: t
     ...
 
 
-def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+def cublas_gemm_bf16_bf16_fp32(input: torch.Tensor, weight: torch.Tensor, output: torch.Tensor | None = None) -> torch.Tensor:
     """
     BF16 x BF16 GEMM with FP32 accumulation and FP32 output.
     """

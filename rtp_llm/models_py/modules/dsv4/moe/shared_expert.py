@@ -99,7 +99,9 @@ def _get_shared_expert_stream(
 
 
 def _find_module_cuda_device(module: nn.Module) -> torch.device | None:
-    for tensor in list(module.parameters(recurse=True)) + list(module.buffers(recurse=True)):
+    for tensor in list(module.parameters(recurse=True)) + list(
+        module.buffers(recurse=True)
+    ):
         if tensor.is_cuda:
             return tensor.device
 
@@ -305,7 +307,9 @@ class FusedSharedExpertFastPath:
         if self.dim is None:
             self.dim = D
         if D != self.dim:
-            raise RuntimeError(f"shared expert dim mismatch: got {D}, expected {self.dim}")
+            raise RuntimeError(
+                f"shared expert dim mismatch: got {D}, expected {self.dim}"
+            )
         inter: int = self.inter_dim  # type: ignore[assignment]
         capacity = max(T, self.max_tokens_per_rank or 0, 1)
         workspace = self._workspace
@@ -330,9 +334,7 @@ class FusedSharedExpertFastPath:
             dtype=torch.float8_e4m3fn,
             device=x.device,
         )
-        x_scale_storage = self._scale_storage(
-            (D // 128 + 3) // 4, capacity, x.device
-        )
+        x_scale_storage = self._scale_storage((D // 128 + 3) // 4, capacity, x.device)
         gate_up_bf16 = torch.empty(
             (capacity, 2 * inter),
             dtype=torch.bfloat16,
@@ -405,9 +407,7 @@ class FusedSharedExpertFastPath:
             )
         return self._run_prepared(shared_experts, x)
 
-    def _run_prepared(
-        self, shared_experts: nn.Module, x: torch.Tensor
-    ) -> torch.Tensor:
+    def _run_prepared(self, shared_experts: nn.Module, x: torch.Tensor) -> torch.Tensor:
         if self._prepared_shared_experts is not shared_experts:
             self.prepare(shared_experts)
         w13_parts: tuple[torch.Tensor, torch.Tensor] = (
@@ -429,9 +429,10 @@ class FusedSharedExpertFastPath:
         if T == 0:
             return out
 
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
+
         from ._shared_expert_triton import quant_bf16_fp8_packed_ue8m0
         from ._silu_mul_fp8_quant_triton import silu_mul_fp8_quant_packed
-        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 
         quant_bf16_fp8_packed_ue8m0(x, x_fp8, x_scale, group_size=128, eps=1.0e-4)
         fp8_gemm_nt(
@@ -509,6 +510,8 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
         fast_path: FusedSharedExpertFastPath | None = None,
     ) -> None:
         self._active_stream: torch.cuda.Stream | None = None
+        self._producer_stream: torch.cuda.Stream | None = None
+        self._input: torch.Tensor | None = None
         self._out: torch.Tensor | None = None
         self._fast_path = fast_path
 
@@ -538,25 +541,41 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
     def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
         if not self._can_overlap(x):
             self._active_stream = None
+            self._producer_stream = None
+            self._input = None
             with record_function_range("dsv4.moe.shared_expert"):
                 self._out = _run_shared_expert(shared_experts, x, self._fast_path)
             return
-        capturing = torch.cuda.is_current_stream_capturing()
-        stream = _get_shared_expert_stream(x.device, allow_create=not capturing)
-        if not capturing:
-            x.record_stream(stream)
-        stream.wait_stream(torch.cuda.current_stream(x.device))
-        with torch.cuda.stream(stream):
-            with record_function_range("dsv4.moe.shared_expert"):
-                self._out = _run_shared_expert(shared_experts, x, self._fast_path)
+        stream = _get_shared_expert_stream(x.device, allow_create=True)
+        producer_stream = torch.cuda.current_stream(x.device)
+        stream.wait_stream(producer_stream)
         self._active_stream = stream
+        self._producer_stream = producer_stream
+        self._input = x
+        try:
+            with torch.cuda.stream(stream):
+                with record_function_range("dsv4.moe.shared_expert"):
+                    self._out = _run_shared_expert(shared_experts, x, self._fast_path)
+        except Exception:
+            producer_stream.wait_stream(stream)
+            self._active_stream = None
+            self._producer_stream = None
+            self._input = None
+            raise
 
     def finish(self) -> torch.Tensor:
         out: torch.Tensor = self._out  # type: ignore[assignment]
         if self._active_stream is not None:
-            torch.cuda.current_stream(out.device).wait_stream(self._active_stream)
+            current_stream = torch.cuda.current_stream(out.device)
+            current_stream.wait_stream(self._active_stream)
+            producer_stream = self._producer_stream
+            assert producer_stream is not None
+            if producer_stream != current_stream:
+                producer_stream.wait_stream(self._active_stream)
+        self._input = None
         self._out = None
         self._active_stream = None
+        self._producer_stream = None
         return out
 
 

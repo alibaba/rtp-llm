@@ -36,12 +36,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
-# CP gather is mocked in these tests, so the workspace just flows through the
-# patched ``cp_all_gather_full_async`` — a trivial one suffices.
-_WS = PrefillWorkspace(
-    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
-)
-
 
 def _build_compressor(
     *,
@@ -131,6 +125,14 @@ def _make_meta(cp_ctx: CPContext, device: torch.device) -> CompressorMeta:
 
 @unittest.skipUnless(torch.cuda.is_available(), "CompressorFP8 requires CUDA gemm")
 class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
+    @staticmethod
+    def _fake_gemm(input_2d, weight, output=None):
+        result = input_2d.float().matmul(weight.float().t())
+        if output is None:
+            return result
+        output.copy_(result)
+        return output
+
     def setUp(self) -> None:
         torch.manual_seed(0)
         self.device = torch.device("cuda")
@@ -149,6 +151,22 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             dtype=torch.bfloat16,
             device=self.device,
         ).reshape(self.cp_ctx.seq_len_full, 2 * self.out_dim)
+        self.workspace = PrefillWorkspace(
+            self.device,
+            q_rows=1,
+            q_dim=1,
+            reserve_cp=True,
+            cp_rows=self.cp_ctx.padded_seq_len,
+            main_w=2 * self.out_dim,
+            idx_w=2 * self.out_dim,
+            align_bytes=1,
+        )
+        self._gemm_patcher = patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.compressor._CUBLAS_GEMM_BF16_BF16_FP32",
+            side_effect=self._fake_gemm,
+        )
+        self._gemm_patcher.start()
+        self.addCleanup(self._gemm_patcher.stop)
 
     def _run(self, cmp: CompressorFP8, *, use_split: bool, cp_gather_stream=None):
         """Returns (gather_inputs, launch_args, pending). pending is None when
@@ -197,12 +215,12 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
                     0,
                     meta=self.meta,
                     cp_gather_stream=cp_gather_stream,
-                    workspace=_WS,
+                    workspace=self.workspace,
                 )
                 cmp.finish_prefill(pending)
             else:
                 pending = None
-                cmp.forward(self.x, 0, meta=self.meta, workspace=_WS)
+                cmp.forward(self.x, 0, meta=self.meta, workspace=self.workspace)
         return gather_inputs, launch_args, pending
 
     def test_start_finish_bit_equal_to_forward_under_cp(self):
@@ -313,7 +331,9 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             ),
             patch.object(cmp, "_launch", side_effect=fake_launch),
         ):
-            pending = cmp.start_prefill(self.x, 0, meta=self.meta, workspace=_WS)
+            pending = cmp.start_prefill(
+                self.x, 0, meta=self.meta, workspace=self.workspace
+            )
             self.assertIsNotNone(pending)
             cmp.wait_prefill_gather(pending)
             self.assertEqual(wait_calls, [handle])
@@ -350,7 +370,9 @@ class CompressorFP8StartFinishPrefillTest(unittest.TestCase):
             launched.append((args, kwargs))
 
         with patch.object(cmp, "_launch", side_effect=fake_launch):
-            pending = cmp.start_prefill(self.x, 0, meta=self.meta, workspace=_WS)
+            pending = cmp.start_prefill(
+                self.x, 0, meta=self.meta, workspace=self.workspace
+            )
             self.assertIsNone(pending)
             cmp.finish_prefill(pending)  # no-op
         self.assertEqual(launched, [])

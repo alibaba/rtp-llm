@@ -13,6 +13,7 @@ import sys
 import types
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -146,6 +147,14 @@ class _CountingWork:
 
     def wait(self):
         self.wait_calls += 1
+
+
+class _FakeStream:
+    def __init__(self):
+        self.events = []
+
+    def wait_event(self, event):
+        self.events.append(event)
 
 
 def _rank_major_packed_payload(
@@ -397,9 +406,7 @@ def test_cp_restore_prefers_fused_path_without_running_fallback():
     calls = []
 
     def fake_fused(actual_out, actual_gathered, actual_restore, actual_lens, offset):
-        calls.append(
-            (actual_out, actual_gathered, actual_restore, actual_lens, offset)
-        )
+        calls.append((actual_out, actual_gathered, actual_restore, actual_lens, offset))
         actual_out.fill_(7.0)
         return True
 
@@ -624,10 +631,12 @@ def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
     )
     work = _CountingWork()
     handle = PR.CPShardedPoolReadHandle(
+        local_flat=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
         gathered=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
         work=work,
         completion_event=None,
         stream=None,
+        producer_stream=None,
         out=torch.empty((1, 0, 1)),
         seq_lens=torch.tensor([0], dtype=torch.int32),
         offset=0,
@@ -638,6 +647,43 @@ def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
 
     assert work.wait_calls == 1
     assert handle.work_waited is True
+
+
+def test_cp_sharded_async_wait_closes_all_stream_lifetimes():
+    cp_ctx = _fake_cp_ctx(cp_size=2, cp_rank=0)
+    reader = PR.CPShardedPoolReader(
+        PR.CPShardConfig(
+            cp_ctx=cp_ctx,
+            per_req_total_kv_lens=torch.tensor([0], dtype=torch.int64),
+            restore_indices=torch.empty(0, dtype=torch.int64),
+            block_size=1,
+            total_local_kv=0,
+            owner_block_size=2,
+        )
+    )
+    current = _FakeStream()
+    producer = _FakeStream()
+    gather = _FakeStream()
+    done = object()
+    handle = PR.CPShardedPoolReadHandle(
+        local_flat=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
+        gathered=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
+        work=_CountingWork(),
+        completion_event=object(),
+        stream=gather,
+        producer_stream=producer,
+        out=torch.empty((1, 0, 1)),
+        seq_lens=torch.tensor([0], dtype=torch.int32),
+        offset=0,
+        done_event=done,
+    )
+
+    with patch.object(torch.cuda, "current_stream", return_value=current):
+        reader.wait_fill_async(handle)
+
+    assert current.events == [done]
+    assert producer.events == [done]
+    assert gather.events == [done]
 
 
 def test_cp_sharded_fill_rejects_gather_lens():

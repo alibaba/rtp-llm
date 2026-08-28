@@ -238,18 +238,12 @@ class CudaAsyncCPGatherImpl:
         gather_stream = stream if stream is not None else current_stream
         if stream is not None:
             gather_stream.wait_stream(current_stream)
-        # ``local_2d`` is allocated on ``current_stream`` but read by the NCCL
-        # kernel on ``gather_stream``. Without ``record_stream`` the caching
-        # allocator can reuse its storage before NCCL finishes, corrupting the
-        # input. ``wait_stream`` above gives NCCL a happens-after edge but NOT
-        # allocator lifetime extension — that is what ``record_stream`` does.
-        #
-        # ``gathered`` does NOT need ``record_stream``: it's a view into the
-        # per-forward workspace (reused across layers, never recycled by the
-        # allocator). Cross-layer reuse of the same sub-region is ordered by
-        # the ``gather_stream.wait_stream(current_stream)`` edge above, which
-        # waits on the prior layer's restore (the consumer of ``gathered``).
-        local_2d.record_stream(gather_stream)
+        # Both tensors are views into the per-forward workspace. ``local_2d``
+        # aliases this role's restore region and stays owned by the handle until
+        # the gather completion is joined on ``current_stream``; ``gathered``
+        # has its own role region. The next layer's gather waits on that current
+        # stream, closing the reuse loop without allocator ``record_stream``.
+        work = None
         try:
             with torch.cuda.stream(gather_stream):
                 with record_function_range(f"{profile_name}.launch"):
@@ -262,6 +256,12 @@ class CudaAsyncCPGatherImpl:
                     completion_event = torch.cuda.Event()
                     completion_event.record(gather_stream)
         except Exception as exc:
+            if work is not None:
+                try:
+                    with torch.cuda.stream(gather_stream):
+                        work.wait()
+                finally:
+                    current_stream.wait_stream(gather_stream)
             raise RuntimeError(
                 "failed to launch CUDA CP all_gather_into_tensor"
             ) from exc

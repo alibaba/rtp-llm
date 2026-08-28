@@ -8,7 +8,8 @@
 
 namespace torch_ext {
 
-at::Tensor cublas_gemm_bf16_bf16_fp32(const at::Tensor& input, const at::Tensor& weight) {
+at::Tensor
+cublas_gemm_bf16_bf16_fp32(const at::Tensor& input, const at::Tensor& weight, const std::optional<at::Tensor>& output) {
     TORCH_CHECK(input.is_cuda(), "cublas_gemm_bf16_bf16_fp32: input must be a CUDA tensor");
     TORCH_CHECK(weight.is_cuda(), "cublas_gemm_bf16_bf16_fp32: weight must be a CUDA tensor");
     TORCH_CHECK(input.scalar_type() == at::kBFloat16, "cublas_gemm_bf16_bf16_fp32: input must be bfloat16");
@@ -28,7 +29,14 @@ at::Tensor cublas_gemm_bf16_bf16_fp32(const at::Tensor& input, const at::Tensor&
     const c10::cuda::CUDAGuard device_guard(input.device());
     auto                       input_contig  = input.contiguous();
     auto                       weight_contig = weight.contiguous();
-    auto                       out           = at::empty({M, N}, input.options().dtype(at::kFloat));
+    auto out = output.has_value() ? *output : at::empty({M, N}, input.options().dtype(at::kFloat));
+    TORCH_CHECK(out.is_cuda(), "cublas_gemm_bf16_bf16_fp32: output must be a CUDA tensor");
+    TORCH_CHECK(out.scalar_type() == at::kFloat, "cublas_gemm_bf16_bf16_fp32: output must be float32");
+    TORCH_CHECK(out.get_device() == input.get_device(),
+                "cublas_gemm_bf16_bf16_fp32: output must be on the input CUDA device");
+    TORCH_CHECK(out.dim() == 2 && out.size(0) == M && out.size(1) == N,
+                "cublas_gemm_bf16_bf16_fp32: output shape mismatch");
+    TORCH_CHECK(out.is_contiguous(), "cublas_gemm_bf16_bf16_fp32: output must be contiguous");
     if (out.numel() == 0) {
         return out;
     }

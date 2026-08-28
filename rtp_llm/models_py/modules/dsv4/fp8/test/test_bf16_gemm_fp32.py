@@ -42,6 +42,18 @@ class Bf16GemmFp32Test(unittest.TestCase):
         self.assertEqual(tuple(out.shape), (2, 3, 11))
         self.assertTrue(torch.allclose(out, ref, rtol=1e-3, atol=1e-3))
 
+    def test_helper_writes_caller_owned_output(self) -> None:
+        torch.manual_seed(2)
+        x = (torch.randn(7, 13, device="cuda") * 0.1).to(torch.bfloat16)
+        w = (torch.randn(5, 13, device="cuda") * 0.1).to(torch.bfloat16)
+        output = torch.empty(7, 5, dtype=torch.float32, device="cuda")
+
+        out = _linear_bf16_bf16_fp32(x, w, output=output)
+        ref = x.float().matmul(w.float().t())
+
+        self.assertEqual(out.data_ptr(), output.data_ptr())
+        self.assertTrue(torch.allclose(out, ref, rtol=1e-3, atol=1e-3))
+
 
 if __name__ == "__main__":
     unittest.main()

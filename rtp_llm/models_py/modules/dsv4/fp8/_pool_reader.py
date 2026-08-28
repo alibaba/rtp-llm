@@ -172,10 +172,12 @@ class CPShardConfig:
 
 @dataclass
 class CPShardedPoolReadHandle:
+    local_flat: torch.Tensor
     gathered: torch.Tensor
     work: Any
     completion_event: torch.cuda.Event
     stream: torch.cuda.Stream
+    producer_stream: torch.cuda.Stream
     out: torch.Tensor
     seq_lens: torch.Tensor
     offset: int
@@ -274,7 +276,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
 
         current_stream = torch.cuda.current_stream(device)
         stream.wait_stream(current_stream)
-        local_flat.record_stream(stream)
         with torch.cuda.stream(stream):
             gathered = torch.empty(
                 (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
@@ -298,13 +299,16 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 # caller never sees the pending handle, so nothing else
                 # would wait it.
                 work.wait()
+                current_stream.wait_stream(stream)
                 raise
 
         return CPShardedPoolReadHandle(
+            local_flat=local_flat,
             gathered=gathered,
             work=work,
             completion_event=completion_event,
             stream=stream,
+            producer_stream=current_stream,
             out=out,
             seq_lens=seq_lens,
             offset=offset,
@@ -333,8 +337,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 "dsv4.cp.all_gather.pool_reader.gather_cmp.wait_work"
             ):
                 self._wait_fill_work_once(handle)
-            handle.gathered.record_stream(stream)
-            handle.out.record_stream(stream)
             try:
                 self._restore_dequant_scatter(
                     handle.gathered,
@@ -343,16 +345,22 @@ class CPShardedPoolReader(CompressedKPoolReader):
                     handle.offset,
                 )
             finally:
-                handle.done_event = torch.cuda.Event()
-                handle.done_event.record(stream)
+                try:
+                    handle.done_event = torch.cuda.Event()
+                    handle.done_event.record(stream)
+                except Exception:
+                    stream.synchronize()
+                    raise
 
     def wait_fill_async(self, handle: CPShardedPoolReadHandle) -> None:
         done_event = handle.done_event
         current_stream = torch.cuda.current_stream(handle.out.device)
+        terminal_event = done_event or handle.completion_event
+        current_stream.wait_event(terminal_event)
+        if handle.producer_stream != current_stream:
+            handle.producer_stream.wait_event(terminal_event)
         if done_event is not None:
-            current_stream.wait_event(done_event)
-        else:
-            current_stream.wait_event(handle.completion_event)
+            handle.stream.wait_event(done_event)
         self._wait_fill_work_once(handle)
 
     def discard_fill_async(self, handle: CPShardedPoolReadHandle) -> None:
@@ -602,9 +610,7 @@ def make_compressed_k_pool_reader(
             cp_ctx.cp_rank,
         )
         has_actual = actual_local > 0
-        local_lens = torch.full(
-            (1,), total_local, dtype=torch.int64, device=device
-        )
+        local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
         local_actual_lens = torch.full(
             (1,), actual_local, dtype=torch.int64, device=device
         )

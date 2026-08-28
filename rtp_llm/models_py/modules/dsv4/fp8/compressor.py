@@ -47,11 +47,19 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 _CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
 
 
-def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+def _linear_bf16_bf16_fp32(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    out_2d = (
+        _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+        if output is None
+        else _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight, output)
+    )
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
 
@@ -610,9 +618,7 @@ class CompressorFP8(PoolBackedModule):
             )
         pool_rows = 0
         if self._kv_pool_view is not None:
-            pool_rows = int(
-                self._kv_pool_view.numel() // self._kv_pool_view.shape[-1]
-            )
+            pool_rows = int(self._kv_pool_view.numel() // self._kv_pool_view.shape[-1])
         cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
         cp_size = int(cp_ctx.cp_size) if cp_ctx is not None else 1
         cp_rank = int(cp_ctx.cp_rank) if cp_ctx is not None else 0
@@ -636,9 +642,7 @@ class CompressorFP8(PoolBackedModule):
             cp_size=cp_size,
             cp_rank=cp_rank,
             kv_owner_tokens_per_block=int(
-                getattr(
-                    self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block
-                )
+                getattr(self, "_kv_owner_tokens_per_block", self._kv_tokens_per_block)
             ),
         )
         meta = CompressorMeta(
@@ -987,13 +991,22 @@ class CompressorFP8(PoolBackedModule):
             return None
 
         out_dim = (1 + self.overlap) * self.head_dim
-        with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
-            N = bsz * seqlen
-            fused_flat = fused_out.reshape(N, -1)
-
+        N = bsz * seqlen
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
+        local_out = None
+        if cp_gather:
+            # Local GEMM and restore are sequential; reuse the restore region.
+            if self._cp_role == _CP_ROLE_INDEXER:
+                local_out = workspace.cp_restore_idx(N, 2 * out_dim, torch.float32)
+            else:
+                local_out = workspace.cp_restore_main(N, 2 * out_dim, torch.float32)
+        with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
+            fused_out = _linear_bf16_bf16_fp32(
+                x, self._wkv_wgate_fused, output=local_out
+            )
+            fused_flat = fused_out.reshape(N, -1)
+
         fused_gather_handle = None
         if cp_gather:
             # The non-prefix restore destination is the per-forward workspace's
@@ -1132,13 +1145,22 @@ class CompressorFP8(PoolBackedModule):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(x, self._wkv_wgate_fused)
-            N = bsz * seqlen
-            fused_flat = fused_out.reshape(N, -1)
-
+        N = bsz * seqlen
         cp_ctx = self._cp_ctx
         cp_gather = cp_should_gather(cp_ctx, start_pos)
+        local_out = None
+        if cp_gather:
+            # Local GEMM and restore are sequential; reuse the restore region.
+            if self._cp_role == _CP_ROLE_INDEXER:
+                local_out = workspace.cp_restore_idx(N, 2 * out_dim, torch.float32)
+            else:
+                local_out = workspace.cp_restore_main(N, 2 * out_dim, torch.float32)
+        with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
+            fused_out = _linear_bf16_bf16_fp32(
+                x, self._wkv_wgate_fused, output=local_out
+            )
+            fused_flat = fused_out.reshape(N, -1)
+
         fused_gather_handle = None
         if cp_gather:
             gather_stream = (
@@ -1254,9 +1276,7 @@ class CompressorFP8(PoolBackedModule):
                     b_idx,
                     has_prefix=True,
                     is_batched=q_len > 1,
-                    seq_start_per_req=position_ids_2d[:, 0]
-                    .to(torch.long)
-                    .contiguous(),
+                    seq_start_per_req=position_ids_2d[:, 0].to(torch.long).contiguous(),
                     cu_seq_per_req=cu_seq_per_req,
                 )
         self._launch(kv_flat, score_flat, meta)

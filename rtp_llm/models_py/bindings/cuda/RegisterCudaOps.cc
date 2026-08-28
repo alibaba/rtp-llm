@@ -18,7 +18,8 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   &torch_ext::cublas_gemm_bf16_bf16_fp32,
                   "cuBLAS BF16 x BF16 GEMM with FP32 accumulation and FP32 output",
                   py::arg("input"),
-                  py::arg("weight"));
+                  py::arg("weight"),
+                  py::arg("output") = py::none());
 
     rtp_ops_m.def("per_tensor_quant_fp8",
                   &per_tensor_quant_fp8,

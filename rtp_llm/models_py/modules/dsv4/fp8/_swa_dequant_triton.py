@@ -50,8 +50,10 @@ class CPByteSlicedSwaPrefixPending:
     gather_lens_cpu: list
     work: Any
     stream: Any
+    producer_stream: Any
     completion_event: Any
-    local_slices: torch.Tensor
+    out: Optional[torch.Tensor] = None
+    out_stream: Any = None
     ready_event: Any = None
     work_waited: bool = False
 
@@ -753,9 +755,9 @@ def _gather_k_cache_packed_to_flat_kernel(
 
     batch_offsets = tl.arange(0, BATCH_BLOCK)
     batch_mask = batch_offsets < batch_size
-    padded_lens = tl.load(
-        padded_lens_ptr + batch_offsets, mask=batch_mask, other=0
-    ).to(tl.int64)
+    padded_lens = tl.load(padded_lens_ptr + batch_offsets, mask=batch_mask, other=0).to(
+        tl.int64
+    )
     padded_ends = tl.cumsum(padded_lens, axis=0)
     batch_idx = tl.sum((token_idx >= padded_ends).to(tl.int32), axis=0)
     padded_start = tl.sum(
@@ -1398,7 +1400,6 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             dtype=k_cache_raw.dtype,
             device=device,
         )
-        local_slices.record_stream(gather_stream)
         with record_function_range(f"{profile_name}.launch"):
             work = torch.distributed.all_gather_into_tensor(
                 gathered,
@@ -1413,6 +1414,7 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             # Drain the in-flight NCCL Work before propagating; the caller
             # never sees the pending handle so nothing else will wait it.
             work.wait()
+            current_stream.wait_stream(gather_stream)
             raise
 
     return CPByteSlicedSwaPrefixPending(
@@ -1428,8 +1430,8 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         gather_lens_cpu=compaction.gather_lens_cpu,
         work=work,
         stream=gather_stream,
+        producer_stream=current_stream,
         completion_event=completion_event,
-        local_slices=local_slices,
     )
 
 
@@ -1451,68 +1453,70 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     # current-stream workspace writes; the caller decides how early to invoke
     # prepare based on which ranges are disjoint.
     assemble_stream.wait_stream(current_stream)
+    pending.out = out
+    pending.out_stream = current_stream
     with torch.cuda.stream(assemble_stream):
         assemble_stream.wait_event(pending.completion_event)
         # Fence NCCL on the stream that will read the gathered bytes below.
         with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
             _wait_swa_prefix_work_once(pending)
-        pending.gathered.record_stream(assemble_stream)
-        pending.local_slices.record_stream(assemble_stream)
-        pending.compact_slots.record_stream(assemble_stream)
-        pending.gather_lens.record_stream(assemble_stream)
-        out.record_stream(assemble_stream)
-        if cp_swa_direct_dequant_scatter_enabled():
-            _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
-                out,
-                pending.gathered,
-                pending.compact_slots,
-                pending.gather_lens,
-                pending.offset,
-                full_entries_per_block=pending.full_entries_per_block,
-                num_unique_blocks=int(pending.unique_blocks.numel()),
-            )
-        else:
-            full_raw = (
-                pending.gathered.view(
-                    pending.cp_size,
-                    int(pending.unique_blocks.numel()),
-                    int(pending.gathered.shape[1]),
+        try:
+            if cp_swa_direct_dequant_scatter_enabled():
+                _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+                    out,
+                    pending.gathered,
+                    pending.compact_slots,
+                    pending.gather_lens,
+                    pending.offset,
+                    full_entries_per_block=pending.full_entries_per_block,
+                    num_unique_blocks=int(pending.unique_blocks.numel()),
                 )
-                .permute(1, 0, 2)
-                .reshape(
-                    int(pending.unique_blocks.numel()),
-                    pending.cp_size * int(pending.gathered.shape[1]),
-                )
-                .contiguous()
-            )
-            full_view = full_raw.as_strided(
-                (
-                    int(pending.unique_blocks.numel()),
-                    pending.full_entries_per_block,
-                    ENTRY_BYTES,
-                ),
-                (int(full_raw.shape[1]), ENTRY_BYTES, 1),
-            )
-            restored = dequantize_slots_to_bf16(
-                full_view,
-                pending.compact_slots.reshape(-1),
-            )
-            restored_3d = restored.view(pending.B, pending.W, HEAD_DIM)
-            if pending.gather_lens_cpu:
-                # CPU lengths are captured during compaction; avoid per-request
-                # device synchronizations in the fallback hot path.
-                for b, gl in enumerate(pending.gather_lens_cpu):
-                    if gl > 0:
-                        out[b, pending.offset : pending.offset + gl, :].copy_(
-                            restored_3d[b, :gl, :]
-                        )
             else:
-                out[:, pending.offset : pending.offset + pending.W, :].copy_(
-                    restored_3d
+                full_raw = (
+                    pending.gathered.view(
+                        pending.cp_size,
+                        int(pending.unique_blocks.numel()),
+                        int(pending.gathered.shape[1]),
+                    )
+                    .permute(1, 0, 2)
+                    .reshape(
+                        int(pending.unique_blocks.numel()),
+                        pending.cp_size * int(pending.gathered.shape[1]),
+                    )
+                    .contiguous()
                 )
-        ready_event = torch.cuda.Event()
-        ready_event.record(assemble_stream)
-    pending.ready_event = ready_event
+                full_view = full_raw.as_strided(
+                    (
+                        int(pending.unique_blocks.numel()),
+                        pending.full_entries_per_block,
+                        ENTRY_BYTES,
+                    ),
+                    (int(full_raw.shape[1]), ENTRY_BYTES, 1),
+                )
+                restored = dequantize_slots_to_bf16(
+                    full_view,
+                    pending.compact_slots.reshape(-1),
+                )
+                restored_3d = restored.view(pending.B, pending.W, HEAD_DIM)
+                if pending.gather_lens_cpu:
+                    # CPU lengths are captured during compaction; avoid per-request
+                    # device synchronizations in the fallback hot path.
+                    for b, gl in enumerate(pending.gather_lens_cpu):
+                        if gl > 0:
+                            out[b, pending.offset : pending.offset + gl, :].copy_(
+                                restored_3d[b, :gl, :]
+                            )
+                else:
+                    out[:, pending.offset : pending.offset + pending.W, :].copy_(
+                        restored_3d
+                    )
+        finally:
+            try:
+                pending.ready_event = torch.cuda.Event()
+                pending.ready_event.record(assemble_stream)
+            except Exception:
+                assemble_stream.synchronize()
+                raise
 
 
 def wait_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
@@ -1522,6 +1526,11 @@ def wait_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         raise RuntimeError("CP byte-sliced SWA prefix pending was not prepared")
     current_stream = torch.cuda.current_stream(pending.gathered.device)
     current_stream.wait_event(pending.ready_event)
+    if pending.producer_stream != current_stream:
+        pending.producer_stream.wait_event(pending.ready_event)
+    if pending.out_stream != current_stream:
+        pending.out_stream.wait_event(pending.ready_event)
+    pending.stream.wait_event(pending.ready_event)
     _wait_swa_prefix_work_once(pending)
 
 
@@ -1533,6 +1542,12 @@ def discard_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     current_stream = torch.cuda.current_stream(pending.gathered.device)
     event = pending.ready_event or pending.completion_event
     current_stream.wait_event(event)
+    if pending.producer_stream != current_stream:
+        pending.producer_stream.wait_event(event)
+    if pending.out_stream is not None and pending.out_stream != current_stream:
+        pending.out_stream.wait_event(event)
+    if pending.ready_event is not None:
+        pending.stream.wait_event(pending.ready_event)
     _wait_swa_prefix_work_once(pending)
 
 

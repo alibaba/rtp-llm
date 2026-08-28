@@ -62,9 +62,9 @@ class PrefillWorkspace:
 
         prefill_q       : [0,                                      q_bytes)
         cp_gather_main  : [0,                                      main_bytes)
-        cp_restore_main : [main_bytes,                             2*main_bytes)
+        cp_local/restore_main : [main_bytes,                       2*main_bytes)
         cp_gather_idx   : [2*main_bytes,                           2*main_bytes + idx_bytes)
-        cp_restore_idx  : [2*main_bytes + idx_bytes,               2*main_bytes + 2*idx_bytes)
+        cp_local/restore_idx  : [2*main_bytes + idx_bytes,         2*main_bytes + 2*idx_bytes)
 
     Union size = ``round_up(max(q_bytes, 2*main_bytes + 2*idx_bytes),
     align_bytes)`` (``align_bytes`` defaults to 1 GiB so the per-forward block is
@@ -73,10 +73,10 @@ class PrefillWorkspace:
     boundary). Folding Q into the compressor CP region saves the standalone
     16 GiB Q buffer.
 
-    Read/write ordering between the aliasing roles is guaranteed only for CP
-    buffers whose contents are no longer live when Q is materialized. The Q vs
-    compressor-CP overlap is DELIBERATE — do NOT assert physical disjointness for
-    those roles.
+    Each role's restore region first holds the fused local GEMM output. NCCL
+    finishes reading it before restore starts, so this is a safe sequential
+    reuse without increasing the union size. All aliasing roles drain before Q
+    is materialized. The Q vs compressor-CP overlap is DELIBERATE.
 
     Each CP sub-region is sized to its role's MAXIMUM byte footprint at the
     role's natural dtype (main/idx: fp32 to admit the compressor's fp32 fused

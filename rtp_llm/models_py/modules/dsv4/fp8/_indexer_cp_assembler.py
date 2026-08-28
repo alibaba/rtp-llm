@@ -74,6 +74,9 @@ class IndexerKCPGatherHandle:
     work_s: Any
     completion_event: torch.cuda.Event
     stream: torch.cuda.Stream
+    producer_stream: torch.cuda.Stream
+    local_k_quant: torch.Tensor
+    local_k_scale: torch.Tensor
     out_k_quant: torch.Tensor
     out_k_scale: torch.Tensor
     done_event: Optional[torch.cuda.Event] = None
@@ -107,12 +110,8 @@ def build_indexer_cp_chunk_plan(
             owner_bs,
             cp_ctx.cp_rank,
         )
-        local_lens = torch.full(
-            (1,), total_local, dtype=torch.int64, device=device
-        )
-        actual_lens = torch.full(
-            (1,), total_actual, dtype=torch.int64, device=device
-        )
+        local_lens = torch.full((1,), total_local, dtype=torch.int64, device=device)
+        actual_lens = torch.full((1,), total_actual, dtype=torch.int64, device=device)
     else:
         local_lens = cp_padded_local_kv_lens(
             per_req, cp_ctx.cp_size, owner_bs
@@ -320,8 +319,6 @@ def start_assemble_indexer_k_async(
     device = local_k_quant.device
     current_stream = torch.cuda.current_stream(device)
     stream.wait_stream(current_stream)
-    local_k_quant.record_stream(stream)
-    local_k_scale.record_stream(stream)
     with torch.cuda.stream(stream):
         gathered_q = torch.empty(
             (world_size * int(local_k_quant.shape[0]), local_k_quant.shape[1]),
@@ -351,6 +348,7 @@ def start_assemble_indexer_k_async(
             except Exception:
                 # quant gather already launched — drain it before propagating.
                 work_q.wait()
+                current_stream.wait_stream(stream)
                 raise
         try:
             completion_event = torch.cuda.Event()
@@ -360,6 +358,7 @@ def start_assemble_indexer_k_async(
             # drain both before propagating.
             work_q.wait()
             work_s.wait()
+            current_stream.wait_stream(stream)
             raise
 
     return IndexerKCPGatherHandle(
@@ -370,6 +369,9 @@ def start_assemble_indexer_k_async(
         work_s=work_s,
         completion_event=completion_event,
         stream=stream,
+        producer_stream=current_stream,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
         out_k_quant=out_k_quant,
         out_k_scale=out_k_scale,
     )
@@ -394,10 +396,6 @@ def prepare_assemble_indexer_k_async(
         # Fence NCCL on the stream that will restore into out_k_* below.
         with record_function_range("dsv4.cp.all_gather.indexer_k.wait_host"):
             _wait_indexer_k_work_once(handle)
-        handle.gathered_q.record_stream(stream)
-        handle.gathered_s.record_stream(stream)
-        handle.out_k_quant.record_stream(stream)
-        handle.out_k_scale.record_stream(stream)
         try:
             restore_indexer_k(
                 handle.plan,
@@ -407,16 +405,22 @@ def prepare_assemble_indexer_k_async(
                 handle.out_k_scale,
             )
         finally:
-            handle.done_event = torch.cuda.Event()
-            handle.done_event.record(stream)
+            try:
+                handle.done_event = torch.cuda.Event()
+                handle.done_event.record(stream)
+            except Exception:
+                stream.synchronize()
+                raise
 
 
 def wait_assemble_indexer_k_async(handle: IndexerKCPGatherHandle) -> None:
     current_stream = torch.cuda.current_stream(handle.out_k_quant.device)
+    terminal_event = handle.done_event or handle.completion_event
+    current_stream.wait_event(terminal_event)
+    if handle.producer_stream != current_stream:
+        handle.producer_stream.wait_event(terminal_event)
     if handle.done_event is not None:
-        current_stream.wait_event(handle.done_event)
-    else:
-        current_stream.wait_event(handle.completion_event)
+        handle.stream.wait_event(handle.done_event)
     _wait_indexer_k_work_once(handle)
 
 

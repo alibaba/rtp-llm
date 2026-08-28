@@ -6,24 +6,22 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-)
-from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.dsv4.moe._shared_expert_triton import (
     quant_bf16_fp8_packed_ue8m0,
 )
 from rtp_llm.models_py.modules.dsv4.moe._silu_mul_fp8_quant_triton import (
     silu_mul_fp8_quant_packed_from_parts,
 )
+from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
 from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
+    _SHARED_EXPERT_STREAM_CACHE,
+    _SHARED_EXPERT_WORKSPACE_CACHE,
     FusedSharedExpertExecutor,
     FusedSharedExpertFastPath,
     OverlapSharedExpertExecutor,
     SequentialSharedExpertExecutor,
     W13SharedExpert,
-    _SHARED_EXPERT_STREAM_CACHE,
-    _SHARED_EXPERT_WORKSPACE_CACHE,
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
@@ -327,13 +325,21 @@ class TestSharedExpertExecutor(unittest.TestCase):
 
     def test_executor_dispatch(self):
         os.environ.pop("DSV4_SHARED_EXPERT_MODE", None)
-        self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
+        self.assertIsInstance(
+            get_shared_expert_executor(), SequentialSharedExpertExecutor
+        )
         with _env("DSV4_SHARED_EXPERT_MODE", "sequential"):
-            self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
+            self.assertIsInstance(
+                get_shared_expert_executor(), SequentialSharedExpertExecutor
+            )
         with _env("DSV4_SHARED_EXPERT_MODE", "overlap"):
-            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
+            self.assertIsInstance(
+                get_shared_expert_executor(), OverlapSharedExpertExecutor
+            )
         with _env("DSV4_SHARED_EXPERT_MODE", "auto"):
-            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
+            self.assertIsInstance(
+                get_shared_expert_executor(), OverlapSharedExpertExecutor
+            )
 
     def test_sequential_executor(self):
         x = torch.randn(3, 4, dtype=torch.bfloat16)
@@ -351,7 +357,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
         overlap = OverlapSharedExpertExecutor()
         with _env("DSV4_MOE_STRICT_FUSED", "0"):
             overlap.start(shared, x)
+        self.assertIs(overlap._input, x)
         got = overlap.finish()
+        self.assertIsNone(overlap._input)
         ref = shared(x).float()
         self.assertTrue(torch.equal(got.cpu(), ref.cpu()))
 
@@ -484,7 +492,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
                 gemm_calls = []
 
                 def fake_with_record(a, b, output, *args, **kwargs):
-                    gemm_calls.append((tuple(a[0].shape), tuple(b[0].shape), tuple(output.shape)))
+                    gemm_calls.append(
+                        (tuple(a[0].shape), tuple(b[0].shape), tuple(output.shape))
+                    )
                     _fake_fp8_gemm_nt(a, b, output, *args, **kwargs)
 
                 with mock.patch(

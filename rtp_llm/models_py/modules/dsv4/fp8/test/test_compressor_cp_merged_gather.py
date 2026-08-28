@@ -19,12 +19,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
-# CP gather is mocked here, so the workspace only needs to flow through the
-# (patched) ``cp_all_gather_full_async`` — a trivial one suffices.
-_WS = PrefillWorkspace(
-    torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
-)
-
 
 def _build_cpu_compressor(
     *, dim: int, head_dim: int, compress_ratio: int
@@ -132,6 +126,16 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
         )
         cp_ctx = _make_cp_ctx()
         cmp.set_cp_ctx(cp_ctx)
+        workspace = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=1,
+            q_dim=1,
+            reserve_cp=True,
+            cp_rows=cp_ctx.padded_seq_len,
+            main_w=2 * out_dim,
+            idx_w=2 * out_dim,
+            align_bytes=1,
+        )
 
         x = torch.randn(cp_ctx.chunk_length, dim, dtype=torch.bfloat16)
         gathered_fused = torch.arange(
@@ -175,9 +179,12 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             launch_args["meta"] = actual_meta
             launch_args["seq_start"] = seq_start
 
-        def fake_linear(local_2d, weight):
+        def fake_linear(local_2d, weight, output=None):
             del weight
-            return torch.zeros(local_2d.shape[0], 2 * out_dim, dtype=torch.bfloat16)
+            if output is None:
+                return torch.zeros(local_2d.shape[0], 2 * out_dim, dtype=torch.float32)
+            output.zero_()
+            return output
 
         with (
             patch(
@@ -194,7 +201,7 @@ class CompressorFP8CPMergedGatherTest(unittest.TestCase):
             ),
             patch.object(cmp, "_launch", side_effect=fake_launch),
         ):
-            cmp.forward(x, 0, meta=meta, workspace=_WS)
+            cmp.forward(x, 0, meta=meta, workspace=workspace)
 
         self.assertEqual(len(gather_inputs), 1)
         gathered_local, actual_ctx = gather_inputs[0]
