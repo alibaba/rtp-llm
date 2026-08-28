@@ -37,7 +37,6 @@ final class MockPerformanceModel {
     private volatile int blockSize;
     private final double sleepScale;
     private final double prefillScale;
-    private final Double fixedPrefillMs;
     // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
     // Guards against sleep_scale making prefill unrealistically fast. Null signals
     // "absent in JSON → no floor".
@@ -72,6 +71,11 @@ final class MockPerformanceModel {
     private final boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
     private volatile double cacheAdmissionRate;
+    // Explicit performance-JSON "prefill.fixed_ms": a declared flat prefill
+    // for duration-blind suites (chaos/elastic). Null = not declared ->
+    // formula-driven. This is an explicit configuration channel, NOT the
+    // removed silent fallback (a missing key never invents a duration).
+    private final Double configuredFixedPrefillMs;
     private volatile Double overrideFixedPrefillMs;
     private volatile Double overrideDecodeStepMs;
     // Python /set_perf compatibility: decode_scale overrides the config-file
@@ -81,8 +85,8 @@ final class MockPerformanceModel {
     private MockPerformanceModel(int blockSize,
                                  double sleepScale,
                                  double prefillScale,
-                                 Double fixedPrefillMs,
                                  Double prefillMinMs,
+                                 Double configuredFixedPrefillMs,
                                  int maxWaitingPrefillBatches,
                                  int directBatchSizeMax,
                                  PrefillTimeFormula prefillFormula,
@@ -95,8 +99,8 @@ final class MockPerformanceModel {
         this.blockSize = blockSize;
         this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
-        this.fixedPrefillMs = fixedPrefillMs;
         this.prefillMinMs = prefillMinMs;
+        this.configuredFixedPrefillMs = configuredFixedPrefillMs;
         this.maxWaitingPrefillBatches = maxWaitingPrefillBatches;
         this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
         this.prefillFormula = prefillFormula;
@@ -114,14 +118,18 @@ final class MockPerformanceModel {
         double sleepScale = performance.path("sleep_scale").asDouble(1.0);
         JsonNode prefill = performance.path("prefill");
         double prefillScale = prefill.path("scale").asDouble(1.0);
-        Double fixedPrefillMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
+        // "fixed_ms" is an explicit opt-in for duration-blind suites
+        // (chaos/elastic): when the JSON declares it, mock prefill is flat.
+        // Absent (the normal path) -> formula-driven, keeping mock execution
+        // time and master routing predictions on one expression. What was
+        // removed is the SILENT fallback, not this explicit channel.
+        Double prefillFixedMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
         Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
         int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
                 .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
         int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
 
-        String expression = loadPrefillExpression(masterConfigFile);
-        PrefillTimeFormula formula = expression == null ? null : PrefillTimeFormula.parse(expression);
+        PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
 
         JsonNode decode = performance.path("decode");
         Double perTokenMs = decode.has("per_token_ms") ? decode.get("per_token_ms").asDouble() : null;
@@ -133,20 +141,39 @@ final class MockPerformanceModel {
                 points.add(new DecodePoint(pair.get(0).asInt(), pair.get(1).asDouble()));
             }
         }
-        if (points.isEmpty()) {
-            for (int batch : new int[]{1, 2, 4, 8, 16, 32, 64, 128, 256}) {
-                points.add(new DecodePoint(batch, 1.0));
-            }
+        if (points.isEmpty() && perTokenMs == null) {
+            // No silent 9-point 1 ms/token default: decode timing must be
+            // explicit so a missing curve can never masquerade as a fast
+            // engine (per_token_ms alone is fine — the curve is unused then).
+            throw new IllegalStateException("Performance JSON '" + performanceFile
+                    + "' has no decode latency config: set decode.step_ms_by_batch"
+                    + " (batch -> step-ms curve) or decode.per_token_ms (fixed per-token ms).");
         }
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
-        return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
-                prefillMinMs, maxWaitingPrefillBatches, directBatchSizeMax, formula, List.copyOf(points),
+        return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
+                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax, formula, List.copyOf(points),
                 decode.path("scale").asDouble(1.0), perTokenMs,
                 reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
     }
 
+    /**
+     * Resolve the prefill duration formula — exactly one source, never a
+     * silent hard-coded fallback:
+     * <ol>
+     *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
+     *       (blank expression = misconfiguration, fail fast);</li>
+     *   <li>otherwise {@link FormulaEstimatorConfig#DEFAULT_EXPRESSION} — the
+     *       production DSv4 fit, which is exactly what the master process
+     *       itself boots on when the estimator is omitted, and the static
+     *       approximation for a LEARNING estimator the mock cannot replay.</li>
+     * </ol>
+     * This keeps mock execution time and master routing predictions on the
+     * same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
+     * (an explicit performance-JSON "prefill.fixed_ms" declaration still
+     * wins over the formula — see prefillMs).
+     */
     private static String loadPrefillExpression(String masterConfigFile) throws IOException {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
@@ -156,11 +183,21 @@ final class MockPerformanceModel {
                 FlexlbConfig config = ConfigService.parse(item.get(1).asText());
                 var estimator = config.getRouter().getRoles().getPrefill()
                         .getExecutionTimeEstimator();
-                return estimator instanceof FormulaEstimatorConfig formula
-                        ? formula.getExpression() : null;
+                if (estimator instanceof FormulaEstimatorConfig formula) {
+                    String expression = formula.getExpression();
+                    if (expression == null || expression.isBlank()) {
+                        throw new IllegalStateException("Master config " + masterConfigFile
+                                + ": router.roles.prefill.executionTimeEstimator is FORMULA"
+                                + " with a blank expression — set the expression explicitly or"
+                                + " omit the estimator to use the code default"
+                                + " (RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION)");
+                    }
+                    return expression;
+                }
+                break;  // LEARNING estimator: fall through to the production-fit default
             }
         }
-        return null;
+        return FormulaEstimatorConfig.DEFAULT_EXPRESSION;
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
@@ -194,8 +231,17 @@ final class MockPerformanceModel {
         }
         double latency;
         if (overrideFixedPrefillMs != null) {
+            // Runtime override (Python /set_perf prefill_fixed_ms): explicit
+            // test-time control, length-blind by design.
             latency = overrideFixedPrefillMs;
-        } else if (prefillFormula != null) {
+        } else if (configuredFixedPrefillMs != null) {
+            // Explicit performance-JSON "prefill.fixed_ms": the declared flat
+            // prefill for duration-blind suites. Declared explicitly, so it
+            // wins over the formula (priority: runtime > JSON > formula).
+            latency = configuredFixedPrefillMs;
+        } else {
+            // The only prefill source: the expression resolved in
+            // loadPrefillExpression (explicit FORMULA or the production fit).
             double[] batchVars = new double[5];
             batchVars[0] = requests.size();
             List<double[]> itemVars = new ArrayList<>(requests.size());
@@ -209,10 +255,6 @@ final class MockPerformanceModel {
                 itemVars.add(vars);
             }
             latency = prefillFormula.evaluate(batchVars, itemVars);
-        } else if (fixedPrefillMs != null) {
-            latency = fixedPrefillMs;
-        } else {
-            latency = 300.0;
         }
         long result = scaledMs(latency * prefillScale);
         // Clamp on the final (post-scale) value: min_ms is the actual-sleep floor.

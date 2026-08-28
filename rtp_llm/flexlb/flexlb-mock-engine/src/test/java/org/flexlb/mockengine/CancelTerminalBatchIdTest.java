@@ -171,7 +171,10 @@ class CancelTerminalBatchIdTest {
                 "sleep_scale", 0.1,
                 "jitter_pct", 0.0,
                 "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0)));
+                // Explicit decode timing (1 ms/token): decode latency is
+                // irrelevant to this cancel-census test, but the model now
+                // rejects a silent default decode curve.
+                "decode", Map.of("scale", 1.0, "per_token_ms", 1.0)));
         MockMasterConfig.writeWithPrefillExpression(master, prefillExpression);
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }
