@@ -68,6 +68,12 @@ final class RequestSlot extends RequestLifecycle {
 
     /** Storage/cleanup ownership; distinct from the public request lifecycle. */
     private SlotPhase slotPhase = SlotPhase.ACTIVE;
+
+    /**
+     * Lock-free tombstone hint maintained by the tombstone installation
+     * tick; see {@link #isTombstonedFast()}.
+     */
+    private volatile boolean tombstoned;
     private EngineOwnership engineOwnership = EngineOwnership.DECODE_PENDING;
     private CancelReason cancellationReason;
 
@@ -178,6 +184,10 @@ final class RequestSlot extends RequestLifecycle {
         item = null;
         placement = null;
         prefillRow = null;
+        // Defensive symmetry with the publication bind: the bind path never
+        // installs a dRow, but the stage-2 dual-write window makes any
+        // future divergence here a tombstone leak, so roll it back too.
+        decodeRow = null;
         priorityAdmission = false;
         assertInvariant();
     }
@@ -387,6 +397,48 @@ final class RequestSlot extends RequestLifecycle {
     boolean isTerminalizingOrLater() {
         requireSlotLock("terminal-track lookup");
         return slotPhase != SlotPhase.ACTIVE;
+    }
+
+    /**
+     * Storage/cleanup phase for off-path reconciliation (slot lock held).
+     * Consumed through {@link SlotPhaseAdjudicator#coarsePhaseOf(SlotPhase)}
+     * so the adjudication layer is the single projection entrance the
+     * reconciliation harness sees (plan 3.1 item 3).
+     */
+    SlotPhase slotPhase() {
+        requireSlotLock("slot phase lookup");
+        return slotPhase;
+    }
+
+    /**
+     * Preemption owner for off-path reconciliation (slot lock held):
+     * the direct registration, or the registration transferred into the
+     * engine fence (NOT_FOUND transfer keeps the claim identity inside
+     * the fence).  Null when this slot holds no preemption claim at all.
+     */
+    PreemptionRegistration preemptionOwnerView() {
+        requireSlotLock("preemption owner view");
+        return preemptionOwner();
+    }
+
+    /** Whether an engine fence registration is attached (slot lock held). */
+    boolean hasEngineFenceRegistration() {
+        requireSlotLock("engine fence presence view");
+        return engineFence != null;
+    }
+
+    /**
+     * Lock-free tombstone hint for off-path reconciliation.  Set inside
+     * the {@code finishTombstone} slot-monitor tick; reading it outside the
+     * monitor may briefly observe {@code false} for a slot that is mid-tick
+     * into TOMBSTONE, but never observes {@code true} for a slot that has
+     * not entered the tombstone installation.  Lets the reconciliation
+     * harness skip retention-window tombstones without contending the
+     * slot monitor (its tombstone audit content is fully derived: item /
+     * rows / registrations are already cleared by that tick).
+     */
+    boolean isTombstonedFast() {
+        return tombstoned;
     }
 
     boolean isRemovableTombstone(long updatedBeforeMs) {
@@ -1843,6 +1895,7 @@ final class RequestSlot extends RequestLifecycle {
         requestDeadline = null;
         acceptanceDeadline = null;
         slotPhase = SlotPhase.TOMBSTONE;
+        tombstoned = true;
         assertInvariant();
         return new TombstoneResult(
                 terminal,
@@ -2061,33 +2114,14 @@ final class RequestSlot extends RequestLifecycle {
      * plus periodic full-scope reconciliation as the backstop (M1 task 4
      * harness); no per-tick constructive rebuild.</p>
      *
-     * <p>DecodeEndpoint eight-layer consolidation map (phase 2 target; this
-     * phase builds the schema and mirror points only — no layer
-     * retirement):
-     * <ul>
-     *   <li>L1 inflightRequests — shadow reservation
-     *       (kv/expected/priority/token): the account mirrored by pRow.</li>
-     *   <li>L2 engineLifecycleReservations — identities beyond the master
-     *       rollback boundary: the pRow→dRow handover boundary.</li>
-     *   <li>L3 trackedConfirmed — engine-confirmed projection
-     *       (ACCEPTED_NOT_RUNNING / RUNNING, engine-reported KV): the
-     *       account mirrored by dRow (numeric authority stays
-     *       engine-side).</li>
-     *   <li>L4 preemptionClaims / preemptionAttempts — victim accounting
-     *       until a typed terminal settles: preemption registry (slot
-     *       already mirrors via PreemptionRegistration).</li>
-     *   <li>L5 engineFenceProtections — fenced ownership with synthetic
-     *       holds: fence registry (slot already mirrors via
-     *       engineFence).</li>
-     *   <li>L6 settledTombstones — settled request-id fences: unified
-     *       tombstone (slot TOMBSTONE is the reconciliation item).</li>
-     *   <li>L7 queuedPhase (+ queued KV totals) — committed-but-not-yet-
-     *       dispatched sub-state: pRow queued sub-state (phase 2 folds the
-     *       marker into the row).</li>
-     *   <li>L8 engineDispatchPermits (+ permit KV totals) — pre-delivery
-     *       dispatch permits: pRow→dRow dispatch-permit sub-state
-     *       (phase 2).</li>
-     * </ul></p>
+     * <p>DecodeEndpoint eight-layer consolidation follows the single
+     * authoritative layer table documented on
+     * {@link DecodeEndpoint.DecodeLedgerAuditView}; this javadoc deliberately
+     * does not duplicate it.  For this row schema only: L1 backs the pRow
+     * account, L3 backs the dRow identity (engine keeps numeric authority),
+     * and the remaining layers stay engine-side ownership domains whose
+     * slot-side mirrors are the {@code PreemptionRegistration} /
+     * {@code engineFence} fields plus the phase-2 row sub-states.</p>
      */
     record SlotResourceRow(
             RowAuthority authority,
@@ -2132,7 +2166,11 @@ final class RequestSlot extends RequestLifecycle {
         }
     }
 
-    private enum SlotPhase {
+    /**
+     * Storage/cleanup phase track (package-visible for the adjudication
+     * layer projection, plan 3.1 item 3).
+     */
+    enum SlotPhase {
         ACTIVE,
         TERMINALIZING,
         TOMBSTONE

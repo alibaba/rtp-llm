@@ -288,6 +288,32 @@ class SlotPhaseAdjudicatorTest {
                 SlotPhaseAdjudicator.coarsePhaseOf(RefinedPhase.FAILED));
     }
 
+    /**
+     * Stage-1 fix B (wiring lock): the storage-track projection is a real
+     * reference to {@code RequestSlot.SlotPhase}, not a parallel enum —
+     * every storage phase projects onto exactly one coarse phase, and the
+     * two tracks never disagree on the storage-only TOMBSTONE state that
+     * the harness consumes on its lock-free fast path.
+     */
+    @Test
+    void slotPhaseProjectionIsTheRealStorageTrackWiring() {
+        assertEquals(CoarsePhase.ACTIVE,
+                SlotPhaseAdjudicator.coarsePhaseOf(
+                        RequestSlot.SlotPhase.ACTIVE));
+        assertEquals(CoarsePhase.TERMINALIZING,
+                SlotPhaseAdjudicator.coarsePhaseOf(
+                        RequestSlot.SlotPhase.TERMINALIZING));
+        assertEquals(CoarsePhase.TOMBSTONE,
+                SlotPhaseAdjudicator.coarsePhaseOf(
+                        RequestSlot.SlotPhase.TOMBSTONE));
+        // The projection is total and refuses null — a wiring mistake
+        // must fail loudly, not silently map to a default phase.
+        assertEquals(3, RequestSlot.SlotPhase.values().length);
+        assertThrows(NullPointerException.class,
+                () -> SlotPhaseAdjudicator.coarsePhaseOf(
+                        (RequestSlot.SlotPhase) null));
+    }
+
     @Test
     void repeatedAdjudicationReplayIsIdempotentForTheAdoptedState() {
         // Feeding the same event twice against the adopted next state must

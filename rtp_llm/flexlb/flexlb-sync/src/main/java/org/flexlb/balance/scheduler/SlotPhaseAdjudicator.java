@@ -73,13 +73,17 @@ import java.util.Objects;
  *
  * <h2>Attachment to the coarse SlotPhase{3} track</h2>
  *
- * <p>{@link CoarsePhase} mirrors the private
+ * <p>{@link CoarsePhase} is the projection of the package-visible
  * {@code RequestSlot.SlotPhase} three-state track
- * (ACTIVE / TERMINALIZING / TOMBSTONE).  Intermediate refined phases live in
- * {@code ACTIVE}; a refined terminal places the slot onto the
- * {@code TERMINALIZING} track (plan 3.2 two-phase death), and TOMBSTONE
+ * (ACTIVE / TERMINALIZING / TOMBSTONE) — see
+ * {@link #coarsePhaseOf(RequestSlot.SlotPhase)}.  Intermediate refined
+ * phases live in {@code ACTIVE}; a refined terminal places the slot onto
+ * the {@code TERMINALIZING} track (plan 3.2 two-phase death), and TOMBSTONE
  * itself is owned by the tombstone installation channel (v2 S7 retention),
- * never by event ruling.</p>
+ * never by event ruling.  The projection is consumed for real by the M1
+ * ledger-reconciliation harness: every slot audit captures its phase via
+ * this layer, so the coarse track is not a parallel enum but the ruling
+ * entrance the reconciliation surface sees.</p>
  */
 public final class SlotPhaseAdjudicator {
 
@@ -216,7 +220,7 @@ public final class SlotPhaseAdjudicator {
     }
 
     /**
-     * Coarse three-state mirror of the private
+     * Coarse three-state projection of the package-visible
      * {@code RequestSlot.SlotPhase} track — the attachment point of the
      * refined lattice onto the slot lifecycle.
      */
@@ -237,6 +241,25 @@ public final class SlotPhaseAdjudicator {
         return refined.isTerminal()
                 ? CoarsePhase.TERMINALIZING
                 : CoarsePhase.ACTIVE;
+    }
+
+    /**
+     * Coarse-track projection of the live {@code RequestSlot.SlotPhase}
+     * storage/cleanup track.  The mapping is the identity on the three
+     * states; routing it through this layer (rather than letting consumers
+     * switch on the slot enum directly) keeps the adjudicator the single
+     * ruling entrance the plan requires, and makes the refined-lattice
+     * and the storage-track projections provably agree (a refined
+     * terminal maps to TERMINALIZING exactly as the storage track does
+     * after {@code beginTerminalizing}).
+     */
+    public static CoarsePhase coarsePhaseOf(RequestSlot.SlotPhase slotPhase) {
+        Objects.requireNonNull(slotPhase, "slotPhase");
+        return switch (slotPhase) {
+            case ACTIVE -> CoarsePhase.ACTIVE;
+            case TERMINALIZING -> CoarsePhase.TERMINALIZING;
+            case TOMBSTONE -> CoarsePhase.TOMBSTONE;
+        };
     }
 
     /**
