@@ -142,7 +142,7 @@ class LoraConfig:
         self.merge_lora: bool = True
 
     def to_string(self):
-        return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}\n"
+        return f"lora_info: {self.lora_info}\nmerge_lora: {self.merge_lora}\n"
 
 
 class LoadConfig:
@@ -308,7 +308,7 @@ class QuantizationConfig:
         self.quantization: str = ""
 
     def to_string(self):
-        return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
+        return f"int8_mode: {self.int8_mode}\nquantization: {self.quantization}"
 
     def get_quantization(self):
         """Get quantization string with compatibility logic.
@@ -385,13 +385,81 @@ class MasterConfig:
         self.master_max_connect_pool_size: int = 100000
         # Session total timeout in seconds. If < 0: auto (3600 when queue mode, 0.5 otherwise).
         self.master_session_timeout_s: float = -1
+        # Keep disabled by default so existing FlexLB/domain routing is unchanged.
+        self.master_client_fallback: bool = False
+        self.master_kvcm_service_id: str = ""
+        self.master_kvcm_bootstrap_port: int = 6381
+        # Exact KVCM instance_id/namespace, for example <prefill-deployment>_128.
+        self.master_kvcm_instance_id: str = ""
+        self.master_kvcm_block_size: int = 0
+        # -1 means unset. Zero is a valid engine-reported hash contract value.
+        self.master_client_fallback_block_hash_lookahead_tokens: int = -1
+        self.master_kvcm_request_timeout_ms: int = 100
+        self.master_client_fallback_worker_grpc_port_override: int = 0
+        self.master_client_fallback_worker_status_port: int = 0
+        self.master_client_fallback_candidate_pool_size: int = 3
+        self.master_kvcm_hot_candidate_pool_size: int = 2
+        self.master_client_fallback_cold_candidate_batch_size: int = 3
+        self.master_client_fallback_worker_status_concurrency: int = 3
+        # Keep these values aligned with the colocated FlexLB configuration.
+        self.master_client_fallback_worker_status_timeout_ms: int = 200
+        self.master_client_fallback_prefill_queue_size_threshold: int = 1024
+        self.master_client_fallback_p2p_hit_discount: float = 0.2
+        self.master_client_fallback_cache_affinity_first_max_extra_work_tokens: int = 0
+        self.master_client_fallback_outstanding_uncached_tokens_threshold: int = 0
+        self.master_client_fallback_cache_affinity_first_min_hit_rate: float = 5.0
+        self.master_client_fallback_discovery_refresh_ms: int = 1000
+        self.master_client_fallback_discovery_stale_ms: int = 5000
+        # Static IP:port lists used by tests may opt out of VIP discovery.
+        self.master_kvcm_use_local: bool = False
+        # Zero preserves the legacy behavior of using the request TTFT timeout.
+        self.master_client_fallback_flexlb_transport_timeout_ms: int = 0
 
     def to_string(self):
         return (
             f"master_queue_reject_threshold: {self.master_queue_reject_threshold}\n"
             f"master_default_timeout_ms: {self.master_default_timeout_ms}\n"
             f"master_max_connect_pool_size: {self.master_max_connect_pool_size}\n"
-            f"master_session_timeout_s: {self.master_session_timeout_s}"
+            f"master_session_timeout_s: {self.master_session_timeout_s}\n"
+            f"master_client_fallback: {self.master_client_fallback}\n"
+            f"master_kvcm_service_id: {self.master_kvcm_service_id}\n"
+            f"master_kvcm_bootstrap_port: {self.master_kvcm_bootstrap_port}\n"
+            f"master_kvcm_instance_id: {self.master_kvcm_instance_id}\n"
+            f"master_kvcm_block_size: {self.master_kvcm_block_size}\n"
+            "master_client_fallback_block_hash_lookahead_tokens: "
+            f"{self.master_client_fallback_block_hash_lookahead_tokens}\n"
+            f"master_kvcm_request_timeout_ms: {self.master_kvcm_request_timeout_ms}\n"
+            "master_client_fallback_worker_grpc_port_override: "
+            f"{self.master_client_fallback_worker_grpc_port_override}\n"
+            "master_client_fallback_worker_status_port: "
+            f"{self.master_client_fallback_worker_status_port}\n"
+            "master_client_fallback_candidate_pool_size: "
+            f"{self.master_client_fallback_candidate_pool_size}\n"
+            "master_kvcm_hot_candidate_pool_size: "
+            f"{self.master_kvcm_hot_candidate_pool_size}\n"
+            "master_client_fallback_cold_candidate_batch_size: "
+            f"{self.master_client_fallback_cold_candidate_batch_size}\n"
+            "master_client_fallback_worker_status_concurrency: "
+            f"{self.master_client_fallback_worker_status_concurrency}\n"
+            "master_client_fallback_worker_status_timeout_ms: "
+            f"{self.master_client_fallback_worker_status_timeout_ms}\n"
+            "master_client_fallback_prefill_queue_size_threshold: "
+            f"{self.master_client_fallback_prefill_queue_size_threshold}\n"
+            "master_client_fallback_p2p_hit_discount: "
+            f"{self.master_client_fallback_p2p_hit_discount}\n"
+            "master_client_fallback_cache_affinity_first_max_extra_work_tokens: "
+            f"{self.master_client_fallback_cache_affinity_first_max_extra_work_tokens}\n"
+            "master_client_fallback_outstanding_uncached_tokens_threshold: "
+            f"{self.master_client_fallback_outstanding_uncached_tokens_threshold}\n"
+            "master_client_fallback_cache_affinity_first_min_hit_rate: "
+            f"{self.master_client_fallback_cache_affinity_first_min_hit_rate}\n"
+            "master_client_fallback_discovery_refresh_ms: "
+            f"{self.master_client_fallback_discovery_refresh_ms}\n"
+            "master_client_fallback_discovery_stale_ms: "
+            f"{self.master_client_fallback_discovery_stale_ms}\n"
+            f"master_kvcm_use_local: {self.master_kvcm_use_local}\n"
+            "master_client_fallback_flexlb_transport_timeout_ms: "
+            f"{self.master_client_fallback_flexlb_transport_timeout_ms}"
         )
 
 

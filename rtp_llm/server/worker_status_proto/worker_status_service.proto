@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+// Keep this file package-less: the deployed engine serves
+// /RpcService/GetWorkerStatus.
+
+message StatusVersionPB {
+  int64 latest_cache_version = 1;
+  int64 latest_finished_version = 2;
+}
+
+message TaskInfoPB {
+  string request_id = 1;
+  reserved 2;
+  reserved "inter_request_id";
+  int64 prefix_length = 3;
+  int64 input_length = 4;
+  int64 waiting_time_ms = 5;
+  int64 iterate_count = 6;
+  int64 end_time_ms = 7;
+  int64 dp_rank = 8;
+  bool is_waiting = 9;
+  bool prefix_length_valid = 10;
+  int64 waiting_entered_time_ms = 11;
+  int64 running_entered_time_ms = 12;
+  int64 request_received_time_ms = 13;
+  int64 input_queue_enqueue_time_ms = 14;
+  int64 input_queue_drain_time_ms = 15;
+  int64 remote_kv_wait_ms = 16;
+  int64 first_token_time_ms = 17;
+  int64 hbm_local_match_tokens = 18;
+  int64 remote_kv_added_match_tokens = 19;
+  int64 first_prefill_step_id = 20;
+  int64 last_prefill_step_id = 21;
+  int64 prefill_step_count = 22;
+  int64 prefill_nonfinal_chunk_tokens_min = 23;
+  int64 prefill_nonfinal_chunk_tokens_max = 24;
+  optional int64 completed_prefill_tokens = 25;
+  optional int64 remaining_prefill_tokens = 26;
+  optional int64 last_completed_prefill_step_id = 27;
+}
+
+enum KvCacheGroupModePB {
+  KV_CACHE_GROUP_MODE_UNSPECIFIED = 0;
+  KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY = 1;
+  KV_CACHE_GROUP_MODE_WITH_MAMBA = 2;
+}
+
+message WorkerStatusPB {
+  string role = 1;
+  int32 available_concurrency = 2;
+  repeated TaskInfoPB running_task_info = 3;
+  repeated TaskInfoPB finished_task_list = 4;
+  int32 waiting_query_len = 5;
+  int32 running_query_len = 6;
+  double step_latency_ms = 7;
+  int32 iterate_count = 8;
+  int32 dp_size = 9;
+  int32 tp_size = 10;
+  int64 status_version = 12;
+  bool alive = 13;
+  string precision = 14;
+  int64 latest_finished_version = 15;
+  int64 available_kv_cache = 16;
+  int64 total_kv_cache = 17;
+  int64 block_size = 18;
+  reserved 19, 20;
+  reserved "free_gpu_memory_bytes", "total_gpu_memory_bytes";
+  int32 block_hash_lookahead_tokens = 21;
+  KvCacheGroupModePB kv_cache_group_mode = 22;
+  int32 cache_match_rollback_blocks = 23;
+}
+
+service RpcService {
+  rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
+}

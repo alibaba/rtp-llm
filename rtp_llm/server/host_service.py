@@ -122,6 +122,119 @@ class VipServerWrapper:
         return hosts if hosts else []
 
 
+class VipHostSnapshot:
+    """Refresh one VIP in the background and publish a last-known-good host set.
+
+    Fallback requests must never perform synchronous service discovery.  This
+    helper owns that blocking work on a daemon thread; readers only take a short
+    lock and receive an immutable tuple.  An empty/error refresh retains the
+    previous non-empty value until ``stale_timeout_seconds`` expires.
+    """
+
+    def __init__(
+        self,
+        vip: VipServerWrapper,
+        *,
+        refresh_interval_seconds: float = 1.0,
+        stale_timeout_seconds: float = 5.0,
+    ) -> None:
+        if refresh_interval_seconds <= 0:
+            raise ValueError("VIP snapshot refresh interval must be positive")
+        if stale_timeout_seconds <= 0:
+            raise ValueError("VIP snapshot stale timeout must be positive")
+        self.vip = vip
+        self.refresh_interval_seconds = refresh_interval_seconds
+        self.stale_timeout_seconds = stale_timeout_seconds
+        self._snapshot_lock = threading.Lock()
+        self._hosts: Tuple[Host, ...] = ()
+        self._last_success_at = 0.0
+        self._stop_event = threading.Event()
+
+        # VipServerWrapper performs one discovery during construction.  Reuse
+        # that value so the first fallback request need not race the thread.
+        initial_hosts = getattr(vip, "hosts", ())
+        self._publish(initial_hosts, time.monotonic())
+        self._refresh_thread = threading.Thread(
+            target=self._refresh_loop,
+            name=f"rtp_llm_vip_snapshot_{vip.domain}",
+            daemon=True,
+        )
+        if vip.domain:
+            self._refresh_thread.start()
+
+    @staticmethod
+    def _deduplicate(hosts) -> Tuple[Host, ...]:
+        result: List[Host] = []
+        seen = set()
+        for host in hosts or ():
+            try:
+                key = (str(host.ip), int(host.port))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(host)
+        return tuple(result)
+
+    def _publish(self, hosts, refreshed_at: float) -> None:
+        normalized = self._deduplicate(hosts)
+        if not normalized:
+            return
+        with self._snapshot_lock:
+            self._hosts = normalized
+            self._last_success_at = refreshed_at
+
+    def refresh_now(self) -> None:
+        """Perform one blocking refresh; intended for the background thread/tests."""
+
+        now = time.monotonic()
+        try:
+            hosts = self.vip.get_hosts(refresh=True)
+        except Exception as error:
+            route_logger.warning(
+                "VIP snapshot refresh failed, domain=%s, error=%s",
+                self.vip.domain,
+                error,
+            )
+            hosts = ()
+        normalized = self._deduplicate(hosts)
+        if normalized:
+            with self._snapshot_lock:
+                self._hosts = normalized
+                self._last_success_at = now
+            return
+
+        with self._snapshot_lock:
+            if (
+                self._hosts
+                and self._last_success_at > 0
+                and now - self._last_success_at >= self.stale_timeout_seconds
+            ):
+                self._hosts = ()
+
+    def _refresh_loop(self) -> None:
+        while not self._stop_event.is_set():
+            self.refresh_now()
+            self._stop_event.wait(self.refresh_interval_seconds)
+
+    def get_hosts(self) -> Tuple[Host, ...]:
+        now = time.monotonic()
+        with self._snapshot_lock:
+            if (
+                self._hosts
+                and self._last_success_at > 0
+                and now - self._last_success_at >= self.stale_timeout_seconds
+            ):
+                return ()
+            return self._hosts
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._refresh_thread.is_alive():
+            self._refresh_thread.join(timeout=1.0)
+
+
 class EndPoint(BaseModel):
     type: str
     address: str
@@ -464,13 +577,9 @@ class MasterService:
             1,
             tags={"master_host": snapshot.master_addr},
         )
-        kmonitor.report(
-            GaugeMetrics.MASTER_QUEUE_LENGTH_METRIC, snapshot.queue_length
-        )
+        kmonitor.report(GaugeMetrics.MASTER_QUEUE_LENGTH_METRIC, snapshot.queue_length)
 
-    def _cleanup_unhealthy_nodes(
-        self, host_health_map: Dict[str, FlexlbHeartbeatInfo]
-    ):
+    def _cleanup_unhealthy_nodes(self, host_health_map: Dict[str, FlexlbHeartbeatInfo]):
         current_time = time.time()
         nodes_to_remove = []
 
@@ -551,6 +660,8 @@ class HostService:
         self.service_available = bool(self.master_vip.domain) or any(
             self.role_vip_map.values()
         )
+        self._role_snapshot_lock = threading.Lock()
+        self._role_snapshots: Dict[RoleType, VipHostSnapshot] = {}
 
     def get_master_addr(self) -> Optional[str]:
         return self.master_service.get_master_addr()
@@ -571,7 +682,12 @@ class HostService:
                 return None
             host = vip.get_host(refresh)
             if host:
-                return RoleAddr(role=role, ip=host.ip, grpc_port=int(host.port) + 1, http_port=int(host.port))  # type: ignore
+                return RoleAddr(
+                    role=role,
+                    ip=host.ip,
+                    grpc_port=int(host.port) + 1,
+                    http_port=int(host.port),
+                )  # type: ignore
             return None
 
         role_addrs: List[RoleAddr] = []
@@ -583,3 +699,48 @@ class HostService:
             if role_addr:
                 role_addrs.append(role_addr)
         return role_addrs
+
+    def enable_role_snapshot(
+        self,
+        role: RoleType,
+        *,
+        refresh_interval_seconds: float = 1.0,
+        stale_timeout_seconds: float = 5.0,
+    ) -> bool:
+        """Start a background all-host snapshot for ``role`` if it has a VIP."""
+
+        vip = self.role_vip_map.get(role)
+        if vip is None:
+            return False
+        with self._role_snapshot_lock:
+            if role not in self._role_snapshots:
+                self._role_snapshots[role] = VipHostSnapshot(
+                    vip,
+                    refresh_interval_seconds=refresh_interval_seconds,
+                    stale_timeout_seconds=stale_timeout_seconds,
+                )
+        return True
+
+    def get_backend_role_addr_snapshot(self, role: RoleType) -> List[RoleAddr]:
+        """Return all currently discovered role addresses without network I/O."""
+
+        with self._role_snapshot_lock:
+            snapshot = self._role_snapshots.get(role)
+        if snapshot is None:
+            return []
+        return [
+            RoleAddr(
+                role=role,
+                ip=str(host.ip),
+                grpc_port=int(host.port) + 1,
+                http_port=int(host.port),
+            )
+            for host in snapshot.get_hosts()
+        ]
+
+    def close(self) -> None:
+        with self._role_snapshot_lock:
+            snapshots = list(self._role_snapshots.values())
+            self._role_snapshots.clear()
+        for snapshot in snapshots:
+            snapshot.close()
