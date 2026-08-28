@@ -284,10 +284,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         # from ``V4Args.max_seq_len`` upstream).  The library aligns this
         # up to ``get_token_alignment_for_mega_moe()`` internally (384 on
         # SM100).
-        assert dist.is_initialized(), (
-            "Mega MoE requires torch.distributed initialised; "
-            "_mega_moe_available() should have gated this earlier"
-        )
         group = dist.group.WORLD
         self._mega_group = group
         # Symm buffer is single-layer staging — share one across all
@@ -615,7 +611,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
         with record_function_range("dsv4.moe.mega_gate_pack"):
             if gate.hash:
-                assert input_ids is not None
                 fused_mega_moe_gate_pack_hash(
                     x,
                     scores_bf16.contiguous(),
@@ -629,7 +624,6 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     norm_eps=1.0e-12,
                 )
             else:
-                assert gate.bias is not None
                 fused_mega_moe_gate_pack_nonhash(
                     x,
                     scores_bf16.contiguous(),

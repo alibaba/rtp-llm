@@ -12,7 +12,8 @@ Each compressor role owns a fixed sub-region of ONE union buffer carved by byte
 offsets (see :class:`PrefillWorkspace` for the layout). Sizes are the per-forward
 MAXIMUM (derived from ``max_seq_len + cp_size + max_context_batch_size``),
 identical on every forward, so a freed block is exactly reusable by the next
-forward — no fragmentation. Getters take the live token count and assert it fits.
+forward. Internal callers use the same metadata that sized the workspace, so
+getters do not repeat capacity checks during inference.
 
 The CP region is split per gather ROLE, because two concurrent compressor gather
 lifetimes can be in flight within a single CSA layer:
@@ -80,8 +81,8 @@ class PrefillWorkspace:
     Each CP sub-region is sized to its role's MAXIMUM byte footprint at the
     role's natural dtype (main/idx: fp32 to admit the compressor's fp32 fused
     gather). Sub-offsets are fp32-aligned (each is a multiple of ``main_bytes`` /
-    ``idx_bytes``, themselves multiples of 4). Getters take the live row count
-    and assert it fits — no silent growth, no fallback allocation.
+    ``idx_bytes``, themselves multiples of 4). Getters use the metadata-sized
+    live row count without silent growth or fallback allocation.
     """
 
     def __init__(
@@ -118,17 +119,27 @@ class PrefillWorkspace:
         cp_region_bytes = 2 * self._main_bytes + 2 * self._idx_bytes
 
         align = int(align_bytes)
-        assert align > 0, f"align_bytes must be positive, got {align}"
         union_bytes = max(self._q_bytes, cp_region_bytes)
         union_bytes = ((union_bytes + align - 1) // align) * align
         self._union = torch.empty(union_bytes, dtype=torch.uint8, device=device)
+        # Cache fixed role sub-regions once so hot getters cannot cross into a
+        # neighboring gather/restore buffer even when caller metadata drifts.
+        self._gather_main_region = self._union[
+            self._off_gather_main : self._off_gather_main + self._main_bytes
+        ]
+        self._restore_main_region = self._union[
+            self._off_restore_main : self._off_restore_main + self._main_bytes
+        ]
+        self._gather_idx_region = self._union[
+            self._off_gather_idx : self._off_gather_idx + self._idx_bytes
+        ]
+        self._restore_idx_region = self._union[
+            self._off_restore_idx : self._off_restore_idx + self._idx_bytes
+        ]
 
     def prefill_q(self, num_tokens: int) -> torch.Tensor:
         """``[num_tokens, q_dim]`` bf16 view at the front of the union buffer."""
         num_tokens = int(num_tokens)
-        assert (
-            0 <= num_tokens <= self._q_rows
-        ), f"prefill_q overflow: num_tokens={num_tokens} > capacity {self._q_rows}"
         return (
             self._union[: self._q_bytes]
             .view(torch.bfloat16)
@@ -138,10 +149,7 @@ class PrefillWorkspace:
     def cp_gather_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP gather buffer."""
         return self._cp_view(
-            "cp_gather_main",
-            self._has_main,
-            self._off_gather_main,
-            self._main_bytes,
+            self._gather_main_region,
             rows,
             dim,
             dtype,
@@ -150,10 +158,7 @@ class PrefillWorkspace:
     def cp_restore_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP restore buffer."""
         return self._cp_view(
-            "cp_restore_main",
-            self._has_main,
-            self._off_restore_main,
-            self._main_bytes,
+            self._restore_main_region,
             rows,
             dim,
             dtype,
@@ -162,10 +167,7 @@ class PrefillWorkspace:
     def cp_gather_idx(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the indexer compressor's CP gather buffer."""
         return self._cp_view(
-            "cp_gather_idx",
-            self._has_idx,
-            self._off_gather_idx,
-            self._idx_bytes,
+            self._gather_idx_region,
             rows,
             dim,
             dtype,
@@ -174,10 +176,7 @@ class PrefillWorkspace:
     def cp_restore_idx(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the indexer compressor's CP restore buffer."""
         return self._cp_view(
-            "cp_restore_idx",
-            self._has_idx,
-            self._off_restore_idx,
-            self._idx_bytes,
+            self._restore_idx_region,
             rows,
             dim,
             dtype,
@@ -185,20 +184,12 @@ class PrefillWorkspace:
 
     def _cp_view(
         self,
-        name: str,
-        has: bool,
-        off: int,
-        region_bytes: int,
+        region: torch.Tensor,
         rows: int,
         dim: int,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        assert has, f"{name} region not reserved (reserve_cp=False)"
         rows = int(rows)
         dim = int(dim)
         nbytes = rows * dim * _dtype_size(dtype)
-        assert nbytes <= region_bytes, (
-            f"{name} overflow: need {nbytes} B ({rows}x{dim}x{_dtype_size(dtype)}) "
-            f"> reserved {region_bytes} B"
-        )
-        return self._union[off : off + nbytes].view(dtype).view(rows, dim)
+        return region[:nbytes].view(dtype).view(rows, dim)

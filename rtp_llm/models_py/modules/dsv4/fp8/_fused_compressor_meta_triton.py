@@ -209,11 +209,6 @@ def fused_compressor_slot_mapping(
     if not _TRITON_AVAILABLE:
         raise RuntimeError("triton unavailable")
 
-    assert positions.dim() == 1 and b_idx.dim() == 1
-    assert positions.shape == b_idx.shape
-    assert positions.dtype == torch.int64
-    assert b_idx.dtype == torch.int64
-
     N = positions.shape[0]
     device = positions.device
 
@@ -243,19 +238,8 @@ def fused_compressor_slot_mapping(
         tokens_per_block = 1
         kv_bt_arg = state_bt
 
-    assert state_tokens_per_block > 0, (
-        f"state_tokens_per_block={state_tokens_per_block} must be > 0; "
-        "caller must propagate kernel_seq_size_per_block from CacheConfig"
-    )
-    assert seq_start_per_req is not None and cu_seq_per_req is not None
-    assert seq_start_per_req.dim() == 1 and cu_seq_per_req.dim() == 1
-    assert cu_seq_per_req.numel() == seq_start_per_req.numel() + 1
-    assert 1 <= int(cp_size) and 0 <= int(cp_rank) < int(cp_size)
     cp_sharded = int(cp_size) > 1
     owner_tokens_per_block = int(kv_owner_tokens_per_block or tokens_per_block)
-    if cp_sharded and has_kv:
-        assert owner_tokens_per_block > 0
-        assert owner_tokens_per_block % tokens_per_block == 0
 
     BLOCK = 128
     grid = ((N + BLOCK - 1) // BLOCK,)

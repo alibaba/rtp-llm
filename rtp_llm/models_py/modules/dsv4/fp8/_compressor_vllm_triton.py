@@ -970,9 +970,6 @@ def build_cos_sin_cache(freqs_cis: torch.Tensor) -> Tuple[torch.Tensor, int]:
       - first ``HALF_ROPE = rope_head_dim // 2`` cols  → cos
       - next  ``HALF_ROPE`` cols                       → sin
     """
-    assert (
-        freqs_cis.dtype == torch.complex64
-    ), f"freqs_cis must be complex64, got {freqs_cis.dtype}"
     cos = freqs_cis.real.contiguous().to(torch.float32)
     sin = freqs_cis.imag.contiguous().to(torch.float32)
     cache = torch.cat([cos, sin], dim=-1).contiguous()

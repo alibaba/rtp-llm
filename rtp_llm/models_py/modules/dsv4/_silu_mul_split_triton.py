@@ -84,12 +84,6 @@ def silu_mul_split(
 
     Returns ``out`` (allocated when None).
     """
-    assert gate.shape == up.shape, f"gate {gate.shape} vs up {up.shape}"
-    assert (
-        gate.dtype == torch.float32 and up.dtype == torch.float32
-    ), f"gate {gate.dtype} / up {up.dtype}; expect fp32"
-    assert gate.is_contiguous() and up.is_contiguous(), "gate/up must be contiguous"
-
     # Flatten leading dims; kernel works on [N, D].
     orig_shape = gate.shape
     D = orig_shape[-1]
@@ -97,9 +91,6 @@ def silu_mul_split(
 
     if out is None:
         out = torch.empty_like(gate)
-    else:
-        assert out.shape == gate.shape and out.dtype == torch.float32
-        assert out.is_contiguous()
 
     if N == 0 or D == 0:
         return out
