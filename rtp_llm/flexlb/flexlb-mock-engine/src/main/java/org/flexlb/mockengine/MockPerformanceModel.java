@@ -34,6 +34,32 @@ final class MockPerformanceModel {
      */
     static final int DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0;
 
+    /**
+     * Default per-step decode latency intercept, JSON "decode.step_base_ms":
+     * the production DSv4 fit step_ms = 19.5 + 0.175 x running (task #68
+     * measurement, R^2 = 0.82 on the step caliber). Code default mirrors the
+     * prefill DEFAULT_EXPRESSION pattern: absent config boots on the
+     * production fit, explicit JSON overrides it.
+     */
+    static final double DEFAULT_DECODE_STEP_BASE_MS = 19.5;
+
+    /**
+     * Default per-step decode latency slope per running stream, JSON
+     * "decode.step_per_running_ms" (production fit, task #68).
+     */
+    static final double DEFAULT_DECODE_STEP_PER_RUNNING_MS = 0.175;
+
+    /**
+     * Default MTP acceptance fold, JSON "decode.tokens_per_step": tokens
+     * produced per running stream per decode step. Production DSv4 accepts
+     * 2.54-2.88 tokens/step (slightly lower at full batch; task #68), so the
+     * per-step model advances each stream by this many tokens per step --
+     * per-token pricing overstated low-batch latency ~5.5x and full-batch
+     * ~2.8x because the fixed per_token_ms caliber ignored both MTP folding
+     * and batch amortisation. Must be > 0.
+     */
+    static final double DEFAULT_TOKENS_PER_STEP = 2.6;
+
     private volatile int blockSize;
     private final double sleepScale;
     private final double prefillScale;
@@ -54,12 +80,20 @@ final class MockPerformanceModel {
     // one-request-per-batch behaviour.
     private final int directBatchSizeMax;
     private final PrefillTimeFormula prefillFormula;
+    // Decode step-latency sources, exactly one active per model:
+    //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
+    //     declared channel, kept for suites that price steps themselves), or
+    //   - the linear production fit stepBaseMs + stepPerRunningMs * running
+    //     (decodePoints empty; coefficients default to the production DSv4
+    //     fit, JSON-declared values override).
+    // The runtime override (setOverrideDecodeStepMs) beats both.
     private final List<DecodePoint> decodePoints;
+    private final double stepBaseMs;
+    private final double stepPerRunningMs;
+    // MTP acceptance fold: tokens advanced per running stream per step
+    // (JSON "decode.tokens_per_step", default DEFAULT_TOKENS_PER_STEP).
+    private final double tokensPerStep;
     private final double decodeScale;
-    // Fixed per-token decode latency (ms) from JSON "decode.per_token_ms".
-    // When non-null, decodeMs uses outputLen * perTokenMs instead of the
-    // step_ms_by_batch curve. Null signals "absent in JSON → use curve fallback".
-    private final Double perTokenMs;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
     // behavior, zero change). When true, decode requests parked in the
@@ -91,8 +125,10 @@ final class MockPerformanceModel {
                                  int directBatchSizeMax,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
+                                 double stepBaseMs,
+                                 double stepPerRunningMs,
+                                 double tokensPerStep,
                                  double decodeScale,
-                                 Double perTokenMs,
                                  boolean reportQueuedAsKvAllocated,
                                  double jitterPct,
                                  double cacheAdmissionRate) {
@@ -105,8 +141,10 @@ final class MockPerformanceModel {
         this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
+        this.stepBaseMs = stepBaseMs;
+        this.stepPerRunningMs = stepPerRunningMs;
+        this.tokensPerStep = tokensPerStep;
         this.decodeScale = decodeScale;
-        this.perTokenMs = perTokenMs;
         this.reportQueuedAsKvAllocated = reportQueuedAsKvAllocated;
         this.jitterPct = jitterPct;
         this.cacheAdmissionRate = cacheAdmissionRate;
@@ -132,7 +170,20 @@ final class MockPerformanceModel {
         PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
 
         JsonNode decode = performance.path("decode");
-        Double perTokenMs = decode.has("per_token_ms") ? decode.get("per_token_ms").asDouble() : null;
+        // per_token_ms is REMOVED (task #69, wrong-version-deleted-clean rule):
+        // it was a fixed per-token latency (V3-era no-MTP single-stream caliber)
+        // that overstated low-batch decode ~5.5x and full-batch ~2.8x versus
+        // production. Fail fast with a migration hint instead of silently
+        // reinterpreting it.
+        if (decode.has("per_token_ms")) {
+            throw new IllegalStateException("Performance JSON '" + performanceFile
+                    + "': decode.per_token_ms is removed — decode is now priced per STEP"
+                    + " (production fit step_base_ms=" + DEFAULT_DECODE_STEP_BASE_MS
+                    + " + step_per_running_ms=" + DEFAULT_DECODE_STEP_PER_RUNNING_MS
+                    + " × running, " + DEFAULT_TOKENS_PER_STEP + " tokens/step by default)."
+                    + " Remove per_token_ms to get the production-fit defaults, or declare"
+                    + " decode.step_ms_by_batch / decode.step_base_ms explicitly.");
+        }
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
         List<DecodePoint> points = new ArrayList<>();
@@ -141,20 +192,35 @@ final class MockPerformanceModel {
                 points.add(new DecodePoint(pair.get(0).asInt(), pair.get(1).asDouble()));
             }
         }
-        if (points.isEmpty() && perTokenMs == null) {
-            // No silent 9-point 1 ms/token default: decode timing must be
-            // explicit so a missing curve can never masquerade as a fast
-            // engine (per_token_ms alone is fine — the curve is unused then).
+        boolean hasLinearCoeffs = decode.has("step_base_ms") || decode.has("step_per_running_ms");
+        if (!points.isEmpty() && hasLinearCoeffs) {
+            // Two explicit step-latency declarations are a config conflict;
+            // picking one silently would violate the least-surprise rule.
             throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "' has no decode latency config: set decode.step_ms_by_batch"
-                    + " (batch -> step-ms curve) or decode.per_token_ms (fixed per-token ms).");
+                    + "': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
+                    + " are mutually exclusive — declare exactly one step-latency source.");
         }
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
+        // No decode latency declaration at all -> the linear production fit
+        // (same pattern as the prefill DEFAULT_EXPRESSION: the code default IS
+        // the production DSv4 fit, so an absent decode section boots on real
+        // numbers instead of the former fail-fast). An explicit curve
+        // overrides the linear fit; explicit coefficients override its
+        // default intercept/slope.
+        double stepBaseMs = decode.path("step_base_ms").asDouble(DEFAULT_DECODE_STEP_BASE_MS);
+        double stepPerRunningMs = decode.path("step_per_running_ms")
+                .asDouble(DEFAULT_DECODE_STEP_PER_RUNNING_MS);
+        double tokensPerStep = decode.path("tokens_per_step").asDouble(DEFAULT_TOKENS_PER_STEP);
+        if (tokensPerStep <= 0) {
+            throw new IllegalStateException("Performance JSON '" + performanceFile
+                    + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
+        }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
-                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax, formula, List.copyOf(points),
-                decode.path("scale").asDouble(1.0), perTokenMs,
+                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax, formula,
+                List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
+                decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
     }
 
@@ -308,44 +374,65 @@ final class MockPerformanceModel {
         this.jitterPct = pct;
     }
 
+    /**
+     * Total decode duration for {@code outputLen} tokens at the given running
+     * batch size (external semantics unchanged: "time to produce outputLen
+     * tokens"). Internally per-step: steps = ceil(outputLen / tokensPerStep)
+     * (MTP fold), each step priced by {@link #decodeStepDelayMs}.
+     */
     long decodeMs(int outputLen, int activeBatchSize) {
-        double stepMs;
+        return scaledMs(decodeSteps(outputLen) * stepMs(activeBatchSize) * effectiveDecodeScale());
+    }
+
+    /**
+     * MTP fold: number of decode steps needed to produce {@code outputLen}
+     * tokens at the configured tokens_per_step (ceil — the final partial step
+     * still costs a full step, like a real engine's last draft round).
+     */
+    int decodeSteps(int outputLen) {
+        return (int) Math.ceil(outputLen / tokensPerStep);
+    }
+
+    /** Tokens produced per running stream per decode step (MTP acceptance fold). */
+    double tokensPerStep() {
+        return tokensPerStep;
+    }
+
+    /** Effective decode scale (runtime /set_perf override > JSON config). */
+    private double effectiveDecodeScale() {
+        return overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
+    }
+
+    /**
+     * Raw (pre-scale) per-step decode latency at the given running batch
+     * size, one source: runtime override > explicit step_ms_by_batch curve >
+     * linear production fit (stepBaseMs + stepPerRunningMs × running).
+     */
+    private double stepMs(int activeBatchSize) {
         if (overrideDecodeStepMs != null) {
-            // Runtime override (Python /set_perf decode_step_ms): fixed per-token semantics.
-            stepMs = overrideDecodeStepMs;
-        } else if (perTokenMs != null) {
-            // JSON "decode.per_token_ms": fixed per-token latency (e.g. 45ms ≈ DeepSeek V3 ~22 tok/s).
-            stepMs = perTokenMs;
-        } else {
-            // Fallback: step_ms_by_batch curve interpolation (backward compat for
-            // configs/tests that only set step_ms_by_batch without per_token_ms).
-            stepMs = interpolateStepMs(activeBatchSize);
+            // Runtime override (Python /set_perf decode_step_ms): fixed
+            // per-STEP semantics (one step emits tokens_per_step tokens).
+            return overrideDecodeStepMs;
         }
-        double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
-        return scaledMs(outputLen * stepMs * effectiveScale);
+        if (!decodePoints.isEmpty()) {
+            return interpolateStepMs(activeBatchSize);
+        }
+        return stepBaseMs + stepPerRunningMs * activeBatchSize;
     }
 
     /**
      * Per-step decode delay for the continuous-batching decode loop (production
      * FIFOScheduler semantics): the step unit WITHOUT output-length
-     * multiplication, resolved with the same caliber priority as
-     * {@link #decodeMs} (runtime override > per_token_ms > step_ms_by_batch
-     * curve at the CURRENT running batch size), then scaled by decode scale +
-     * sleep scale and jittered (same formula as {@code scaledMs}). Returns
-     * >= 1 ms. The curve itself already amortizes speculative decoding, so a
-     * per-step consumer needs no separate acceptance-rate modeling.
+     * multiplication, resolved with the same source priority as
+     * {@link #decodeMs} (runtime override > step_ms_by_batch curve at the
+     * CURRENT running batch size > linear production fit), then scaled by
+     * decode scale + sleep scale and jittered (same formula as
+     * {@code scaledMs}). Returns >= 1 ms. Each step advances every running
+     * stream by {@link #tokensPerStep()} tokens — the MTP fold the per-step
+     * loop needs on top of the step duration.
      */
     long decodeStepDelayMs(int activeBatchSize) {
-        double stepMs;
-        if (overrideDecodeStepMs != null) {
-            stepMs = overrideDecodeStepMs;
-        } else if (perTokenMs != null) {
-            stepMs = perTokenMs;
-        } else {
-            stepMs = interpolateStepMs(activeBatchSize);
-        }
-        double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
-        return scaledMs(stepMs * effectiveScale);
+        return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale());
     }
 
     boolean shouldAdmitCache() {

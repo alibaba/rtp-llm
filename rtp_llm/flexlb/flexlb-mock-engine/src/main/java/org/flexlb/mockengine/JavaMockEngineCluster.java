@@ -564,18 +564,22 @@ public final class JavaMockEngineCluster {
         private final ArrayDeque<DecodePendingTask> decodePendingQueue = new ArrayDeque<>();
         private final Object decodeQueueLock = new Object();
         // ── Per-step continuous batching decode engine (production FIFOScheduler
-        // alignment) ──
+        // alignment, task #69 per-step + MTP fold caliber) ──
         // A decode request admitted into a running slot becomes a DecodeStream.
         // The engine advances ALL running streams one step at a time on a single
-        // chained scheduler task: each step emits one token per stream and takes
-        // decodeStepDelayMs(currentRunningCount) — the step_ms_by_batch curve
-        // re-read at every step boundary, so a batch-size change (completion,
-        // top-up, cancel) re-prices the NEXT step. A stream reaching outputLen
-        // completes at that step boundary (terminal ownership claimed under
-        // decodeQueueLock, publishing outside the lock) and the waiting-queue
-        // head is admitted immediately (production top-up semantics). This
-        // replaces the former one-shot sleep: decodeMs(outputLen, batchSizeAtAdmission)
-        // computed once at admission, immune to later concurrency changes.
+        // chained scheduler task: each step emits performance.tokensPerStep()
+        // tokens per stream (MTP acceptance fold, production DSv4 ≈ 2.6) and
+        // takes decodeStepDelayMs(currentRunningCount) — the step latency
+        // (explicit step_ms_by_batch curve or the linear production fit
+        // 19.5 + 0.175 × running) re-read at every step boundary, so a
+        // batch-size change (completion, top-up, cancel) re-prices the NEXT
+        // step. A stream whose step budget (ceil(outputLen / tokensPerStep)
+        // steps, pre-computed at admission) is exhausted completes at that step
+        // boundary (terminal ownership claimed under decodeQueueLock,
+        // publishing outside the lock) and the waiting-queue head is admitted
+        // immediately (production top-up semantics). This replaces the former
+        // one-shot sleep: decodeMs(outputLen, batchSizeAtAdmission) computed
+        // once at admission, immune to later concurrency changes.
         // decode exec statistics now measure the SUM OF ACTUAL STEP DURATIONS
         // (old caliber: one-shot estimate at admission — numbers shift when the
         // running batch size changes mid-flight; both are ms per request).
@@ -594,26 +598,29 @@ public final class JavaMockEngineCluster {
             final MockPerformanceModel.RequestShape shape;
             final long batchId;
             final LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue;
-            /** Tokens left until finished; decremented once per step. */
-            int remainingTokens;
+            /** Steps left until finished: ceil(outputLen / tokensPerStep) at
+             * admission (MTP fold — every step emits tokensPerStep tokens).
+             * Decremented once per step. */
+            int remainingSteps;
             /** Σ actual step durations (the per-step exec caliber). */
             double accumulatedExecMs;
             /** Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first). */
             boolean owned;
             /** True while a step is already executing (tick pending) and this
              * stream joined mid-step: the stream joins the running batch at the
-             * NEXT step boundary and produces its first token there, mirroring
+             * NEXT step boundary and produces its first tokens there, mirroring
              * production where a request arriving during step k first participates
              * in step k+1. Flipped to false by the boundary tick. */
             boolean awaitsFirstStep;
 
             DecodeStream(MockPerformanceModel.RequestShape shape, long batchId,
                          LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
+                         int totalSteps,
                          boolean awaitsFirstStep) {
                 this.shape = shape;
                 this.batchId = batchId;
                 this.responseQueue = responseQueue;
-                this.remainingTokens = shape.outputLen();
+                this.remainingSteps = totalSteps;
                 this.awaitsFirstStep = awaitsFirstStep;
             }
         }
@@ -1875,7 +1882,8 @@ public final class JavaMockEngineCluster {
                     // When no tick is pending, the arm below prices the step with
                     // this stream already in the count.
                     decodeRunning.put(requestId,
-                            new DecodeStream(shape, batchId, responseQueue, decodeStepScheduled));
+                            new DecodeStream(shape, batchId, responseQueue,
+                                    performance.decodeSteps(shape.outputLen()), decodeStepScheduled));
                     stats.decodeAdmitted.increment();
                     scheduleDecodeStepLocked();
                 } else {
@@ -1921,12 +1929,13 @@ public final class JavaMockEngineCluster {
          * Per-step decode loop tick. Runs on the SHARED completion scheduler (one
          * chained task per engine, guarded by decodeStepScheduled, so 1250 engines
          * cost 1250 lightweight pending timers on the completionThreads pool —
-         * no per-engine thread). Advances every running stream by one token;
-         * the step's duration was locked in when it was ARMED (the batch size at
-         * that boundary prices the whole step — see pendingStepDelayMs), and a
-         * batch-size change (completion, top-up, cancel) re-prices the NEXT
-         * step. Streams that joined mid-step (awaitsFirstStep) first participate
-         * at the next boundary. Streams that hit outputLen complete here; the
+         * no per-engine thread). Advances every running stream by one step
+         * (tokensPerStep tokens per stream, MTP fold); the step's duration was
+         * locked in when it was ARMED (the batch size at that boundary prices
+         * the whole step — see pendingStepDelayMs), and a batch-size change
+         * (completion, top-up, cancel) re-prices the NEXT step. Streams that
+         * joined mid-step (awaitsFirstStep) first participate at the next
+         * boundary. Streams that exhaust their step budget complete here; the
          * waiting batch is topped up immediately (production top-up semantics),
          * then the next step is chained. Terminal bookkeeping is claimed under
          * decodeQueueLock (racing cancel); the completion frame, stats and
@@ -1950,15 +1959,18 @@ public final class JavaMockEngineCluster {
                     if (stream.awaitsFirstStep) {
                         // Joined while this step was already in flight (admission
                         // or cancel-path top-up saw decodeStepScheduled=true): it
-                        // did not participate in THIS step — no token advance, no
+                        // did not participate in THIS step — no step advance, no
                         // exec time. It joins the batch at the next boundary,
                         // which scheduleDecodeStepLocked prices with the new count.
                         stream.awaitsFirstStep = false;
                         continue;
                     }
-                    stream.remainingTokens--;
+                    // One step = tokensPerStep tokens (MTP fold): the step budget
+                    // was pre-computed as ceil(outputLen / tokensPerStep) at
+                    // admission, so the tick only decrements whole steps.
+                    stream.remainingSteps--;
                     stream.accumulatedExecMs += stepDelayMs;
-                    if (stream.remainingTokens <= 0) {
+                    if (stream.remainingSteps <= 0) {
                         it.remove();
                         finished.add(stream);
                     }
@@ -2032,7 +2044,9 @@ public final class JavaMockEngineCluster {
                 // for that boundary like a mid-step admission.
                 decodeRunning.put(candidateId,
                         new DecodeStream(candidate.shape(), candidate.batchId(),
-                                candidate.responseQueue(), decodeStepScheduled));
+                                candidate.responseQueue(),
+                                performance.decodeSteps(candidate.shape().outputLen()),
+                                decodeStepScheduled));
                 stats.decodeAdmitted.increment();
                 recordLifecycleRunning(candidateId);
                 lastEnqueueTime.set(System.nanoTime());
@@ -2040,7 +2054,8 @@ public final class JavaMockEngineCluster {
         }
 
         /**
-         * Claim the terminal transition for a stream that just hit outputLen.
+         * Claim the terminal transition for a stream that just exhausted its
+         * step budget (outputLen tokens via the MTP fold).
          * MUST be called holding decodeQueueLock. Whichever of this path or
          * cancel() removes the runningTasks entry first owns the terminal: the
          * winner releases the slot/KV/pendingRequests counters; the loser does
