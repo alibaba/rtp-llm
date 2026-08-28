@@ -34,6 +34,27 @@ def _inputs_for_shape(shape, dtype=torch.bfloat16):
 
 
 class FlyDSLChunkGDNShapeGateTest(unittest.TestCase):
+    def setUp(self):
+        chunk._use_flydsl_chunk_gdn.cache_clear()
+        chunk._is_flydsl_chunk_gdn_importable.cache_clear()
+        self.addCleanup(chunk._use_flydsl_chunk_gdn.cache_clear)
+        self.addCleanup(chunk._is_flydsl_chunk_gdn_importable.cache_clear)
+
+    def test_missing_flydsl_bridge_warns_once_and_disables_path(self):
+        with (
+            mock.patch.dict(os.environ, {"USE_FLYDSL": "1"}, clear=False),
+            mock.patch.object(
+                chunk.importlib,
+                "import_module",
+                side_effect=ImportError("missing bridge"),
+            ) as import_module,
+            self.assertLogs(chunk.logger.name, level="WARNING") as logs,
+        ):
+            self.assertFalse(chunk.is_flydsl_chunk_gdn_enabled())
+            self.assertFalse(chunk.is_flydsl_chunk_gdn_enabled())
+        import_module.assert_called_once()
+        self.assertIn("falling back to the Triton", "\n".join(logs.output))
+
     def test_all_qwen35_36_target_shapes_recognized(self):
         self.assertEqual(
             chunk.FLYDSL_CHUNK_GDN_TARGET_SHAPES, EXPECTED_QWEN35_36_RUNTIME_SHAPES
