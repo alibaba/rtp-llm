@@ -21,6 +21,12 @@ final class RequestMetricsOrchestrator {
         boolean isShuttingDown();
 
         int liveRequestCount();
+
+        /**
+         * Age (ms) of the oldest live request slot, 0 when the ledger is
+         * empty — the master-side leak signature gauge.
+         */
+        long oldestLiveSlotAgeMs();
     }
 
     private final Lifecycle lifecycle;
@@ -50,6 +56,12 @@ final class RequestMetricsOrchestrator {
         try {
             reporter.reportSchedulerInflightSize(
                     lifecycle.liveRequestCount());
+            // Age of the oldest scheduler-ledger inflight entry: with a
+            // healthy TTL the size gauge alone cannot distinguish "busy"
+            // from "leaking"; a max age creeping toward the TTL window is
+            // the leak signature.
+            reporter.reportSchedulerInflightMaxAgeMs(
+                    lifecycle.oldestLiveSlotAgeMs());
         } catch (RuntimeException failure) {
             warnIsolated(
                     "Failed to report scheduler inflight metrics", failure);
