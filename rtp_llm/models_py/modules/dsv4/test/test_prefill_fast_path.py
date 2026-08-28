@@ -106,6 +106,44 @@ class _FakeV4:
 
 
 class PrefillFastPathTest(unittest.TestCase):
+    def test_workspace_is_allocated_before_cp_setup_and_embedding(self):
+        v4 = _FakeV4()
+        events = []
+        original_embed = v4.embed
+
+        def make_workspace(*args, **kwargs):
+            events.append("workspace")
+            return object()
+
+        def propagate_cp(cp_ctx):
+            events.append("propagate_cp")
+
+        def embed(input_ids):
+            events.append("embed")
+            return original_embed(input_ids)
+
+        with patch.object(
+            prefill_forward, "PrefillWorkspace", side_effect=make_workspace
+        ), patch.object(
+            v4, "_propagate_cp_ctx", side_effect=propagate_cp
+        ), patch.object(
+            v4, "embed", side_effect=embed
+        ), patch.object(
+            prefill_forward, "build_and_propagate_prefill_meta_fp8"
+        ), patch.object(
+            prefill_forward, "clear_prefill_meta_shared_fp8"
+        ):
+            prefill_forward.forward_layers(
+                v4,
+                kv_cache=None,
+                input_ids=torch.tensor([3, 4], dtype=torch.long),
+                positions=torch.tensor([7, 8], dtype=torch.long),
+                cu_seqlens=torch.tensor([0, 2], dtype=torch.long),
+                block_tables_by_type=None,
+            )
+
+        self.assertEqual(events, ["workspace", "propagate_cp", "embed"])
+
     def test_cp_prepare_skips_dead_framework_positions(self):
         v4 = SimpleNamespace(_cp_info=None, _cp_size=1)
         attn = SimpleNamespace(
