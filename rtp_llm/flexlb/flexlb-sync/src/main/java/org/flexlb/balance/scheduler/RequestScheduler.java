@@ -45,6 +45,8 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
     private static final long MAX_BACKOFF_MS = 50L;
     private static final long FALLBACK_PROBE_INTERVAL_NANOS =
             TimeUnit.MILLISECONDS.toNanos(2L);
+    private static final long ATTEMPT_FAILURE_LOG_INTERVAL_NANOS =
+            TimeUnit.SECONDS.toNanos(5L);
     private static final int COMMIT_TURN_STRIPES = 256;
     private final ConfigService configService;
     private final Router router;
@@ -55,6 +57,11 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
     private final ScheduledThreadPoolExecutor executor;
     private final AtomicInteger waitingCount = new AtomicInteger();
     private final AtomicLong sequence = new AtomicLong();
+    private final AtomicLong attemptFailureCount = new AtomicLong();
+    private final AtomicLong recoveredActiveClaimCount = new AtomicLong();
+    private final AtomicLong lastAttemptFailureLogNanos =
+            new AtomicLong(Long.MIN_VALUE);
+    private final AtomicLong lastLoggedAttemptFailureCount = new AtomicLong();
     private final AtomicBoolean closed = new AtomicBoolean();
     private final ReentrantReadWriteLock attemptGate = new ReentrantReadWriteLock(true);
     private final ReentrantLock[] commitTurns = new ReentrantLock[COMMIT_TURN_STRIPES];
@@ -133,6 +140,13 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
         }
     }
     private void attempt(Waiter waiter, WaitLane source) {
+        try {
+            attemptUnderGate(waiter, source);
+        } catch (Throwable failure) {
+            handleAttemptFailure(waiter, source, failure);
+        }
+    }
+    private void attemptUnderGate(Waiter waiter, WaitLane source) {
         attemptGate.readLock().lock();
         try {
             if (closed.get()) { stop(waiter, source, shutdownError()); }
@@ -439,7 +453,14 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
         if (lane == null) { return; }
         if (lane.waiters.isEmpty() && lane.active == null) {
             cancelProbe(lane);
-            if (lanes.remove(lane.key, lane)) { lane.unsubscribe.run(); }
+            if (lanes.remove(lane.key, lane)) {
+                try {
+                    lane.unsubscribe.run();
+                } catch (Throwable failure) {
+                    Logger.warn("PLACEMENT_LANE_UNSUBSCRIBE_FAILED lane={}",
+                            lane.key, failure);
+                }
+            }
         } else if (lane.active == null) {
             refreshPolicyProbe(lane);
             if (!hasProbe(lane)) { scheduleProbe(lane, 0L); }
@@ -570,6 +591,109 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
             scheduleFallbackPump();
         }
         if (head != null) { attempt(head, lane); }
+    }
+
+    /** An unexpected attempt failure must not retain an active turn or a future. */
+    private void handleAttemptFailure(
+            Waiter waiter, WaitLane source, Throwable failure) {
+        AttemptRecovery recovery;
+        try {
+            recovery = recoverAttempt(waiter, source);
+        } catch (Throwable recoveryFailure) {
+            failure.addSuppressed(recoveryFailure);
+            recovery = AttemptRecovery.failed();
+        }
+        logAttemptFailure(waiter, source, recovery, failure);
+    }
+
+    /** Exceptional only: recover the exact owner even after a lane migration. */
+    private AttemptRecovery recoverAttempt(Waiter waiter, WaitLane source) {
+        List<WaitLane> recovered = new ArrayList<>();
+        WaitResource currentKey = null;
+        int currentWaiters = 0;
+        String retry = "NONE";
+        synchronized (laneLock) {
+            for (WaitLane lane : lanes.values()) {
+                if (lane.active == waiter) {
+                    lane.active = null;
+                    recovered.add(lane);
+                }
+            }
+            WaitLane current = waiter.lane;
+            boolean currentMember = current != null
+                    && current.waiters.contains(waiter);
+            if (current != null) {
+                currentKey = current.key;
+                currentWaiters = current.waiters.size();
+            }
+            for (WaitLane lane : recovered) {
+                if (lane != current) {
+                    advance(lane);
+                }
+            }
+            if (source != null && source != current && source.active == null) {
+                advance(source);
+            }
+            if (!waiter.owned.get() || waiter.future.isDone()) {
+                detach(waiter);
+                advance(current);
+            } else if (currentMember) {
+                if (current.active == null && !hasProbe(current)) {
+                    long retryDelayMs = current.backoffMs;
+                    current.backoffMs = Math.min(
+                            MAX_BACKOFF_MS, retryDelayMs * 2L);
+                    scheduleProbe(current, retryDelayMs);
+                    retry = "LANE";
+                } else {
+                    retry = "QUEUED";
+                }
+            } else {
+                if (current != null) { detach(waiter); }
+                park(waiter, null, waiter.recoveryResource(), false);
+                retry = "RECOVERY_LANE";
+            }
+        }
+        recoveredActiveClaimCount.addAndGet(recovered.size());
+        return new AttemptRecovery(
+                recovered.stream().map(lane -> lane.key).toList(),
+                currentKey, currentWaiters, retry);
+    }
+
+    private void logAttemptFailure(
+            Waiter waiter,
+            WaitLane source,
+            AttemptRecovery recovery,
+            Throwable failure) {
+        long total = attemptFailureCount.incrementAndGet();
+        long now = System.nanoTime();
+        if (!claimLog(lastAttemptFailureLogNanos, now,
+                ATTEMPT_FAILURE_LOG_INTERVAL_NANOS)) { return; }
+        long previouslyLogged = lastLoggedAttemptFailureCount.getAndSet(total);
+        Logger.error("PLACEMENT_ATTEMPT_UNCAUGHT total={} suppressed={} "
+                        + "recovered_claim_total={} request_id={} sequence={} "
+                        + "priority={} source={} current_lane={} current_waiters={} "
+                        + "recovered_lanes={} retry={} owned={} "
+                        + "future_done={}",
+                total, Math.max(0L, total - previouslyLogged - 1L),
+                recoveredActiveClaimCount.get(), waiter.requestId,
+                waiter.sequence, waiter.priority, source == null ? null : source.key,
+                recovery.currentLane(), recovery.currentWaiters(),
+                recovery.recoveredLanes(), recovery.retry(),
+                waiter.owned.get(), waiter.future.isDone(), failure);
+    }
+
+    private static boolean claimLog(
+            AtomicLong logSlot, long now, long intervalNanos) {
+        while (true) {
+            long previous = logSlot.get();
+            if (previous != Long.MIN_VALUE
+                    && now - previous < intervalNanos) {
+                return false;
+            }
+            if (logSlot.compareAndSet(previous, now)) {
+                return true;
+            }
+        }
     }
 
     static long saturatingAddNanos(long nowNanos, long delayNanos) {
@@ -740,18 +864,40 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
     private static final class Waiter {
         private final BalanceContext context;
         private final CompletableFuture<Response> future;
+        private final long requestId;
         private final long sequence;
         private final int priority;
         private final boolean priorityOrdering;
         private final AtomicBoolean owned = new AtomicBoolean(true);
         private long reselectNotAfterMs = Long.MAX_VALUE;
         private WaitLane lane;
+        private WaitResource recoveryResource;
         private Waiter(BalanceContext context, CompletableFuture<Response> future,
                        long sequence, boolean priorityOrdering) {
             this.context = context;
             this.future = future; this.sequence = sequence;
+            this.requestId = context.getRequest().getRequestId();
             this.priority = context.getPriority();
             this.priorityOrdering = priorityOrdering;
+        }
+        private WaitResource recoveryResource() {
+            if (recoveryResource == null) {
+                recoveryResource = new WaitResource(
+                        null, "attempt-recovery-" + sequence, null);
+            }
+            return recoveryResource;
+        }
+    }
+    private record AttemptRecovery(
+            List<WaitResource> recoveredLanes,
+            WaitResource currentLane,
+            int currentWaiters,
+            String retry) {
+        private AttemptRecovery {
+            recoveredLanes = List.copyOf(recoveredLanes);
+        }
+        private static AttemptRecovery failed() {
+            return new AttemptRecovery(List.of(), null, -1, "RECOVERY_FAILED");
         }
     }
     private static final class WaitLane {

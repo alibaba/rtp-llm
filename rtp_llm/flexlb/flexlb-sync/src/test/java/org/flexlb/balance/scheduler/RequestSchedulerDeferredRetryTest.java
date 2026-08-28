@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -254,6 +255,187 @@ class RequestSchedulerDeferredRetryTest {
 
     @Test
     @Timeout(30)
+    void probeFailureBeforeRoutingReturnsLaneOwnershipToTheQueue()
+            throws Exception {
+        ProbeFailureRouter router = new ProbeFailureRouter();
+        SchedulerFixture fixture = fixture(router);
+
+        fixture.scheduler.submit(context(
+                new FailOnceOnProbeContext(),
+                ProbeFailureRouter.HEAD_REQUEST_ID,
+                50,
+                Long.MAX_VALUE,
+                fixture.config));
+        fixture.scheduler.submit(context(
+                ProbeFailureRouter.TAIL_REQUEST_ID,
+                50,
+                Long.MAX_VALUE,
+                fixture.config));
+
+        assertTrue(router.tailRetried.await(1, TimeUnit.SECONDS),
+                "an uncaught probe failure retained lane.active and stranded "
+                        + "the next waiter");
+    }
+
+    @Test
+    @Timeout(30)
+    void firstAttemptPostFallbackFailureCannotStrandTheLane()
+            throws Exception {
+        ProbeFailureRouter router = new ProbeFailureRouter();
+        AdmissionFallback armFailure = (context, future) -> {
+            if (context instanceof PostFallbackFailureContext fault) {
+                fault.arm();
+            }
+            return false;
+        };
+        SchedulerFixture fixture = fixture(router, armFailure);
+        PostFallbackFailureContext head = new PostFallbackFailureContext();
+
+        CompletableFuture<Response> returned = null;
+        Throwable escaped = null;
+        try {
+            returned = fixture.scheduler.submit(context(
+                    head,
+                    ProbeFailureRouter.HEAD_REQUEST_ID,
+                    50,
+                    Long.MAX_VALUE,
+                    fixture.config));
+        } catch (Throwable failure) {
+            escaped = failure;
+        }
+        CompletableFuture<Response> headFuture = returned != null
+                ? returned
+                : fixture.lifecycle.requestSlot(
+                        ProbeFailureRouter.HEAD_REQUEST_ID).future();
+        fixture.scheduler.submit(context(
+                ProbeFailureRouter.TAIL_REQUEST_ID,
+                50,
+                Long.MAX_VALUE,
+                fixture.config));
+
+        boolean tailRetried = router.tailRetried.await(1, TimeUnit.SECONDS);
+        Throwable escapedFailure = escaped;
+        assertAll(
+                () -> assertNull(escapedFailure,
+                        "post-fallback failure escaped submit"),
+                () -> assertTrue(headFuture.isDone(),
+                        "post-fallback failure silently left its future pending"),
+                () -> assertTrue(tailRetried,
+                        "post-fallback failure retained lane.active and stranded the tail"));
+    }
+
+    @Test
+    @Timeout(30)
+    void migratedWaiterFailureReleasesBothLaneOwners()
+            throws Exception {
+        MigratingFailureRouter router = new MigratingFailureRouter();
+        AtomicInteger headFallbacks = new AtomicInteger();
+        AdmissionFallback failAfterMigration = (context, future) -> {
+            if (context instanceof PostFallbackFailureContext fault
+                    && headFallbacks.incrementAndGet() == 2) {
+                fault.arm();
+            }
+            return false;
+        };
+        SchedulerFixture fixture = fixture(router, failAfterMigration);
+        PostFallbackFailureContext head = new PostFallbackFailureContext();
+
+        fixture.scheduler.submit(context(
+                head, MigratingFailureRouter.HEAD_REQUEST_ID,
+                50, Long.MAX_VALUE, fixture.config));
+        fixture.scheduler.submit(context(
+                MigratingFailureRouter.SOURCE_TAIL_REQUEST_ID,
+                50, Long.MAX_VALUE, fixture.config));
+        fixture.scheduler.submit(context(
+                MigratingFailureRouter.TARGET_TAIL_REQUEST_ID,
+                50, Long.MAX_VALUE, fixture.config));
+
+        boolean sourceRetried = router.sourceTailRetried.await(
+                1, TimeUnit.SECONDS);
+        boolean targetRetried = router.targetTailRetried.await(
+                1, TimeUnit.SECONDS);
+        CompletableFuture<Response> headFuture = fixture.lifecycle.requestSlot(
+                MigratingFailureRouter.HEAD_REQUEST_ID).future();
+        assertAll(
+                () -> assertTrue(headFuture.isDone(),
+                        "failed migrated waiter remained owned"),
+                () -> assertTrue(sourceRetried,
+                        "source lane owner was not returned"),
+                () -> assertTrue(targetRetried,
+                        "target lane owner was not returned"));
+    }
+
+    @Test
+    @Timeout(30)
+    void telemetryErrorAfterCommitPreservesCanonicalItem()
+            throws Exception {
+        BatchSchedulerReporter failingReporter = new BatchSchedulerReporter(
+                new NoOpFlexMonitor()) {
+            @Override
+            public void reportRouteSubmitTimeMs(
+                    String role, String engineIp, long submitMs) {
+                throw new AssertionError("synthetic telemetry failure");
+            }
+        };
+        SchedulerFixture fixture = fixture(
+                new CommittedRouter(), failingReporter);
+
+        CompletableFuture<Response> returned = null;
+        Throwable escaped = null;
+        try {
+            returned = fixture.scheduler.submit(context(
+                    CommittedRouter.REQUEST_ID,
+                    50, Long.MAX_VALUE, fixture.config));
+        } catch (Throwable failure) {
+            escaped = failure;
+        }
+        RequestSlot slot = fixture.lifecycle.requestSlot(
+                CommittedRouter.REQUEST_ID);
+        CompletableFuture<Response> canonicalFuture = returned != null
+                ? returned : slot.future();
+        Throwable escapedFailure = escaped;
+        awaitCondition(() -> fixture.scheduler.getQueuedRequestCount() == 0);
+
+        assertAll(
+                () -> assertNull(escapedFailure,
+                        "telemetry failure escaped after canonical commit"),
+                () -> assertFalse(canonicalFuture.isDone(),
+                        "telemetry failure published a terminal response"),
+                () -> assertNotNull(activeItem(slot),
+                        "telemetry failure removed the canonical committed item"));
+    }
+
+    @Test
+    @Timeout(30)
+    void detachedFailuresShareOneBoundedRetryPump()
+            throws Exception {
+        int requests = 64;
+        List<PermanentPreconditionFailureContext> contexts = new ArrayList<>();
+        SchedulerFixture fixture = fixture(new AlwaysDeferredRouter(), requests + 16);
+        for (int index = 0; index < requests; index++) {
+            PermanentPreconditionFailureContext context =
+                    new PermanentPreconditionFailureContext();
+            contexts.add(context);
+            fixture.scheduler.submit(context(
+                    context, 600L + index,
+                    50, Long.MAX_VALUE, fixture.config));
+        }
+
+        int before = contexts.stream()
+                .mapToInt(PermanentPreconditionFailureContext::attempts)
+                .sum();
+        TimeUnit.MILLISECONDS.sleep(200L);
+        int retries = contexts.stream()
+                .mapToInt(PermanentPreconditionFailureContext::attempts)
+                .sum() - before;
+
+        assertTrue(retries > 0 && retries <= 140,
+                () -> "detached waiters made " + retries
+                        + " retries in 200ms; expected one shared 2ms pump");
+    }
+
+    @Test
+    @Timeout(30)
     void crossRoleWaitLanesCannotMutuallyBlockTheOldestRequest()
             throws Exception {
         CrossRoleLaneRouter router = new CrossRoleLaneRouter(true);
@@ -458,6 +640,22 @@ class RequestSchedulerDeferredRetryTest {
         return fixture(router, 64);
     }
 
+    private SchedulerFixture fixture(
+            Router router, AdmissionFallback admissionFallback) {
+        SchedulerFixture fixture = new SchedulerFixture(
+                router, 64, admissionFallback);
+        fixtures.add(fixture);
+        return fixture;
+    }
+
+    private SchedulerFixture fixture(
+            Router router, BatchSchedulerReporter reporter) {
+        SchedulerFixture fixture = new SchedulerFixture(
+                router, 64, (context, future) -> false, reporter);
+        fixtures.add(fixture);
+        return fixture;
+    }
+
     private SchedulerFixture fixture(Router router, int maxOutstanding) {
         SchedulerFixture fixture = new SchedulerFixture(router, maxOutstanding);
         fixtures.add(fixture);
@@ -473,18 +671,71 @@ class RequestSchedulerDeferredRetryTest {
             int priority,
             long expiresAtMs,
             FlexlbConfig config) {
+        return context(new BalanceContext(), requestId, priority, expiresAtMs, config);
+    }
+
+    private static BalanceContext context(
+            BalanceContext context,
+            long requestId,
+            int priority,
+            long expiresAtMs,
+            FlexlbConfig config) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128L);
         request.setMaxNewTokens(8);
         request.setPriority(priority);
         request.setModel("deferred-retry-contract");
-        BalanceContext context = new BalanceContext();
         context.setConfig(config);
         context.setRequest(request);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(priority, expiresAtMs));
         return context;
+    }
+
+    private static final class FailOnceOnProbeContext extends BalanceContext {
+        private final AtomicInteger expirationChecks = new AtomicInteger();
+
+        @Override
+        public boolean requestExpired(long nowMs) {
+            if (expirationChecks.incrementAndGet() == 4) {
+                throw new AssertionError("synthetic probe failure");
+            }
+            return false;
+        }
+    }
+
+    private static final class PostFallbackFailureContext extends BalanceContext {
+        private final AtomicInteger armed = new AtomicInteger();
+
+        private void arm() {
+            armed.set(1);
+        }
+
+        @Override
+        public long getRequestId() {
+            if (armed.compareAndSet(1, 0)) {
+                throw new AssertionError("synthetic post-fallback failure");
+            }
+            return super.getRequestId();
+        }
+    }
+
+    private static final class PermanentPreconditionFailureContext
+            extends BalanceContext {
+        private final AtomicInteger expirationChecks = new AtomicInteger();
+
+        @Override
+        public boolean requestExpired(long nowMs) {
+            if (expirationChecks.incrementAndGet() > 1) {
+                throw new AssertionError("permanent precondition failure");
+            }
+            return false;
+        }
+
+        private int attempts() {
+            return expirationChecks.get() - 1;
+        }
     }
 
     private static BatchItem activeItem(RequestSlot slot) {
@@ -521,6 +772,23 @@ class RequestSchedulerDeferredRetryTest {
         private final FlexlbConfig config;
 
         private SchedulerFixture(Router router, int maxOutstanding) {
+            this(router, maxOutstanding, (context, future) -> false,
+                    new BatchSchedulerReporter(new NoOpFlexMonitor()));
+        }
+
+        private SchedulerFixture(
+                Router router,
+                int maxOutstanding,
+                AdmissionFallback admissionFallback) {
+            this(router, maxOutstanding, admissionFallback,
+                    new BatchSchedulerReporter(new NoOpFlexMonitor()));
+        }
+
+        private SchedulerFixture(
+                Router router,
+                int maxOutstanding,
+                AdmissionFallback admissionFallback,
+                BatchSchedulerReporter batchReporter) {
             config = SchedulingTestConfig.batchConfig();
             SchedulingTestConfig.usePriorityQueue(config);
             SchedulingTestConfig.useQueueCapacity(config)
@@ -531,8 +799,6 @@ class RequestSchedulerDeferredRetryTest {
                     return config;
                 }
             };
-            BatchSchedulerReporter batchReporter =
-                    new BatchSchedulerReporter(new NoOpFlexMonitor());
             lifecycle = new RequestLifecycleCoordinator(
                     configService,
                     batchReporter,
@@ -550,13 +816,12 @@ class RequestSchedulerDeferredRetryTest {
                         throw new AssertionError(
                                 "no endpoint is constructed in this fixture");
                     });
-            AdmissionFallback noFallback = (context, future) -> false;
             scheduler = new RequestScheduler(
                     configService,
                     router,
                     endpointRegistry,
                     batchReporter,
-                    noFallback,
+                    admissionFallback,
                     lifecycle);
         }
 
@@ -603,6 +868,93 @@ class RequestSchedulerDeferredRetryTest {
             }
             return new QueueRoutingResult.Rejected(
                     rejected(StrategyErrorType.INVALID_REQUEST));
+        }
+    }
+
+    private static final class ProbeFailureRouter implements Router {
+        private static final long HEAD_REQUEST_ID = 501L;
+        private static final long TAIL_REQUEST_ID = 502L;
+
+        private final AtomicInteger headAttempts = new AtomicInteger();
+        private final AtomicInteger tailAttempts = new AtomicInteger();
+        private final CountDownLatch tailRetried = new CountDownLatch(1);
+
+        @Override
+        public Response routeDirect(BalanceContext context) {
+            throw new AssertionError("QUEUE contract must not route DIRECT");
+        }
+
+        @Override
+        public QueueRoutingResult routeForQueue(BalanceContext context) {
+            if (context.getRequestId() == HEAD_REQUEST_ID) {
+                return headAttempts.incrementAndGet() == 1
+                        ? new QueueRoutingResult.Deferred(RoleType.PREFILL, "probe-failure")
+                        : new QueueRoutingResult.Rejected(
+                                rejected(StrategyErrorType.INVALID_REQUEST));
+            }
+            if (tailAttempts.incrementAndGet() > 1) {
+                tailRetried.countDown();
+            }
+            return new QueueRoutingResult.Deferred(RoleType.PREFILL, "probe-failure");
+        }
+    }
+
+    private static final class MigratingFailureRouter implements Router {
+        private static final long HEAD_REQUEST_ID = 511L;
+        private static final long SOURCE_TAIL_REQUEST_ID = 512L;
+        private static final long TARGET_TAIL_REQUEST_ID = 513L;
+
+        private final AtomicInteger headAttempts = new AtomicInteger();
+        private final AtomicInteger sourceTailAttempts = new AtomicInteger();
+        private final AtomicInteger targetTailAttempts = new AtomicInteger();
+        private final CountDownLatch sourceTailRetried = new CountDownLatch(1);
+        private final CountDownLatch targetTailRetried = new CountDownLatch(1);
+
+        @Override
+        public Response routeDirect(BalanceContext context) {
+            throw new AssertionError("QUEUE contract must not route DIRECT");
+        }
+
+        @Override
+        public QueueRoutingResult routeForQueue(BalanceContext context) {
+            long requestId = context.getRequestId();
+            if (requestId == HEAD_REQUEST_ID) {
+                int attempt = headAttempts.incrementAndGet();
+                if (attempt > 2) {
+                    return new QueueRoutingResult.Rejected(
+                            rejected(StrategyErrorType.INVALID_REQUEST));
+                }
+                return new QueueRoutingResult.Deferred(
+                        attempt == 1 ? RoleType.PREFILL : RoleType.DECODE,
+                        "migration-failure");
+            }
+            AtomicInteger attempts = requestId == SOURCE_TAIL_REQUEST_ID
+                    ? sourceTailAttempts : targetTailAttempts;
+            CountDownLatch retried = requestId == SOURCE_TAIL_REQUEST_ID
+                    ? sourceTailRetried : targetTailRetried;
+            if (attempts.incrementAndGet() > 1) {
+                retried.countDown();
+            }
+            RoleType role = requestId == SOURCE_TAIL_REQUEST_ID
+                    ? RoleType.PREFILL : RoleType.DECODE;
+            return new QueueRoutingResult.Deferred(role, "migration-failure");
+        }
+    }
+
+    private static final class CommittedRouter implements Router {
+        private static final long REQUEST_ID = 521L;
+        private final PrefillEndpoint endpoint =
+                MigratingRouter.availableEndpoint("telemetry-prefill");
+
+        @Override
+        public Response routeDirect(BalanceContext context) {
+            throw new AssertionError("QUEUE contract must not route DIRECT");
+        }
+
+        @Override
+        public QueueRoutingResult routeForQueue(BalanceContext context) {
+            return MigratingRouter.admittedOn(
+                    context, endpoint, "telemetry-prefill", 8021);
         }
     }
 
