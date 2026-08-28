@@ -1694,10 +1694,14 @@ def main():
         lines.extend(emit_grid(queue_containers))
         lines.append("")
 
-    # 2.1 队列 Top/Bottom-5 引擎（queue_top_bottom_ts；命名规范
-    # 「<侧>-<队列> Top-5 / Bottom-5」，每图 5 条线按引擎 IP 标注。
-    # 旧 aggregate 无此键 -> 整节省略（P master-batcher Top-5 由队列节
-    # 退化路径渲染）。
+    # 2.1 队列 Top/Bottom-5 引擎同图对比（queue_top_bottom_ts；每队列
+    # 一张合并图：Top-5（负载最重）与 Bottom-5（最轻）同图，图例带
+    # Top / Bottom / Top+Bottom 前缀。引擎数 <10 时 top 与 bottom 集合
+    # 可能重叠，交集引擎只画一条曲线（标 Top+Bottom），避免同引擎双线；
+    # 引擎总数 <=5 时两集合完全重合，全部标 Top+Bottom。颜色：tone 全空
+    # 走 PALETTE 分段——top 段 idx 0-4（前 5 色）、bottom 段 idx 5-9
+    # （后 5 色），一图内 10 色不撞。旧 aggregate 无此键 -> 整节省略
+    # （P master-batcher Top-5 由队列节退化路径渲染）。
     if queue_top_bottom_ts:
         tb_containers = []
         # (键, 标题基名, y 轴语义 + 数据源说明)
@@ -1736,49 +1740,76 @@ def main():
                 "全零 = 引擎侧无等待积压",
             ),
         )
-        TB_COLORS = ["danger", "warning", "info", "success", "neutral"]
+
+        def _tb_ips(rows):
+            """从 rows 提取保序去重的引擎 IP 列表（插入序 = 峰值序）。"""
+            out = []
+            for r in rows:
+                for k in r:
+                    if k != "t" and k not in out:
+                        out.append(k)
+            return out
+
         for tb_key, tb_title, tb_cap in TB_META:
             tb_entry = queue_top_bottom_ts.get(tb_key) or {}
-            for tb_kind, tb_kind_label in (("top", "Top-5"), ("bottom", "Bottom-5")):
-                tb_rows = tb_entry.get(tb_kind) or []
-                if not tb_rows:
+            top_rows = tb_entry.get("top") or []
+            bot_rows = tb_entry.get("bottom") or []
+            top_ips = _tb_ips(top_rows)[:5]
+            bot_ips = _tb_ips(bot_rows)[:5]
+            if not top_ips and not bot_ips:
+                continue
+            bot_set = set(bot_ips)
+            top_set = set(top_ips)
+            # 合并序列：Top 集合（含交集，标 Top / Top+Bottom）在前，
+            # Bottom 减交集（纯 Bottom）在后；交集引擎只画一条线。
+            merged = []
+            for ip in top_ips:
+                tag = ("Top+Bottom·" if ip in bot_set else "Top·") + ip
+                merged.append((ip, tag, top_rows))
+            for ip in bot_ips:
+                if ip in top_set:
                     continue
-                tb_ips = []
-                for r in tb_rows:
-                    for k in r:
-                        if k != "t" and k not in tb_ips:
-                            tb_ips.append(k)
-                tb_ips = tb_ips[:5]
-                if not tb_ips:
-                    continue
-                tb_cats = const(
-                    "tbT" + tb_key + tb_kind,
-                    str_arr(sparse_cats([r.get("t", 0) for r in tb_rows])),
-                )
-                tb_series = []
-                for i, ip in enumerate(tb_ips):
-                    tb_series.append(
-                        (
-                            "tb%d" % i,
-                            ip,
-                            const(
-                                "tbV" + tb_key + tb_kind + str(i),
-                                num_arr([r.get(ip, 0) or 0 for r in tb_rows]),
-                            ),
-                            TB_COLORS[i % len(TB_COLORS)],
-                        )
-                    )
-                tb_containers.append(
-                    emit_container(
-                        tb_title + " " + tb_kind_label,
-                        "x = 压测时间（s，5s 窗口采样）；y = " + tb_cap,
-                        emit_chart("LineChart", tb_cats, 230, tb_series),
+                merged.append((ip, "Bottom·" + ip, bot_rows))
+            if not merged:
+                continue
+            # x 轴：优先 top rows 的 t 网格（实测 top/bottom 一致）；
+            # bottom-only 曲线若 t 网格不同则按前向 step 对齐。
+            rows_ref = top_rows or bot_rows
+            t_grid = [r.get("t", 0) for r in rows_ref]
+            tb_cats = const(
+                "tbT" + tb_key,
+                str_arr(sparse_cats(t_grid)),
+            )
+            tb_series = []
+            for i, (ip, label, rows) in enumerate(merged):
+                if rows is rows_ref:
+                    vals = [r.get(ip, 0) or 0 for r in rows]
+                else:
+                    pts = [(r.get("t", 0), r.get(ip, 0) or 0) for r in rows]
+                    vals = ts_step_values(pts, t_grid)
+                tb_series.append(
+                    (
+                        "tb%d" % i,
+                        label,
+                        const("tbV" + tb_key + str(i), num_arr(vals)),
+                        None,
                     )
                 )
+            tb_containers.append(
+                emit_container(
+                    tb_title + " Top-5 / Bottom-5",
+                    "x = 压测时间（s，5s 窗口采样）；y = "
+                    + tb_cap
+                    + "；Top-5（负载最重）与 Bottom-5（最轻）同图对比，"
+                    "图例 Top/Bottom 前缀区分（交集引擎仅一条线，标"
+                    " Top+Bottom）",
+                    emit_chart("LineChart", tb_cats, 230, tb_series),
+                )
+            )
         if tb_containers:
             lines.append("      <Divider />")
             lines.append("")
-            lines.append("      <H2>2.1 队列 Top/Bottom-5 引擎</H2>")
+            lines.append("      <H2>2.1 队列 Top-5 / Bottom-5 引擎（同图对比）</H2>")
             lines.extend(emit_grid(tb_containers))
             lines.append("")
 
