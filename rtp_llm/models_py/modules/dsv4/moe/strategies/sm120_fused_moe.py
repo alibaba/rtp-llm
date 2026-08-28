@@ -23,16 +23,17 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_route
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .grouped_fp4 import GroupedFP4Strategy, _has_fp8_fp4_grouped_kernel
 from .local_loop import LocalLoopStrategy
+from rtp_llm.models_py.utils.arch import is_sm120
 
 
 _SM120_CP_FUSED_MOE_LOGGED = False
 
 
 def _is_sm120_runtime() -> bool:
-    return bool(
-        torch.cuda.is_available()
-        and torch.cuda.get_device_capability()[0] == 12
-    )
+    # The kernels are compiled for the exact SM120 (12.0) target.  Do not
+    # treat other SM12x devices as compatible merely because they share the
+    # major capability number.
+    return is_sm120()
 
 
 @register_strategy
@@ -91,7 +92,7 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
-        if not x.is_cuda or torch.cuda.get_device_capability(x.device)[0] != 12:
+        if not x.is_cuda or not is_sm120(x.device):
             raise RuntimeError("Sm120FusedMoeStrategy requires an SM120 CUDA device")
         if self._is_pure_cp() and not torch.cuda.is_current_stream_capturing():
             return self._forward_cp_reduce_scatter(x, weights, indices)

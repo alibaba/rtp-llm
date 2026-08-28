@@ -17,6 +17,7 @@ import torch.nn as nn
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 
 from .warmup_sync import cuda_graph_warmup_forward_enabled
+from rtp_llm.models_py.utils.arch import is_sm120
 
 
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
@@ -30,7 +31,7 @@ def _mode() -> str:
 def strict_fused_moe_enabled() -> bool:
     return os.environ.get("DSV4_MOE_STRICT_FUSED", "1") != "0"
 def _requires_sm120_linear(x: torch.Tensor) -> bool:
-    return x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12
+    return x.is_cuda and is_sm120(x.device)
 
 
 def _normalize_cuda_device(device: torch.device) -> torch.device | None:
