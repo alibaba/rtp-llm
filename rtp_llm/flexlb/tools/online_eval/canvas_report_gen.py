@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -163,6 +164,20 @@ def nice_max(v):
         if cand >= v * 1.02:
             return round(cand, 10)
     return mag * 10
+
+
+def ts_step_values(pts, times):
+    """有序 [(t, v)] 序列按 times 逐点对齐（前向 step 插值）：
+    取 t' <= t 的最后一个样本值；t 早于首样本取首值，晚于尾样本取尾值。"""
+    if not pts:
+        return [0 for _ in times]
+    ts = [p[0] for p in pts]
+    vals = [p[1] for p in pts]
+    out = []
+    for t in times:
+        i = bisect.bisect_right(ts, t)
+        out.append(vals[i - 1] if i > 0 else vals[0])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +565,7 @@ def main():
 
     # 队列时序（5s 粒度，avg/engine 口径：集群总量 ÷ 引擎数，
     # engine_dist.engine_count 优先）
-    TQ = p_run_req = p_run_batch = p_wait = None
+    TQ = p_run_req = p_run_batch = p_wait = p_master_bq = None
     d_run_req = d_wait = avg_batch = heap_used = None
     q_step = 5
     if queue_ts:
@@ -611,6 +626,24 @@ def main():
         )
         deltas = [b - a for a, b in zip(tq_vals, tq_vals[1:]) if b > a]
         q_step = max(set(deltas), key=deltas.count) if deltas else 5
+        if batcher_ts_by_role:
+            # 第四线：master batcher 队列（avg/engine，master 侧口径）。
+            # 数据源与 2.1 节 p_master_batcher 同源（batcher_ts_by_role 的
+            # prefill 集群总量 ÷ P 引擎数）；master 序列 t0 通常为 -10s，
+            # 按 TQ 时间轴前向 step 对齐（尾部超出取尾值，序列尾部已归零）。
+            btr_pts = [
+                (float(r.get("t", 0) or 0), r.get("prefill", 0) or 0)
+                for r in batcher_ts_by_role
+            ]
+            p_master_bq = const(
+                "pMasterBq",
+                num_arr(
+                    [
+                        round(v / max(1, p_engines), 2)
+                        for v in ts_step_values(btr_pts, tq_vals)
+                    ]
+                ),
+            )
 
     # engine_dist：窗口 Gini（按池独立，过滤 null 点）
     wg = (ed or {}).get("window_gini") or {}
@@ -1186,23 +1219,35 @@ def main():
     # 2. 队列（avg/engine：集群总量 ÷ 引擎数，engine_dist.engine_count 优先）
     if queue_ts:
         q_cap = "x = 压测时间（s，" + str(q_step) + "s 采样）"
-        queue_containers = [
-            emit_container(
-                "Prefill 队列（avg/engine）",
+        pq_series = [
+            ("rr", "running 请求数（引擎侧）", p_run_req, "success"),
+            ("rb", "running 批数（引擎侧）", p_run_batch, "info"),
+            ("w", "waiting 请求数（引擎侧）", p_wait, "neutral"),
+        ]
+        if p_master_bq:
+            pq_series.append(
+                ("mb", "master batcher 队列（master 侧）", p_master_bq, "danger")
+            )
+            pq_cap = (
                 q_cap
                 + "；y = 请求数 / 批数（avg/engine = 集群总量 ÷ "
                 + num(p_engines)
-                + " 引擎）",
-                emit_chart(
-                    "LineChart",
-                    TQ,
-                    230,
-                    [
-                        ("rr", "running 请求数", p_run_req, "success"),
-                        ("rb", "running 批数", p_run_batch, "info"),
-                        ("w", "waiting 请求数", p_wait, "neutral"),
-                    ],
-                ),
+                + " 引擎）；前三条为引擎侧队列，第四条为 master 侧 batcher "
+                "队列（master per-engine batcher 集群总量 ÷ 同引擎数，1s 采样 "
+                "step 对齐）"
+            )
+        else:
+            pq_cap = (
+                q_cap
+                + "；y = 请求数 / 批数（avg/engine = 集群总量 ÷ "
+                + num(p_engines)
+                + " 引擎）；均为引擎侧队列（无 master 侧序列）"
+            )
+        queue_containers = [
+            emit_container(
+                "Prefill 队列（avg/engine）",
+                pq_cap,
+                emit_chart("LineChart", TQ, 230, pq_series),
             ),
             emit_container(
                 "Decode 队列（avg/engine）",
