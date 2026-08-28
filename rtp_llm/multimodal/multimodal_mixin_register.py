@@ -56,8 +56,8 @@ register_lazy_multimodal_mixin(
     "rtp_llm.multimodal.multimodal_mixins.deepseek_vl2.deepseek_vl2_mixin",
 )
 register_lazy_multimodal_mixin(
-    "glm5_next",
-    "rtp_llm.multimodal.multimodal_mixins.glm5_next.glm5_next_mixin",
+    "glm5_3_flash",
+    "rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm5_3_flash_mixin",
 )
 register_lazy_multimodal_mixin(
     "kimi_k25", "rtp_llm.multimodal.multimodal_mixins.kimi_k25.kimi_k25_mixin"

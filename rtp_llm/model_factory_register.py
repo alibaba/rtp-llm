@@ -207,8 +207,10 @@ def _register_builtin_lazy_models() -> None:
         "glm_5_mtp", "rtp_llm.models.deepseek_v2", ["GlmMoeDsaMtpForCausalLM"]
     )
     register_lazy_model(
-        "glm5_next",
-        "rtp_llm.models.glm5_next",
+        "glm5_3_flash",
+        "rtp_llm.models.glm5_3_flash",
+        # Keep the architecture emitted by the upstream checkpoint for
+        # compatibility; the RTP model type remains the product name above.
         ["Glm5NextForConditionalGeneration"],
     )
     register_lazy_model(

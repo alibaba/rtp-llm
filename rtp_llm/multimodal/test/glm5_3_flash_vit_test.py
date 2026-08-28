@@ -3,14 +3,14 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.multimodal.multimodal_mixins.glm5_next.glm5_next_mixin import (
-    Glm5NextVisionAttention,
-    Glm5NextVisionModel,
+from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash.glm5_3_flash_mixin import (
+    Glm53FlashVisionAttention,
+    Glm53FlashVisionModel,
     glm5_smart_resize,
 )
 
 
-class Glm5NextVitTest(unittest.TestCase):
+class Glm53FlashVitTest(unittest.TestCase):
     def test_resize_is_upward_aligned(self):
         height, width = glm5_smart_resize(
             101,
@@ -40,7 +40,7 @@ class Glm5NextVitTest(unittest.TestCase):
             swiglu_limit=10.0,
             temporal_patch_size=2,
         )
-        model = Glm5NextVisionModel(config)
+        model = Glm53FlashVisionModel(config)
         grid_thw = torch.tensor([[1, 4, 4]], dtype=torch.int64)
         pixel_values = torch.randn(16, 3 * 2 * 2 * 2)
         self.assertEqual(model._rotary_freqs(grid_thw).shape, (16, 4))
@@ -54,7 +54,7 @@ class Glm5NextVitTest(unittest.TestCase):
             hidden_size=32,
             num_heads=4,
         )
-        attention = Glm5NextVisionAttention(config)
+        attention = Glm53FlashVisionAttention(config)
         q = torch.randn(3, 4, 8, dtype=torch.bfloat16)
         k = torch.randn_like(q)
         freqs = torch.randn(3, 4)

@@ -118,11 +118,17 @@ class ChatGlm45Renderer(ReasoningToolBaseRenderer):
         )
 
 
-class Glm5NextRenderer(ChatGlm45Renderer):
+class Glm53FlashRenderer(ChatGlm45Renderer):
     """GLM-5.3 renderer that preserves media inputs for the ViT pipeline."""
 
     _IMAGE_TOKEN = "<|begin_of_image|><|image|><|end_of_image|>"
-    _VIDEO_TOKEN = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    @override
+    def in_think_mode(self, request: ChatCompletionRequest) -> bool:
+        # This checkpoint's chat template always opens the assistant turn with
+        # ``<think>``. Always install the reasoning parser so the preamble is
+        # not returned as ordinary response content when THINK_MODE is unset.
+        return True
 
     @staticmethod
     def _preprocess_config(content_part, media_url):
@@ -165,17 +171,9 @@ class Glm5NextRenderer(ChatGlm45Renderer):
                         )
                     )
                 elif part.type == ContentPartTypeEnum.video_url:
-                    assert part.video_url is not None
-                    urls.append(part.video_url.url)
-                    types.append(MMUrlType.VIDEO)
-                    preprocess_configs.append(
-                        self._preprocess_config(part, part.video_url)
-                    )
-                    rewritten.append(
-                        ContentPart(
-                            type=ContentPartTypeEnum.text,
-                            text=self._VIDEO_TOKEN + "\n",
-                        )
+                    raise ValueError(
+                        "GLM-5.3-Flash does not support video input; "
+                        "send image_url content only"
                     )
                 else:
                     rewritten.append(part)
@@ -193,4 +191,4 @@ class Glm5NextRenderer(ChatGlm45Renderer):
 
 register_renderer("glm4_moe", ChatGlm45Renderer)
 register_renderer("glm_5", ChatGlm45Renderer)
-register_renderer("glm5_next", Glm5NextRenderer)
+register_renderer("glm5_3_flash", Glm53FlashRenderer)

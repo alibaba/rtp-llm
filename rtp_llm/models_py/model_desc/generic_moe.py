@@ -60,6 +60,11 @@ class _FusedSharedExpertSentinel(nn.Module):
         raise RuntimeError("shared expert is fused into MegaMoE")
 
 
+def _shared_expert_swiglu_limit(config: ModelConfig) -> float:
+    """Return the checkpoint-defined clamp for the unfused shared expert."""
+    return float(getattr(config, "swiglu_limit", 0.0))
+
+
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
@@ -242,6 +247,7 @@ class GenericMoeLayer(nn.Module):
                     weights,
                     quant_config,
                     hw_kernel_config=hw_kernel_config,
+                    swiglu_limit=_shared_expert_swiglu_limit(config),
                 )
         else:
             self.shared_expert = None

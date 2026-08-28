@@ -6,7 +6,7 @@ from rtp_llm.openai.renderer_factory_register import ensure_all_renderers_regist
 _CLASS_TO_MODULE: Dict[str, str] = {
     "ChatGlm4Renderer": "rtp_llm.openai.renderers.chatglm4_renderer",
     "ChatGlm45Renderer": "rtp_llm.openai.renderers.chatglm45_renderer",
-    "Glm5NextRenderer": "rtp_llm.openai.renderers.chatglm45_renderer",
+    "Glm53FlashRenderer": "rtp_llm.openai.renderers.chatglm45_renderer",
     "ChatGlm47Renderer": "rtp_llm.openai.renderers.chatglm47_renderer",
     "DeepSeekVLV2Renderer": "rtp_llm.openai.renderers.deepseek_vl2_renderer",
     "DeepseekV31Renderer": "rtp_llm.openai.renderers.deepseekv31_renderer",

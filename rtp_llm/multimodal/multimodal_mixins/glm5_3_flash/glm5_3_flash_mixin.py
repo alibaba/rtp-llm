@@ -100,7 +100,7 @@ def _resize_and_pad(image: Image.Image, canvas: tuple[int, int], upscale: bool):
     return padded
 
 
-class Glm5NextRMSNorm(nn.Module):
+class Glm53FlashRMSNorm(nn.Module):
     def __init__(self, hidden_size: int, eps: float):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
@@ -120,7 +120,7 @@ def _clamped_swiglu(gate: torch.Tensor, up: torch.Tensor, limit: float):
     return F.silu(gate) * up
 
 
-class Glm5NextVisionPatchEmbed(nn.Module):
+class Glm53FlashVisionPatchEmbed(nn.Module):
     def __init__(self, config):
         super().__init__()
         kernel = (config.temporal_patch_size, config.patch_size, config.patch_size)
@@ -147,7 +147,7 @@ class Glm5NextVisionPatchEmbed(nn.Module):
         return self.proj(x.to(self.proj.weight.dtype)).view(-1, self.hidden_size)
 
 
-class Glm5NextVisionAttention(nn.Module):
+class Glm53FlashVisionAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.num_heads
@@ -157,8 +157,8 @@ class Glm5NextVisionAttention(nn.Module):
             config.hidden_size * 3,
             bias=config.attention_bias,
         )
-        self.q_norm = Glm5NextRMSNorm(self.head_dim, 1e-5)
-        self.k_norm = Glm5NextRMSNorm(self.head_dim, 1e-5)
+        self.q_norm = Glm53FlashRMSNorm(self.head_dim, 1e-5)
+        self.k_norm = Glm53FlashRMSNorm(self.head_dim, 1e-5)
         self.proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
 
     @staticmethod
@@ -201,7 +201,7 @@ class Glm5NextVisionAttention(nn.Module):
         return self.proj(torch.cat(outputs).reshape(x.shape))
 
 
-class Glm5NextVisionMLP(nn.Module):
+class Glm53FlashVisionMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.limit = config.swiglu_limit
@@ -215,20 +215,20 @@ class Glm5NextVisionMLP(nn.Module):
         )
 
 
-class Glm5NextVisionBlock(nn.Module):
+class Glm53FlashVisionBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.norm1 = Glm5NextRMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.norm2 = Glm5NextRMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.attn = Glm5NextVisionAttention(config)
-        self.mlp = Glm5NextVisionMLP(config)
+        self.norm1 = Glm53FlashRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.norm2 = Glm53FlashRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.attn = Glm53FlashVisionAttention(config)
+        self.mlp = Glm53FlashVisionMLP(config)
 
     def forward(self, x, sequence_lengths, rotary_freqs):
         x = x + self.attn(self.norm1(x), sequence_lengths, rotary_freqs)
         return x + self.mlp(self.norm2(x))
 
 
-class Glm5NextPatchMerger(nn.Module):
+class Glm53FlashPatchMerger(nn.Module):
     def __init__(self, config):
         super().__init__()
         hidden_size = config.out_hidden_size
@@ -247,24 +247,24 @@ class Glm5NextPatchMerger(nn.Module):
         )
 
 
-class Glm5NextVisionModel(nn.Module):
+class Glm53FlashVisionModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.patch_size = config.patch_size
         self.spatial_merge_size = config.spatial_merge_size
-        self.patch_embed = Glm5NextVisionPatchEmbed(config)
+        self.patch_embed = Glm53FlashVisionPatchEmbed(config)
         self.blocks = nn.ModuleList(
-            Glm5NextVisionBlock(config) for _ in range(config.depth)
+            Glm53FlashVisionBlock(config) for _ in range(config.depth)
         )
-        self.post_layernorm = Glm5NextRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.post_layernorm = Glm53FlashRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.downsample = nn.Conv2d(
             config.hidden_size,
             config.out_hidden_size,
             kernel_size=config.spatial_merge_size,
             stride=config.spatial_merge_size,
         )
-        self.merger = Glm5NextPatchMerger(config)
+        self.merger = Glm53FlashPatchMerger(config)
         head_dim = config.hidden_size // config.num_heads
         rotary_dim = head_dim // 2
         inv_freq = 1.0 / (
@@ -304,11 +304,11 @@ class Glm5NextVisionModel(nn.Module):
         return self.merger(x)
 
 
-class Glm5NextImageEmbedding(MultiModalEmbeddingInterface):
+class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
     def __init__(self, mm_related_params: VitParameters):
         config = dict(mm_related_params.config["vision_config"])
         config["swiglu_limit"] = mm_related_params.config["swiglu_limit"]
-        self.visual = Glm5NextVisionModel(SimpleNamespace(**config))
+        self.visual = Glm53FlashVisionModel(SimpleNamespace(**config))
         self.processor_config = mm_related_params.config["processor_config"]
         processor_config = self.processor_config["image_processor"]
         self.processor = Qwen2VLImageProcessor(
@@ -337,10 +337,10 @@ class Glm5NextImageEmbedding(MultiModalEmbeddingInterface):
         processor_config,
     ):
         if len(mm_inputs) != 1:
-            raise ValueError("GLM5-Next preprocessing expects one multimodal input")
+            raise ValueError("GLM-5.3-Flash preprocessing expects one multimodal input")
         mm_input = mm_inputs[0]
         if mm_input.mm_type not in (MMUrlType.DEFAULT, MMUrlType.IMAGE):
-            raise ValueError("GLM5-Next video preprocessing is not enabled yet")
+            raise ValueError("GLM-5.3-Flash supports image input only")
         image = Image.open(
             get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
         ).convert("RGB")
@@ -382,22 +382,22 @@ class Glm5NextImageEmbedding(MultiModalEmbeddingInterface):
         return self.visual(pixel_values, grid_thw), None
 
 
-class Glm5NextVitWeight(BaseVitWeights):
+class Glm53FlashVitWeight(BaseVitWeights):
     def _set_weight_prefix(self):
         self._ckpt_prefix = "model.visual."
         self._ft_prefix = "self.mm_part.visual."
 
 
-class Glm5NextMixin(BaseMultiModalMixin):
+class Glm53FlashMixin(BaseMultiModalMixin):
     def _init_multimodal(self):
-        self.mm_part = Glm5NextImageEmbedding(self.mm_related_params)
-        self.mm_related_params.vit_weights = Glm5NextVitWeight(
+        self.mm_part = Glm53FlashImageEmbedding(self.mm_related_params)
+        self.mm_related_params.vit_weights = Glm53FlashVitWeight(
             {"vit": self.mm_part.visual}
         )
 
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
-        return Glm5NextImageEmbedding(mm_related_params).visual
+        return Glm53FlashImageEmbedding(mm_related_params).visual
 
 
-register_multimodal_mixin("glm5_next", Glm5NextMixin)
+register_multimodal_mixin("glm5_3_flash", Glm53FlashMixin)

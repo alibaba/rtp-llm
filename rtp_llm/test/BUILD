@@ -340,8 +340,8 @@ py_test(
 )
 
 py_test(
-    name = "glm5_next_config_test",
-    srcs = ["glm5_next_config_test.py"],
+    name = "glm5_3_flash_config_test",
+    srcs = ["glm5_3_flash_config_test.py"],
     deps = [
         "//rtp_llm:async_model",
         "//rtp_llm:models",
@@ -350,8 +350,8 @@ py_test(
 )
 
 py_test(
-    name = "glm5_next_renderer_test",
-    srcs = ["glm5_next_renderer_test.py"],
+    name = "glm5_3_flash_renderer_test",
+    srcs = ["glm5_3_flash_renderer_test.py"],
     deps = [
         "//rtp_llm:testlib",
     ],

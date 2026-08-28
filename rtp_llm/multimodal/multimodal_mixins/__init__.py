@@ -10,7 +10,7 @@ from .base_multimodal_mixin import (
 _CLASS_TO_MODULE: Dict[str, str] = {
     "ChatGlmV4VisionMixin": ".chatglm4v.chatglm4v_mixin",
     "DeepSeekVLV2Mixin": ".deepseek_vl2.deepseek_vl2_mixin",
-    "Glm5NextMixin": ".glm5_next.glm5_next_mixin",
+    "Glm53FlashMixin": ".glm5_3_flash.glm5_3_flash_mixin",
     "KimiK25Mixin": ".kimi_k25.kimi_k25_mixin",
     "LlavaMixin": ".llava.llava_mixin",
     "MiniMaxM3VLMixin": ".minimax_m3_vl.minimax_m3_vl_mixin",

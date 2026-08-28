@@ -28,7 +28,7 @@ class NewMlaRotaryEmbeddingOp(object):
         fmha_params: rtp_llm_ops.SparseMlaParams,
         precomputed_pos_ids: torch.Tensor = None,
     ):
-        # GLM5-Next uses pure NoPE MLA (qk_rope_head_dim == 0).  FlashInfer's
+        # GLM-5.3-Flash uses pure NoPE MLA (qk_rope_head_dim == 0). FlashInfer's
         # RoPE kernel does not accept a zero head dimension.
         if query.shape[-1] == 0:
             return

@@ -1,4 +1,4 @@
-"""GLM-5.3-Flash (GLM5-Next) configuration and model integration."""
+"""GLM-5.3-Flash configuration and model integration."""
 
 import json
 import os
@@ -20,7 +20,7 @@ from rtp_llm.model_loader.weight_module import (
 )
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import DataType, HybridAttentionType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -50,9 +50,17 @@ _UNQUANTIZED_WEIGHT_NAMES = {
 }
 
 
-def parse_glm5_next_config(
+class Glm53FlashModelConfig(ModelConfig):
+    """Model config with checkpoint-mandated KDA cache precision."""
+
+    def init_linear_attention_cache_precision(self, kv_cache_config: Any) -> None:
+        super().init_linear_attention_cache_precision(kv_cache_config)
+        self.linear_attention_config.ssm_state_dtype = DataType.TYPE_FP32
+
+
+def parse_glm53_flash_config(
     config_json: Dict[str, Any], ckpt_path: str = ""
-) -> ModelConfig:
+) -> Glm53FlashModelConfig:
     """Translate the nested Hugging Face config into RTP model config."""
     text_config = config_json.get("text_config", config_json)
     layer_types = text_config["layer_types"]
@@ -60,7 +68,7 @@ def parse_glm5_next_config(
     num_layers = int(text_config["num_hidden_layers"])
     if len(layer_types) != num_layers or len(mlp_layer_types) != num_layers:
         raise ValueError(
-            "GLM5-Next layer schedules must match num_hidden_layers: "
+            "GLM-5.3-Flash layer schedules must match num_hidden_layers: "
             f"attention={len(layer_types)}, mlp={len(mlp_layer_types)}, "
             f"layers={num_layers}"
         )
@@ -75,19 +83,19 @@ def parse_glm5_next_config(
         ]
     except KeyError as error:
         raise ValueError(
-            f"Unsupported GLM5-Next attention type: {error.args[0]}"
+            f"Unsupported GLM-5.3-Flash attention type: {error.args[0]}"
         ) from error
     unsupported_mlp_types = set(mlp_layer_types) - {"dense", "sparse"}
     if unsupported_mlp_types:
         raise ValueError(
-            "Unsupported GLM5-Next MLP types: "
+            "Unsupported GLM-5.3-Flash MLP types: "
             + ", ".join(sorted(unsupported_mlp_types))
         )
 
-    config = ModelConfig()
+    config = Glm53FlashModelConfig()
     config.ckpt_path = ckpt_path
     config.tokenizer_path = ckpt_path
-    config.model_type = "glm5_next"
+    config.model_type = "glm5_3_flash"
     config.num_layers = num_layers
     config.hidden_size = int(text_config["hidden_size"])
     config.vocab_size = int(text_config["vocab_size"])
@@ -111,7 +119,7 @@ def parse_glm5_next_config(
     if not isinstance(eos_token_ids, list):
         eos_token_ids = [eos_token_ids]
     if not eos_token_ids:
-        raise ValueError("GLM5-Next eos_token_id must not be empty")
+        raise ValueError("GLM-5.3-Flash eos_token_id must not be empty")
     config.special_tokens.eos_token_id = int(eos_token_ids[0])
     config.special_tokens.pad_token_id = int(
         config_json.get("pad_token_id", text_config.get("pad_token_id", 0))
@@ -168,7 +176,7 @@ def parse_glm5_next_config(
 
     scoring_func = text_config.get("scoring_func", "sigmoid")
     if scoring_func not in {"softmax", "sigmoid"}:
-        raise ValueError(f"Unsupported GLM5-Next scoring_func: {scoring_func}")
+        raise ValueError(f"Unsupported GLM-5.3-Flash scoring_func: {scoring_func}")
     config.scoring_func = 0 if scoring_func == "softmax" else 1
     config.routed_scaling_factor = float(text_config["routed_scaling_factor"])
     config.moe_k = int(text_config["num_experts_per_tok"])
@@ -198,10 +206,6 @@ def parse_glm5_next_config(
                 int(config_json.get("image_start_token_id", 154830)),
                 int(config_json.get("image_end_token_id", 154831)),
             ],
-            [
-                int(config_json.get("video_start_token_id", 154832)),
-                int(config_json.get("video_end_token_id", 154833)),
-            ],
         ]
         config.mm_model_config.mm_position_ids_style = 0
         config.mm_related_params.special_tokens["default_mm_token"] = (
@@ -210,7 +214,7 @@ def parse_glm5_next_config(
         processor_path = os.path.join(ckpt_path, "processor_config.json")
         if not os.path.exists(processor_path):
             raise FileNotFoundError(
-                f"processor_config.json not found for GLM5-Next VL: {ckpt_path}"
+                f"processor_config.json not found for GLM-5.3-Flash VL: {ckpt_path}"
             )
         with open(processor_path, encoding="utf-8") as reader:
             processor_config = json.load(reader)
@@ -229,7 +233,7 @@ def _merge_conv1d(tensors: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat(tensors, dim=0)
 
 
-class Glm5NextWeight(DeepSeekV2Weight):
+class Glm53FlashWeight(DeepSeekV2Weight):
     """GLM-5.3 manifest reusing the DeepSeek MLA, MoE and FP8 loaders."""
 
     def _process_meta(self, meta_dict, weight_keys):
@@ -423,7 +427,7 @@ class Glm5NextWeight(DeepSeekV2Weight):
                 )
         if isinstance(weight, CompositeWeight):
             for sub_weight in weight.sub_weights.values():
-                Glm5NextWeight._prefix_checkpoint_names(sub_weight)
+                Glm53FlashWeight._prefix_checkpoint_names(sub_weight)
 
     def _get_weight_info(self) -> ModelWeightInfo:
         weight_info = super()._get_weight_info()
@@ -435,7 +439,7 @@ class Glm5NextWeight(DeepSeekV2Weight):
         return weight_info
 
 
-class Glm5Next(BaseModel):
+class Glm53Flash(BaseModel):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_path = os.path.join(ckpt_path, "config.json")
@@ -443,7 +447,7 @@ class Glm5Next(BaseModel):
             raise FileNotFoundError(f"config.json not found in {ckpt_path}")
         with open(config_path, encoding="utf-8") as reader:
             config_json = json.load(reader)
-        return parse_glm5_next_config(config_json, ckpt_path)
+        return parse_glm53_flash_config(config_json, ckpt_path)
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -453,7 +457,7 @@ class Glm5Next(BaseModel):
         from rtp_llm.models_py.utils.arch import is_cuda
 
         if not is_cuda():
-            raise RuntimeError("GLM5-Next is supported only on CUDA")
+            raise RuntimeError("GLM-5.3-Flash is supported only on CUDA")
         self.py_model = KimiLinearModel(
             self.model_config,
             self.parallelism_config,
@@ -468,11 +472,21 @@ class Glm5Next(BaseModel):
 
     @staticmethod
     def get_weight_cls():
-        return Glm5NextWeight
+        return Glm53FlashWeight
 
 
 register_model(
-    "glm5_next",
-    Glm5Next,
+    "glm5_3_flash",
+    Glm53Flash,
+    # This is the architecture string stored in the released checkpoint, not
+    # the RTP-facing model/product name.
     ["Glm5NextForConditionalGeneration"],
 )
+
+
+__all__ = [
+    "Glm53Flash",
+    "Glm53FlashModelConfig",
+    "Glm53FlashWeight",
+    "parse_glm53_flash_config",
+]

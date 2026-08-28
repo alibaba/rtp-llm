@@ -69,9 +69,9 @@ py_test(
 )
 
 py_test(
-    name = "glm5_next_vit_test",
+    name = "glm5_3_flash_vit_test",
     srcs = [
-        "glm5_next_vit_test.py",
+        "glm5_3_flash_vit_test.py",
     ],
     deps = [
         "//rtp_llm:testlib",

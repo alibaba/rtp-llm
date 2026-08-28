@@ -15,8 +15,12 @@ from rtp_llm.model_loader.linear_attn_weight import (
     split_kda_tp_dim1,
 )
 from rtp_llm.model_loader.weight_module import CompositeWeight
-from rtp_llm.models.glm5_next import Glm5Next, Glm5NextWeight, parse_glm5_next_config
-from rtp_llm.models_py.model_desc import kimi_linear
+from rtp_llm.models.glm5_3_flash import (
+    Glm53Flash,
+    Glm53FlashWeight,
+    parse_glm53_flash_config,
+)
+from rtp_llm.models_py.model_desc import generic_moe, kimi_linear
 from rtp_llm.models_py.modules.base.cuda import indexer_op
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _requires_prefill_cp_support,
@@ -33,7 +37,7 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import ClampedSiluAndMul
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
-from rtp_llm.ops import HWKernelConfig, HybridAttentionType, ParallelismConfig
+from rtp_llm.ops import DataType, HWKernelConfig, HybridAttentionType, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -89,7 +93,7 @@ def _test_config():
     }
 
 
-class Glm5NextConfigTest(unittest.TestCase):
+class Glm53FlashConfigTest(unittest.TestCase):
     def test_mega_moe_activation_clamp_is_opt_in(self):
         self.assertEqual(_activation_clamp(SimpleNamespace(swiglu_limit=10.0)), 10.0)
         self.assertIsNone(_activation_clamp(SimpleNamespace(swiglu_limit=0.0)))
@@ -102,6 +106,10 @@ class Glm5NextConfigTest(unittest.TestCase):
             -10.0, 10.0
         )
         torch.testing.assert_close(actual, expected)
+
+    def test_shared_expert_uses_checkpoint_swiglu_limit(self):
+        config = parse_glm53_flash_config(_test_config())
+        self.assertEqual(generic_moe._shared_expert_swiglu_limit(config), 10.0)
 
     def test_prefill_uses_safe_gate_for_bounded_gate(self):
         prefill = kimi_linear.KimiLinearKDAPrefill.__new__(
@@ -265,8 +273,9 @@ class Glm5NextConfigTest(unittest.TestCase):
         )
 
     def test_parse_hybrid_config(self):
-        config = parse_glm5_next_config(_test_config(), "/model")
+        config = parse_glm53_flash_config(_test_config(), "/model")
         self.assertEqual(config.ckpt_path, "/model")
+        self.assertEqual(config.model_type, "glm5_3_flash")
         self.assertEqual(config.num_layers, 45)
         self.assertEqual(config.moe_layer_index, list(range(3, 45)))
         self.assertEqual(config.attn_config.rope_head_dim, 0)
@@ -289,6 +298,18 @@ class Glm5NextConfigTest(unittest.TestCase):
             config.hybrid_attention_config.enable_independent_kv_cache_pools
         )
 
+    def test_kda_recurrent_state_is_always_fp32(self):
+        config = parse_glm53_flash_config(_test_config())
+        kv_cache_config = KVCacheConfig()
+        kv_cache_config.ssm_state_dtype = "bf16"
+
+        config.init_linear_attention_cache_precision(kv_cache_config)
+
+        self.assertEqual(
+            config.linear_attention_config.ssm_state_dtype,
+            DataType.TYPE_FP32,
+        )
+
     def test_parse_multimodal_config(self):
         config_json = _test_config()
         config_json.update(
@@ -304,9 +325,9 @@ class Glm5NextConfigTest(unittest.TestCase):
             mock.patch("builtins.open", mock.mock_open(read_data="{}")),
             mock.patch("os.path.exists", return_value=True),
         ):
-            config = parse_glm5_next_config(config_json, "/model")
+            config = parse_glm53_flash_config(config_json, "/model")
         self.assertTrue(config.mm_model_config.is_multimodal)
-        self.assertEqual(config.mm_model_config.mm_sep_tokens, [[11, 12], [13, 14]])
+        self.assertEqual(config.mm_model_config.mm_sep_tokens, [[11, 12]])
         self.assertEqual(
             config.mm_related_params.special_tokens["default_mm_token"],
             "<|begin_of_image|><|image|><|end_of_image|>",
@@ -320,13 +341,13 @@ class Glm5NextConfigTest(unittest.TestCase):
         config_json = _test_config()
         config_json["text_config"]["layer_types"].pop()
         with self.assertRaisesRegex(ValueError, "must match num_hidden_layers"):
-            parse_glm5_next_config(config_json)
+            parse_glm53_flash_config(config_json)
 
     def test_list_eos_tokens(self):
         config_json = _test_config()
         config_json["text_config"]["eos_token_id"] = [154820, 154827, 154829]
         config_json["text_config"]["pad_token_id"] = 154820
-        config = parse_glm5_next_config(config_json)
+        config = parse_glm53_flash_config(config_json)
         self.assertEqual(config.special_tokens.eos_token_id, 154820)
         self.assertEqual(
             config.special_tokens.stop_words_id_list,
@@ -551,7 +572,7 @@ class Glm5NextConfigTest(unittest.TestCase):
         self.assertIs(conv1d.call_args.kwargs["prefix_lengths"], prefix_lengths)
 
     def test_kda_context_parallel_keeps_full_attention_heads(self):
-        linear_config = parse_glm5_next_config(_test_config()).linear_attention_config
+        linear_config = parse_glm53_flash_config(_test_config()).linear_attention_config
         parallelism = SimpleNamespace(
             tp_size=4,
             get_attn_tp_size=lambda: 1,
@@ -573,8 +594,8 @@ class Glm5NextConfigTest(unittest.TestCase):
         self.assertEqual(kda.qkv_size, 64 * 128 * 3)
 
     def test_kda_and_hc_checkpoint_manifest(self):
-        config = parse_glm5_next_config(_test_config())
-        manifest = object.__new__(Glm5NextWeight)
+        config = parse_glm53_flash_config(_test_config())
+        manifest = object.__new__(Glm53FlashWeight)
         manifest.model_config = config
         kda_weights = manifest._get_kda_weight_info()
         weights = kda_weights + manifest._get_hc_weight_info()
@@ -614,7 +635,7 @@ class Glm5NextConfigTest(unittest.TestCase):
     )
     def test_real_checkpoint_manifest(self):
         ckpt_path = os.environ["GLM5_CKPT_PATH"]
-        config = Glm5Next._create_config(ckpt_path)
+        config = Glm53Flash._create_config(ckpt_path)
         with open(
             os.path.join(ckpt_path, "model.safetensors.index.json"),
             encoding="utf-8",
@@ -624,7 +645,7 @@ class Glm5NextConfigTest(unittest.TestCase):
         parallelism = ParallelismConfig()
         parallelism.world_size = 1
         parallelism.local_world_size = 1
-        manifest = Glm5NextWeight(
+        manifest = Glm53FlashWeight(
             config,
             parallelism,
             HWKernelConfig(),
@@ -663,7 +684,7 @@ class Glm5NextConfigTest(unittest.TestCase):
     )
     def test_real_quantized_checkpoint_manifest(self):
         ckpt_path = os.environ["GLM5_CKPT_PATH"]
-        config = Glm5Next._create_config(ckpt_path)
+        config = Glm53Flash._create_config(ckpt_path)
         config.init_precision_config(KVCacheConfig(), "BF16")
         with open(
             os.path.join(ckpt_path, "model.safetensors.index.json"),
@@ -674,7 +695,7 @@ class Glm5NextConfigTest(unittest.TestCase):
         parallelism = ParallelismConfig()
         parallelism.world_size = 1
         parallelism.local_world_size = 1
-        manifest = Glm5NextWeight(
+        manifest = Glm53FlashWeight(
             config,
             parallelism,
             HWKernelConfig(),
@@ -713,7 +734,7 @@ class Glm5NextConfigTest(unittest.TestCase):
     )
     def test_real_tokenizer(self):
         ckpt_path = os.environ["GLM5_CKPT_PATH"]
-        tokenizer = TokenizerFactory.create(ckpt_path, ckpt_path, "glm5_next")
+        tokenizer = TokenizerFactory.create(ckpt_path, ckpt_path, "glm5_3_flash")
         self.assertTrue(tokenizer.encode("hello"))
         self.assertEqual(
             tokenizer.encode("<|begin_of_image|><|image|><|end_of_image|>"),
@@ -721,7 +742,7 @@ class Glm5NextConfigTest(unittest.TestCase):
         )
 
 
-class Glm5KdaWeightTest(unittest.TestCase):
+class Glm53FlashKdaWeightTest(unittest.TestCase):
     def setUp(self):
         self.config = SimpleNamespace(
             linear_num_key_heads=64,
