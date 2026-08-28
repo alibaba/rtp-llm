@@ -82,9 +82,3 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
-
-# Canvas report artifacts & render helpers (reports never go into git;
-# final reports live in the Qoder canvases dir / local non-git dirs only)
-*.canvas.tsx
-/rtp_llm/flexlb/tools/online_eval/canvas_report_render_*.py
-/rtp_llm/flexlb/tools/online_eval/canvas_report_render_*.html
