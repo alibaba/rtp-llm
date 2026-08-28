@@ -627,6 +627,17 @@ master_json = load_json("master.json") or {}
 run_meta = load_json("run_meta.json") or {}
 prom_ts = master_json.get("prometheus_timeseries") or []
 
+# mock per-engine 1s 时序（mock_per_engine_timeseries.json.gz，mock 引擎自身
+# 上报的 running / waiting / KV 等 per-engine 指标；缺文件 -> 空表 ->
+# 引擎侧 Top/Bottom-5 序列省略）。
+mock_per_engine_ts = []
+if os.path.isfile("mock_per_engine_timeseries.json.gz"):
+    try:
+        with gzip.open("mock_per_engine_timeseries.json.gz", "rt") as _f:
+            mock_per_engine_ts = json.load(_f) or []
+    except (OSError, ValueError):
+        mock_per_engine_ts = []
+
 
 def rel_axis(pts):
     """[(epoch_ms, value)] -> [(t_s, value)] on the per-request send axis.
@@ -728,17 +739,18 @@ def prom_ts_extract_labeled(base_name, label_name, agg="sum"):
     }
 
 
-def prom_ts_extract_role_engine(base_name):
-    """G3 prometheus timeline -> {role: {engineIp: [(epoch_ms, value)]}}.
+def _ts_role_ip_split(groups, base_name):
+    """[{ts, metrics}] timeline -> {role: {engineIp: [(epoch_ms, value)]}}.
 
     Splits a per-engine metric carrying both role and engineIp tags (e.g.
-    app.flexlb.batcher.queue.size) by the two labels at once. Series
-    missing either label are skipped.
+    app.flexlb.batcher.queue.size / mock_engine_running) by the two labels
+    at once. Series missing either label are skipped.
     """
     role_re = re.compile(r'(?:^|,)role="([^"]*)"(?:,|$)')
-    engine_re = re.compile(r'(?:^|,)engineIp="([^"]*)"(?:,|$)')
+    # 标签名兼容：master prometheus 用 engineIp，mock per-engine 用 engine_ip
+    engine_re = re.compile(r'(?:^|,)(?:engineIp|engine_ip)="([^"]*)"(?:,|$)')
     series = {}
-    for grp in prom_ts:
+    for grp in groups:
         if not isinstance(grp, dict):
             continue
         metrics = grp.get("metrics")
@@ -766,6 +778,11 @@ def prom_ts_extract_role_engine(base_name):
         for pts in role_series.values():
             pts.sort(key=lambda p: p[0])
     return series
+
+
+def prom_ts_extract_role_engine(base_name):
+    """G3 prometheus timeline -> {role: {engineIp: [(epoch_ms, value)]}}."""
+    return _ts_role_ip_split(prom_ts, base_name)
 
 
 # master 10s ServerScheduleLatencyRecorder rows (SERVER_LAT). The row itself
@@ -1124,6 +1141,82 @@ if batcher_role_series:
             top_by_t[t][ip] = round(v, 2)
     batcher_top_engines_ts = [{"t": t, **vals} for t, vals in sorted(top_by_t.items())]
 
+# ---- queue Top/Bottom-5 per-engine series (queue_top_bottom_ts) ----
+# 每队列（P master-batcher / P、D 引擎侧 running / waiting）各取按峰值排序
+# 的 top-5 与 bottom-5 引擎，5s 窗口降采样，行格式 [{t, "<ip>": v}]。
+# top/bottom 同口径（均按峰值），体现负载最重与最轻的引擎；全零引擎
+# 也会出现在 bottom-5（线本身就是“饿死”证据）。生成器缺键时退化。
+
+
+def _downsample_5s(pts):
+    """[(epoch_ms, v)] -> 每 5s 窗口取最后样本（保序）。"""
+    last_in_bucket = {}
+    order = []
+    for ts, v in pts:
+        bucket = int(ts // 5000)
+        if bucket not in last_in_bucket:
+            order.append(bucket)
+        last_in_bucket[bucket] = (ts, v)
+    return [last_in_bucket[b] for b in order]
+
+
+def _top_bottom_rows(engine_pts, n=5):
+    """{ip: [(ts, v)]} -> {"top": rows, "bottom": rows}.
+
+    按峰值排序选 top/bottom 引擎（并列时按 ip 字典序稳定）；行格式
+    [{t, "<ip>": v}]（rel_axis 相对秒轴 + 5s 窗口降采样）。
+    """
+    out = {"top": [], "bottom": []}
+    if not engine_pts:
+        return out
+    ranked = sorted(
+        engine_pts,
+        key=lambda ip: (max(v for _, v in engine_pts[ip]), ip),
+    )
+    picks = {
+        "top": ranked[-n:][::-1],
+        "bottom": ranked[:n],
+    }
+    for kind, ips in picks.items():
+        by_t = defaultdict(dict)
+        for ip in ips:
+            for t, v in rel_axis(_downsample_5s(engine_pts[ip])):
+                by_t[t][ip] = round(v, 2)
+        out[kind] = [{"t": t, **vals} for t, vals in sorted(by_t.items())]
+    return out
+
+
+queue_top_bottom_ts = {}
+
+# P master-batcher 队列（master prometheus per-engine 序列，1s 采样；
+# 决策时点深度近似）。与上方 batcher_top_engines_ts 同源，但补齐 bottom-5。
+if batcher_role_series:
+    _tb = _top_bottom_rows(batcher_role_series.get("PREFILL") or {})
+    if _tb["top"] or _tb["bottom"]:
+        queue_top_bottom_ts["p_master_batcher"] = {
+            **_tb,
+            "rank": "peak",
+            "sample_window_s": 5,
+        }
+
+# 引擎侧 running / waiting（mock_per_engine_timeseries.json.gz，mock 引擎
+# 自身上报的 per-engine gauge，1s 采样）。
+for _side, _role_tag in (("p", "prefill"), ("d", "decode")):
+    for _metric in ("running", "waiting"):
+        _series = (
+            _ts_role_ip_split(mock_per_engine_ts, "mock_engine_" + _metric).get(
+                _role_tag
+            )
+            or {}
+        )
+        _tb = _top_bottom_rows(_series)
+        if _tb["top"] or _tb["bottom"]:
+            queue_top_bottom_ts[_side + "_" + _metric] = {
+                **_tb,
+                "rank": "peak",
+                "sample_window_s": 5,
+            }
+
 # Per-dispatch batch size gauge (engine.balancing.master.batch.size, tags
 # role + engineIp + reason, reported once per dispatch). Per reason the
 # per-engine values are averaged: each engine's gauge holds the size of
@@ -1270,6 +1363,7 @@ out = {
     "batcher_ts_by_role": batcher_ts_by_role,
     "batcher_engine_quantile_ts": batcher_engine_quantile_ts,
     "batcher_top_engines_ts": batcher_top_engines_ts,
+    "queue_top_bottom_ts": queue_top_bottom_ts,
     "dispatch_reason_ts": dispatch_reason_ts,
     "dispatch_batch_size_ts": dispatch_batch_size_ts,
     "batch_size_final": batch_size_final,

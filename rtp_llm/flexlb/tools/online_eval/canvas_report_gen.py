@@ -421,6 +421,7 @@ def main():
     batcher_ts_by_role = agg.get("batcher_ts_by_role") or []
     batcher_engine_quantile_ts = agg.get("batcher_engine_quantile_ts") or []
     batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
+    queue_top_bottom_ts = agg.get("queue_top_bottom_ts") or {}
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
     cancel_ts = agg.get("cancel_qps_ts") or []
@@ -1238,8 +1239,9 @@ def main():
         # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
         # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分；
         # 只画 prefill avg/engine + 128 容量线（decode 侧队列语义不同，不画）；
-        # prefill 另给跨引擎分位与 top-5 引擎序列（决策时点深度的
-        # 1s 采样近似）。旧口径（仅 batcher_ts，P+D 合计）退化画集群总量。
+        # prefill 另给 top-5 引擎序列（决策时点深度的 1s 采样近似；
+        # Top/Bottom-5 全集见 2.1 节）。旧口径（仅 batcher_ts，P+D 合计）
+        # 退化画集群总量。
         if batcher_ts_by_role:
             BRT = const(
                 "BRT",
@@ -1279,84 +1281,12 @@ def main():
                     ),
                 )
             )
-            if batcher_engine_quantile_ts:
-                EQT = const(
-                    "EQT",
-                    str_arr(
-                        sparse_cats([r.get("t", 0) for r in batcher_engine_quantile_ts])
-                    ),
-                )
-                queue_containers.append(
-                    emit_container(
-                        "prefill 引擎队列深度分布（跨引擎分位）",
-                        "x = 压测时间（s，1s 采样）；y = per-engine batcher 队列深度（跨引擎 p50/p90/p99/max）",
-                        emit_chart(
-                            "LineChart",
-                            EQT,
-                            230,
-                            [
-                                (
-                                    "q50",
-                                    "p50",
-                                    const(
-                                        "eqP50",
-                                        num_arr(
-                                            [
-                                                r.get("p50", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "success",
-                                ),
-                                (
-                                    "q90",
-                                    "p90",
-                                    const(
-                                        "eqP90",
-                                        num_arr(
-                                            [
-                                                r.get("p90", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "info",
-                                ),
-                                (
-                                    "q99",
-                                    "p99",
-                                    const(
-                                        "eqP99",
-                                        num_arr(
-                                            [
-                                                r.get("p99", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "warning",
-                                ),
-                                (
-                                    "qmx",
-                                    "max",
-                                    const(
-                                        "eqMax",
-                                        num_arr(
-                                            [
-                                                r.get("max", 0) or 0
-                                                for r in batcher_engine_quantile_ts
-                                            ]
-                                        ),
-                                    ),
-                                    "danger",
-                                ),
-                            ],
-                        ),
-                    )
-                )
-            if batcher_top_engines_ts:
-                # top-5 引擎序列：行键 = engineIp（动态），series 名用 e0..e4
+            if batcher_top_engines_ts and not (
+                (queue_top_bottom_ts.get("p_master_batcher") or {}).get("top")
+            ):
+                # 旧 aggregate（无 queue_top_bottom_ts 键）：退化渲染 P
+                # master-batcher Top-5（命名与 2.1 节统一）；新键存在时由
+                # 独立节渲染 top+bottom 全集，此处跳过避免重复。
                 top_engine_keys = []
                 for r in batcher_top_engines_ts:
                     for k in r:
@@ -1391,8 +1321,10 @@ def main():
                         )
                     queue_containers.append(
                         emit_container(
-                            "prefill 队列深度 top-5 引擎",
-                            "x = 压测时间（s，5s 采样）；y = per-engine batcher 队列深度（峰值 top-5 引擎）",
+                            "P master-batcher 队列深度 Top-5",
+                            "master batcher 队列深度（决策时点 1s 采样近似，5s 窗口）；"
+                            "数据源 master.json prometheus_timeseries per-engine；"
+                            "按峰值排序；容量上限 128（maxWaitingRequestsPerPrefillWorker）",
                             emit_chart("LineChart", TET, 230, top_lines),
                         )
                     )
@@ -1532,6 +1464,94 @@ def main():
         lines.append("      <H2>2. 队列（集群总量）</H2>")
         lines.extend(emit_grid(queue_containers))
         lines.append("")
+
+    # 2.1 队列 Top/Bottom-5 引擎（queue_top_bottom_ts；命名规范
+    # 「<侧>-<队列> Top-5 / Bottom-5」，每图 5 条线按引擎 IP 标注。
+    # 旧 aggregate 无此键 -> 整节省略（P master-batcher Top-5 由队列节
+    # 退化路径渲染）。
+    if queue_top_bottom_ts:
+        tb_containers = []
+        # (键, 标题基名, y 轴语义 + 数据源说明)
+        TB_META = (
+            (
+                "p_master_batcher",
+                "P master-batcher 队列深度",
+                "per-engine master batcher 队列深度（决策时点 1s 采样近似，"
+                "5s 窗口）；数据源 master.json prometheus_timeseries；"
+                "按峰值排序；容量上限 128（maxWaitingRequestsPerPrefillWorker）",
+            ),
+            (
+                "p_running",
+                "P running",
+                "per-engine prefill running 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序",
+            ),
+            (
+                "p_waiting",
+                "P waiting",
+                "per-engine prefill waiting 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序；"
+                "全零 = 引擎侧无等待积压",
+            ),
+            (
+                "d_running",
+                "D running",
+                "per-engine decode running 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序",
+            ),
+            (
+                "d_waiting",
+                "D waiting",
+                "per-engine decode waiting 请求数（mock 引擎 1s 采样，5s 窗口）；"
+                "数据源 mock_per_engine_timeseries.json.gz；按峰值排序；"
+                "全零 = 引擎侧无等待积压",
+            ),
+        )
+        TB_COLORS = ["danger", "warning", "info", "success", "neutral"]
+        for tb_key, tb_title, tb_cap in TB_META:
+            tb_entry = queue_top_bottom_ts.get(tb_key) or {}
+            for tb_kind, tb_kind_label in (("top", "Top-5"), ("bottom", "Bottom-5")):
+                tb_rows = tb_entry.get(tb_kind) or []
+                if not tb_rows:
+                    continue
+                tb_ips = []
+                for r in tb_rows:
+                    for k in r:
+                        if k != "t" and k not in tb_ips:
+                            tb_ips.append(k)
+                tb_ips = tb_ips[:5]
+                if not tb_ips:
+                    continue
+                tb_cats = const(
+                    "tbT" + tb_key + tb_kind,
+                    str_arr(sparse_cats([r.get("t", 0) for r in tb_rows])),
+                )
+                tb_series = []
+                for i, ip in enumerate(tb_ips):
+                    tb_series.append(
+                        (
+                            "tb%d" % i,
+                            ip,
+                            const(
+                                "tbV" + tb_key + tb_kind + str(i),
+                                num_arr([r.get(ip, 0) or 0 for r in tb_rows]),
+                            ),
+                            TB_COLORS[i % len(TB_COLORS)],
+                        )
+                    )
+                tb_containers.append(
+                    emit_container(
+                        tb_title + " " + tb_kind_label,
+                        "x = 压测时间（s，5s 窗口采样）；y = " + tb_cap,
+                        emit_chart("LineChart", tb_cats, 230, tb_series),
+                    )
+                )
+        if tb_containers:
+            lines.append("      <Divider />")
+            lines.append("")
+            lines.append("      <H2>2.1 队列 Top/Bottom-5 引擎</H2>")
+            lines.extend(emit_grid(tb_containers))
+            lines.append("")
 
     # 3. 调度均衡性（窗口 Gini，仅当 engine_dist 有数据）
     if p_wg_pts or d_wg_pts:
@@ -2292,8 +2312,8 @@ def main():
     if (
         batcher_ts
         or batcher_ts_by_role
-        or batcher_engine_quantile_ts
         or batcher_top_engines_ts
+        or queue_top_bottom_ts
         or dispatch_reason_ts
         or dispatch_batch_size_ts
     ):
