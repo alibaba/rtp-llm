@@ -303,6 +303,34 @@ class TRTLLMFMHAv2PrefillOp:
             )
             fmha_input = (q, kv)
             input_layout = "CONTIGUOUS_Q_KV"
+
+        use_sm120_bert_specialization = (
+            is_sm12x()
+            and self.attention_type == "mha"
+            and compute_dtype == torch.bfloat16
+            and self.head_dim == 64
+            and params.max_q_len == 128
+            and params.max_kv_len == 128
+            and fmha_input.shape[0] == params.batch_size * 128
+            and self.mask_mode == "padding"
+        )
+        if use_sm120_bert_specialization:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_sm120 import (
+                sm120_bert_fmha_v2_prefill,
+            )
+
+            o = sm120_bert_fmha_v2_prefill(
+                qkv=fmha_input,
+                workspace_buffer=self.workspace_buffer,
+                seq_lens=params.seq_lens,
+                max_q_len=params.max_q_len,
+                max_kv_len=params.max_kv_len,
+                bmm1_scale=self.bmm1_scale,
+                batch_size=params.batch_size,
+                cum_seq_lens=params.cu_seqlens,
+            )
+            return o.view(-1, self.head_num * self.head_dim)
+
         o = trtllm_fmha_v2_prefill(
             qkv=fmha_input,
             input_layout=input_layout,
