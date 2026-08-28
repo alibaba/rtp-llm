@@ -30,15 +30,15 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
                 return;
             }
             BatchItem head = (BatchItem) exactItems.get(0);
-            String engine = prefillIpPort(head);
+            String engineIp = prefillIp(head);
             reporter.reportBatcherQueueSize(
-                    PREFILL_ROLE, engine, metadata.queueDepth());
+                    PREFILL_ROLE, engineIp, metadata.queueDepth());
             long nowMs = System.currentTimeMillis();
             for (DeliveryItem item : exactItems) {
                 BatchItem exact = (BatchItem) item;
                 reporter.reportBatchWaitTimeMs(
                         PREFILL_ROLE,
-                        engine,
+                        engineIp,
                         Math.max(0L, nowMs - exact.enqueuedAtMs()),
                         exact.priority());
             }
@@ -59,11 +59,11 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
             }
             String reason = metadata.reason();
             BatchItem head = (BatchItem) dispatched.get(0);
-            String engine = prefillIpPort(head);
+            String engineIp = prefillIp(head);
             reporter.reportDispatchReason(
-                    PREFILL_ROLE, engine, reason);
+                    PREFILL_ROLE, engineIp, reason);
             reporter.reportBatcherQueueSize(
-                    PREFILL_ROLE, engine, metadata.queueDepth());
+                    PREFILL_ROLE, engineIp, metadata.queueDepth());
             long nowMs = System.currentTimeMillis();
             long hitTokens = 0L;
             long totalTokens = 0L;
@@ -71,29 +71,28 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
                 BatchItem exact = (BatchItem) item;
                 reporter.reportBatchWaitTimeMs(
                         PREFILL_ROLE,
-                        engine,
+                        engineIp,
                         Math.max(0L, nowMs - exact.enqueuedAtMs()),
                         exact.priority());
                 hitTokens = saturatedAdd(hitTokens, exact.hitCache());
                 totalTokens = saturatedAdd(totalTokens, exact.seqLen());
             }
             reporter.reportBatchCacheHitMetrics(
-                    PREFILL_ROLE, engine, hitTokens, totalTokens);
+                    PREFILL_ROLE, engineIp, hitTokens, totalTokens);
             reporter.reportBatchSize(
-                    PREFILL_ROLE, engine, reason,
+                    PREFILL_ROLE, engineIp, reason,
                     dispatched.size());
             reporter.reportBatchTotalTokens(
-                    PREFILL_ROLE, engine, reason, totalTokens);
+                    PREFILL_ROLE, engineIp, reason, totalTokens);
             reporter.reportBatchPredictedTimeMs(
-                    PREFILL_ROLE, engine, Math.max(0L, predictedMs));
+                    PREFILL_ROLE, engineIp, Math.max(0L, predictedMs));
         } catch (Throwable failure) {
             Logger.warn("Batch dispatch telemetry isolated", failure);
         }
     }
 
-    /** Engine identity for per-engine series: ipPort, not bare IP (mock fleets share one IP). */
-    private static String prefillIpPort(BatchItem item) {
-        return item.prefillEp().ipPort();
+    private static String prefillIp(BatchItem item) {
+        return item.prefillEp().getIp();
     }
 
     private static long saturatedAdd(long left, long right) {

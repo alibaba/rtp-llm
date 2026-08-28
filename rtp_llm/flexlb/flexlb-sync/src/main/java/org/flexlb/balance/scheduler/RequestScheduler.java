@@ -153,7 +153,7 @@ public final class RequestScheduler {
         try {
             reporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),
-                    item.prefillEp().ipPort(),
+                    item.prefillEp().getIp(),
                     System.currentTimeMillis() - context.getStartTime());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn(

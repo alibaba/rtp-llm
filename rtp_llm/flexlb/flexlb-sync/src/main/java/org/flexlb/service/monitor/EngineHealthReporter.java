@@ -235,14 +235,10 @@ public class EngineHealthReporter {
         WorkerStatus.EngineObservation status =
                 workerStatus.committedEngineObservation();
         WorkerStatus.PollHealth pollHealth = workerStatus.pollHealth();
-        // ipPort, not bare IP: mock fleets share one IP, so a bare-IP label
-        // collapses all engines onto one overwriting series (see
-        // BatchSchedulerReporter callers).
-        String engineIp = topology.ip() + ":" + topology.port();
 
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", engineIp,
+                "engineIp", topology.ip(),
                 "role", status.role().name());
 
         Long availableConcurrency = status.availableConcurrency();
@@ -270,11 +266,10 @@ public class EngineHealthReporter {
                 workerStatus.committedEngineObservation();
         CacheStatus cacheStatus = workerStatus.getCacheStatus();
         long cacheLastUpdateTime = workerStatus.cacheLastSuccessfulPollUs();
-        String engineIp = topology.ip() + ":" + topology.port();
         if (cacheLastUpdateTime > 0) {
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", engineIp,
+                    "engineIp", topology.ip(),
                     "role", status.role().name());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
         }
@@ -286,7 +281,7 @@ public class EngineHealthReporter {
                     "role", status.role().name());
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", engineIp,
+                    "engineIp", topology.ip(),
                     "role", status.role().name());
             monitor.report(CACHE_BLOCK_SIZE, roleMetricTags, blockSize);
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
@@ -298,7 +293,7 @@ public class EngineHealthReporter {
 
         FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", engineIp,
+                "engineIp", topology.ip(),
                 "role", status.role().name());
 
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
