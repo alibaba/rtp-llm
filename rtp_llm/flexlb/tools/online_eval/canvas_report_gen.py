@@ -1330,8 +1330,9 @@ def main():
                     )
         if batcher_ts:
             BT = const("BT", str_arr(sparse_cats([r.get("t", 0) for r in batcher_ts])))
-            # routing.queue.length 唯一上报点是 type=batchQueue（同一 batcher
-            # 队列的按优先级分桶视角），保持集群总量口径。
+            # routing 队列口径：与 batcher_queue_size 同源（同一 per-engine
+            # batcher 队列的集群合计）。旧 priority 桶口径（routing.queue.length）
+            # 尾部 stale 冻结为上报伪影，已弃用；旧 aggregate 数据仍为旧口径。
             routing_q = const(
                 "routingQueue",
                 num_arr([r.get("routing_queue", 0) or 0 for r in batcher_ts]),
@@ -1365,13 +1366,23 @@ def main():
             if any(r.get("routing_queue") for r in batcher_ts):
                 queue_containers.append(
                     emit_container(
-                        "master 队列深度：routing（集群总量）",
-                        "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）",
+                        "master 队列深度：routing（集群总量，batcher 同源口径）",
+                        "x = 压测时间（s，1s 采样）；y = 队列深度（请求数，集群总量）。"
+                        "口径：与 batcher_queue_size 同源（同一 per-engine batcher 队列的集群合计，"
+                        "尾部正确归零）；旧 priority 桶口径（routing.queue.length）尾部 stale 冻结"
+                        "为上报伪影，已弃用；旧 aggregate 数据仍为旧口径",
                         emit_chart(
                             "LineChart",
                             BT,
                             230,
-                            [("rq", "routing 队列", routing_q, "warning")],
+                            [
+                                (
+                                    "rq",
+                                    "routing 队列（batcher 同源）",
+                                    routing_q,
+                                    "warning",
+                                )
+                            ],
                         ),
                     )
                 )

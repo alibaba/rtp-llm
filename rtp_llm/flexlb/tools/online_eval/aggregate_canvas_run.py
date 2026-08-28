@@ -1056,8 +1056,13 @@ BATCHER_Q_BASE = "flexlb_app_flexlb_batcher_queue_size"
 batcher_pts = prom_ts_extract(BATCHER_Q_BASE, agg="sum")
 # routing.queue.length's only reporter is reportBatcherQueueDepthByPriority
 # (type=batchQueue): the SAME per-engine batcher queue bucketed by priority,
-# not an independent routing-stage queue.
-routing_pts = prom_ts_extract("flexlb_app_routing_queue_length", agg="sum")
+# not an independent routing-stage queue. That priority-bucket view freezes
+# its last sample at shutdown (stale tail, an upload artifact — e.g. a
+# forever-189 tail instead of draining to 0), so the routing series now
+# reuses the batcher_queue_size source: same queue, correct zero-drain.
+# Old aggregate JSONs keep their legacy routing_queue values (degraded
+# compat): the report caption spells out the active convention.
+routing_pts = batcher_pts
 batcher_ts = []
 if batcher_pts or routing_pts:
     b_by_ts = {ts: v for ts, v in batcher_pts}
