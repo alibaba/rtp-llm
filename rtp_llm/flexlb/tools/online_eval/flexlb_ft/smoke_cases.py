@@ -575,6 +575,21 @@ def bal_concurrent_mix(ctx: CaseContext):
     (strict→0.75, normal/loose→0.85): the calibrated loose floor (0.85,
     false-failure < 1% at 2 engines / 20 samples) is never widened past
     itself.
+
+    P6 note (intake2 scheduler contract, task #65 intake2-sync): the
+    RequestScheduler/GroupPolicy architecture fails fast with retryable
+    NO_PREFILL_WORKER (8402) once the per-engine inflight-batch admission
+    ledger is saturated — dispatcher.maxInflightBatchesPerPrefillWorker
+    (harness default 4) x 2 smoke prefill workers = 8 concurrent batch
+    reservations; each burst request is its own batch, so a 20-way burst
+    exceeds the floor and the excess is rejected at select time via
+    projection PROJECTION_BLOCKED_DELIVERY_CAPACITY_BATCH_ADMISSION
+    (flexlb-sync BatchPrefillAdmission.reserveBatch +
+    WorkerBatcher.admissionBlockUnderLock).  The old "master queues the
+    entire burst" assumption no longer holds: completeness now means
+    (a) no failure other than batch-admission backpressure, and (b) at
+    least the 8-reservation floor admitted — the first 8 arrivals always
+    find a permit (releases only raise the floor).
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
@@ -605,10 +620,16 @@ def bal_concurrent_mix(ctx: CaseContext):
         max_share = max(dist.values()) / n_ok if n_ok else 1.0
         dist_json = json.dumps(dict(dist), sort_keys=True)
 
+        admission_denied = [f for f in failures if "NO_PREFILL_WORKER" in f]
+        hard_failures = [f for f in failures if "NO_PREFILL_WORKER" not in f]
         report.invariant(
             "P6",
-            not failures and n_ok == 20,
-            detail=f"completed={n_ok}/20, failures={failures[:2]}",
+            not hard_failures and n_ok >= 8,
+            detail=(
+                f"completed={n_ok}/20, batch-admission-denied="
+                f"{len(admission_denied)} (retryable 8402, intake2 "
+                f"contract), failures={hard_failures[:2]}"
+            ),
         )
         report.check(
             "P1",
