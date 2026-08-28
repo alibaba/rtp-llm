@@ -214,8 +214,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 }
             }
 
-            // Finished-task cleanup is not gated by the coarse status version.
-            if (priorityScheduler != null && finishedTaskInfo != null && !finishedTaskInfo.isEmpty()) {
+            boolean hasFinishedTasks = finishedTaskInfo != null && !finishedTaskInfo.isEmpty();
+            if (priorityScheduler != null && (versionAdvanced || hasFinishedTasks)) {
                 priorityScheduler.onWorkerStatusUpdate(newWorkerStatus);
             }
 

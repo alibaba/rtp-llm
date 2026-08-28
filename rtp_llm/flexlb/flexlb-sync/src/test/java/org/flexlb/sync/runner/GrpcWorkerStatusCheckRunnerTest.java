@@ -2,6 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
@@ -110,6 +111,33 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
         assertEquals(16_000, workerStatus.getInTransitAndWaitingUncachedTokens());
         assertEquals(1, workerStatus.getWaitingTaskList().size());
+    }
+
+    @Test
+    void should_notify_scheduler_for_advanced_running_only_status() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus workerStatus = status(8080);
+        workerStatus.setRole(RoleType.DECODE);
+        PriorityScheduler priorityScheduler = Mockito.mock(PriorityScheduler.class);
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(123L)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
+                .build();
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.DECODE.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                .setStatusVersion(100L)
+                .setAlive(true)
+                .addRunningTaskInfo(runningTask)
+                .build();
+        whenStatus(response);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.DECODE, "test-group",
+                workerStatus, Map.of(ipPort, workerStatus), engineHealthReporter,
+                engineGrpcService, 20L, priorityScheduler, null, Runnable::run).run();
+
+        verify(priorityScheduler).onWorkerStatusUpdate(Mockito.any());
     }
 
     @Test
