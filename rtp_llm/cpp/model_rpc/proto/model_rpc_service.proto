@@ -444,6 +444,10 @@ message TaskInfoPB {
     // allocated KV blocks * tokens-per-block). 0 means "not reported" (legacy
     // engine or KV not yet allocated). Observational only for now: FlexLB must
     // not depend on it for correctness; absence falls back to default 0.
+    // For terminal records (finished_task_list / CANCELED) the value is a
+    // best-effort snapshot at terminal time: it may legitimately read 0 when
+    // the resource has already been released or was never allocated.
+    // Consumers must NOT assume a terminal record carries a non-zero value.
     int64 kv_tokens = 16;
 }
 

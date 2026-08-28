@@ -44,6 +44,11 @@ public:
     // derivePhase reads), or when the resource has already been released —
     // for a finished record that is exactly the "occupied nothing at terminal
     // time" value, so callers need no extra state.
+    // blocks > 0 does NOT imply a live cache manager: warmup streams and
+    // fakeInitKVBlock() can reserve blocks with a null cache_manager
+    // (StreamCacheResource::fakeInitKVBlock explicitly tolerates that).
+    // Report 0 ("not reported") in that case instead of dereferencing a
+    // null manager — identical to the legacy-engine default path.
     static int64_t computeKvTokens(const GenerateStreamPtr& stream) {
         if (!stream) {
             return 0;
@@ -52,11 +57,17 @@ public:
         if (blocks == 0) {
             return 0;
         }
+        if (!stream->streamCacheResource().resourceContext().cache_manager) {
+            return 0;
+        }
         return static_cast<int64_t>(blocks) * stream->streamCacheResource().reuseBlockTokens();
     }
 
     // Hard cap on running_task_info detail entries reported per
-    // GetWorkerStatus. Deliberately far above any realistic running count so
+    // GetWorkerStatus. Note this bounds the count of ADMITTED requests known
+    // to the runtime meta (including RECEIVED / KV_ALLOCATED entries and the
+    // waiting-queue depth they represent), not just concurrent RUNNING
+    // streams. Deliberately far above any realistic admitted count so
     // it never fires today; it exists purely to bound RPC payload and
     // aggregation memory. When exceeded, the running detail is truncated and
     // running_detail_truncated is set so consumers can tell truncation-driven
@@ -140,6 +151,11 @@ public:
         auto running   = running_streams_.find(request_id);
         if (running != running_streams_.end()) {
             task_info = running->second.task_info;
+            // The stored task_info predates any KV allocation (enqueue does
+            // not record kv_tokens). Refresh it from the live stream so an
+            // overlay-only view never carries a stale enqueue-time zero for a
+            // request that has since allocated blocks.
+            task_info.kv_tokens = computeKvTokens(running->second.stream);
         } else {
             for (auto it = finished_streams_.rbegin(); it != finished_streams_.rend(); ++it) {
                 if (it->second.request_id == request_id) {
@@ -183,6 +199,10 @@ public:
                 task_info.iterate_count   = stream->iterCount();
                 task_info.execution_time_ms =
                     computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
+                // Same best-effort terminal snapshot as ordinary dequeue():
+                // the CANCELED record must not systematically read 0 while
+                // normal terminals carry the terminal-time usage.
+                task_info.kv_tokens = computeKvTokens(stream);
             }
             running_streams_.erase(running);
         }

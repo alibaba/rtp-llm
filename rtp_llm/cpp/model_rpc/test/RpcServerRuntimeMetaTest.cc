@@ -2,6 +2,8 @@
 
 #include <thread>
 
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 
 namespace rtp_llm::test {
@@ -11,7 +13,10 @@ namespace {
 class RuntimeMetaTestStream: public GenerateStream {
 public:
     explicit RuntimeMetaTestStream(const std::shared_ptr<GenerateInput>& input):
-        GenerateStream(input, modelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
+        RuntimeMetaTestStream(input, ResourceContext{}) {}
+
+    RuntimeMetaTestStream(const std::shared_ptr<GenerateInput>& input, const ResourceContext& resource_context):
+        GenerateStream(input, modelConfig(), RuntimeConfig{}, resource_context, nullptr) {}
 
     ErrorResult<GenerateOutputs> nextOutput() override {
         return ErrorResult<GenerateOutputs>(GenerateOutputs{});
@@ -275,6 +280,33 @@ std::shared_ptr<RuntimeMetaTestStream> makeBareStream(int64_t request_id) {
     return std::make_shared<RuntimeMetaTestStream>(input);
 }
 
+// A CPU-only stream with real KV bookkeeping: a warmup KVCacheManager (the
+// constructor then skips the GPU-side allocateAndSync()) plus
+// fakeInitKVBlock() reserves `blocks` blocks, so the status path can exercise
+// the non-zero computation blocks x tokens-per-block. The manager is only
+// used here for cacheConfig()/cpSlotMapper() reads.
+std::shared_ptr<RuntimeMetaTestStream> makeKvStream(int64_t request_id, size_t blocks, size_t seq_size_per_block) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->request_id      = request_id;
+    input->group_id        = 77;
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    CacheConfig cache_config;
+    cache_config.layer_num          = 1;
+    cache_config.layer_all_num      = 1;
+    cache_config.block_num          = 1;
+    cache_config.seq_size_per_block = seq_size_per_block;
+    auto cache_manager              = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    auto stream = std::make_shared<RuntimeMetaTestStream>(input, resource_context);
+    stream->streamCacheResource().fakeInitKVBlock(blocks);
+    return stream;
+}
+
 }  // namespace
 
 // Engine contract defaults: a stream without allocated KV reports
@@ -342,6 +374,59 @@ TEST(RpcServerRuntimeMetaTest, FinishedWindowReplaysTerminalsUntilCursorAdvances
     // Durably advanced cursor: the window stops replaying.
     auto settled = meta.getEngineScheduleInfo(advanced);
     EXPECT_TRUE(settled.finished_task_info_list.empty());
+}
+
+// Running detail reports kv_tokens = blocks x tokens-per-block once KV has
+// actually been allocated (3 blocks x 64 tokens = 192).
+TEST(RpcServerRuntimeMetaTest, RunningKvTokensComputedFromBlocksTimesBlockTokens) {
+    RpcServerRuntimeMeta meta;
+    meta.enqueue(TaskIdentity{/*request_id=*/611, /*batch_id=*/77},
+                 makeKvStream(611, /*blocks=*/3, /*seq_size_per_block=*/64));
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].kv_tokens, 192);
+}
+
+// blocks > 0 with a null cache manager (the warmup / fakeInitKVBlock shape)
+// reports 0 — "not reported" — instead of dereferencing the null manager.
+TEST(RpcServerRuntimeMetaTest, KvTokensZeroWhenBlocksReservedWithoutCacheManager) {
+    auto stream = makeBareStream(612);
+    stream->streamCacheResource().fakeInitKVBlock(/*reserved_blocks=*/3);
+    ASSERT_GT(stream->curBlocksNum(), 0);
+
+    EXPECT_EQ(RpcServerRuntimeMeta::computeKvTokens(stream), 0);
+}
+
+// Ordinary dequeue() snapshots the terminal-time KV usage: with blocks still
+// reserved the finished record carries the non-zero value.
+TEST(RpcServerRuntimeMetaTest, DequeueSnapshotsNonZeroKvTokensAtTerminal) {
+    RpcServerRuntimeMeta meta;
+    auto                 stream = makeKvStream(613, /*blocks=*/2, /*seq_size_per_block=*/128);
+    meta.enqueue(TaskIdentity{/*request_id=*/613, /*batch_id=*/77}, stream);
+
+    meta.dequeue(613, stream);
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].kv_tokens, 256);
+}
+
+// The typed CANCELED terminal takes the same best-effort KV snapshot as an
+// ordinary terminal instead of systematically reading 0.
+TEST(RpcServerRuntimeMetaTest, PriorityCanceledSnapshotsKvTokensAtTerminal) {
+    RpcServerRuntimeMeta meta;
+    auto                 stream = makeKvStream(614, /*blocks=*/3, /*seq_size_per_block=*/64);
+    const TaskIdentity   identity{/*request_id=*/614, /*batch_id=*/77};
+    meta.enqueue(identity, stream);
+    meta.markPriorityPreemptionCanceling(identity);
+
+    ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
+        614, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].kv_tokens, 192);
 }
 
 }  // namespace rtp_llm::test
