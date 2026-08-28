@@ -1313,7 +1313,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         && !params.device_resource_config.enable_layer_micro_batch && !context_parallel_enabled
         && draft_model_config.index_share_for_mtp_iteration && draft_model_config.num_layers == 1
         && draft_model_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
-    mtp_indexer_topk_ = draft_model_config.attn_config.indexer_topk;
+    mtp_indexer_topk_           = draft_model_config.attn_config.indexer_topk;
+    mtp_indexer_compress_ratio_ = std::max<int64_t>(draft_model_config.attn_config.indexer_compress_ratio, 1);
     RTP_LLM_LOG_INFO(
         "[MTP indexer share] enabled=%d %s=%s model_capability=%d python_draft=%d python_api_capability=%d "
         "layer_micro_batch=%d context_parallel=%d layers=%ld topk=%ld propose_step=%zu",
@@ -3120,12 +3121,17 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
                     auto state = current_state;
                     auto seed  = torch::full(
                         {1, mtp_indexer_topk_}, -1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-                    const int64_t seq_len     = std::max<int64_t>(stream->seqLength(), 0);
-                    const int64_t valid_count = std::min<int64_t>(seq_len, mtp_indexer_topk_);
+                    const int64_t seq_len = std::max<int64_t>(stream->seqLength(), 0);
+                    // The shared selection uses indexer coordinates. For a
+                    // compressed KPool, only complete raw-token groups are
+                    // addressable; the live incomplete group is supplied by
+                    // SparseMLA's causal tail.
+                    const int64_t indexer_seq_len = seq_len / mtp_indexer_compress_ratio_;
+                    const int64_t valid_count     = std::min<int64_t>(indexer_seq_len, mtp_indexer_topk_);
                     if (valid_count > 0) {
                         seed.narrow(/*dim=*/1, /*start=*/0, valid_count)
-                            .copy_(torch::arange(seq_len - valid_count,
-                                                 seq_len,
+                            .copy_(torch::arange(indexer_seq_len - valid_count,
+                                                 indexer_seq_len,
                                                  torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
                                        .reshape({1, valid_count}));
                     }

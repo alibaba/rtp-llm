@@ -577,6 +577,29 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdChe
     EXPECT_FALSE(disabled_fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.defined());
 }
 
+TEST_F(MtpExecutorTest, testFakeDecodeStreamSeedsCompressedIndexerCoordinates) {
+    MtpExecutorTestConfig test_config;
+    auto                  components                 = createMtpExecutorComponents(test_config);
+    components.executor->mtp_indexer_share_enabled_  = true;
+    components.executor->mtp_indexer_topk_           = 6;
+    components.executor->mtp_indexer_compress_ratio_ = 4;
+
+    auto fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                              components.model_config,
+                                                              components.runtime_config,
+                                                              components.resource_context,
+                                                              test_config.vocab_size);
+    fake_stream->setSeqLength(19);  // four complete KPool groups plus a three-token tail
+
+    std::list<GenerateStreamPtr> streams{fake_stream};
+    std::list<GenerateStreamPtr> prefill_streams;
+    std::list<GenerateStreamPtr> decode_streams;
+    components.executor->prepareStreams(streams, prefill_streams, decode_streams);
+
+    const auto seed_cpu = fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.cpu();
+    EXPECT_TRUE(torch::equal(seed_cpu, torch::tensor({{0, 1, 2, 3, -1, -1}}, torch::kInt32)));
+}
+
 TEST_F(MtpExecutorTest, testComputeMtpTargetLogprobsKeepsOnlyCompactFp32Statistics) {
     auto logits = torch::tensor({3.0f, -1.0f, 0.5f, 2.0f, 0.0f, 4.0f, 1.0f, 3.0f}, torch::kFloat16).reshape({2, 4});
     auto expected_logprobs   = torch::log_softmax(logits.to(torch::kFloat32), -1);

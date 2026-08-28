@@ -29,6 +29,17 @@ def _requires_prefill_cp_support(
     return bool(attn_inputs.is_prefill and not use_decode_mla)
 
 
+def _sparse_prefill_fast_path_limit(attn_configs: AttentionConfigs) -> int:
+    """Return the raw-token width below which dense prefill is exact.
+
+    ``indexer_topk`` is normally a token count, but compressed indexers use it
+    for the number of selected KPool groups.  Those models publish the expanded
+    raw-token width through ``sparse_attention_topk``.
+    """
+    sparse_topk = int(getattr(attn_configs, "sparse_attention_topk", 0))
+    return sparse_topk if sparse_topk > 0 else int(attn_configs.indexer_topk)
+
+
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -87,7 +98,8 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not use_decode_mla
-            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens.max().item()
+            <= _sparse_prefill_fast_path_limit(attn_configs)
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )

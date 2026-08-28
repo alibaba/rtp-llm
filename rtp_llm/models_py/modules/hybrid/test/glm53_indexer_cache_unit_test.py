@@ -4,6 +4,9 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    _sparse_prefill_fast_path_limit,
+)
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     IndexerCompressorCacheLayout,
     compress_indexer_projection_reference,
@@ -19,6 +22,12 @@ from rtp_llm.models_py.modules.hybrid.indexer_grouping import (
 
 
 class Glm53IndexerGroupingTest(unittest.TestCase):
+    def test_prefill_fast_path_uses_expanded_raw_token_width(self) -> None:
+        compressed = SimpleNamespace(indexer_topk=512, sparse_attention_topk=2051)
+        legacy = SimpleNamespace(indexer_topk=2048, sparse_attention_topk=0)
+        self.assertEqual(_sparse_prefill_fast_path_limit(compressed), 2051)
+        self.assertEqual(_sparse_prefill_fast_path_limit(legacy), 2048)
+
     def test_geometry_uses_compressed_selection_space(self) -> None:
         geometry = IndexerGroupingGeometry.from_attention_config(
             SimpleNamespace(

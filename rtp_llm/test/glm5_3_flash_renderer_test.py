@@ -79,6 +79,22 @@ class Glm53FlashRendererTest(unittest.TestCase):
 
         self.assertTrue(renderer.in_think_mode(request))
 
+    def test_checkpoint_forced_think_parser_splits_implicit_reasoning(self):
+        renderer = self._renderer()
+        renderer._build_prompt = lambda request: "<think>"
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            chat_template_kwargs={"enable_thinking": False},
+        )
+
+        parser = renderer._create_reasoning_parser(request)
+        self.assertIsNotNone(parser)
+        reasoning, content = parser.parse_non_stream(
+            "I should answer briefly.</think>Hello!"
+        )
+        self.assertEqual(reasoning, "I should answer briefly.")
+        self.assertEqual(content, "Hello!")
+
 
 if __name__ == "__main__":
     unittest.main()

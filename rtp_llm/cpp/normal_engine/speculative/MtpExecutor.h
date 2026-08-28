@@ -240,6 +240,7 @@ private:
     // the full DP+TP world, or peers can enter different cloned _mega_bufs.
     bool                                             mtp_indexer_graph_choice_world_sync_ = false;
     int64_t                                          mtp_indexer_topk_                    = 0;
+    int64_t                                          mtp_indexer_compress_ratio_          = 1;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       seed_decode_draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
