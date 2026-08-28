@@ -55,6 +55,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * optional engine stream reading for TTFT/total latency, and generates summary.json +
  * per_request.jsonl matching the Python client format.
  *
+ * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
+ * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
+ * the client stops after a successful Schedule RPC; the engine still executes the
+ * request in full (BATCH dispatcher: master enqueued it via EnqueueBatch during the
+ * Schedule RPC). This trims the client's stream-reading network cost from load tests
+ * while keeping engine-side load identical to the read-stream mode.
+ *
  * <p>Configuration is read exclusively from environment variables at startup (no
  * multi-layer override). Run as:
  * <pre>{@code
@@ -396,8 +403,22 @@ public final class JavaLoadClient {
         String newSourceRid = req.sourceRid + loopSuffix;
         String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
         long newRequestId = stableRequestId(newSourceRid);
+        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
+        // round presents byte-identical block_cache_keys, so cache affinity
+        // routes each rid to the SAME prefill engine round after round and
+        // the P-side load collapses onto a handful of engines (Gini ~0.56).
+        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
+        // request prefix reuse) while giving every round a unique routing
+        // prefix. The source list is shared across rounds, so it is copied
+        // here and never mutated in place.
+        List<Long> blockKeys = req.blockKeys;
+        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
+            List<Long> salted = new ArrayList<>(blockKeys);
+            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
+            blockKeys = salted;
+        }
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, req.blockKeys, req.tokenIds, req.priority);
+                req.inputLen, req.outputLen, blockKeys, req.tokenIds, req.priority);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -461,7 +482,24 @@ public final class JavaLoadClient {
                 result.prefill = roleAddr(scheduleResponse, "PREFILL");
                 result.decode = roleAddr(scheduleResponse, "DECODE");
 
-                if (!config.fetchResponseEnabled) {
+                if (!config.fetchOutputStream) {
+                    // Under a NON_BATCH dispatcher the engine only receives the
+                    // request through the client's own GenerateStreamCall
+                    // (submission and stream reading are the same streaming
+                    // call), so skipping the fetch would mean the request
+                    // never reaches any engine. Fail fast instead of silently
+                    // producing a run with zero engine load.
+                    if (!scheduleResponse.getEnqueuedByMaster()) {
+                        System.err.println(
+                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
+                                + "schedule response reports enqueued_by_master=false "
+                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
+                                + "dispatcher the engine only receives requests through the "
+                                + "client's GenerateStreamCall stream, so skipping the fetch "
+                                + "would leave the engine idle. Re-enable stream reading or "
+                                + "switch the master to a BATCH dispatcher.");
+                        System.exit(86);
+                    }
                     result.status = "scheduled";
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                     // Route through tallyResult so the result lands in
@@ -500,7 +538,7 @@ public final class JavaLoadClient {
         }
 
         // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchResponseEnabled) {
+        if (scheduleResponse != null && config.fetchOutputStream) {
             try {
                 Double firstFrameNanos = null;
                 Double terminalNanos = null;
@@ -963,9 +1001,13 @@ public final class JavaLoadClient {
             blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
         }
 
-        // Auto-TPM QoS priority: per-record "priority" field wins, else the
-        // client-wide PRIORITY env default; 0 keeps the field unset on the wire.
-        int priority = raw.path("priority").asInt(config.priority);
+        // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
+        // request to that single level (single-QoS runs); otherwise the
+        // per-record "priority" field wins, else the client-wide PRIORITY env
+        // default; 0 keeps the field unset on the wire.
+        int priority = config.forcePriority > 0
+                ? config.forcePriority
+                : raw.path("priority").asInt(config.priority);
 
         return new TraceRecord(requestId, sourceRid, traceId, tsMs,
                 inputLen, outputLen, blockKeys, tokenIds, priority);
@@ -1024,6 +1066,17 @@ public final class JavaLoadClient {
         return Hashing.murmur3_128()
                 .hashString(value, StandardCharsets.UTF_8)
                 .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
+    }
+
+    // Package-visible for loop-mode unique-prefix assertions in tests.
+    // Deterministic per-round salt: the same (key, loop) pair always maps to
+    // the same value, different loops map to different values.
+    static long roundSaltedKey(long blockKey, int loopIdx) {
+        return Hashing.murmur3_128().newHasher()
+                .putLong(blockKey)
+                .putInt(loopIdx)
+                .hash()
+                .asLong();
     }
 
     private static long toSignedInt64(BigInteger value) {
@@ -1691,7 +1744,12 @@ public final class JavaLoadClient {
         final long timeoutMs;
         final double slaTtftMs;
         final String zeroOutputPolicy;
-        final boolean scheduleOnly;
+        /** When false the client skips reading engine output streams (FetchResponse/
+         *  GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
+         *  still executes prefill + decode in full — only the client-side read is
+         *  trimmed. Requires a BATCH dispatcher (see the enqueued_by_master
+         *  fail-fast in handleRequest). */
+        final boolean fetchOutputStream;
         final boolean loop;
         final int nChannels;
         final int eventLoopThreads;
@@ -1700,7 +1758,6 @@ public final class JavaLoadClient {
         final boolean skipServerLatency;
         final String model;
         final String apiKey;
-        final boolean fetchResponseEnabled;
         final boolean gradient;
         final int gradientStartSpeed;
         final int gradientMaxSpeed;
@@ -1712,65 +1769,74 @@ public final class JavaLoadClient {
         final boolean dryRun;
         /** Default Auto-TPM QoS priority for all replayed requests; 0 = unset. */
         final int priority;
+        /** Single-priority override: > 0 pins every request to that level. */
+        final int forcePriority;
         /** Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval). */
         final String sendMode;
         /** Total target QPS across all shards; required > 0 in uniform mode. */
         final double sendModeQps;
+        /**
+         * REPLAY_UNIQUE_PREFIX: re-salt blockKeys[0] per loop round so every
+         * replay round presents a fresh cache-affinity prefix (default on).
+         */
+        final boolean replayUniquePrefix;
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, scheduleOnly, loop, nChannels,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
+                    skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, "replay", 0.0);
+                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0,
+                    true);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, scheduleOnly, loop, nChannels,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
+                    skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    "replay", 0.0);
+                    0, "replay", 0.0, true);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, String sendMode, double sendModeQps) {
+               int priority, int forcePriority, String sendMode, double sendModeQps,
+               boolean replayUniquePrefix) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1785,7 +1851,7 @@ public final class JavaLoadClient {
             this.timeoutMs = timeoutMs;
             this.slaTtftMs = slaTtftMs;
             this.zeroOutputPolicy = zeroOutputPolicy;
-            this.scheduleOnly = scheduleOnly;
+            this.fetchOutputStream = fetchOutputStream;
             this.loop = loop;
             this.nChannels = nChannels;
             this.eventLoopThreads = eventLoopThreads;
@@ -1794,7 +1860,6 @@ public final class JavaLoadClient {
             this.skipServerLatency = skipServerLatency;
             this.model = model;
             this.apiKey = apiKey;
-            this.fetchResponseEnabled = fetchResponseEnabled;
             this.gradient = gradient;
             this.gradientStartSpeed = gradientStartSpeed;
             this.gradientMaxSpeed = gradientMaxSpeed;
@@ -1805,8 +1870,10 @@ public final class JavaLoadClient {
             this.endpointsFile = endpointsFile;
             this.dryRun = dryRun;
             this.priority = priority;
+            this.forcePriority = forcePriority;
             this.sendMode = sendMode;
             this.sendModeQps = sendModeQps;
+            this.replayUniquePrefix = replayUniquePrefix;
             if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
                 throw new IllegalArgumentException(
                         "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
@@ -1830,12 +1897,7 @@ public final class JavaLoadClient {
                 int httpPort = Integer.parseInt(targetAddr.substring(colon + 1));
                 grpcTarget = host + ":" + (httpPort + 2);
             }
-            boolean scheduleOnly = envBool("SCHEDULE_ONLY", false);
-            String expectFetchResponse = env("FLEXLB_EXPECT_FETCH_RESPONSE", "");
-            boolean fetchResponseEnabled = !scheduleOnly
-                    && !expectFetchResponse.equalsIgnoreCase("0")
-                    && !expectFetchResponse.equalsIgnoreCase("false")
-                    && !expectFetchResponse.equalsIgnoreCase("no");
+            boolean fetchOutputStream = envBool("FETCH_OUTPUT_STREAM", true);
             return new Config(
                     env("TRACE_FILE", ""),
                     targetAddr,
@@ -1851,7 +1913,7 @@ public final class JavaLoadClient {
                     envLong("TIMEOUT_MS", 3_600_000L),
                     envDouble("SLA_TTFT_MS", 500.0),
                     env("ZERO_OUTPUT_POLICY", "skip"),
-                    scheduleOnly,
+                    fetchOutputStream,
                     envBool("LOOP", false),
                     envInt("N_CHANNELS", 8),
                     envInt("EVENT_LOOP_THREADS", 32),
@@ -1860,7 +1922,6 @@ public final class JavaLoadClient {
                     envBool("SKIP_SERVER_LATENCY", false),
                     env("MODEL", "engine_service"),
                     env("API_KEY", ""),
-                    fetchResponseEnabled,
                     envBool("GRADIENT", false),
                     envInt("GRADIENT_START_SPEED", 10),
                     envInt("GRADIENT_MAX_SPEED", 1000),
@@ -1871,8 +1932,10 @@ public final class JavaLoadClient {
                     env("ENDPOINTS_FILE", ""),
                     envBool("DRY_RUN", false),
                     envInt("PRIORITY", 0),
+                    envInt("FORCE_PRIORITY", 0),
                     env("SEND_MODE", "replay"),
-                    envDouble("SEND_MODE_QPS", 0.0)
+                    envDouble("SEND_MODE_QPS", 0.0),
+                    envBool("REPLAY_UNIQUE_PREFIX", true)
             );
         }
 
@@ -1892,7 +1955,6 @@ public final class JavaLoadClient {
             System.out.println("  TIMEOUT_MS=" + timeoutMs);
             System.out.println("  SLA_TTFT_MS=" + slaTtftMs);
             System.out.println("  ZERO_OUTPUT_POLICY=" + zeroOutputPolicy);
-            System.out.println("  SCHEDULE_ONLY=" + scheduleOnly);
             System.out.println("  LOOP=" + loop);
             System.out.println("  N_CHANNELS=" + nChannels);
             System.out.println("  EVENT_LOOP_THREADS=" + eventLoopThreads);
@@ -1901,7 +1963,7 @@ public final class JavaLoadClient {
             System.out.println("  SKIP_SERVER_LATENCY=" + skipServerLatency);
             System.out.println("  MODEL=" + model);
             System.out.println("  API_KEY=" + (apiKey.isEmpty() ? "<empty>" : "<set>"));
-            System.out.println("  FETCH_RESPONSE_ENABLED=" + fetchResponseEnabled);
+            System.out.println("  FETCH_OUTPUT_STREAM=" + fetchOutputStream);
             System.out.println("  GRADIENT=" + gradient);
             System.out.println("  GRADIENT_START_SPEED=" + gradientStartSpeed);
             System.out.println("  GRADIENT_MAX_SPEED=" + gradientMaxSpeed);
@@ -1911,8 +1973,10 @@ public final class JavaLoadClient {
             System.out.println("  ENABLE_FALLBACK=" + enableFallback);
             System.out.println("  ENDPOINTS_FILE=" + endpointsFile);
             System.out.println("  PRIORITY=" + priority);
+            System.out.println("  FORCE_PRIORITY=" + forcePriority);
             System.out.println("  SEND_MODE=" + sendMode);
             System.out.println("  SEND_MODE_QPS=" + sendModeQps);
+            System.out.println("  REPLAY_UNIQUE_PREFIX=" + replayUniquePrefix);
             System.out.println("=====================================");
         }
 

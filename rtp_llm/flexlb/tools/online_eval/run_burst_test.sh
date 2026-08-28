@@ -41,6 +41,11 @@ ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-one}"
 LIMIT="${LIMIT:-0}"
 DURATION_S="${DURATION_S:-0}"
 MONITOR_INTERVAL="${MONITOR_INTERVAL:-2}"
+# M8: pin the secondary per-second pollers OFF so the burst baseline keeps
+# its historical zero-observation-overhead profile (numbers stay comparable
+# with the old baseline). stability_monitor.py is the observation channel
+# for these runs.
+export FLEXLB_SECONDARY_POLLERS_ENABLED="${FLEXLB_SECONDARY_POLLERS_ENABLED:-0}"
 
 # Experiment-profile inputs used only to construct FLEXLB_CONFIG.
 EXPERIMENT_MAX_INFLIGHT_BATCHES="${EXPERIMENT_MAX_INFLIGHT_BATCHES:-2}"

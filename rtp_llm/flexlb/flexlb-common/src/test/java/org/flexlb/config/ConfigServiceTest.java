@@ -25,6 +25,15 @@ class ConfigServiceTest {
         assertInstanceOf(BatchDispatcherConfig.class, config.getDispatcher());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(2, config.getSchemaVersion());
+
+        // An omitted estimator must not fall back to the legacy 1 ms/token
+        // expression: the production DSv4 prefill fit is the code default.
+        FormulaEstimatorConfig estimator = assertInstanceOf(
+                FormulaEstimatorConfig.class,
+                config.getRouter().getRoles().getPrefill()
+                        .getExecutionTimeEstimator());
+        assertEquals(FormulaEstimatorConfig.DEFAULT_EXPRESSION,
+                estimator.getExpression());
     }
 
     @Test

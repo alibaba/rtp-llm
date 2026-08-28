@@ -18,7 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Auto-TPM priority support in {@link JavaLoadClient}: per-record priority
- * parsing (trace field beats the PRIORITY env default), propagation onto
+ * parsing (trace field beats the PRIORITY env default), the FORCE_PRIORITY
+ * single-level pin (overrides both), propagation onto
  * FlexlbScheduleRequestPB.priority (field 14; 0 keeps it off the wire), and
  * the per-priority stats view used by priority-dimension assertions.
  */
@@ -34,7 +35,7 @@ class LoadClientPriorityTest {
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
-                "engine_service", "", false,
+                "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true,
                 priority);
         return new JavaLoadClient(config);
@@ -96,6 +97,36 @@ class LoadClientPriorityTest {
         JavaLoadClient.TraceRecord defaulted = client.parseTraceRecord(withoutField);
         assertNotNull(defaulted);
         assertEquals(40, defaulted.priority);
+    }
+
+    // ---- trace parsing: FORCE_PRIORITY pins a single level ----
+
+    @Test
+    void forcePriorityPinsEveryRecord() throws Exception {
+        // Bottom constructor carries the FORCE_PRIORITY knob (fromEnv reads
+        // the env); the 35-param convenience overload forwards 0 = disabled.
+        JavaLoadClient.Config config = new JavaLoadClient.Config(
+                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
+                0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
+                120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
+                "engine_service", "",
+                false, 10, 1000, 0, 0, "", false, "", true,
+                40, 50, "replay", 0.0, true);
+        JavaLoadClient client = new JavaLoadClient(config);
+
+        ObjectNode withField = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r1").put("priority", 70);
+        JavaLoadClient.TraceRecord pinned = client.parseTraceRecord(withField);
+        assertNotNull(pinned);
+        assertEquals(50, pinned.priority);
+
+        ObjectNode withoutField = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r2");
+        JavaLoadClient.TraceRecord pinnedDefault = client.parseTraceRecord(withoutField);
+        assertNotNull(pinnedDefault);
+        assertEquals(50, pinnedDefault.priority);
     }
 
     @Test

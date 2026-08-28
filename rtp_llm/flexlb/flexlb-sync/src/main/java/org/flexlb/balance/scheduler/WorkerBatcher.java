@@ -123,6 +123,16 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
             subscribedCapacityAvailability;
     /** Exact active head for which this worker is waiting on a capacity event. */
     private BatcherCycleResult.CapacityBlocked capacityBlockedHead;
+    /**
+     * Route admission block projection switch (FLEXLB_ROUTE_ADMISSION_BLOCK_PROJECTION,
+     * default true = production). When false, {@link #admissionBlockUnderLock}
+     * returns null for every snapshot: RouteAdmissionPolicy then sees no
+     * admission observation and returns the unmodified timeline, so the
+     * endpoint is never BLOCKED from an observed admission wait (queue-first
+     * form). The dispatch-side park logic ({@link #awaitBlockedHeadCapacity})
+     * is NOT affected — a capacity-blocked head still parks exactly as before.
+     */
+    private final boolean routeAdmissionBlockProjectionEnabled;
 
     WorkerBatcher(
             String key,
@@ -136,6 +146,8 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         boolean priorityOrdering = config.isPriorityOrdering();
         this.deliveryStrategy = deliveryStrategy;
         this.deliveryLifecycle = deliveryLifecycle;
+        this.routeAdmissionBlockProjectionEnabled = config.getInternalRuntime()
+                .isRouteAdmissionBlockProjectionEnabled();
         Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         Comparator<GroupPlanner.Item> projectionOrder =
@@ -281,6 +293,13 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     private AdmissionBlock admissionBlockUnderLock() {
         assert queueLock.isHeldByCurrentThread()
                 : "capacity block snapshot requires queueLock";
+        if (!routeAdmissionBlockProjectionEnabled) {
+            // Queue-first form: the snapshot carries no admission card, so
+            // RouteAdmissionPolicy's observation is null and it returns the
+            // unmodified timeline (the endpoint stays selectable). Only the
+            // projection is skipped — the dispatch-side park below is intact.
+            return null;
+        }
         BatcherCycleResult.CapacityBlocked blocked = capacityBlockedHead;
         if (blocked == null
                 || ctx.peek() != blocked.item()

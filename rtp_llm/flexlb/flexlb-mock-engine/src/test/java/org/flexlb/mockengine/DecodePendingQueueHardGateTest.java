@@ -28,22 +28,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Two-quadrant regression tests for the opt-in decode hard admission gate
- * (performance JSON {@code decode.max_pending_requests}):
+ * Regression tests for the unconditional decode hard admission gate
+ * (production waiting_streams_ semantics, no configuration key):
  *
  * <ol>
- *   <li>{@link #absentCapKeepsLegacySoftAccounting} — when the key is ABSENT,
- *       behavior must be exactly the legacy one: decodeMaxConcurrency stays a
- *       soft accounting/reporting value, every request is admitted immediately
- *       (activeDecodeRequests may exceed the cap), nothing is queued and
- *       nothing is rejected (no decode-side rejection surface).</li>
- *   <li>{@link #optInCapGatesQueuesAndRejectsOverflow} — when the key is
- *       configured, decodeMaxConcurrency becomes a hard gate: excess requests
- *       are parked in the pending queue up to the configured cap, overflow is
- *       rejected (backpressure), and queued requests drain as slots free.</li>
+ *   <li>{@link #hardGateParksExcessInUnboundedQueue} — decodeMaxConcurrency
+ *       is a hard cap: excess requests park in the (unbounded) pending queue,
+ *       activeDecodeRequests never exceeds the cap, nothing is ever rejected
+ *       on the decode side, and queued requests keep their runningTasks
+ *       claim (dedup guard) while counting as in flight.</li>
+ *   <li>{@link #queuedRequestsDrainThroughCompletionChain} — completions
+ *       hand freed slots to queued requests one-for-one until the queue is
+ *       fully drained; every accepted request completes, all counters settle
+ *       at zero and checkLeakDrain flags nothing.</li>
  * </ol>
  */
-class DecodePendingCapOptInTest {
+class DecodePendingQueueHardGateTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63300;
@@ -59,12 +59,12 @@ class DecodePendingCapOptInTest {
     @BeforeEach
     void setUp() {
         scheduler = Executors.newScheduledThreadPool(4, runnable -> {
-            Thread thread = new Thread(runnable, "decode-cap-optin-scheduler");
+            Thread thread = new Thread(runnable, "decode-hard-gate-scheduler");
             thread.setDaemon(true);
             return thread;
         });
         workerPool = Executors.newCachedThreadPool(r -> {
-            Thread thread = new Thread(r, "decode-cap-optin-worker");
+            Thread thread = new Thread(r, "decode-hard-gate-worker");
             thread.setDaemon(true);
             return thread;
         });
@@ -83,90 +83,83 @@ class DecodePendingCapOptInTest {
         scheduler.awaitTermination(3, TimeUnit.SECONDS);
     }
 
-    // ──────────── Quadrant 1: key absent → legacy soft accounting ────────────
+    // ──────────── Test 1: hard cap parks excess in the unbounded queue ────────────
 
     @Test
-    void absentCapKeepsLegacySoftAccounting() throws Exception {
+    void hardGateParksExcessInUnboundedQueue() throws Exception {
         // decode step 10000 × sleep_scale 0.1 = 1000 ms — all ten requests are
         // still in flight when the assertions run.
-        MockPerformanceModel model = model(10_000.0, null);
-        // Tiny cap 2 to prove it is NOT enforced in legacy mode.
+        MockPerformanceModel model = model(10_000.0);
+        // Tiny cap 2: the unconditional gate must pin running at 2 and park
+        // the remaining 8 in the pending queue.
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 2);
 
         int nRequests = 10;
         for (int i = 0; i < nRequests; i++) {
             assertTrue(invokeScheduleDecodeCompletion(
                             decode, shapeOf(model, 100L + i, 8), -1, null),
-                    "legacy mode must never reject a decode request");
+                    "the hard gate must never reject a decode request — "
+                            + "excess parks in the unbounded waiting queue");
         }
 
-        assertEquals(nRequests, getActiveDecodeRequests(decode),
-                "legacy mode: activeDecodeRequests is soft accounting and may "
-                        + "exceed decodeMaxConcurrency (no hard gate)");
-        assertEquals(nRequests, decode.getRunningCount(),
-                "legacy mode: all requests run immediately");
+        assertEquals(2, getActiveDecodeRequests(decode),
+                "hard gate: activeDecodeRequests capped at decodeMaxConcurrency");
+        assertEquals(nRequests - 2, decodePendingQueueSize(decode),
+                "hard gate: excess requests must park in the decode pending queue");
         assertEquals(nRequests, decode.getInflightCount(),
-                "legacy mode: all requests are in flight");
-        assertEquals(0, decodePendingQueueSize(decode),
-                "legacy mode: nothing must be parked in the decode pending queue");
+                "running + queued requests all count as in flight");
+        assertEquals(nRequests, decode.getRunningCount(),
+                "queued requests keep their runningTasks claim (dedup guard)");
 
         // All requests must complete normally and drain every counter.
-        awaitQuiescence(decode, 15_000);
+        awaitQuiescence(decode, 30_000);
         assertEquals(0, getActiveDecodeRequests(decode));
         assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(0, decodePendingQueueSize(decode));
         assertEquals(nRequests, decode.getCompletedCount(),
-                "legacy mode: every request completes (none rejected/queued)");
+                "every accepted request must complete (none rejected)");
         decode.checkLeakDrain(0L);
         assertFalse(decode.isLeakDetected());
     }
 
-    // ──────────── Quadrant 2: key configured → gate + queue + backpressure ────────────
+    // ──────────── Test 2: queued requests drain as completions free slots ────────────
 
     @Test
-    void optInCapGatesQueuesAndRejectsOverflow() throws Exception {
+    void queuedRequestsDrainThroughCompletionChain() throws Exception {
         // decode step 10000 × sleep_scale 0.1 = 1000 ms per request; cap 2
-        // concurrency + queue capped at 3 → 6th request is overflow.
-        MockPerformanceModel model = model(10_000.0, 3);
+        // concurrency → requests 1-2 run, 3-6 park and drain in order.
+        MockPerformanceModel model = model(10_000.0);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 2);
 
         // First 2 fill the concurrency slots.
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 8), -1, null));
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 2L, 8), -1, null));
         assertEquals(2, getActiveDecodeRequests(decode),
-                "gated mode: activeDecodeRequests capped at decodeMaxConcurrency");
+                "hard gate: activeDecodeRequests capped at decodeMaxConcurrency");
         assertEquals(0, decodePendingQueueSize(decode));
 
-        // Next 3 are parked in the pending queue (accepted, not running).
-        for (long rid = 3; rid <= 5; rid++) {
+        // Next 4 are parked in the pending queue (accepted, not running) —
+        // the queue is unbounded, so there is no overflow / rejection point.
+        for (long rid = 3; rid <= 6; rid++) {
             assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, rid, 8), -1, null),
                     "request " + rid + " must be accepted into the pending queue");
         }
         assertEquals(2, getActiveDecodeRequests(decode),
-                "gated mode: queued requests must not consume concurrency slots");
-        assertEquals(3, decodePendingQueueSize(decode),
-                "requests 3..5 must be parked in the pending queue");
-        assertEquals(5, decode.getInflightCount(),
+                "queued requests must not consume concurrency slots");
+        assertEquals(4, decodePendingQueueSize(decode),
+                "requests 3..6 must be parked in the pending queue");
+        assertEquals(6, decode.getInflightCount(),
                 "running + queued requests all count as in flight");
-        assertEquals(5, decode.getRunningCount(),
+        assertEquals(6, decode.getRunningCount(),
                 "queued requests keep their runningTasks claim (dedup guard)");
-
-        // 6th overflows the queue cap → rejected, nothing claimed.
-        assertFalse(invokeScheduleDecodeCompletion(decode, shapeOf(model, 6L, 8), -1, null),
-                "overflow beyond decode.max_pending_requests must be rejected");
-        assertEquals(2, getActiveDecodeRequests(decode));
-        assertEquals(3, decodePendingQueueSize(decode));
-        assertEquals(5, decode.getInflightCount(),
-                "a rejected request must not leave any counter claimed");
-        assertEquals(5, decode.getRunningCount(),
-                "a rejected request must not leave a runningTasks entry behind");
 
         // Completions hand freed slots to queued requests until fully drained.
         awaitQuiescence(decode, 30_000);
         assertEquals(0, getActiveDecodeRequests(decode));
         assertEquals(0, decode.getActiveKvTokens());
         assertEquals(0, decodePendingQueueSize(decode));
-        assertEquals(5, decode.getCompletedCount(),
-                "all five accepted requests must complete via the drain chain");
+        assertEquals(6, decode.getCompletedCount(),
+                "all six accepted requests must complete via the drain chain");
         decode.checkLeakDrain(0L);
         assertFalse(decode.isLeakDetected());
     }
@@ -186,20 +179,16 @@ class DecodePendingCapOptInTest {
     }
 
     /**
-     * Builds a performance model with a single-point decode curve and an
-     * optional {@code decode.max_pending_requests} opt-in (null = absent =
-     * legacy soft accounting).
+     * Builds a performance model with a single-point decode curve. The decode
+     * hard concurrency gate is unconditional (no opt-in key exists anymore).
      */
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests)
+    private MockPerformanceModel model(double decodeStepMs)
             throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
         decodeConfig.put("scale", 1.0);
         decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
         MAPPER.writeValue(performance.toFile(), Map.of(
                 "block_size", 1024,
                 "sleep_scale", 0.1,

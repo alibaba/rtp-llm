@@ -18,6 +18,7 @@ per-speed ``analysis.json`` files with structured analysis data.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import os
 import re
@@ -143,13 +144,57 @@ def load_jsonl_safe(path: Path) -> List[Dict[str, Any]]:
     return records
 
 
+def per_request_paths(run_dir: Path) -> List[Path]:
+    """Per-request sources: legacy shard/single-worker files first.
+
+    A successful consolidation deletes the legacy per_request files, so their
+    presence means fresher data (RUN_DIR reuse). The consolidated run-root
+    per_request.jsonl / per_request.jsonl.gz is the fallback.
+    """
+    paths = sorted(run_dir.glob("load_client/shard_*/per_request.jsonl"))
+    if not paths:
+        single = run_dir / "load_client" / "per_request.jsonl"
+        if single.is_file():
+            paths = [single]
+    if not paths:
+        for name in ("per_request.jsonl", "per_request.jsonl.gz"):
+            candidate = run_dir / name
+            if candidate.is_file():
+                paths = [candidate]
+                break
+    return paths
+
+
+def load_per_request_records(paths: Iterable[Path]) -> List[Dict[str, Any]]:
+    """Safely load per-request JSONL rows (plain or gzip), skipping bad lines."""
+    records: List[Dict[str, Any]] = []
+    for path in paths:
+        opener = gzip.open if path.suffix == ".gz" else open
+        try:
+            stream = opener(path, "rt", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        records.append(obj)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    return records
+
+
 def load_run_data(run_dir: Path, speed: int) -> SpeedRunData:
     """Load all data sources for a single run directory."""
     speed_label = f"{speed}x"
     data = SpeedRunData(speed=speed, speed_label=speed_label, run_dir=run_dir)
 
     data.summary = load_json_safe(run_dir / "load_client" / "summary.json")
-    data.per_request = load_jsonl_safe(run_dir / "load_client" / "per_request.jsonl")
+    data.per_request = load_per_request_records(per_request_paths(run_dir))
     data.monitor = load_jsonl_safe(run_dir / "monitor.jsonl")
     data.log_events, data.log_found = parse_flexlb_log(flexlb_log_paths(run_dir))
     data.analysis = analyze_run(data)
@@ -181,12 +226,23 @@ _INFO_LINE_RE = re.compile(r"\bINFO\b\s", re.IGNORECASE)
 
 
 def flexlb_log_paths(run_dir: Path) -> List[Path]:
+    """Legacy log sources win whenever they exist.
+
+    A successful consolidation deletes the legacy logs, so a legacy file that
+    is present means fresher data (RUN_DIR reuse). After consolidation the
+    structured dispatch/complete lines live in the run-root master.log.
+    """
     log_dir = run_dir / "flexlb_logs"
     paths = list(log_dir.glob("flexlb.log*")) if log_dir.is_dir() else []
     if paths:
         return sorted(paths, key=lambda path: (path.stat().st_mtime_ns, path.name))
     fallback = run_dir / "flexlb.log"
-    return [fallback] if fallback.is_file() else []
+    if fallback.is_file():
+        return [fallback]
+    master_log = run_dir / "master.log"
+    if master_log.is_file():
+        return [master_log]
+    return []
 
 
 def parse_flexlb_log(paths: Iterable[Path]) -> Tuple[Dict[str, Any], bool]:

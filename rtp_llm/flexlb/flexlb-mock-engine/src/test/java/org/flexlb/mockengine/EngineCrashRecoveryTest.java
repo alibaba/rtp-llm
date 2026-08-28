@@ -14,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -27,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -49,7 +52,7 @@ class EngineCrashRecoveryTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
-    private static final int BASE_PORT = 62400;
+    private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(62400);
 
     @TempDir
     Path tempDir;
@@ -161,8 +164,40 @@ class EngineCrashRecoveryTest {
 
     // ──────────── Cluster setup (with real gRPC servers) ────────────
 
+    /**
+     * Claim the next 10-port block whose first {@code needed} ports are all
+     * bindable right now. The allocator restarts at its fixed base (62400)
+     * in every JVM, so residue from a previous suite run (a not-yet-reaped
+     * socket from the last JVM, or any other squatter) fails the wildcard
+     * gRPC binds below on back-to-back runs; skipping occupied blocks keeps
+     * the test hermetic. The probe binds exactly like the gRPC servers do
+     * (wildcard address, same JVM-default socket options), so anything that
+     * would fail the engine bind also fails the probe. Mirrors the
+     * established {@code ComprehensiveFaultInjectionTest.allocatePortBlock}
+     * pattern.
+     */
+    private static int allocatePortBlock(int needed) {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            int basePort = PORT_ALLOCATOR.getAndAdd(10);
+            boolean allFree = true;
+            for (int i = 0; i < needed; i++) {
+                try (ServerSocket probe = new ServerSocket()) {
+                    probe.bind(new InetSocketAddress(basePort + i), 1);
+                } catch (IOException e) {
+                    allFree = false;
+                    break;
+                }
+            }
+            if (allFree) {
+                return basePort;
+            }
+        }
+        throw new IllegalStateException("no bindable 10-port block after 20 attempts");
+    }
+
     private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
             throws IOException {
+        int basePort = allocatePortBlock(nPrefill + nDecode);
         scheduler = Executors.newScheduledThreadPool(8, runnable -> {
             Thread thread = new Thread(runnable, "mock-engine-scheduler");
             thread.setDaemon(true);
@@ -176,7 +211,7 @@ class EngineCrashRecoveryTest {
         decodeServices = new ArrayList<>();
 
         for (int i = 0; i < nPrefill; i++) {
-            int port = BASE_PORT + i;
+            int port = basePort + i;
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
                     port, services, scheduler, model, 100,
@@ -196,7 +231,7 @@ class EngineCrashRecoveryTest {
         }
 
         for (int i = 0; i < nDecode; i++) {
-            int port = BASE_PORT + nPrefill + i;
+            int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
                     port, services, scheduler, model, 100,
