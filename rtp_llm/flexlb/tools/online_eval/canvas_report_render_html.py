@@ -160,7 +160,7 @@ h1{margin:0 0 6px;font-size:22px}
 </header>
 <div class="kpi-row" id="kpis"></div>
 <div class="grid" id="grid"></div>
-<div class="hint">Chart.js 4.4.7 · legend 单击可切换单条系列，双击隔离；tooltip 随鼠标移动。</div>
+<div class="hint">Chart.js 4.4.7 · legend 单击可切换单条系列，双击隔离；tooltip 随鼠标移动；隐藏后 y 轴按剩余可见系列自适应。</div>
 <script>
 const SPEC = __SPEC_JSON__;
 document.getElementById('title').textContent = SPEC.summary.title;
@@ -171,13 +171,29 @@ SPEC.summary.kpis.forEach(k=>{
   d.innerHTML=`<div class="v">${k.value}</div><div class="l">${k.label}</div>`;
   kb.appendChild(d);
 });
+// y 轴自适应：只按 legend 可见系列重算 max（beginAtZero），legend/双击后 update()。
+// 双击隔离用手写 handler：默认 Chart.js 只支持单击切换单条，双击这里定义为"只留这条"，
+// 再双击同一条恢复"全显"。
+function visibleMax(chart){
+  let m = 0; const ds = chart.data.datasets;
+  chart.data.datasets.forEach((d,i)=>{
+    if(!chart.getDatasetMeta(i).hidden){
+      d.data.forEach(v=>{ if(typeof v==='number' && v>m) m=v; });
+    }
+  });
+  return m>0 ? m*1.05 : undefined;
+}
+function rescaleY(chart){
+  chart.options.scales.y.max = visibleMax(chart);
+  chart.update('none');
+}
 const grid = document.getElementById('grid');
 SPEC.panels.forEach(p=>{
   const wrap=document.createElement('div'); wrap.className='panel';
   wrap.innerHTML=`<h3>${p.title}</h3><div class="cap">${p.caption}</div><div class="box"><canvas id="c-${p.id}"></canvas></div>`;
   grid.appendChild(wrap);
   const ctx=wrap.querySelector('canvas').getContext('2d');
-  new Chart(ctx,{
+  const chart = new Chart(ctx,{
     type: p.type==='bar'?'bar':'line',
     data:{
       labels:p.x,
@@ -190,15 +206,40 @@ SPEC.panels.forEach(p=>{
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index', intersect:false},
       plugins:{
-        legend:{position:'bottom', labels:{boxWidth:10,font:{size:11}}},
+        legend:{
+          position:'bottom', labels:{boxWidth:10,font:{size:11}},
+          onClick:(e,item,legend)=>{
+            const ch=legend.chart; const idx=item.datasetIndex;
+            // 双击（<300ms 同 idx）= 隔离该系列 / 恢复全显
+            const now=Date.now();
+            ch.$lastClick = ch.$lastClick || {};
+            const last = ch.$lastClick[idx] || 0;
+            ch.$lastClick[idx] = now;
+            const others = ch.data.datasets.map((_,i)=>i).filter(i=>i!==idx);
+            if(now - last < 300){
+              // double click: toggle isolate
+              const alreadyIsolated = others.every(i=>ch.getDatasetMeta(i).hidden)
+                                   && !ch.getDatasetMeta(idx).hidden;
+              others.forEach(i=>ch.getDatasetMeta(i).hidden = !alreadyIsolated);
+              ch.getDatasetMeta(idx).hidden = false;
+            }else{
+              // single click: toggle visibility of this series
+              const meta = ch.getDatasetMeta(idx);
+              meta.hidden = meta.hidden===null ? !ch.data.datasets[idx].hidden : !meta.hidden;
+            }
+            rescaleY(ch);
+          }
+        },
         tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${c.parsed.y}${p.unit||''}`}},
       },
       scales:{
         x:{ticks:{maxRotation:0,autoSkip:true,maxTicksLimit:12}},
-        y:{beginAtZero:true, ...(p.yMax?{suggestedMax:p.yMax}:{})}
+        y:{beginAtZero:true}
       }
     }
   });
+  // 初次 render 后按当前可见系列锁一次 max
+  rescaleY(chart);
 });
 </script></body></html>
 """

@@ -2507,6 +2507,40 @@ def main():
     lines.append("      </Text>")
     lines.append("    </Stack>")
 
+    # subtitle（HTML 页头副标）：走绝对路径 + P/D 规模，比 tsx 表内 sources
+    # 更详细。tsx 内 sources 保持相对文件名/run_id，方便报告作为附件流转。
+    src_abs = [os.path.abspath(args.aggregate)]
+    if summary_standalone is not None:
+        src_abs.append(os.path.abspath(summary_path))
+    if slo is not None:
+        src_abs.append(os.path.abspath(slo_path))
+    if ed is not None:
+        embedded = args.engine_dist is None and isinstance(agg.get("engine_dist"), dict)
+        src_abs.append(
+            "(aggregate 内嵌 engine_dist)" if embedded else os.path.abspath(ed_path)
+        )
+    _run_dir_abs = os.path.abspath(os.path.dirname(args.aggregate) or ".")
+    if os.path.basename(_run_dir_abs) in ("analysis", "load_client"):
+        _run_dir_abs = os.path.dirname(_run_dir_abs)
+    scale_bits = []
+    if p_engines is not None:
+        scale_bits.append("P=" + str(p_engines))
+    if d_engines is not None:
+        scale_bits.append("D=" + str(d_engines))
+    if shards is not None:
+        scale_bits.append("shards=" + str(shards))
+    if args.replay is not None:
+        scale_bits.append("replay=" + str(args.replay))
+    if duration_s:
+        scale_bits.append("duration=" + str(int(duration_s)) + "s")
+    subtitle_html = (
+        "数据源："
+        + " · ".join(src_abs)
+        + " · run 目录 "
+        + _run_dir_abs
+        + (" · 规模 " + " ".join(scale_bits) if scale_bits else "")
+    )
+
     # ---- 拼 in-memory tsx（供末端反抽 spec，不写盘）----
     header = []
     header.append(
@@ -2533,7 +2567,7 @@ def main():
         sys.path.insert(0, _this_dir)
     import canvas_report_render_html  # noqa: E402
 
-    spec = _extract_spec_from_tsx(tsx_src, run_id=str(run_id), subtitle=sources)
+    spec = _extract_spec_from_tsx(tsx_src, run_id=str(run_id), subtitle=subtitle_html)
     html_out = canvas_report_render_html.render(spec)
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
