@@ -6,9 +6,19 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
-from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
-from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+from rtp_llm.models.kimi_k3.quantization import get_kimi_k3_load_time_fp8_config
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather_trim,
+    all_reduce,
+    get_process_group,
+)
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    TokenShardLayout,
+    shard_tokens_with_padding,
+)
 from rtp_llm.models_py.modules.base import RMSNorm
+from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
@@ -48,13 +58,16 @@ class KimiK3MLA(MlaAttention):
         weights: Dict[str, torch.Tensor],
         layer_idx: int = -1,
     ) -> None:
+        attention_quant_config = get_kimi_k3_load_time_fp8_config(is_kda=False)
+        if attention_quant_config is None:
+            attention_quant_config = config.quant_config
         super().__init__(
             config.attn_config,
             parallelism_config,
             weights,
             layer_idx,
             _MLA_LATENT_NORM_EPS,
-            config.quant_config,
+            attention_quant_config,
         )
         # The framework RMSNorm consumes dense rows. The previous K3 wrapper
         # also materialized these split views before invoking the same kernel.
@@ -90,7 +103,19 @@ class KimiK3MLA(MlaAttention):
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
         self._o_w = weights[W.attn_o_w]
-        self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
+        self._uses_separate_gate_layout = W.attn_gate_w in weights
+        self._packed_qkv_gate_w = weights.get(W.mla_fusedqkrope_w)
+        self._gate_proj = (
+            LinearFactory.create_linear_from_weights(
+                weights,
+                W.attn_gate_w,
+                W.attn_gate_s,
+                None,
+                quant_config=attention_quant_config,
+            )
+            if self._uses_separate_gate_layout
+            else None
+        )
         # These are only the two small MLA latent norms; decoder-wide norms keep
         # the framework kernel.
         self.q_a_layernorm = RMSNorm(self._q_a_norm, _MLA_LATENT_NORM_EPS)
@@ -104,6 +129,24 @@ class KimiK3MLA(MlaAttention):
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         prefill_layout = getattr(self, "_sp_prefill_layout_for_forward", None)
+        if self._uses_separate_gate_layout:
+            assert self._gate_proj is not None
+            projection_input = hidden_states
+            if self._sp_prefill_input_is_sharded:
+                logical_tokens = (
+                    hidden_states.shape[0] * self.attn_tp_size
+                    if prefill_layout is None
+                    else prefill_layout.logical_tokens
+                )
+                projection_input = all_gather_trim(
+                    hidden_states,
+                    logical_tokens,
+                    Group.TP,
+                )
+            return (
+                self.fused_qkv_a_proj(projection_input),
+                self._gate_proj(projection_input),
+            )
         if self._sp_prefill_input_is_sharded:
             logical_tokens = (
                 hidden_states.shape[0] * self.attn_tp_size
@@ -153,6 +196,18 @@ class KimiK3MLA(MlaAttention):
         return attn_output * torch.sigmoid(output_gate.reshape_as(attn_output))
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+        if self._uses_separate_gate_layout:
+            output = self.o_proj(attn_output)
+            if self.attn_tp_size > 1:
+                output = all_reduce(output, group=Group.TP)
+            if self._sp_active_for_forward:
+                output, _ = shard_tokens_with_padding(
+                    output,
+                    output.shape[0],
+                    self.attn_tp_size,
+                    int(self.parallelism_config.get_attn_tp_rank()),
+                )
+            return output
         if self._sp_active_for_forward:
             tp_size = self.parallelism_config.get_attn_tp_size()
             pad_reduce_scatter = self._sp_padded_for_forward or (

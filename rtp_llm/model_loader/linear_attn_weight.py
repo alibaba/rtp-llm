@@ -189,6 +189,28 @@ def split_kda_qkv(
     return torch.cat([q, k, v], dim=1)
 
 
+def split_kda_qkvg(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    """Shard runtime-layout KDA Q/K/V/G projections along output columns."""
+
+    projection_size = (
+        linear_config.linear_num_value_heads
+        * linear_config.linear_value_head_dim
+    )
+    if t.shape[1] != 4 * projection_size:
+        raise ValueError(
+            f"invalid KDA QKVG shape {tuple(t.shape)}; expected last "
+            f"dimension {4 * projection_size}"
+        )
+    sections = t.split(projection_size, dim=1)
+    local_size = projection_size // load_config.tp_size
+    begin = load_config.tp_rank * local_size
+    return torch.cat(
+        [section.narrow(1, begin, local_size) for section in sections], dim=1
+    ).contiguous()
+
+
 def split_kda_qkvg_fa_beta_sections(
     tensor: torch.Tensor,
     q_size: int,
@@ -295,6 +317,7 @@ _linear_attn_split_stratey = {
     W.linear_attn_norm_w: sp_id,
     # KDA (Kimi Delta Attention) fused weights.
     W.linear_attn_qkv_w: split_kda_qkv,
+    W.linear_attn_qkvg_w: split_kda_qkvg,
     W.linear_attn_qkvg_fa_beta_w: split_kda_qkvg_fa_beta,
     W.linear_attn_b_w: split_kda_tp_dim1,
     W.linear_attn_f_a_w: sp_id,  # forget-gate LoRA down: rank not sharded

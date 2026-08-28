@@ -8,8 +8,10 @@ import torch
 from torch import nn
 
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
+from rtp_llm.models.kimi_k3.quantization import get_kimi_k3_load_time_fp8_config
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
+    all_gather_trim,
     all_reduce,
     get_process_group,
 )
@@ -17,6 +19,7 @@ from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens_with_padding,
 )
+from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
@@ -111,17 +114,56 @@ class KimiK3KDA(nn.Module):
         )
         self.cache_store_segment_sizes = self.cache.store_segment_sizes
 
-        fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
-        self.forget_latent_size = int(weights[W.linear_attn_f_b_w].shape[0])
-        expected_fused_width = (
-            4 * self.projection_size + self.forget_latent_size + self.total_heads
+        self._uses_separate_projection_layout = W.linear_attn_qkvg_w in weights
+        self.forget_latent_size = int(
+            weights[W.linear_attn_f_a_w].shape[0]
+            if self._uses_separate_projection_layout
+            else weights[W.linear_attn_f_b_w].shape[0]
         )
-        if fused_projection.shape[1] != expected_fused_width:
-            raise ValueError(
-                "fused KDA QKVG/F_A/beta width "
-                f"{fused_projection.shape[1]} != {expected_fused_width}"
+        if self._uses_separate_projection_layout:
+            fp8_config = get_kimi_k3_load_time_fp8_config(is_kda=True)
+            if fp8_config is None:
+                raise RuntimeError(
+                    "KDA FP8 weights were loaded while KIMI_K3_W8A8_KDA=0"
+                )
+
+            def _fp8_linear(weight_name: str, scale_name: str):
+                return LinearFactory.create_linear_from_weights(
+                    weights,
+                    weight_name,
+                    scale_name,
+                    None,
+                    quant_config=fp8_config,
+                )
+
+            self.kda_qkvg_proj = _fp8_linear(
+                W.linear_attn_qkvg_w, W.linear_attn_qkvg_s
             )
-        self.kda_fused_w = fused_projection
+            self.kda_f_a_proj = _fp8_linear(
+                W.linear_attn_f_a_w, W.linear_attn_f_a_s
+            )
+            self.kda_f_b_proj = _fp8_linear(
+                W.linear_attn_f_b_w, W.linear_attn_f_b_s
+            )
+            self.kda_beta_proj = _fp8_linear(
+                W.linear_attn_b_w, W.linear_attn_b_s
+            )
+            self.kda_out_proj = _fp8_linear(
+                W.linear_attn_out_w, W.linear_attn_out_s
+            )
+        else:
+            fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
+            expected_fused_width = (
+                4 * self.projection_size
+                + self.forget_latent_size
+                + self.total_heads
+            )
+            if fused_projection.shape[1] != expected_fused_width:
+                raise ValueError(
+                    "fused KDA QKVG/F_A/beta width "
+                    f"{fused_projection.shape[1]} != {expected_fused_width}"
+                )
+            self.kda_fused_w = fused_projection
 
         fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)
         if fused_conv.shape[0] != 3 * self.projection_size:
@@ -174,6 +216,35 @@ class KimiK3KDA(nn.Module):
         torch.Tensor,
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
+
+        if self._uses_separate_projection_layout:
+            projection_input = hidden_states
+            if prefill_sp_layout is not None:
+                projection_input = all_gather_trim(
+                    hidden_states,
+                    prefill_sp_layout.logical_tokens,
+                    Group.TP,
+                )
+            projected_qkvg = self.kda_qkvg_proj(projection_input)
+            q_projected, k_projected, v_projected, output_gate = torch.split(
+                projected_qkvg,
+                [self.projection_size] * 4,
+                dim=1,
+            )
+            forget_latent = self.kda_f_a_proj(projection_input)
+            raw_gate = self.kda_f_b_proj(forget_latent)
+            raw_beta = self.kda_beta_proj(projection_input).narrow(
+                1, 0, self.local_heads
+            )
+            return (
+                projected_qkvg.narrow(1, 0, 3 * self.projection_size),
+                q_projected,
+                k_projected,
+                v_projected,
+                raw_gate,
+                raw_beta,
+                output_gate,
+            )
 
         if prefill_sp_layout is not None:
             projected_fused = all_gather_gemm(
@@ -277,6 +348,23 @@ class KimiK3KDA(nn.Module):
             )
 
         projection_input = output.reshape(token_count, self.projection_size)
+        if self._uses_separate_projection_layout:
+            output = self.kda_out_proj(projection_input)
+            if self.attn_tp_size > 1:
+                output = all_reduce(output, group=Group.TP)
+            if (
+                sequence_parallel
+                and self.attn_tp_size > 1
+                and hidden_states.is_cuda
+                and (mode == "prefill" or not is_target_verify)
+            ):
+                output, _ = shard_tokens_with_padding(
+                    output,
+                    token_count,
+                    self.attn_tp_size,
+                    self.attn_tp_rank,
+                )
+            return output
         if use_explicit_output:
             output = torch.matmul(
                 projection_input,

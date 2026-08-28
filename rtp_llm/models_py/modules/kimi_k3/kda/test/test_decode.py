@@ -18,6 +18,7 @@ class KimiK3KDATargetVerifyTest(TestCase):
     def _projection_module(tp_size: int = 8) -> kda_module.KimiK3KDA:
         module = kda_module.KimiK3KDA.__new__(kda_module.KimiK3KDA)
         nn.Module.__init__(module)
+        module._uses_separate_projection_layout = False
         module.attn_tp_size = tp_size
         module.attn_tp_rank = 0
         module.projection_size = 2
