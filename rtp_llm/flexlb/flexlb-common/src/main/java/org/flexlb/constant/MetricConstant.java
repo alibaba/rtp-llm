@@ -198,7 +198,9 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
 
     /**
-     * Engine worker info running query length variance
+     * Variance of each role's observable endpoint load. The metric name is
+     * retained for dashboard compatibility; Prefill reports committed work-ms
+     * while Decode and status-only roles report active task counts.
      */
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
@@ -490,11 +492,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
 
     /**
-     * Auto-TPM normal placement success count (QPS), tags: priority
-     */
-    public static final String AUTO_TPM_NORMAL_PLACEMENT_COUNT = "auto_tpm.normal_placement.count";
-
-    /**
      * Auto-TPM eviction plan generation count (QPS), tags: priority, case, result
      */
     public static final String AUTO_TPM_EVICTION_PLAN_COUNT = "auto_tpm.eviction_plan.count";
@@ -508,11 +505,6 @@ public class MetricConstant {
      * Auto-TPM evicted victim count (QPS), tags: victim_priority, incoming_priority, stage, case
      */
     public static final String AUTO_TPM_VICTIM_COUNT = "auto_tpm.victim.count";
-
-    /**
-     * Auto-TPM optimistic plan commit conflict count (QPS), tags: case
-     */
-    public static final String AUTO_TPM_PLAN_CONFLICT_COUNT = "auto_tpm.plan_conflict.count";
 
     /**
      * Auto-TPM prefill batcher queue depth (gauge), tags: endpoint
@@ -551,7 +543,8 @@ public class MetricConstant {
      * Auto-TPM decode confirmed running request count (gauge), tags: endpoint.
      * Dashboard migration note on the value semantics:
      * <ul>
-     *   <li>Phase 4 and earlier: equalled confirmedRunningCount, i.e. the
+     *   <li>Phase 4 and earlier: equalled the merged confirmed Engine-owned
+     *       count, i.e. the
      *       accepted and running layers merged into one gauge.</li>
      *   <li>Phase 5+: counts ONLY engine-reported {@code RUNNING} tasks; the
      *       accepted layer moved to {@link #AUTO_TPM_DECODE_ACCEPTED_COUNT}.
@@ -601,13 +594,6 @@ public class MetricConstant {
      * preemption path and the Frontend-initiated cancel path.
      */
     public static final String AUTO_TPM_CANCEL_QPS = "auto_tpm.cancel.qps";
-
-    /**
-     * Auto-TPM plan age — snapshot/plan build to successful commit, ms
-     * (redesign N3 §3.8 placement_plan_age_ms), tags: priority.
-     * Quantifies how stale a lockfree commit's plan view was.
-     */
-    public static final String AUTO_TPM_PLAN_AGE_MS = "auto_tpm.plan_age_ms";
 
     /**
      * Auto-TPM decode engine-facing load (gauge): confirmed + dispatched

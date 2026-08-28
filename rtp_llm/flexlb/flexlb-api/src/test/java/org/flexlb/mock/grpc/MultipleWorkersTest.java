@@ -72,11 +72,11 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         // 2. Reconfigure the Router to alternate between worker A and B
         AtomicInteger routeCounter = new AtomicInteger(0);
         reset(router);
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+        when(router.routeForQueue(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             boolean useB = routeCounter.getAndIncrement() % 2 == 1;
-            reserveDecode(ctx);
-            return buildRouteResponse(ctx.getRequestId(), useB);
+            return admittedRoute(
+                    ctx, buildRouteResponse(ctx.getRequestId(), useB));
         });
 
         // 3. Submit 4 requests — should alternate A, B, A, B

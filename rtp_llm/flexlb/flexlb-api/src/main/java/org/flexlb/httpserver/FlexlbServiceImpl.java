@@ -5,6 +5,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.pv.PvLogData;
@@ -22,12 +23,13 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -42,14 +44,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             LoggerFactory.getLogger("pvLogger");
 
     private final RouteService routeService;
-    private final LBStatusConsistencyService lbStatusConsistencyService;
+    private final MasterElectService masterElectService;
     private final EngineHealthReporter engineHealthReporter;
     private final ActiveRequestCounter activeRequestCounter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final ConfigService configService;
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
-    private final PrioritySchedulerReporter prioritySchedulerReporter;
+    private final RequestSchedulerReporter requestSchedulerReporter;
+
+    @Autowired
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -58,16 +62,31 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
-                             PrioritySchedulerReporter prioritySchedulerReporter) {
+                             RequestSchedulerReporter requestSchedulerReporter) {
+        this(routeService, (MasterElectService) lbStatusConsistencyService,
+                engineHealthReporter, activeRequestCounter, grpcForwarder,
+                configService, batchSchedulerReporter, serverLatencyRecorder,
+                requestSchedulerReporter);
+    }
+
+    FlexlbServiceImpl(RouteService routeService,
+                      MasterElectService masterElectService,
+                      EngineHealthReporter engineHealthReporter,
+                      ActiveRequestCounter activeRequestCounter,
+                      FlexlbGrpcForwarder grpcForwarder,
+                      ConfigService configService,
+                      BatchSchedulerReporter batchSchedulerReporter,
+                      ServerScheduleLatencyRecorder serverLatencyRecorder,
+                      RequestSchedulerReporter requestSchedulerReporter) {
         this.routeService = routeService;
-        this.lbStatusConsistencyService = lbStatusConsistencyService;
+        this.masterElectService = masterElectService;
         this.engineHealthReporter = engineHealthReporter;
         this.activeRequestCounter = activeRequestCounter;
         this.grpcForwarder = grpcForwarder;
         this.configService = configService;
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
-        this.prioritySchedulerReporter = prioritySchedulerReporter;
+        this.requestSchedulerReporter = requestSchedulerReporter;
     }
 
     @Override
@@ -84,9 +103,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             context = buildContext(request);
             BalanceContext requestContext = context;
-            boolean consistencyEnabled = lbStatusConsistencyService.isNeedConsistency();
+            boolean consistencyEnabled = masterElectService.isNeedConsistency();
             boolean masterAtEntry = consistencyEnabled
-                    && lbStatusConsistencyService.isMaster();
+                    && masterElectService.isMaster();
             boolean forwardToMaster = consistencyEnabled && !masterAtEntry;
             engineHealthReporter.reportArriveDelayTime(requestContext);
 
@@ -588,12 +607,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             long latencyMs = now - ctx.getStartTime();
             boolean success = response.getSuccess();
             String result = success ? "success" : "error_" + response.getCode();
-            prioritySchedulerReporter.reportScheduleLatency(ctx.getPriority(), result, latencyMs);
+            requestSchedulerReporter.reportScheduleLatency(ctx.getPriority(), result, latencyMs);
             // Approximate TTFT: schedule-complete minus arrival, as seen by
             // FlexLB. The true TTFT (first token emitted by the engine) is not
             // observable here, so this proxy omits engine-side prefill
             // execution time (task10 P2-8).
-            prioritySchedulerReporter.reportTtft(ctx.getPriority(), latencyMs);
+            requestSchedulerReporter.reportTtft(ctx.getPriority(), latencyMs);
             String selectedPrefill = "";
             String selectedDecode = "";
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
@@ -701,10 +720,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setPriority(schedulingMetadata.priority());
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
-        prioritySchedulerReporter.reportRequest(schedulingMetadata.priority());
+        requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
 
         if (!pb.getGenerateInput().isEmpty()) {
-            ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());
+            ctx.setGenerateInputPb(pb.getGenerateInput());
         }
 
         // Capture gRPC server entry time from interceptor context for delay metric splitting
@@ -771,8 +790,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private boolean shouldForwardToMaster() {
-        return lbStatusConsistencyService.isNeedConsistency()
-                && !lbStatusConsistencyService.isMaster();
+        return masterElectService.isNeedConsistency()
+                && !masterElectService.isMaster();
     }
 
     private enum ScheduleOrigin {

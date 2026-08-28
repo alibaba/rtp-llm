@@ -49,6 +49,11 @@ public class Logger {
         return log.isDebugEnabled();
     }
 
+    /** Returns whether fine-grained per-candidate tracing is enabled. */
+    public static boolean isTraceEnabled() {
+        return log.isTraceEnabled();
+    }
+
     public static void info(String format, Object... args) {
         log.info(format, args);
     }

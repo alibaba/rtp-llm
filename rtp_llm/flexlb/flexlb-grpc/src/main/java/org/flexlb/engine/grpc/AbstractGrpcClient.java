@@ -2,9 +2,6 @@ package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
 import lombok.Getter;
-import org.apache.commons.collections4.CollectionUtils;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.util.CommonUtils;
@@ -33,15 +30,9 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
      * @see ServiceType
      */
     protected final Map<String/*ip:port:serviceType*/, Invoker> channelPool = new ConcurrentHashMap<>();
-    protected final EngineLocalView engineLocalView;
-    protected final GlobalCacheIndex globalCacheIndex;
     protected final GrpcReporter grpcReporter;
 
-    protected AbstractGrpcClient(EngineLocalView engineLocalView,
-                                 GlobalCacheIndex globalCacheIndex,
-                                 GrpcReporter grpcReporter) {
-        this.engineLocalView = engineLocalView;
-        this.globalCacheIndex = globalCacheIndex;
+    protected AbstractGrpcClient(GrpcReporter grpcReporter) {
         this.grpcReporter = grpcReporter;
     }
 
@@ -61,8 +52,6 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         // Update gRPC channel pool
         updateGrpcChannelPool(ipPortList);
 
-        // Update engine cache, remove offline engines
-        updateEngineKvCache(ipPortList);
     }
 
     /**
@@ -72,8 +61,6 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
      * @param ipPortList Latest worker address list in format ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
-        Logger.info("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
-
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
 
@@ -93,13 +80,18 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             }
         }
 
+        if (addedKeys.isEmpty() && currentKeys.isEmpty()) {
+            return;
+        }
+
         // Create channels for newly online workers
+        int addedChannelCount = 0;
         for (String newKey : addedKeys) {
             try {
                 ManagedChannel managedChannel = createChannel(newKey);
                 Invoker invoker = putInvokerIfAbsent(newKey, managedChannel);
                 if (invoker.getChannel() == managedChannel) {
-                    Logger.info("add channel for ipPort {}", newKey);
+                    addedChannelCount++;
                 }
             } catch (Exception e) {
                 Logger.error("create channel for ipPort {} failed", newKey, e);
@@ -107,9 +99,11 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         }
 
         // Close and remove channels for offline workers
+        int removedChannelCount = 0;
         for (String key : currentKeys) {
             Invoker invoker = channelPool.remove(key);
             if (invoker != null) {
+                removedChannelCount++;
                 try {
                     invoker.shutdown();
                 } catch (Exception e) {
@@ -117,39 +111,9 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
                 }
             }
         }
-    }
 
-    /**
-     * Update cache, remove offline engine cache
-     *
-     * @param ipPortList Latest worker address list in format ip:httpPort
-     */
-    private void updateEngineKvCache(List<String> ipPortList) {
-        Set<String> cacheEngineKeys = engineLocalView.getAllEngineIpPorts();
-        Set<String> newEngineIpPorts = new HashSet<>(ipPortList);
-
-        // Skip if size is the same
-        if (cacheEngineKeys.size() == newEngineIpPorts.size()) {
-            return;
-        }
-
-        // Find offline engines to be cleaned up
-        Set<String> staleEngineKeys = new HashSet<>(cacheEngineKeys);
-        staleEngineKeys.removeAll(newEngineIpPorts);
-
-        if (CollectionUtils.isNotEmpty(staleEngineKeys)) {
-            Logger.info("Update cache: found {} stale engines to remove, current cache size: {}, new ipPortList size: {}",
-                    staleEngineKeys.size(), cacheEngineKeys.size(), newEngineIpPorts.size());
-
-            for (String staleEngine : staleEngineKeys) {
-                Logger.warn("Removing stale engine cache: {}", staleEngine);
-                long startTime = System.nanoTime() / 1000;
-                engineLocalView.removeAllCacheBlockOfEngine(staleEngine);
-                globalCacheIndex.removeAllCacheBlockOfEngine(staleEngine);
-                long elapsed = System.nanoTime() / 1000 - startTime;
-                Logger.warn("Removed stale engine cache: {} in {}μs", staleEngine, elapsed);
-            }
-        }
+        Logger.info("gRPC channel pool changed: hosts={}, addedChannels={}, removedChannels={}, totalChannels={}",
+                ipPortList.size(), addedChannelCount, removedChannelCount, channelPool.size());
     }
 
     @Scheduled(fixedRate = 2000)

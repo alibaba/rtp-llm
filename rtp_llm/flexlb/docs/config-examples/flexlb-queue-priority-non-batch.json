@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,
@@ -18,8 +18,12 @@
         }
       }
     },
+    "decision": {
+      "type": "SINGLE"
+    },
     "capacity": {
-      "maxOutstandingRequestsGlobal": 500000
+      "maxOutstandingRequestsGlobal": 500000,
+      "maxWaitingRequestsPerPrefillWorker": 102400
     },
     "lifecycle": {
       "staleInflightTimeoutMs": 300000,
@@ -50,7 +54,7 @@
             "minimumToleranceMs": 20,
             "outlierRejection": {
               "maxPendingVsAverageMultiplier": 3.0,
-              "maxWaitVsAverageMultiplier": 3.0
+              "maxProjectedDrainVsAverageMultiplier": 3.0
             }
           }
         },

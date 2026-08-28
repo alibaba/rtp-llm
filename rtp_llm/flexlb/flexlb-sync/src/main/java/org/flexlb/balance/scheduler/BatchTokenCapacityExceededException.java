@@ -5,8 +5,8 @@ package org.flexlb.balance.scheduler;
  * token capacity, so it must fail explicitly instead of being silently
  * dropped (design doc 8.3).
  *
- * <p>Extends {@link IllegalArgumentException} so legacy offer-failure
- * handling is unchanged; the Auto-TPM path maps it to
+ * <p>Extends {@link IllegalArgumentException} because an impossible padded
+ * request shape is invalid scheduler input; the Auto-TPM path maps it to
  * {@code StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED}.
  */
 public class BatchTokenCapacityExceededException extends IllegalArgumentException {

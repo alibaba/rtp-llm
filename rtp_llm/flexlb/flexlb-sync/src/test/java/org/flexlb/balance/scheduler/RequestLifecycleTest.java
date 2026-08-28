@@ -1,13 +1,18 @@
 package org.flexlb.balance.scheduler;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -16,13 +21,39 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RequestLifecycleTest {
 
+    @ParameterizedTest(name = "{0} + {1} -> {2}")
+    @MethodSource("lifecycleTransitionCases")
+    void everyReducerHasAnExplicitResultFromEveryLifecycleState(
+            RequestLifecycleState initial,
+            LifecycleEvent event,
+            ExpectedTransition expected) {
+        RequestLifecycle lifecycle = lifecycleIn(initial);
+        RequestLifecycleSnapshot before = lifecycle.snapshot();
+
+        if (expected.rejected()) {
+            assertThrows(IllegalStateException.class,
+                    () -> event.apply(lifecycle));
+        } else {
+            assertEquals(expected.state(), event.apply(lifecycle).state());
+        }
+
+        RequestLifecycleSnapshot after = lifecycle.snapshot();
+        assertEquals(expected.state(), after.state());
+        if (initial.isTerminal()) {
+            assertEquals(before.detail(), after.detail(),
+                    "a late reducer must not overwrite the terminal cause");
+            assertEquals(before.deliveryClaimKind(), after.deliveryClaimKind());
+            assertEquals(before.batchId(), after.batchId());
+        }
+    }
+
     @Test
     void normalBatchDeliveryTransitionsToCompleted() {
         RequestLifecycle lifecycle = new RequestLifecycle(1L);
 
-        assertFalse(lifecycle.hasDeliveryClaim());
+        assertFalse(hasDeliveryClaim(lifecycle));
         lifecycle.startBatchEnqueue(101L);
-        assertTrue(lifecycle.hasDeliveryClaim());
+        assertTrue(hasDeliveryClaim(lifecycle));
         assertEquals(RequestLifecycleState.DISPATCHING, lifecycle.snapshot().state());
         assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, lifecycle.snapshot().deliveryClaimKind());
         assertEquals(RequestLifecycleState.ACKNOWLEDGED,
@@ -35,26 +66,13 @@ class RequestLifecycleTest {
     }
 
     @Test
-    void deadlineTransitionsDirectlyToTimedOutAndCannotBeOverwritten() {
-        RequestLifecycle lifecycle = new RequestLifecycle(3L);
-        lifecycle.startBatchEnqueue(103L);
-
-        RequestLifecycleSnapshot timedOut = lifecycle.timeout("deadline exceeded");
-        assertEquals(RequestLifecycleState.TIMED_OUT, timedOut.state());
-        assertEquals(RequestLifecycleState.TIMED_OUT,
-                lifecycle.markDeliveryConfirmed().state());
-        assertEquals(RequestLifecycleState.TIMED_OUT, lifecycle.fail("late failure").state());
-        assertEquals(RequestLifecycleState.TIMED_OUT, lifecycle.complete("late completion").state());
-    }
-
-    @Test
     void routeDecisionDeliveryAcquiresRequestScopedDeliveryClaim() {
         RequestLifecycle lifecycle = new RequestLifecycle(4L);
 
         lifecycle.startRouteDecisionDelivery();
         RequestLifecycleSnapshot acknowledged = lifecycle.markDeliveryConfirmed();
 
-        assertTrue(lifecycle.hasDeliveryClaim());
+        assertTrue(hasDeliveryClaim(lifecycle));
         assertEquals(RequestLifecycleState.ACKNOWLEDGED, acknowledged.state());
         assertEquals(DeliveryClaimKind.ROUTE_DECISION, acknowledged.deliveryClaimKind());
         assertEquals(0L, acknowledged.batchId());
@@ -94,7 +112,7 @@ class RequestLifecycleTest {
         assertEquals(RequestLifecycleState.TIMED_OUT, snapshot.state());
         assertEquals(DeliveryClaimKind.NONE, snapshot.deliveryClaimKind());
         assertEquals(0L, snapshot.batchId());
-        assertFalse(lifecycle.hasDeliveryClaim());
+        assertFalse(hasDeliveryClaim(lifecycle));
     }
 
     @Test
@@ -173,10 +191,10 @@ class RequestLifecycleTest {
         assertEquals(RequestLifecycleState.TIMED_OUT, snapshot.state());
         assertEquals(0L, snapshot.batchId());
         if (snapshot.deliveryClaimKind() == DeliveryClaimKind.NONE) {
-            assertFalse(lifecycle.hasDeliveryClaim());
+            assertFalse(hasDeliveryClaim(lifecycle));
         } else {
             assertEquals(DeliveryClaimKind.ROUTE_DECISION, snapshot.deliveryClaimKind());
-            assertTrue(lifecycle.hasDeliveryClaim());
+            assertTrue(hasDeliveryClaim(lifecycle));
         }
     }
 
@@ -193,6 +211,10 @@ class RequestLifecycleTest {
         }
     }
 
+    private static boolean hasDeliveryClaim(RequestLifecycle lifecycle) {
+        return lifecycle.snapshot().deliveryClaimKind().isClaimed();
+    }
+
     private static void await(CountDownLatch latch) {
         try {
             if (!latch.await(5, TimeUnit.SECONDS)) {
@@ -201,6 +223,138 @@ class RequestLifecycleTest {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new AssertionError("test interrupted", interrupted);
+        }
+    }
+
+    private static Stream<Arguments> lifecycleTransitionCases() {
+        return Arrays.stream(RequestLifecycleState.values())
+                .flatMap(initial -> Arrays.stream(LifecycleEvent.values())
+                        .map(event -> Arguments.of(
+                                initial, event, expected(initial, event))));
+    }
+
+    private static ExpectedTransition expected(
+            RequestLifecycleState initial,
+            LifecycleEvent event) {
+        if (initial.isTerminal()) {
+            return ExpectedTransition.accepted(initial);
+        }
+        return switch (initial) {
+            case QUEUED -> switch (event) {
+                case CONFIRM_DELIVERY, COMPLETE -> ExpectedTransition.rejected(initial);
+                case REQUEST_CANCEL -> ExpectedTransition.accepted(
+                        RequestLifecycleState.CANCEL_REQUESTED);
+                case CANCEL -> ExpectedTransition.accepted(RequestLifecycleState.CANCELLED);
+                case TIMEOUT -> ExpectedTransition.accepted(RequestLifecycleState.TIMED_OUT);
+                case FAIL -> ExpectedTransition.accepted(RequestLifecycleState.FAILED);
+            };
+            case DISPATCHING -> switch (event) {
+                case CONFIRM_DELIVERY -> ExpectedTransition.accepted(
+                        RequestLifecycleState.ACKNOWLEDGED);
+                case REQUEST_CANCEL -> ExpectedTransition.accepted(
+                        RequestLifecycleState.CANCEL_REQUESTED);
+                case CANCEL -> ExpectedTransition.accepted(RequestLifecycleState.CANCELLED);
+                case TIMEOUT -> ExpectedTransition.accepted(RequestLifecycleState.TIMED_OUT);
+                case FAIL -> ExpectedTransition.accepted(RequestLifecycleState.FAILED);
+                case COMPLETE -> ExpectedTransition.accepted(RequestLifecycleState.COMPLETED);
+            };
+            case ACKNOWLEDGED -> switch (event) {
+                case CONFIRM_DELIVERY -> ExpectedTransition.accepted(
+                        RequestLifecycleState.ACKNOWLEDGED);
+                case REQUEST_CANCEL -> ExpectedTransition.accepted(
+                        RequestLifecycleState.CANCEL_REQUESTED);
+                case CANCEL -> ExpectedTransition.accepted(RequestLifecycleState.CANCELLED);
+                case TIMEOUT -> ExpectedTransition.accepted(RequestLifecycleState.TIMED_OUT);
+                case FAIL -> ExpectedTransition.accepted(RequestLifecycleState.FAILED);
+                case COMPLETE -> ExpectedTransition.accepted(RequestLifecycleState.COMPLETED);
+            };
+            case CANCEL_REQUESTED -> switch (event) {
+                case CONFIRM_DELIVERY, REQUEST_CANCEL -> ExpectedTransition.accepted(
+                        RequestLifecycleState.CANCEL_REQUESTED);
+                case CANCEL -> ExpectedTransition.accepted(RequestLifecycleState.CANCELLED);
+                case TIMEOUT -> ExpectedTransition.accepted(RequestLifecycleState.TIMED_OUT);
+                case FAIL -> ExpectedTransition.accepted(RequestLifecycleState.FAILED);
+                case COMPLETE -> ExpectedTransition.accepted(RequestLifecycleState.COMPLETED);
+            };
+            case CANCELLED, TIMED_OUT, FAILED, COMPLETED ->
+                    throw new AssertionError("terminal state handled above");
+        };
+    }
+
+    private static RequestLifecycle lifecycleIn(RequestLifecycleState state) {
+        RequestLifecycle lifecycle = new RequestLifecycle(1000L + state.ordinal());
+        switch (state) {
+            case QUEUED -> {
+            }
+            case DISPATCHING -> lifecycle.startRouteDecisionDelivery();
+            case ACKNOWLEDGED -> {
+                lifecycle.startRouteDecisionDelivery();
+                lifecycle.markDeliveryConfirmed();
+            }
+            case CANCEL_REQUESTED -> lifecycle.requestCancel("initial cancel requested");
+            case CANCELLED -> lifecycle.cancel("initial cancelled");
+            case TIMED_OUT -> lifecycle.timeout("initial timeout");
+            case FAILED -> lifecycle.fail("initial failure");
+            case COMPLETED -> {
+                lifecycle.startRouteDecisionDelivery();
+                lifecycle.complete("initial completion");
+            }
+        }
+        assertEquals(state, lifecycle.snapshot().state());
+        return lifecycle;
+    }
+
+    private enum LifecycleEvent {
+        CONFIRM_DELIVERY {
+            @Override
+            RequestLifecycleSnapshot apply(RequestLifecycle lifecycle) {
+                return lifecycle.markDeliveryConfirmed();
+            }
+        },
+        REQUEST_CANCEL {
+            @Override
+            RequestLifecycleSnapshot apply(RequestLifecycle lifecycle) {
+                return lifecycle.requestCancel("event cancel requested");
+            }
+        },
+        CANCEL {
+            @Override
+            RequestLifecycleSnapshot apply(RequestLifecycle lifecycle) {
+                return lifecycle.cancel("event cancelled");
+            }
+        },
+        TIMEOUT {
+            @Override
+            RequestLifecycleSnapshot apply(RequestLifecycle lifecycle) {
+                return lifecycle.timeout("event timeout");
+            }
+        },
+        FAIL {
+            @Override
+            RequestLifecycleSnapshot apply(RequestLifecycle lifecycle) {
+                return lifecycle.fail("event failure");
+            }
+        },
+        COMPLETE {
+            @Override
+            RequestLifecycleSnapshot apply(RequestLifecycle lifecycle) {
+                return lifecycle.complete("event completion");
+            }
+        };
+
+        abstract RequestLifecycleSnapshot apply(RequestLifecycle lifecycle);
+    }
+
+    private record ExpectedTransition(
+            RequestLifecycleState state,
+            boolean rejected) {
+
+        private static ExpectedTransition accepted(RequestLifecycleState state) {
+            return new ExpectedTransition(state, false);
+        }
+
+        private static ExpectedTransition rejected(RequestLifecycleState state) {
+            return new ExpectedTransition(state, true);
         }
     }
 

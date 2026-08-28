@@ -5,155 +5,141 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ModelWorkerStatusTest {
 
     private ModelWorkerStatus modelWorkerStatus;
-    private WorkerStatus workerStatus1;
-    private WorkerStatus workerStatus2;
-    private WorkerStatus workerStatus3;
 
     @BeforeEach
     void setUp() {
         modelWorkerStatus = new ModelWorkerStatus();
-        workerStatus1 = new WorkerStatus();
-        workerStatus1.setGroup("group1");
-        workerStatus2 = new WorkerStatus();
-        workerStatus2.setGroup("group2");
-        workerStatus3 = new WorkerStatus();
-        workerStatus3.setGroup("group1");
     }
 
     @Test
-    void should_return_pdfusion_status_map_when_getting_role_status_map_with_pdfusion_type() {
-        // Given
-        String ipPort = "127.0.0.1:8080";
-        workerStatus1.setGroup("testGroup");
-        modelWorkerStatus.getPdFusionStatusMap().put(ipPort, workerStatus1);
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.PDFUSION);
-
-        // Then
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertEquals(workerStatus1, result.get(ipPort));
+    void should_return_pdfusion_status_map_for_pdfusion_role() {
+        assertRoleMap(
+                RoleType.PDFUSION,
+                modelWorkerStatus.getPdFusionStatusMap(),
+                "127.0.0.1:8080");
     }
 
     @Test
-    void should_return_prefill_status_map_when_getting_role_status_map_with_prefill_type() {
-        // Given
-        String ipPort = "127.0.0.1:8081";
-        workerStatus1.setGroup("testGroup");
-        modelWorkerStatus.getPrefillStatusMap().put(ipPort, workerStatus1);
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.PREFILL);
-
-        // Then
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertEquals(workerStatus1, result.get(ipPort));
+    void should_return_prefill_status_map_for_prefill_role() {
+        assertRoleMap(
+                RoleType.PREFILL,
+                modelWorkerStatus.getPrefillStatusMap(),
+                "127.0.0.1:8081");
     }
 
     @Test
-    void should_return_decode_status_map_when_getting_role_status_map_with_decode_type() {
-        // Given
-        String ipPort = "127.0.0.1:8082";
-        workerStatus1.setGroup("testGroup");
-        modelWorkerStatus.getDecodeStatusMap().put(ipPort, workerStatus1);
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.DECODE);
-
-        // Then
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertEquals(workerStatus1, result.get(ipPort));
+    void should_return_decode_status_map_for_decode_role() {
+        assertRoleMap(
+                RoleType.DECODE,
+                modelWorkerStatus.getDecodeStatusMap(),
+                "127.0.0.1:8082");
     }
 
     @Test
-    void should_return_vit_status_map_when_getting_role_status_map_with_vit_type() {
-        // Given
-        String ipPort = "127.0.0.1:8083";
-        workerStatus1.setGroup("testGroup");
-        modelWorkerStatus.getVitStatusMap().put(ipPort, workerStatus1);
-
-        // When
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.VIT);
-
-        // Then
-        assertNotNull(result);
-        assertEquals(1, result.size());
-        assertEquals(workerStatus1, result.get(ipPort));
+    void should_return_vit_status_map_for_vit_role() {
+        assertRoleMap(
+                RoleType.VIT,
+                modelWorkerStatus.getVitStatusMap(),
+                "127.0.0.1:8083");
     }
 
     @Test
-    void should_return_null_when_getting_role_status_map_with_invalid_role_type() {
-        // Note: We can't test this easily since the method only handles the four known role types
-        // and returns null for any other case which is not possible since RoleType is an enum
-        // Just testing the default false case:
-        var result = modelWorkerStatus.getRoleStatusMap(RoleType.DECODE);
-        assertNotNull(result); // Valid role type return non-null result
+    void should_return_frontend_status_map_for_frontend_role() {
+        assertRoleMap(
+                RoleType.FRONTEND,
+                modelWorkerStatus.getFrontendStatusMap(),
+                "127.0.0.1:8084");
     }
 
     @Test
-    void should_return_empty_list_when_getting_role_type_list_with_empty_status_maps() {
-        // Given - default empty state
+    void null_role_returns_immutable_empty_projection() {
+        Map<String, WorkerStatus> result =
+                modelWorkerStatus.getRoleStatusMap(null);
 
-        // When
-        var result = modelWorkerStatus.getRoleTypeList();
-
-        // Then
-        assertNotNull(result);
         assertTrue(result.isEmpty());
+        assertThrows(UnsupportedOperationException.class,
+                () -> result.put("127.0.0.1:8080",
+                        status(RoleType.VIT, "group", 8080)));
     }
 
     @Test
-    void should_return_role_types_list_when_getting_role_type_list_with_non_empty_status_maps() {
-        // Given
-        modelWorkerStatus.getPdFusionStatusMap().put("127.0.0.1:8080", workerStatus1);
-        modelWorkerStatus.getDecodeStatusMap().put("127.0.0.1:8081", workerStatus2);
-        modelWorkerStatus.getPrefillStatusMap().put("127.0.0.1:8082", workerStatus3);
+    void role_maps_are_independent_exact_owners() {
+        WorkerStatus prefill = status(
+                RoleType.PREFILL, "group1", 8080);
+        WorkerStatus decode = status(
+                RoleType.DECODE, "group2", 8081);
+        modelWorkerStatus.getPrefillStatusMap()
+                .put(prefill.getIpPort(), prefill);
+        modelWorkerStatus.getDecodeStatusMap()
+                .put(decode.getIpPort(), decode);
 
-        // When
-        var result = modelWorkerStatus.getRoleTypeList();
-
-        // Then
-        assertNotNull(result);
-        assertEquals(3, result.size());
-        assertTrue(result.contains(RoleType.PDFUSION));
-        assertTrue(result.contains(RoleType.DECODE));
-        assertTrue(result.contains(RoleType.PREFILL));
-        assertFalse(result.contains(RoleType.VIT));
+        assertSame(prefill, modelWorkerStatus
+                .getRoleStatusMap(RoleType.PREFILL)
+                .get(prefill.getIpPort()));
+        assertSame(decode, modelWorkerStatus
+                .getRoleStatusMap(RoleType.DECODE)
+                .get(decode.getIpPort()));
+        assertNotSame(
+                modelWorkerStatus.getRoleStatusMap(RoleType.PREFILL),
+                modelWorkerStatus.getRoleStatusMap(RoleType.DECODE));
+        assertTrue(modelWorkerStatus
+                .getRoleStatusMap(RoleType.PDFUSION).isEmpty());
     }
 
     @Test
-    void should_return_total_count_of_all_status_maps_when_getting_worker_total_count() {
-        // Given
-        modelWorkerStatus.getPdFusionStatusMap().put("127.0.0.1:8080", workerStatus1);
-        modelWorkerStatus.getDecodeStatusMap().put("127.0.0.1:8081", workerStatus2);
-        modelWorkerStatus.getPrefillStatusMap().put("127.0.0.1:8082", workerStatus3);
+    void should_return_total_count_across_all_role_maps() {
+        modelWorkerStatus.getPdFusionStatusMap().put(
+                "127.0.0.1:8080",
+                status(RoleType.PDFUSION, "group1", 8080));
+        modelWorkerStatus.getDecodeStatusMap().put(
+                "127.0.0.1:8081",
+                status(RoleType.DECODE, "group2", 8081));
+        modelWorkerStatus.getPrefillStatusMap().put(
+                "127.0.0.1:8082",
+                status(RoleType.PREFILL, "group1", 8082));
+        modelWorkerStatus.getFrontendStatusMap().put(
+                "127.0.0.1:8083",
+                status(RoleType.FRONTEND, "group1", 8083));
 
-        // When
-        int result = modelWorkerStatus.getWorkerTotalCount();
-
-        // Then
-        assertEquals(3, result);
+        assertEquals(4, modelWorkerStatus.getWorkerTotalCount());
     }
 
     @Test
-    void should_return_zero_when_getting_worker_total_count_with_empty_maps() {
-        // Given - empty status maps (default state)
+    void should_return_zero_total_count_when_all_maps_are_empty() {
+        assertEquals(0, modelWorkerStatus.getWorkerTotalCount());
+    }
 
-        // When
-        int result = modelWorkerStatus.getWorkerTotalCount();
+    private void assertRoleMap(
+            RoleType role,
+            Map<String, WorkerStatus> concreteMap,
+            String ipPort) {
+        int port = Integer.parseInt(
+                ipPort.substring(ipPort.lastIndexOf(':') + 1));
+        WorkerStatus status = status(role, "testGroup", port);
+        concreteMap.put(ipPort, status);
 
-        // Then
-        assertEquals(0, result);
+        Map<String, WorkerStatus> selected =
+                modelWorkerStatus.getRoleStatusMap(role);
+
+        assertSame(concreteMap, selected);
+        assertEquals(1, selected.size());
+        assertSame(status, selected.get(ipPort));
+    }
+
+    private static WorkerStatus status(
+            RoleType role, String group, int port) {
+        return WorkerStatus.createDiscovered(
+                role, group, "127.0.0.1", port, port + 1, "test-site");
     }
 }

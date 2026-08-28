@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <limits>
 #include <numeric>
 #include <string>
@@ -19,6 +20,8 @@
 
 namespace rtp_llm {
 namespace {
+
+constexpr int64_t kMallocFailureDetailIntervalMs = 30'000;
 
 inline bool cpShardThisGroupForReserve(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
@@ -609,7 +612,47 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, b
 }
 
 size_t HybridPoolKVCacheAllocator::availableTokensNum() const {
-    return minTokenCapacity(/*use_available_blocks=*/true, /*full_groups_only=*/true);
+    // WorkerStatus has one scalar KV-capacity field. Keep that field in the
+    // FULL-pool token unit used by routing and single-request shape checks, but
+    // scale it by the least available ratio of every required auxiliary pool.
+    // A small STATE/SWA pool is not itself a prompt-token limit; once it fills,
+    // however, no new request can initialize even if the much larger FULL
+    // pools remain mostly empty. FULL pools are already compared in their
+    // absolute token unit above and must not be scaled a second time.
+    //
+    // Reporting the raw minimum block count would make an empty small pool
+    // look almost exhausted. Reporting only FULL pools hid the production
+    // failure entirely. Normalizing each pool by its own total preserves 100%
+    // capacity at startup and reaches zero exactly when any mandatory pool is
+    // exhausted.
+    size_t       available_tokens = minTokenCapacity(/*use_available_blocks=*/true, /*full_groups_only=*/true);
+    const size_t total_tokens     = minTokenCapacity(/*use_available_blocks=*/false, /*full_groups_only=*/true);
+    if (available_tokens == 0 || total_tokens == 0) {
+        return available_tokens;
+    }
+
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        if (gid < config_.group_types.size() && config_.group_types[gid] == CacheGroupType::FULL) {
+            continue;
+        }
+        const auto& pool = group_block_pools_[gid];
+        if (!pool) {
+            continue;
+        }
+        const size_t pool_total = pool->totalBlocksNum();
+        if (pool_total == 0) {
+            continue;
+        }
+        const size_t pool_available    = std::min(pool->availableBlocksNum(), pool_total);
+        const auto   normalized_tokens = static_cast<size_t>(static_cast<unsigned __int128>(total_tokens)
+                                                           * static_cast<unsigned __int128>(pool_available)
+                                                           / static_cast<unsigned __int128>(pool_total));
+        available_tokens               = std::min(available_tokens, normalized_tokens);
+        if (available_tokens == 0) {
+            break;
+        }
+    }
+    return available_tokens;
 }
 
 size_t HybridPoolKVCacheAllocator::totalTokensNum() const {
@@ -752,6 +795,28 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
         return;
     }
 
+    // Per-request failures are already counted by rtp_llm_rpc_error_qps and
+    // DecodeRpcServer retains the terminal request/error line. The full
+    // allocator snapshot is diagnostic state, not a per-request access log.
+    // Emit it at most once per allocator/rank per interval so a saturated pool
+    // cannot fill the worker disk with seven nearly identical pool rows for
+    // every rejected request.
+    const auto now_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    auto last_ms = last_malloc_failure_detail_ms_.load(std::memory_order_relaxed);
+    while (true) {
+        if (last_ms != 0 && now_ms - last_ms < kMallocFailureDetailIntervalMs) {
+            suppressed_malloc_failure_details_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (last_malloc_failure_detail_ms_.compare_exchange_weak(
+                last_ms, now_ms, std::memory_order_relaxed, std::memory_order_relaxed)) {
+            break;
+        }
+    }
+    const auto suppressed_details = suppressed_malloc_failure_details_.exchange(0, std::memory_order_relaxed);
+
     const auto& resource       = malloc_info.batch_kv_cache_resource;
     const auto& cp_mapper      = malloc_info.cp_slot_mapper;
     const int   batch_size     = resource->batchSize();
@@ -776,7 +841,8 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
     RTP_LLM_LOG_WARNING("HybridPool malloc failure: error_code=602 request_id=%ld phase=%s failed_batch=%d "
                         "failed_group=%d incremental=%d batch_size=%d seq_len=%d common_seq_len=%d total_seq_len=%d "
                         "planning_seq_len=%d request_reserve_step=%d planning_reserve_step=%d "
-                        "failed_need_blocks=%d reserve_blocks=%zu snapshot=best_effort_at_failure",
+                        "failed_need_blocks=%d reserve_blocks=%zu suppressed_details=%lu "
+                        "snapshot=best_effort_at_failure",
                         malloc_info.request_id,
                         phase,
                         failed_batch,
@@ -790,8 +856,10 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                         request_reserve_step,
                         reserve_step,
                         failed_need_blocks,
-                        reserve_blocks);
+                        reserve_blocks,
+                        static_cast<unsigned long>(suppressed_details));
 
+    bool logged_bottleneck_pool = false;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
         const size_t group_index = static_cast<size_t>(gid);
         const auto   group_type =
@@ -849,7 +917,13 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                                          config_.group_seq_size_per_block[group_index] :
                                          config_.seq_size_per_block;
 
-        RTP_LLM_LOG_WARNING("HybridPool malloc failure pool: error_code=602 request_id=%ld gid=%d "
+        const bool is_bottleneck = gid == failed_group || shortfall > 0;
+        if (!is_bottleneck || logged_bottleneck_pool) {
+            continue;
+        }
+        logged_bottleneck_pool = true;
+
+        RTP_LLM_LOG_WARNING("HybridPool malloc failure bottleneck: error_code=602 request_id=%ld gid=%d "
                             "group_type=%s region=%s failed=%d need_blocks=%d need_slots=%d "
                             "group_reserve_blocks=%zu required_available_blocks=%lld shortfall_blocks=%lld "
                             "current_slots=%zu "

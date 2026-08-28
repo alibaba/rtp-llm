@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -28,6 +29,9 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final CacheAwareService localKvCacheAwareManager = Mockito.mock(CacheAwareService.class);
 
+    private final DynamicCacheIntervalService cacheIntervalService =
+            Mockito.mock(DynamicCacheIntervalService.class);
+
     @Test
     void testGrpcCacheStatusCheckRunner() {
         // Arrange
@@ -35,9 +39,7 @@ class GrpcCacheStatusCheckRunnerTest {
         String ipPort = "127.0.0.1:8080";
         String site = "test-site";
 
-        WorkerStatus workerStatus = new WorkerStatus();
-        workerStatus.setIp("127.0.0.1");
-        workerStatus.setPort(8080);
+        WorkerStatus workerStatus = workerStatus();
 
         EngineRpcService.CacheStatusPB cacheStatusPB = EngineRpcService.CacheStatusPB.newBuilder()
                 .setVersion(1)
@@ -49,7 +51,10 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                modelName, ipPort, site, RoleType.PREFILL, workerStatus,
+                workerStatus.tryBeginCachePoll(),
+                engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService,
                 20, new LongAdder(), 50L, true, Runnable::run);
         runner.run();
 
@@ -63,4 +68,11 @@ class GrpcCacheStatusCheckRunnerTest {
         // Assert
         verify(engineGrpcService).getCacheStatusAsync(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
     }
+
+    private static WorkerStatus workerStatus() {
+        return RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1",
+                8080, 8081, "test-site");
+    }
+
 }

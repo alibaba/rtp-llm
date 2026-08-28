@@ -17,10 +17,10 @@ COST_BASED_PREFILL (batch-only):
   S5  kv_cache_hit_preference      - Same block key routes to cached worker.
   S6  cost_based_determinism       - Identical conditions -> same worker.
 
-SHORTEST_TTFT (direct/queue-only):
-  S7  cas_fairness                 - Concurrent requests spread across workers.
+SHORTEST_TTFT:
+  S7  lru_pool_fairness            - Concurrent requests spread across workers.
   S8  ttft_sorting                - Lower prefill delay biases routing.
-  S9  no_hard_filter              - High queue depth does NOT block routing.
+  S9  pending_hard_filter          - High pending endpoint is excluded.
 
 Usage:
     python3 scheduling_smoke.py --master-ip 127.0.0.1 \\
@@ -49,6 +49,11 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
     MAX_SINGLE_WORKER_RATIO = 0.60
     KV_CACHE_SYNC_WAIT_S = 2.0
     STREAM_TIMEOUT_S = 15.0
+    PENDING_HARD_FILTER_DEPTH = 200_000
+    STATUS_SYNC_TIMEOUT_S = 5.0
+    STATUS_SYNC_POLL_S = 0.05
+    PENDING_FILTER_CONFIRMATIONS = 3
+    PENDING_FILTER_SAMPLE_REQUESTS = 5
 
     # -- Helpers ----------------------------------------------------------
 
@@ -347,7 +352,14 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             cool = prefill_names[1]
 
             # Inject high queue depth (reported value, does not block requests)
-            await self._set_queue_depth(hot, 80000)
+            injected = await self._set_queue_depth(hot, 80000)
+            if not injected:
+                return ScenarioResult(
+                    "S4: hotspot_filter",
+                    False,
+                    f"failed to inject queue depth on {hot}",
+                    time.monotonic() - start,
+                )
             injected_engine = hot
 
             # Wait for master to sync the updated worker status
@@ -532,14 +544,14 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 time.monotonic() - start,
             )
 
-    # -- S7: cas_fairness (direct/queue-only) ------------------------------
+    # -- S7: lru_pool_fairness -------------------------------------------
 
-    async def test_cas_fairness(self) -> ScenarioResult:
+    async def test_lru_pool_fairness(self) -> ScenarioResult:
         """S7: Concurrent requests should spread across >=2 workers.
 
-        SHORTEST_TTFT uses CAS fairness (lastSelectedTime earliest wins).
-        With 2 workers + RATIO 0.3, candidateCount=1, but lastSelectedTime
-        updates should cause rotation across workers.
+        SHORTEST_TTFT serializes selection per routing group and chooses the
+        oldest last-selection timestamp within its projected-TTFT candidate
+        pool. Concurrent requests should therefore rotate across peers.
         """
         start = time.monotonic()
         try:
@@ -554,7 +566,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             for idx, (addr, err) in enumerate(results):
                 if err:
                     return ScenarioResult(
-                        "S7: cas_fairness",
+                        "S7: lru_pool_fairness",
                         False,
                         f"rid={rids[idx]} failed: {err}",
                         time.monotonic() - start,
@@ -579,27 +591,28 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 f"accepted={json.dumps(accepted, sort_keys=True)}"
             )
             return ScenarioResult(
-                "S7: cas_fairness",
+                "S7: lru_pool_fairness",
                 passed,
                 detail,
                 time.monotonic() - start,
             )
         except Exception as exc:
             return ScenarioResult(
-                "S7: cas_fairness",
+                "S7: lru_pool_fairness",
                 False,
                 f"exception: {exc!r}",
                 time.monotonic() - start,
             )
 
-    # -- S8: ttft_sorting (direct/queue-only) ------------------------------
+    # -- S8: ttft_sorting ------------------------------------------------
 
     async def test_ttft_sorting(self) -> ScenarioResult:
         """S8: Lower prefill delay on prefill-0 should bias requests toward it.
 
-        SHORTEST_TTFT scores by prefillMs + realWaitTimeMs.  Setting
+        SHORTEST_TTFT scores each endpoint by projected TTFT. Setting
         prefill-0 to 10ms and prefill-1 to 500ms should route most
-        requests to prefill-0.  CAS fairness may cause some even split.
+        requests to prefill-0. Candidate-pool LRU may distribute requests when
+        endpoint projections are close enough to share the pool.
         """
         start = time.monotonic()
         perf_engines: list[str] = []
@@ -618,10 +631,17 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             fast = prefill_names[0]
             slow = prefill_names[1]
 
-            await self._set_perf(fast, prefill_fixed_ms=10.0)
-            await self._set_perf(slow, prefill_fixed_ms=500.0)
             perf_engines = [fast, slow]
-
+            fast_updated = await self._set_perf(fast, prefill_fixed_ms=10.0)
+            slow_updated = await self._set_perf(slow, prefill_fixed_ms=500.0)
+            if not fast_updated or not slow_updated:
+                return ScenarioResult(
+                    "S8: ttft_sorting",
+                    False,
+                    "failed to configure discriminating prefill timings: "
+                    f"fast_updated={fast_updated}, slow_updated={slow_updated}",
+                    time.monotonic() - start,
+                )
             addrs: list[str] = []
             for _ in range(10):
                 rid = self._next_request_id()
@@ -643,11 +663,11 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             fast_count = dist.get(fast, 0)
             slow_count = dist.get(slow, 0)
 
-            passed = fast_count >= slow_count
+            passed = fast_count > slow_count
             detail = (
                 f"fast={fast}({fast_count}), slow={slow}({slow_count}), "
                 f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-                f"assertion=fast>=slow"
+                f"assertion=fast>slow"
             )
             return ScenarioResult(
                 "S8: ttft_sorting",
@@ -669,14 +689,14 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 except Exception:
                     pass
 
-    # -- S9: no_hard_filter (direct/queue-only) ---------------------------
+    # -- S9: pending_hard_filter -----------------------------------------
 
-    async def test_no_hard_filter(self) -> ScenarioResult:
-        """S9: High queue depth does NOT block routing (no hard filter).
+    async def test_pending_hard_filter(self) -> ScenarioResult:
+        """S9: High pending count excludes the hotspot endpoint.
 
-        SHORTEST_TTFT has no hard filter — even with high queue depth,
-        requests can still route to that worker.  This contrasts with S4
-        where COST_BASED_PREFILL filters out the hotspot.
+        SHORTEST_TTFT inherits the common prefill pending hard filter before
+        projected-TTFT selection. A worker with an injected hotspot queue
+        must therefore receive no requests while healthy peers are available.
         """
         start = time.monotonic()
         injected_engine: str | None = None
@@ -687,50 +707,133 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             )
             if len(prefill_names) < 2:
                 return ScenarioResult(
-                    "S9: no_hard_filter",
+                    "S9: pending_hard_filter",
                     False,
                     "need >=2 prefill workers",
                     time.monotonic() - start,
                 )
             target = prefill_names[0]
+            addr_map = await self._addr_to_name()
+            block_key = self._next_request_id() * 100
+            affinity_keys = [block_key + offset for offset in range(3)]
 
-            await self._set_queue_depth(target, 50000)
+            async def route_affinity_request() -> tuple[str, str | None]:
+                rid = self._next_request_id()
+                addr, error = await self._run_one_request(
+                    rid, output_len=2, block_keys=affinity_keys
+                )
+                return addr_map.get(addr, addr), error
+
+            # Establish a cache-affinity leader first. This makes the hard
+            # filter assertion discriminating: before injection the target is
+            # preferred, after status propagation it must be ineligible.
+            seeded_target, seed_error = await route_affinity_request()
+            if seed_error:
+                return ScenarioResult(
+                    "S9: pending_hard_filter",
+                    False,
+                    f"cache seed failed: {seed_error}",
+                    time.monotonic() - start,
+                )
+            target = seeded_target
+            if target not in prefill_names:
+                return ScenarioResult(
+                    "S9: pending_hard_filter",
+                    False,
+                    f"cache seed selected unknown prefill worker: {target}",
+                    time.monotonic() - start,
+                )
+            await asyncio.sleep(self.KV_CACHE_SYNC_WAIT_S)
+            affinity_target, affinity_error = await route_affinity_request()
+            if affinity_error or affinity_target != target:
+                return ScenarioResult(
+                    "S9: pending_hard_filter",
+                    False,
+                    "cache-affinity baseline was not established: "
+                    f"target={target}, routed={affinity_target}, "
+                    f"error={affinity_error}",
+                    time.monotonic() - start,
+                )
+
+            # The matrix config caps prefill pending requests at 100_000.
+            # Inject above that cap to exercise the common hard gate rather
+            # than the strategy-specific relative-outlier policy from S4.
+            injected = await self._set_queue_depth(
+                target, self.PENDING_HARD_FILTER_DEPTH
+            )
+            if not injected:
+                return ScenarioResult(
+                    "S9: pending_hard_filter",
+                    False,
+                    f"failed to inject pending depth on {target}",
+                    time.monotonic() - start,
+                )
             injected_engine = target
 
-            addrs: list[str] = []
-            for _ in range(5):
-                rid = self._next_request_id()
-                keys = [rid * 100 + j for j in range(3)]
-                addr, err = await self._run_one_request(
-                    rid, output_len=2, block_keys=keys
-                )
-                if err:
+            # Observe control-plane propagation through routing behavior,
+            # rather than assuming a fixed sleep is sufficient. The target
+            # was just proven to be the cache-affinity leader, so consecutive
+            # routes away from it demonstrate that the master applied the
+            # hard eligibility gate.
+            deadline = time.monotonic() + self.STATUS_SYNC_TIMEOUT_S
+            consecutive_exclusions = 0
+            propagation_routes: list[str] = []
+            while (time.monotonic() < deadline
+                   and consecutive_exclusions < self.PENDING_FILTER_CONFIRMATIONS):
+                routed, error = await route_affinity_request()
+                if error:
                     return ScenarioResult(
-                        "S9: no_hard_filter",
+                        "S9: pending_hard_filter",
                         False,
-                        f"rid={rid} failed: {err}",
+                        f"status propagation probe failed: {error}",
                         time.monotonic() - start,
                     )
-                addrs.append(addr)
+                propagation_routes.append(routed)
+                consecutive_exclusions = (
+                    consecutive_exclusions + 1 if routed != target else 0
+                )
+                if consecutive_exclusions < self.PENDING_FILTER_CONFIRMATIONS:
+                    await asyncio.sleep(self.STATUS_SYNC_POLL_S)
+            if consecutive_exclusions < self.PENDING_FILTER_CONFIRMATIONS:
+                return ScenarioResult(
+                    "S9: pending_hard_filter",
+                    False,
+                    "master did not apply pending hard filter before timeout: "
+                    f"target={target}, routes={propagation_routes}",
+                    time.monotonic() - start,
+                )
 
-            addr_map = await self._addr_to_name()
-            dist = Counter(addr_map.get(a, a) for a in addrs)
+            routed_names: list[str] = []
+            for _ in range(self.PENDING_FILTER_SAMPLE_REQUESTS):
+                routed, error = await route_affinity_request()
+                if error:
+                    return ScenarioResult(
+                        "S9: pending_hard_filter",
+                        False,
+                        f"validation request failed: {error}",
+                        time.monotonic() - start,
+                    )
+                routed_names.append(routed)
+
+            dist = Counter(routed_names)
             target_count = dist.get(target, 0)
 
-            passed = target_count > 0
+            passed = target_count == 0
             detail = (
                 f"target={target}({target_count}), "
-                f"dist={json.dumps(dict(dist), sort_keys=True)}"
+                f"dist={json.dumps(dict(dist), sort_keys=True)}, "
+                f"propagation_routes={propagation_routes}, "
+                f"assertion=cache-leader target_count==0"
             )
             return ScenarioResult(
-                "S9: no_hard_filter",
+                "S9: pending_hard_filter",
                 passed,
                 detail,
                 time.monotonic() - start,
             )
         except Exception as exc:
             return ScenarioResult(
-                "S9: no_hard_filter",
+                "S9: pending_hard_filter",
                 False,
                 f"exception: {exc!r}",
                 time.monotonic() - start,
@@ -1000,9 +1103,9 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             ]
         else:
             scenarios += [
-                self.test_cas_fairness,
+                self.test_lru_pool_fairness,
                 self.test_ttft_sorting,
-                self.test_no_hard_filter,
+                self.test_pending_hard_filter,
             ]
         print("=" * 70)
         print("FlexLB Scheduling Smoke Test")

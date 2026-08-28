@@ -428,6 +428,45 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
     EXPECT_EQ(allocator->totalTokensNum(), 28u);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, AvailableTokensReflectMostSaturatedRequiredPool) {
+    auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    // The externally reported unit remains the FULL group's token capacity:
+    // 7 usable blocks * 4 tokens. Consuming one of the five required LINEAR
+    // blocks leaves 80% admission headroom, so the report must be scaled to
+    // floor(28 * 4 / 5) instead of continuing to advertise all 28 tokens.
+    config.group_seq_size_per_block = {2, 4};
+    auto allocator                  = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    auto required_pool_block = allocator->groupBlockPools()[0]->malloc(1);
+    ASSERT_EQ(required_pool_block.size(), 1u);
+
+    EXPECT_EQ(allocator->availableTokensNum(), 22u);
+    EXPECT_EQ(allocator->totalTokensNum(), 28u);
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), 28u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, AvailableTokensDoNotDoubleScaleFullPools) {
+    auto config             = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/11, /*full_block_num=*/6);
+    config.cache_specs[0]   = config.cache_specs[1];
+    config.group_types      = {CacheGroupType::FULL, CacheGroupType::FULL};
+    config.linear_group_num = 0;
+    config.full_group_num   = 2;
+    std::fill(config.layer_group_types.begin(), config.layer_group_types.end(), CacheGroupType::FULL);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    // Group 0 has 40 tokens and group 1 has 20. After consuming half of
+    // group 0, both still have 20 tokens available. Applying group 0's 50%
+    // ratio to the already-minimized 20-token scalar would incorrectly report
+    // 10; FULL pools must stay in their directly comparable token unit.
+    auto full_pool_blocks = allocator->groupBlockPools()[0]->malloc(5);
+    ASSERT_EQ(full_pool_blocks.size(), 5u);
+
+    EXPECT_EQ(allocator->availableTokensNum(), 20u);
+    EXPECT_EQ(allocator->totalTokensNum(), 20u);
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
     auto config                     = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     config.group_seq_size_per_block = {100, 4};
@@ -1046,7 +1085,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
     EXPECT_EQ(hca_free_before - allocator->groupBlockPools()[hca_state_gid]->freeBlocksNum(), 1u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) {
+TEST_F(HybridPoolKVCacheAllocatorTest, ExhaustedSmallStatePoolClosesReportedAdmissionCapacity) {
     auto config = makeDSV4HybridPoolConfig(/*block_num=*/50);
 
     constexpr int hca_state_gid = 5;
@@ -1063,6 +1102,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsIgnoreSmallHCAStatePool) 
         allocator->groupBlockPools()[hca_state_gid]->totalBlocksNum() * config.group_seq_size_per_block[hca_state_gid];
     EXPECT_LT(hca_state_tokens, allocator->totalTokensNum());
     EXPECT_EQ(allocator->availableTokensNum(), allocator->maxAvailableTokensNum());
+    EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
+
+    // Independent BlockPools reserve block zero, so a configured two-block
+    // state pool has one usable block. Once that mandatory pool is exhausted,
+    // a new request cannot be initialized even though the FULL pools still
+    // have ample space. WorkerStatus must stop advertising Decode capacity.
+    auto state_block = allocator->groupBlockPools()[hca_state_gid]->malloc(1);
+    ASSERT_EQ(state_block.size(), 1u);
+    EXPECT_EQ(allocator->groupBlockPools()[hca_state_gid]->availableBlocksNum(), 0u);
+    EXPECT_EQ(allocator->availableTokensNum(), 0u);
     EXPECT_EQ(allocator->totalTokensNum(), allocator->maxAvailableTokensNum());
 }
 
@@ -1351,7 +1400,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto result                    = allocator->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.reuse_len, 5 * spb * 2);
+    // initMallocForCommonLen intentionally leaves one CP virtual block for
+    // prefill instead of reusing the entire input. The production behavior was
+    // changed by 394b3e5548, but this older expectation was never updated.
+    EXPECT_EQ(result.reuse_len, 4 * spb * 2);
 
     FreeInfo hit_free{hit_res, hit_tokens};
     allocator->free(hit_free);

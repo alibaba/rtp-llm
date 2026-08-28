@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -72,8 +73,10 @@ private:
     int    defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
 
-    std::vector<BlockPoolPtr> group_block_pools_;
-    RoleType                  role_type_{RoleType::PDFUSION};
+    std::vector<BlockPoolPtr>     group_block_pools_;
+    RoleType                      role_type_{RoleType::PDFUSION};
+    mutable std::atomic<int64_t>  last_malloc_failure_detail_ms_{0};
+    mutable std::atomic<uint64_t> suppressed_malloc_failure_details_{0};
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;
