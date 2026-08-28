@@ -72,6 +72,8 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
     private long fallbackOrder;
     private long policyOrder;
     private long nextFallbackPermitNanos = Long.MIN_VALUE;
+    private long lastLaneBypassLogNanos = Long.MIN_VALUE;
+    private long laneBypassCount;
     @Autowired
     RequestScheduler(ConfigService configService, Router router,
             EndpointRegistry endpointRegistry, BatchSchedulerReporter reporter,
@@ -320,21 +322,51 @@ public final class RequestScheduler implements RequestShutdownOrchestrator.Place
             }
             for (ServerStatus status : statuses) {
                 WaitResource exact = selected(status);
-                WaitLane blocked = blockedLane(exact, source);
+                WaitLane blocked = blockedLane(exact, source, waiter);
                 if (blocked == null && exact.endpointAddress() != null) {
-                    blocked = blockedLane(new WaitResource(exact.role(), exact.group(), null), source);
+                    blocked = blockedLane(
+                            new WaitResource(exact.role(), exact.group(), null), source, waiter);
                 }
                 if (blocked == null && exact.group() != null) {
-                    blocked = blockedLane(new WaitResource(exact.role(), null, null), source);
+                    blocked = blockedLane(
+                            new WaitResource(exact.role(), null, null), source, waiter);
                 }
                 if (blocked != null) { return blocked.key; }
             }
             return null;
         }
     }
-    private WaitLane blockedLane(WaitResource key, WaitLane source) {
+    private WaitLane blockedLane(WaitResource key, WaitLane source, Waiter waiter) {
         WaitLane lane = lanes.get(key);
-        return lane == null || lane == source || lane.waiters.isEmpty() ? null : lane;
+        if (lane == null || lane == source || lane.waiters.isEmpty()) {
+            return null;
+        }
+        Waiter incumbent = lane.waiters.first();
+        // Dependencies only point to a request that precedes this one under FIFO/PRIORITY.
+        if (lane.waiters.comparator().compare(incumbent, waiter) < 0) {
+            return lane;
+        }
+        if (source != null && source.key.role() != lane.key.role()) {
+            logLaneBypass(waiter, source, lane, incumbent);
+        }
+        return null;
+    }
+    private void logLaneBypass(
+            Waiter waiter, WaitLane source, WaitLane candidate, Waiter incumbent) {
+        laneBypassCount++;
+        long now = System.nanoTime();
+        if (lastLaneBypassLogNanos != Long.MIN_VALUE
+                && now - lastLaneBypassLogNanos < TimeUnit.SECONDS.toNanos(5L)) {
+            return;
+        }
+        Logger.info("PLACEMENT_LANE_ORDER_BYPASS count={} request_id={} priority={} "
+                        + "sequence={} source={} candidate={} incumbent_id={} "
+                        + "incumbent_priority={} incumbent_sequence={}",
+                laneBypassCount, waiter.context.getRequestId(), waiter.priority,
+                waiter.sequence, source.key, candidate.key,
+                incumbent.context.getRequestId(), incumbent.priority, incumbent.sequence);
+        laneBypassCount = 0L;
+        lastLaneBypassLogNanos = now;
     }
     private static boolean overlaps(WaitResource key, ServerStatus status) {
         WaitResource selected = selected(status);

@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -8,6 +10,7 @@ import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.List;
@@ -134,6 +137,67 @@ class DecodeEndpointAdmissionTest {
                 prepared.status());
         assertEquals(prepared.reservation(), endpoint.reservationHandle(2L));
         assertTrue(endpoint.layeredAdmissionView().queued().contains(2L));
+    }
+
+    @Test
+    void queuedCapacityFullWarnIdentifiesGateAndRateLimitsPerReason()
+            throws InterruptedException {
+        TimeUnit.MILLISECONDS.sleep(1_050L);
+        DecodeEndpoint slots = diagnosticEndpoint("10.0.0.11");
+        DecodeEndpoint hardKv = diagnosticEndpoint("10.0.0.12");
+        DecodeEndpoint expectedKv = diagnosticEndpoint("10.0.0.13");
+        updateStatus(slots, 1_000L, 1_000L);
+        updateStatus(hardKv, 1_000L, 1_000L);
+        updateStatus(expectedKv, 1_000L, 1_000L);
+
+        ch.qos.logback.classic.Logger syncLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("syncLogger");
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        syncLogger.addAppender(appender);
+        try {
+            assertEquals(DecodeEndpoint.QueuedPreparationStatus.PREPARED,
+                    prepareQueued(slots, 1L, 100L, 110L,
+                            new DecodeEndpoint.AdmissionCapacity(1L, 100L)));
+            assertEquals(DecodeEndpoint.QueuedPreparationStatus.CAPACITY_FULL,
+                    prepareQueued(slots, 2L, 100L, 110L,
+                            new DecodeEndpoint.AdmissionCapacity(1L, 100L)));
+            assertEquals(DecodeEndpoint.QueuedPreparationStatus.CAPACITY_FULL,
+                    prepareQueued(slots, 3L, 100L, 110L,
+                            new DecodeEndpoint.AdmissionCapacity(1L, 100L)),
+                    "a burst on one endpoint must not emit another warning");
+
+            assertEquals(DecodeEndpoint.QueuedPreparationStatus.CAPACITY_FULL,
+                    prepareQueued(hardKv, 4L, 1_001L, 1_001L,
+                            new DecodeEndpoint.AdmissionCapacity(10L, 100L)));
+            assertEquals(DecodeEndpoint.QueuedPreparationStatus.CAPACITY_FULL,
+                    prepareQueued(expectedKv, 5L, 100L, 901L,
+                            new DecodeEndpoint.AdmissionCapacity(10L, 90L)));
+            prepareQueued(slots, 6L, 100L, 110L,
+                    new DecodeEndpoint.AdmissionCapacity(1L, 100L));
+
+            List<String> warnings = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.startsWith("DECODE_CAPACITY_FULL "))
+                    .toList();
+            assertEquals(3, warnings.size(),
+                    "the second SLOTS failure must be rate limited");
+            assertEquals(1L, warnings.stream()
+                    .filter(message -> message.contains("reason=SLOTS"))
+                    .count());
+            assertEquals(1L, warnings.stream()
+                    .filter(message -> message.contains("reason=HARD_KV"))
+                    .count());
+            assertEquals(1L, warnings.stream()
+                    .filter(message -> message.contains("reason=EXPECTED_KV"))
+                    .count());
+        } finally {
+            syncLogger.detachAppender(appender);
+            appender.stop();
+            slots.close();
+            hardKv.close();
+            expectedKv.close();
+        }
     }
 
     @Test
@@ -1020,6 +1084,35 @@ class DecodeEndpointAdmissionTest {
         response.setAvailableKvCacheTokens(availableKvCacheTokens);
         response.setTotalKvCacheTokens(availableKvCacheTokens);
         EndpointTestSupport.applyStatus(endpoint, response);
+    }
+
+    private static DecodeEndpoint diagnosticEndpoint(String ip) {
+        WorkerStatus workerStatus = EndpointTestSupport.workerStatus(
+                RoleType.DECODE, ip, 8080, 8081);
+        return new DecodeEndpoint(workerStatus, event -> { });
+    }
+
+    private static void updateStatus(
+            DecodeEndpoint target, long availableKv, long totalKv) {
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of());
+        response.setFinishedTaskInfo(Map.of());
+        response.setAvailableKvCacheTokens(availableKv);
+        response.setTotalKvCacheTokens(totalKv);
+        EndpointTestSupport.applyStatus(target, response);
+    }
+
+    private static DecodeEndpoint.QueuedPreparationStatus prepareQueued(
+            DecodeEndpoint target,
+            long requestId,
+            long hardKv,
+            long expectedKv,
+            DecodeEndpoint.AdmissionCapacity capacity) {
+        try (WorkerEndpoint.GenerationPin pin = target.tryPinGeneration()) {
+            assertNotNull(pin);
+            return target.tryPrepareQueuedPinned(
+                    pin, requestId, hardKv, expectedKv, 50, capacity).status();
+        }
     }
 
     private static ReentrantLock decodeAdmissionLock(

@@ -45,6 +45,7 @@ import java.util.function.LongPredicate;
 public class DecodeEndpoint extends WorkerEndpoint {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final long CAPACITY_FULL_WARN_INTERVAL_NANOS = 1_000_000_000L;
     private static final Comparator<ReservationHandle> RETIREMENT_ORDER =
             Comparator.comparingLong(ReservationHandle::endpointGenerationId)
                     .thenComparingLong(ReservationHandle::requestId)
@@ -322,6 +323,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || maxKvUsagePercent > 100L) {
                 throw new IllegalArgumentException(
                         "Decode admission limits are outside their domain");
+            }
+        }
+    }
+
+    private enum CapacityFullReason {
+        NONE,
+        SLOTS,
+        HARD_KV,
+        EXPECTED_KV;
+
+        private final AtomicLong lastWarnNanos = new AtomicLong(Long.MIN_VALUE);
+
+        private boolean claimWarn(long now) {
+            while (true) {
+                long last = lastWarnNanos.get();
+                if (last != Long.MIN_VALUE
+                        && now - last < CAPACITY_FULL_WARN_INTERVAL_NANOS) {
+                    return false;
+                }
+                if (lastWarnNanos.compareAndSet(last, now)) {
+                    return true;
+                }
             }
         }
     }
@@ -660,7 +683,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             RequestInflight candidate = new RequestInflight(
                     kvTokens, expectedKvTokens, priority, 1L);
-            if (isQueuedPlacementCapacityFullLocked(candidate, capacity)) {
+            CapacityFullReason fullReason =
+                    queuedPlacementCapacityFullReasonLocked(candidate, capacity);
+            if (fullReason != CapacityFullReason.NONE) {
+                warnCapacityFullLocked(fullReason, candidate, capacity);
                 return new QueuedPreparation(
                         QueuedPreparationStatus.CAPACITY_FULL, null);
             }
@@ -3486,51 +3512,99 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * already hold a dispatch permit are counted by the hard gate, so only the
      * remaining queued owners are added here.
      */
-    private boolean isQueuedPlacementCapacityFullLocked(
+    private CapacityFullReason queuedPlacementCapacityFullReasonLocked(
             RequestInflight candidate,
             AdmissionCapacity capacity) {
-        long queuedWithoutPermit = Math.max(
-                0L, (long) queuedPhaseCount.get()
-                        - activeEngineDispatchPermitCount);
-        long occupiedSlots = saturatedAddNonNegative(
-                engineDispatchHardGateUsageLocked(), queuedWithoutPermit);
+        long occupiedSlots = queuedPlacementOccupiedSlotsLocked();
         if (capacity.maxEngineRequests() > 0L
                 && occupiedSlots >= capacity.maxEngineRequests()) {
-            return true;
+            return CapacityFullReason.SLOTS;
         }
 
         WorkerStatus.EngineObservation fields =
                 getStatus().committedWorkerStatus().fields();
         long totalKv = fields.totalKvCacheTokens();
         if (totalKv <= 0L) {
-            return false;
+            return CapacityFullReason.NONE;
         }
-        long hardAvailable = Math.max(
+        long hardAvailable = queuedPlacementHardAvailable(fields);
+        if (candidate.kvTokens() > hardAvailable) {
+            return CapacityFullReason.HARD_KV;
+        }
+        if (capacity.maxKvUsagePercent() == 0L) {
+            return CapacityFullReason.NONE;
+        }
+
+        long currentExpectedUsage = queuedPlacementExpectedUsage(fields);
+        long projectedExpectedUsage = saturatedAddNonNegative(
+                currentExpectedUsage, candidate.expectedKvTokens());
+        return (double) projectedExpectedUsage * 100.0
+                > (double) capacity.maxKvUsagePercent() * (double) totalKv
+                ? CapacityFullReason.EXPECTED_KV
+                : CapacityFullReason.NONE;
+    }
+
+    private long queuedPlacementOccupiedSlotsLocked() {
+        long queuedWithoutPermit = Math.max(
+                0L, (long) queuedPhaseCount.get()
+                        - activeEngineDispatchPermitCount);
+        return saturatedAddNonNegative(
+                engineDispatchHardGateUsageLocked(), queuedWithoutPermit);
+    }
+
+    private long queuedPlacementHardAvailable(
+            WorkerStatus.EngineObservation fields) {
+        return Math.max(
                 0L,
                 fields.availableKvCacheTokens()
                         - inflightKvReservedTotal.get()
                         - priorityPreemptionHeldKv.get()
                         - engineFenceHeldKv.get());
-        if (candidate.kvTokens() > hardAvailable) {
-            return true;
-        }
-        if (capacity.maxKvUsagePercent() == 0L) {
-            return false;
-        }
+    }
 
+    private long queuedPlacementExpectedUsage(
+            WorkerStatus.EngineObservation fields) {
         long reportedUsed = Math.max(
-                0L, totalKv - fields.availableKvCacheTokens());
-        long currentExpectedUsage = saturatedAddNonNegative(
+                0L, fields.totalKvCacheTokens()
+                        - fields.availableKvCacheTokens());
+        return saturatedAddNonNegative(
                 saturatedAddNonNegative(
                         reportedUsed,
                         inflightExpectedKvReservedTotal.get()),
                 saturatedAddNonNegative(
                         priorityPreemptionHeldExpectedKv.get(),
                         engineFenceHeldExpectedKv.get()));
-        long projectedExpectedUsage = saturatedAddNonNegative(
-                currentExpectedUsage, candidate.expectedKvTokens());
-        return (double) projectedExpectedUsage * 100.0
-                > (double) capacity.maxKvUsagePercent() * (double) totalKv;
+    }
+
+    private void warnCapacityFullLocked(CapacityFullReason reason,
+                                        RequestInflight candidate,
+                                        AdmissionCapacity capacity) {
+        long now = System.nanoTime();
+        if (!reason.claimWarn(now)) {
+            return;
+        }
+        WorkerStatus.EngineObservation fields = getStatus().committedWorkerStatus().fields();
+        long priorityHeldSlots = preemptionClaims.values().stream()
+                .filter(claim -> claim.kvHeldAfterWorkerRelease).count();
+        long projectedExpectedKv = saturatedAddNonNegative(
+                queuedPlacementExpectedUsage(fields), candidate.expectedKvTokens());
+        logger.warn(
+                "DECODE_CAPACITY_FULL reason={} endpoint={} slots={}/{} "
+                        + "confirmed={} inflight={} queued={} permits={} "
+                        + "held_slots_priority={} held_slots_fence={} kv_hard_available={} "
+                        + "worker_kv_available={} worker_kv_total={} "
+                        + "request_hard={} request_expected={} projected_expected={} "
+                        + "kv_limit_percent={} held_kv_priority={}/{} held_kv_fence={}/{}",
+                reason, ipPort(), queuedPlacementOccupiedSlotsLocked(),
+                capacity.maxEngineRequests(), confirmedRunningCount,
+                inflightRequests.size(), queuedPhaseCount.get(),
+                activeEngineDispatchPermitCount, priorityHeldSlots,
+                engineFenceHeldSlotCount, queuedPlacementHardAvailable(fields),
+                fields.availableKvCacheTokens(), fields.totalKvCacheTokens(),
+                candidate.kvTokens(), candidate.expectedKvTokens(), projectedExpectedKv,
+                capacity.maxKvUsagePercent(), priorityPreemptionHeldKv.get(),
+                priorityPreemptionHeldExpectedKv.get(), engineFenceHeldKv.get(),
+                engineFenceHeldExpectedKv.get());
     }
 
     /**

@@ -254,6 +254,49 @@ class RequestSchedulerDeferredRetryTest {
 
     @Test
     @Timeout(30)
+    void crossRoleWaitLanesCannotMutuallyBlockTheOldestRequest()
+            throws Exception {
+        CrossRoleLaneRouter router = new CrossRoleLaneRouter(true);
+        SchedulerFixture fixture = fixture(router);
+
+        fixture.scheduler.submit(context(
+                451L, 50, Long.MAX_VALUE, fixture.config));
+        fixture.scheduler.submit(context(
+                452L, 50, Long.MAX_VALUE, fixture.config));
+        assertTrue(router.olderRetryEntered.await(3, TimeUnit.SECONDS));
+        assertTrue(router.laterRetryEntered.await(3, TimeUnit.SECONDS));
+        router.releaseOlderRetry.countDown();
+        try {
+            awaitCondition(() -> router.decodePrepares.get() > 0);
+        } finally {
+            router.releaseLaterRetry.countDown();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void laterHigherPriorityRequestCanCrossAnOlderLowerPriorityRoleLane()
+            throws Exception {
+        CrossRoleLaneRouter router = new CrossRoleLaneRouter(false);
+        SchedulerFixture fixture = fixture(router);
+        assertTrue(fixture.config.isPriorityOrdering());
+
+        fixture.scheduler.submit(context(
+                451L, 10, Long.MAX_VALUE, fixture.config));
+        fixture.scheduler.submit(context(
+                452L, 90, Long.MAX_VALUE, fixture.config));
+        assertTrue(router.olderRetryEntered.await(3, TimeUnit.SECONDS));
+        assertTrue(router.laterRetryEntered.await(3, TimeUnit.SECONDS));
+        router.releaseLaterRetry.countDown();
+        try {
+            awaitCondition(() -> router.decodePrepares.get() > 0);
+        } finally {
+            router.releaseOlderRetry.countDown();
+        }
+    }
+
+    @Test
+    @Timeout(30)
     void policyReselectDeadlineBypassesAFullSevenHundredFiftyLaneBudget()
             throws Exception {
         int backgroundLanes = 750;
@@ -624,6 +667,89 @@ class RequestSchedulerDeferredRetryTest {
             attempts.incrementAndGet();
             return new QueueRoutingResult.Deferred(
                     RoleType.PREFILL, "test");
+        }
+    }
+
+    private static final class CrossRoleLaneRouter implements Router {
+        private final boolean admitOlder;
+        private final CountDownLatch olderRetryEntered = new CountDownLatch(1);
+        private final CountDownLatch laterRetryEntered = new CountDownLatch(1);
+        private final CountDownLatch releaseOlderRetry = new CountDownLatch(1);
+        private final CountDownLatch releaseLaterRetry = new CountDownLatch(1);
+        private final java.util.concurrent.ConcurrentMap<Long, AtomicInteger> attempts =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        private final AtomicInteger decodePrepares = new AtomicInteger();
+
+        private CrossRoleLaneRouter(boolean admitOlder) {
+            this.admitOlder = admitOlder;
+        }
+
+        @Override
+        public Response routeDirect(BalanceContext context) {
+            throw new AssertionError("QUEUE contract must not route DIRECT");
+        }
+
+        @Override
+        public QueueRoutingResult routeForQueue(BalanceContext context) {
+            int attempt = attempts.computeIfAbsent(
+                    context.getRequestId(), ignored -> new AtomicInteger())
+                    .incrementAndGet();
+            if (attempt == 1) {
+                RoleType role = context.getRequestId() % 2L == 1L
+                        ? RoleType.PREFILL : RoleType.DECODE;
+                return new QueueRoutingResult.Deferred(role, "test");
+            }
+            if (context.getRequestId() == 451L) {
+                olderRetryEntered.countDown();
+                await(releaseOlderRetry);
+                return admitOlder
+                        ? admitted(context)
+                        : new QueueRoutingResult.Deferred(RoleType.PREFILL, "test");
+            }
+            laterRetryEntered.countDown();
+            await(releaseLaterRetry);
+            return admitOlder
+                    ? new QueueRoutingResult.Deferred(RoleType.DECODE, "test")
+                    : admitted(context);
+        }
+
+        private QueueRoutingResult admitted(BalanceContext context) {
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setServerStatus(List.of(
+                    status(context, RoleType.PREFILL, "prefill", 8001),
+                    status(context, RoleType.DECODE, "decode", 8002)));
+            QueueRouteAdmission admission = mock(QueueRouteAdmission.class);
+            when(admission.response()).thenReturn(response);
+            when(admission.prefillReselectNotAfterMs()).thenReturn(Long.MAX_VALUE);
+            when(admission.prepareDecode(context)).thenAnswer(ignored -> {
+                decodePrepares.incrementAndGet();
+                return QueueRouteAdmission.DecodePrepareStatus.CAPACITY_FULL;
+            });
+            return new QueueRoutingResult.Admitted(admission);
+        }
+
+        private static ServerStatus status(
+                BalanceContext context, RoleType role, String ip, int port) {
+            ServerStatus status = new ServerStatus();
+            status.setSuccess(true);
+            status.setRole(role);
+            status.setRequestId(context.getRequestId());
+            status.setServerIp(ip);
+            status.setHttpPort(port);
+            status.setGroup("test");
+            return status;
+        }
+
+        private static void await(CountDownLatch latch) {
+            try {
+                assertTrue(latch.await(10, TimeUnit.SECONDS),
+                        "cross-role lane latch timed out");
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(
+                        "cross-role lane wait was interrupted", interrupted);
+            }
         }
     }
 
