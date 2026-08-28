@@ -155,10 +155,25 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 .setAvailableKvCache(beh.getAvailableKvCache())
                 .setTotalKvCache(beh.getTotalKvCache())
                 .setStatusVersion(request.getLatestCacheVersion() + 1)
-                .setLatestFinishedVersion(request.getLatestFinishedVersion())
                 .setDpSize(1)
                 .setTpSize(1)
                 .setDpRank(0);
+
+        // Engine-contract behavior: finished-window replay semantics mirror the
+        // real engine — entries are re-sent while the requester's cursor is
+        // behind latest_finished_version and stop once it catches up. Default
+        // (latestFinishedVersion == null) keeps the legacy echo behavior.
+        Long behaviorLatestFinished = beh.getLatestFinishedVersion();
+        if (behaviorLatestFinished != null) {
+            builder.setLatestFinishedVersion(behaviorLatestFinished);
+            if (behaviorLatestFinished > request.getLatestFinishedVersion()) {
+                builder.addAllFinishedTaskList(beh.getFinishedTasks());
+            }
+        } else {
+            builder.setLatestFinishedVersion(request.getLatestFinishedVersion());
+        }
+        builder.addAllRunningTaskInfo(beh.getRunningTasks());
+        builder.setRunningDetailTruncated(beh.isRunningDetailTruncated());
 
         responseObserver.onNext(builder.build());
         responseObserver.onCompleted();

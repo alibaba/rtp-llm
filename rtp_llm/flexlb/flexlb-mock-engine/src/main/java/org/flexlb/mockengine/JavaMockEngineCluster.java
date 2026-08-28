@@ -2137,6 +2137,11 @@ public final class JavaMockEngineCluster {
                     .setBatchId(batchId)
                     .setPhase(phase)
                     .setDpRank(dpRank)
+                    // Engine-contract kv_tokens: the mock books per-request KV
+                    // as the input length once KV is held (same basis as
+                    // activeKvTokens); RECEIVED has allocated nothing yet.
+                    .setKvTokens(phase == EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED
+                            ? 0L : shape.inputLen())
                     .build();
         }
 
@@ -2163,6 +2168,9 @@ public final class JavaMockEngineCluster {
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
                     .setDpRank(dpRank)
+                    // Terminal-time KV snapshot: input + generated output is
+                    // what the request occupied when it finished.
+                    .setKvTokens(shape.inputLen() + shape.outputLen())
                     .build();
             publishCompletion(task);
         }
