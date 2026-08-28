@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import java.util.Objects;
 
 /** Immutable lifecycle view returned by request-state and reconciliation APIs. */
 public record RequestLifecycleSnapshot(long requestId,
@@ -12,9 +11,9 @@ public record RequestLifecycleSnapshot(long requestId,
                                        String detail) {
 
     public RequestLifecycleSnapshot {
-        Objects.requireNonNull(state, "state");
-        Objects.requireNonNull(deliveryClaimKind, "deliveryClaimKind");
-        Objects.requireNonNull(detail, "detail");
+        assert state != null : "missing lifecycle state";
+        assert deliveryClaimKind != null : "missing delivery claim kind";
+        assert detail != null : "missing lifecycle detail";
         if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE && batchId <= 0) {
             throw new IllegalArgumentException(
                     "batch enqueue delivery requires a positive batchId");

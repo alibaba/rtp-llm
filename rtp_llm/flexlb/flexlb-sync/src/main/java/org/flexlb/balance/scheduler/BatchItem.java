@@ -1,19 +1,26 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.strategy.EndpointSelection;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Prioritized;
 
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A single inference request queued for a priority scheduling decision.
  *
- * <p>Extracted from {@link PriorityScheduler} to reduce coupling
+ * <p>Extracted from {@link RequestScheduler} to reduce coupling
  * with {@link WorkerBatcher}. A decision group may be delivered through a
  * batch RPC or returned as individual route decisions.
  *
@@ -22,7 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code EndpointRegistry} lookups by ip+port.
  *
  */
-public final class BatchItem implements Prioritized {
+public final class BatchItem implements DeliveryItem, Prioritized {
 
     private static final AtomicLong ENQUEUE_SEQUENCE = new AtomicLong();
 
@@ -30,29 +37,20 @@ public final class BatchItem implements Prioritized {
     private final CompletableFuture<Response> future;
     private final Response routeResponse;
     private final ServerStatus prefill;
-    private final ServerStatus decode;
     private final PrefillEndpoint prefillEp;
-    private final DecodeEndpoint decodeEp;
+    private final AtomicReference<DecodeBinding> decodeBinding;
+    private final DecodeReselection decodeReselection;
+    private final PlacementAvailability placementAvailability;
     private final long enqueuedAtMs;
     private final long enqueueSequence;
-    private final DeliveryMode deliveryMode;
-
-    /**
-     * Non-null after the batching policy has declared this route decision
-     * ready for delivery. Access is serialized by the owning worker batcher's
-     * queue lock; keeping the marker on the existing item avoids allocating a
-     * wrapper for every request held behind the request-mode inflight cap.
-     */
-    private String readyDeliveryReason;
-
-    /**
-     * Last batching-park diagnostics are owned by the request itself. Keeping the
-     * lazily-created mutable holder here makes repeated parks allocation-free
-     * while adding only one reference to requests that never park. Unlike a
-     * scheduler-wide request-id map, it cannot retain externally removed
-     * items. Access is serialized by the owning worker thread / queue lock.
-     */
-    private ParkTrace parkTrace;
+    private final long requestId;
+    private final int priority;
+    private final long expiresAtMs;
+    private final long seqLen;
+    private final long hitCache;
+    private final long maxDecodeEngineRequests;
+    private final long maxDecodeKvUsagePercent;
+    private final int maxInflightDeliveriesPerPrefillWorker;
 
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -61,17 +59,64 @@ public final class BatchItem implements Prioritized {
                      ServerStatus decode,
                      PrefillEndpoint prefillEp,
                      DecodeEndpoint decodeEp,
+                     DecodeEndpoint.ReservationHandle decodeReservation,
                      long enqueuedAtMs) {
-        this.ctx = ctx;
+        this(ctx,
+                future,
+                routeResponse,
+                prefill,
+                decode,
+                prefillEp,
+                decodeEp,
+                decodeReservation,
+                enqueuedAtMs,
+                null,
+                null);
+    }
+
+    BatchItem(BalanceContext ctx,
+                     CompletableFuture<Response> future,
+                     Response routeResponse,
+                     ServerStatus prefill,
+                     ServerStatus decode,
+                     PrefillEndpoint prefillEp,
+                     DecodeEndpoint decodeEp,
+                     DecodeEndpoint.ReservationHandle decodeReservation,
+                     long enqueuedAtMs,
+                     DecodeReselection decodeReselection,
+                     PlacementAvailability placementAvailability) {
+        this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
-        this.decode = decode;
         this.prefillEp = prefillEp;
-        this.decodeEp = decodeEp;
+        this.decodeBinding = new AtomicReference<>(new DecodeBinding(
+                decode, decodeEp, decodeReservation));
+        this.decodeReselection = decodeReselection;
+        this.placementAvailability = placementAvailability;
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
-        this.deliveryMode = DeliveryMode.from(ctx);
+        Request request = ctx.getRequest();
+        this.requestId = request == null ? 0L : request.getRequestId();
+        this.priority = request == null && ctx.schedulingMetadata() == null
+                ? 0 : ctx.getPriority();
+        this.expiresAtMs = ctx.getRequestExpiresAtMs();
+        this.seqLen = request == null ? 0L : request.getSeqLen();
+        this.hitCache = hitCacheOf(prefill);
+        FlexlbConfig schedulingConfig = Objects.requireNonNull(
+                ctx.getConfig(), "request scheduling config");
+        RoutingConfig.DecodeAvailabilityConfig decodeAvailability =
+                schedulingConfig.getRouter().getRoles()
+                .getDecode().getAvailability();
+        Long configuredDecodeLimit = decodeAvailability.getMaxEngineRequests();
+        this.maxDecodeEngineRequests = configuredDecodeLimit == null
+                ? 0L : configuredDecodeLimit;
+        this.maxDecodeKvUsagePercent =
+                decodeAvailability.getMaxKvUsagePercent();
+        Integer configuredDeliveryLimit = schedulingConfig.getDispatcher()
+                .maxInflightDeliveriesPerPrefillWorker();
+        this.maxInflightDeliveriesPerPrefillWorker =
+                configuredDeliveryLimit == null ? 0 : configuredDeliveryLimit;
     }
 
     // -- accessors --
@@ -80,79 +125,46 @@ public final class BatchItem implements Prioritized {
     public CompletableFuture<Response> future() { return future; }
     public Response routeResponse() { return routeResponse; }
     public ServerStatus prefill() { return prefill; }
-    public ServerStatus decode() { return decode; }
+    public ServerStatus decode() { return decodeBinding.get().status(); }
     public PrefillEndpoint prefillEp() { return prefillEp; }
-    public DecodeEndpoint decodeEp() { return decodeEp; }
+    public DecodeEndpoint decodeEp() { return decodeBinding.get().endpoint(); }
+    public DecodeEndpoint.ReservationHandle decodeReservation() {
+        return decodeBinding.get().reservation();
+    }
+
+    DecodeBinding decodeBinding() {
+        return decodeBinding.get();
+    }
+
+    boolean replaceDecodeBinding(
+            DecodeBinding expected,
+            DecodeBinding replacement) {
+        return decodeBinding.compareAndSet(
+                Objects.requireNonNull(expected, "expected"),
+                Objects.requireNonNull(replacement, "replacement"));
+    }
+
+    EndpointSelection selectDecodeForDispatch() {
+        DecodeBinding current = decodeBinding.get();
+        if (decodeReselection == null || current.status() == null) {
+            return null;
+        }
+        return decodeReselection.select(ctx, current.status().getGroup());
+    }
+
+    PlacementAvailability decodePlacementAvailability() {
+        return placementAvailability;
+    }
+    @Override
     public long enqueuedAtMs() { return enqueuedAtMs; }
-    DeliveryMode deliveryMode() { return deliveryMode; }
-
-    String readyDeliveryReason() { return readyDeliveryReason; }
-
-    void markRouteDecisionReady(String reason) {
-        if (deliveryMode != DeliveryMode.ROUTE_DECISION) {
-            throw new IllegalStateException(
-                    "Only route decisions can enter the ready-delivery backlog");
-        }
-        readyDeliveryReason = reason == null || reason.isBlank()
-                ? "route_decision_ready" : reason;
+    public long expiresAtMs() { return expiresAtMs; }
+    public boolean requestExpired(long nowMs) {
+        return expiresAtMs <= 0L || nowMs >= expiresAtMs;
     }
-
-    void clearRouteDecisionReady() { readyDeliveryReason = null; }
-
-    void recordParkTrace(String reason, long budgetMs, long waitMs,
-                         int queueSize, int inflightCount) {
-        ParkTrace trace = parkTrace;
-        if (trace == null) {
-            trace = new ParkTrace();
-            parkTrace = trace;
-        }
-        trace.update(reason, budgetMs, waitMs, queueSize, inflightCount);
-    }
-
-    ParkTrace consumeParkTrace() {
-        ParkTrace trace = parkTrace;
-        parkTrace = null;
-        return trace == null ? ParkTrace.EMPTY : trace;
-    }
-
-    void clearParkTrace() {
-        parkTrace = null;
-    }
-
-    boolean hasParkTrace() { return parkTrace != null; }
-
-    static final class ParkTrace {
-        private static final ParkTrace EMPTY =
-                new ParkTrace("none", -1, -1, -1, -1);
-
-        private String reason;
-        private long budgetMs;
-        private long waitMs;
-        private int queueSize;
-        private int inflightCount;
-
-        private ParkTrace() {
-        }
-
-        private ParkTrace(String reason, long budgetMs, long waitMs,
-                          int queueSize, int inflightCount) {
-            update(reason, budgetMs, waitMs, queueSize, inflightCount);
-        }
-
-        private void update(String reason, long budgetMs, long waitMs,
-                            int queueSize, int inflightCount) {
-            this.reason = reason;
-            this.budgetMs = budgetMs;
-            this.waitMs = waitMs;
-            this.queueSize = queueSize;
-            this.inflightCount = inflightCount;
-        }
-
-        String reason() { return reason; }
-        long budgetMs() { return budgetMs; }
-        long waitMs() { return waitMs; }
-        int queueSize() { return queueSize; }
-        int inflightCount() { return inflightCount; }
+    public long maxDecodeEngineRequests() { return maxDecodeEngineRequests; }
+    public long maxDecodeKvUsagePercent() { return maxDecodeKvUsagePercent; }
+    public int maxInflightDeliveriesPerPrefillWorker() {
+        return maxInflightDeliveriesPerPrefillWorker;
     }
 
     /**
@@ -162,7 +174,7 @@ public final class BatchItem implements Prioritized {
      */
     @Override
     public int priority() {
-        return ctx != null ? ctx.getPriority() : 0;
+        return priority;
     }
 
     /**
@@ -177,26 +189,38 @@ public final class BatchItem implements Prioritized {
 
     // -- derived accessors --
 
+    @Override
     public long requestId() {
-        return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getRequestId() : 0;
+        return requestId;
     }
 
     /** Total sequence length of this request. */
+    @Override
     public long seqLen() {
-        return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getSeqLen() : 0;
+        return seqLen;
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
+    @Override
     public long hitCache() {
-        return hitCacheOf(prefill);
+        return hitCache;
     }
 
     /** Extract cache-hit length from a {@link ServerStatus} debug info. */
     private static long hitCacheOf(ServerStatus ss) {
         return ss != null && ss.getDebugInfo() != null
                 ? ss.getDebugInfo().getHitCacheLen() : 0;
+    }
+
+    record DecodeBinding(
+            ServerStatus status,
+            DecodeEndpoint endpoint,
+            DecodeEndpoint.ReservationHandle reservation) {
+    }
+
+    @FunctionalInterface
+    interface DecodeReselection {
+        EndpointSelection select(BalanceContext context, String group);
     }
 
 }

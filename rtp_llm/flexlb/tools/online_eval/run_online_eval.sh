@@ -110,18 +110,23 @@ if [[ "${LOAD_CLIENT_IMPL}" == "python" || "${MOCK_ENGINE_IMPL}" == "python" ]];
 fi
 
 DEFAULT_FLEXLB_CONFIG='{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "ordering": {"type": "PRIORITY", "defaultPriority": 50},
-    "capacity": {"maxOutstandingRequestsGlobal": 1000000}
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 32,
+      "maxCollectionWaitMs": 10,
+      "maxPredictedExecutionMs": 550
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 1000000,
+      "maxWaitingRequestsPerPrefillWorker": 1024
+    }
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxRequests": 32,
-    "maxCollectionWaitMs": 10,
-    "maxWaitingRequestsPerPrefillWorker": 1024,
-    "earlyDispatchPredictedExecutionMs": 550,
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {

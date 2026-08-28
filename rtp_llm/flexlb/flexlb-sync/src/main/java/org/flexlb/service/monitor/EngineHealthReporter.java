@@ -9,6 +9,7 @@ import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -149,11 +150,21 @@ public class EngineHealthReporter {
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
-    public void reportLatencyMetric(String modelName, String role, double result, double result2) {
+    public void reportStepLatencyVariance(
+            String modelName, String role, double variance) {
         FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
-        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, result);
-        monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, result2);
-        logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
+        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, variance);
+        logger.debug("Step-latency variance - model: {}, role: {}, value: {}",
+                modelName, role, variance);
+    }
+
+    public void reportRunningLoadVariance(
+            String modelName, String role, double variance) {
+        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+        monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR,
+                metricTags, variance);
+        logger.debug("Running-load variance - model: {}, role: {}, value: {}",
+                modelName, role, variance);
     }
 
     @Scheduled(fixedRate = 2000)
@@ -226,61 +237,80 @@ public class EngineHealthReporter {
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
+        WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+        WorkerStatus.EngineObservation status =
+                workerStatus.committedEngineObservation();
+        WorkerStatus.PollHealth pollHealth = workerStatus.pollHealth();
+
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole().name());
+                "engineIp", topology.ip(),
+                "role", status.role().name());
 
-        Long availableConcurrency = workerStatus.getAvailableConcurrency();
+        Long availableConcurrency = status.availableConcurrency();
         if (availableConcurrency != null) {
             monitor.report(ENGINE_STATUS_AVAILABLE_CONCURRENCY, metricTags, availableConcurrency);
         }
-        long lastUpdateTime = workerStatus.getStatusLastUpdateTime().get();
-        if (lastUpdateTime > 0) {
-            monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
+        long pollIntervalUs = pollHealth.successfulPollIntervalUs();
+        if (pollIntervalUs > 0) {
+            monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD,
+                    metricTags, (double) pollIntervalUs);
         }
-        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getLoadMetric() : 0);
+        if (ep != null) {
+            ep.getLoadMetric().ifPresent(
+                    value -> monitor.report(
+                            ENGINE_RUNNING_QUEUE_TIME, metricTags, value));
+        }
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
     }
 
-    public void reportCacheStatusCheckerSuccess(String modelName, WorkerStatus workerStatus) {
-        long cacheLastUpdateTime = workerStatus.getCacheLastUpdateTime().get();
-        if (cacheLastUpdateTime > 0) {
+    public void reportCacheStatusCheckerSuccess(
+            String modelName,
+            WorkerStatus workerStatus,
+            long successfulPollIntervalUs) {
+        WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+        WorkerStatus.EngineObservation status =
+                workerStatus.committedEngineObservation();
+        CacheStatus cacheStatus = workerStatus.getCacheStatus();
+        if (successfulPollIntervalUs > 0L) {
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", workerStatus.getIp(),
-                    "role", workerStatus.getRole().name());
-            monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
+                    "engineIp", topology.ip(),
+                    "role", status.role().name());
+            monitor.report(
+                    CACHE_STATUS_CHECK_SUCCESS_PERIOD,
+                    metricTags,
+                    (double) successfulPollIntervalUs);
         }
-        if (workerStatus.getCacheStatus() != null) {
-            long blockSize = workerStatus.getCacheStatus().getBlockSize();
-            long cacheKeySize = workerStatus.getCacheStatus().getCacheKeySize();
+        if (cacheStatus != null) {
+            long blockSize = cacheStatus.getBlockSize();
+            long cacheKeySize = cacheStatus.getCacheKeySize();
             FlexMetricTags roleMetricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "role", workerStatus.getRole().name());
+                    "role", status.role().name());
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", workerStatus.getIp(),
-                    "role", workerStatus.getRole().name());
+                    "engineIp", topology.ip(),
+                    "role", status.role().name());
             monitor.report(CACHE_BLOCK_SIZE, roleMetricTags, blockSize);
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
         }
 
-        long totalKvCacheTokens = workerStatus.getTotalKvCacheTokens().get();
-        long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
+        long totalKvCacheTokens = status.totalKvCacheTokens();
+        long availableKvCacheTokens = status.availableKvCacheTokens();
         long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;
 
         FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole().name());
+                "engineIp", topology.ip(),
+                "role", status.role().name());
 
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
         monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
         monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS,
-                FlexMetricTags.of("model", modelName, "role", workerStatus.getRole().name()),
+                FlexMetricTags.of("model", modelName, "role", status.role().name()),
                 totalKvCacheTokens);
         if (totalKvCacheTokens > 0) {
             double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;

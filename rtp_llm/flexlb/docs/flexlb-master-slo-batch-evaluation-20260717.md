@@ -4,6 +4,11 @@
 > `COST_SLO_MS` 只是离线分析阈值，不是当前 FlexLB 配置；当前实现没有
 > SLO budget、长度 bucket 或优先级 TTL 倍率。生产行为只由
 > `FLEXLB_CONFIG` JSON 和请求自身的到期字段决定。
+> 下表中的 `dispatcher.*` 凑批项是测试当时 schema v1 的历史字段，schema
+> v2 已删除。当前配置分别位于 `scheduler.decision.maxRequests`、
+> `scheduler.decision.maxCollectionWaitMs` 和
+> `scheduler.decision.maxPredictedExecutionMs`；后者在等于上限时会纳入请求并
+> 立即下发，因此重跑结果不应假定与旧边界逐项完全一致。
 
 ## 1. 结论
 

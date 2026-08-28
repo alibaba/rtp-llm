@@ -8,7 +8,7 @@ import lombok.Getter;
 @Getter
 public enum ResourceMeasureIndicatorEnum {
 
-    WAIT_TIME("WaitTime", "Wait time"),
+    PREFILL_PENDING_REQUESTS("PrefillPendingRequests", "Prefill pending requests"),
 
     REMAINING_KV_CACHE("RemainingKvCache", "Remaining KV cache"),
 

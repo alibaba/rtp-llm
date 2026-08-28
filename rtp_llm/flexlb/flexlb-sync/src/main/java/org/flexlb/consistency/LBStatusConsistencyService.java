@@ -8,7 +8,6 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -131,7 +130,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
         if (masterHostIp == null) {
-            Logger.warn("getMasterHostIpPort: masterHostIp is null.");
             return null;
         }
         return masterHostIp + ":" + serverPort;

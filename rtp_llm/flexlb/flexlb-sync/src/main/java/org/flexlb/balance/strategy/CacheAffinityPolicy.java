@@ -15,8 +15,8 @@ final class CacheAffinityPolicy {
     record Decision(int[] preferredIndexes,
                     int preferredCount,
                     Reason reason,
-                    long minScoreMs,
-                    long scoreCutoffMs) {
+                    long minProjectedTtftMs,
+                    long projectedTtftCutoffMs) {
         boolean hasPreference() {
             return preferredCount > 0;
         }
@@ -33,13 +33,13 @@ final class CacheAffinityPolicy {
 
     static Decision evaluate(
             int candidateCount,
-            IntToLongFunction scoreAt,
+            IntToLongFunction projectedTtftAt,
             IntToLongFunction cacheHitAt,
-            long minScoreMs,
+            long minProjectedTtftMs,
             long referenceHitTokens,
             long seqLen,
             long configuredMaxExtraTtftMs,
-            double configuredMinHitRate) {
+            double configuredMinPrefixHitPercent) {
         if (candidateCount <= 0) {
             return new Decision(
                     new int[0], 0, Reason.NO_CACHE_LEAD, Long.MAX_VALUE, Long.MAX_VALUE);
@@ -53,13 +53,15 @@ final class CacheAffinityPolicy {
             maxHitTokens = Math.max(maxHitTokens, hitTokens);
         }
 
-        minScoreMs = Math.max(0L, minScoreMs);
+        minProjectedTtftMs = Math.max(0L, minProjectedTtftMs);
         referenceHitTokens = clampHit(referenceHitTokens, seqLen);
         long maxExtraTtftMs = Math.max(0L, configuredMaxExtraTtftMs);
-        long scoreCutoffMs = saturatingAdd(minScoreMs, maxExtraTtftMs);
+        long projectedTtftCutoffMs = saturatingAdd(
+                minProjectedTtftMs, maxExtraTtftMs);
         if (maxHitTokens <= minHitTokens) {
             return new Decision(
-                    new int[0], 0, Reason.NO_CACHE_LEAD, minScoreMs, scoreCutoffMs);
+                    new int[0], 0, Reason.NO_CACHE_LEAD,
+                    minProjectedTtftMs, projectedTtftCutoffMs);
         }
 
         boolean minimumHitRateMet = false;
@@ -69,11 +71,13 @@ final class CacheAffinityPolicy {
             long hitTokens = clampHit(cacheHitAt.applyAsLong(i), seqLen);
             if (hitTokens <= minHitTokens
                     || hitTokens < referenceHitTokens
-                    || !meetsMinimumHitRate(hitTokens, seqLen, configuredMinHitRate)) {
+                    || !meetsMinimumHitRate(
+                            hitTokens, seqLen, configuredMinPrefixHitPercent)) {
                 continue;
             }
             minimumHitRateMet = true;
-            if (Math.max(0L, scoreAt.applyAsLong(i)) <= scoreCutoffMs) {
+            if (Math.max(0L, projectedTtftAt.applyAsLong(i))
+                    <= projectedTtftCutoffMs) {
                 preferredIndexes[preferredCount++] = i;
             }
         }
@@ -83,30 +87,34 @@ final class CacheAffinityPolicy {
                     new int[0],
                     0,
                     minimumHitRateMet ? Reason.OVER_CAP : Reason.LOW_CACHE_HIT,
-                    minScoreMs,
-                    scoreCutoffMs);
+                    minProjectedTtftMs,
+                    projectedTtftCutoffMs);
         }
 
         sortPreferred(
-                preferredIndexes, 0, preferredCount - 1, scoreAt, cacheHitAt, seqLen);
+                preferredIndexes, 0, preferredCount - 1,
+                projectedTtftAt, cacheHitAt, seqLen);
         return new Decision(
                 preferredIndexes,
                 preferredCount,
                 Reason.CACHE_LEADER,
-                minScoreMs,
-                scoreCutoffMs);
+                minProjectedTtftMs,
+                projectedTtftCutoffMs);
     }
 
     private static boolean meetsMinimumHitRate(
-            long hitTokens, long seqLen, double configuredMinHitRate) {
+            long hitTokens,
+            long seqLen,
+            double configuredMinPrefixHitPercent) {
         double minimumHitRate;
-        if (Double.isNaN(configuredMinHitRate)
-                || configuredMinHitRate == Double.POSITIVE_INFINITY) {
+        if (Double.isNaN(configuredMinPrefixHitPercent)
+                || configuredMinPrefixHitPercent == Double.POSITIVE_INFINITY) {
             minimumHitRate = 100.0;
-        } else if (configuredMinHitRate == Double.NEGATIVE_INFINITY) {
+        } else if (configuredMinPrefixHitPercent == Double.NEGATIVE_INFINITY) {
             minimumHitRate = 0.0;
         } else {
-            minimumHitRate = Math.min(100.0, Math.max(0.0, configuredMinHitRate));
+            minimumHitRate = Math.min(
+                    100.0, Math.max(0.0, configuredMinPrefixHitPercent));
         }
         return minimumHitRate <= 0.0
                 || seqLen > 0L && hitTokens * 100.0 / seqLen >= minimumHitRate;
@@ -125,17 +133,21 @@ final class CacheAffinityPolicy {
             int[] indexes,
             int low,
             int high,
-            IntToLongFunction scoreAt,
+            IntToLongFunction projectedTtftAt,
             IntToLongFunction cacheHitAt,
             long seqLen) {
         int left = low;
         int right = high;
         int pivot = indexes[(low + high) >>> 1];
         while (left <= right) {
-            while (compare(indexes[left], pivot, scoreAt, cacheHitAt, seqLen) < 0) {
+            while (compare(
+                    indexes[left], pivot,
+                    projectedTtftAt, cacheHitAt, seqLen) < 0) {
                 left++;
             }
-            while (compare(indexes[right], pivot, scoreAt, cacheHitAt, seqLen) > 0) {
+            while (compare(
+                    indexes[right], pivot,
+                    projectedTtftAt, cacheHitAt, seqLen) > 0) {
                 right--;
             }
             if (left <= right) {
@@ -147,17 +159,19 @@ final class CacheAffinityPolicy {
             }
         }
         if (low < right) {
-            sortPreferred(indexes, low, right, scoreAt, cacheHitAt, seqLen);
+            sortPreferred(
+                    indexes, low, right, projectedTtftAt, cacheHitAt, seqLen);
         }
         if (left < high) {
-            sortPreferred(indexes, left, high, scoreAt, cacheHitAt, seqLen);
+            sortPreferred(
+                    indexes, left, high, projectedTtftAt, cacheHitAt, seqLen);
         }
     }
 
     private static int compare(
             int leftIndex,
             int rightIndex,
-            IntToLongFunction scoreAt,
+            IntToLongFunction projectedTtftAt,
             IntToLongFunction cacheHitAt,
             long seqLen) {
         int hitOrder = Long.compare(
@@ -166,9 +180,9 @@ final class CacheAffinityPolicy {
         if (hitOrder != 0) {
             return hitOrder;
         }
-        int scoreOrder = Long.compare(
-                Math.max(0L, scoreAt.applyAsLong(leftIndex)),
-                Math.max(0L, scoreAt.applyAsLong(rightIndex)));
-        return scoreOrder != 0 ? scoreOrder : Integer.compare(leftIndex, rightIndex);
+        int ttftOrder = Long.compare(
+                Math.max(0L, projectedTtftAt.applyAsLong(leftIndex)),
+                Math.max(0L, projectedTtftAt.applyAsLong(rightIndex)));
+        return ttftOrder != 0 ? ttftOrder : Integer.compare(leftIndex, rightIndex);
     }
 }

@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
@@ -19,7 +19,7 @@ class HttpLoadBalanceServerTest {
     void masterInfoUsesCanonicalSchedulerQueueDepth() {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         ConfigService configService = mock(ConfigService.class);
-        PriorityScheduler scheduler = mock(PriorityScheduler.class);
+        RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");

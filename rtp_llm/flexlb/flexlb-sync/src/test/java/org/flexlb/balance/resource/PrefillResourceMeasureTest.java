@@ -1,5 +1,6 @@
 package org.flexlb.balance.resource;
 
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
@@ -16,16 +17,19 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Tests for {@link PrefillResourceMeasure}.
  *
- * <p>Since {@code isResourceAvailable(PrefillEndpoint)} depends on endpoint-level
- * state ({@code realPendingCount()}), it is tested in integration tests
- * ({@code PrioritySchedulerTest}). This unit test focuses on
- * {@code calculateAverageWaterLevel} using {@code WorkerStatus.runningTaskList}
- * with {@link TaskPhase} to distinguish running vs waiting tasks.
+ * <p>The generic availability path consumes the endpoint's churn-safe admission
+ * count. Projection-aware callers use the explicit-count overload so their
+ * availability decision and TTFT share one coherent observation.
  */
 @ExtendWith(MockitoExtension.class)
 class PrefillResourceMeasureTest {
@@ -40,7 +44,31 @@ class PrefillResourceMeasureTest {
         config = new FlexlbConfig();
         config.getRouter().getRoles().getPrefill().getAvailability()
                 .setMaxPendingRequests(2);
+        config.getRouter().setAvailabilityHysteresisPercent(50);
         when(configService.loadBalanceConfig()).thenReturn(config);
+    }
+
+    @Test
+    void coherentPendingCountDrivesAvailabilityWithoutReadingEndpointAgain() {
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
+
+        assertFalse(measure.isResourceAvailable(2L),
+                "the coherent count at the upper threshold must close admission");
+        assertTrue(measure.isResourceAvailable(1L),
+                "the coherent count at the lower threshold must reopen admission");
+        assertThrows(IllegalArgumentException.class,
+                () -> measure.isResourceAvailable(-1L));
+    }
+
+    @Test
+    void callerPassesTheEndpointChurnSafeAdmissionCount() {
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.admissionPendingRequestCount()).thenReturn(1L);
+
+        assertTrue(measure.isResourceAvailable(
+                endpoint.admissionPendingRequestCount()));
+        verify(endpoint).admissionPendingRequestCount();
     }
 
     @Test
@@ -53,7 +81,7 @@ class PrefillResourceMeasureTest {
         runningTaskList.put("1", taskInfo(1L, TaskPhase.PENDING));
         runningTaskList.put("2", taskInfo(2L, TaskPhase.RECEIVED));
         runningTaskList.put("3", taskInfo(3L, TaskPhase.KV_ALLOCATED));
-        worker.setRunningTaskList(runningTaskList);
+        publishTasks(worker, runningTaskList);
 
         assertEquals(15.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
@@ -66,7 +94,7 @@ class PrefillResourceMeasureTest {
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
         runningTaskList.put("1", taskInfo(1L, TaskPhase.RUNNING));
         runningTaskList.put("2", taskInfo(2L, TaskPhase.RUNNING));
-        worker.setRunningTaskList(runningTaskList);
+        publishTasks(worker, runningTaskList);
 
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
@@ -83,7 +111,7 @@ class PrefillResourceMeasureTest {
         runningTaskList.put("2", taskInfo(2L, TaskPhase.RECEIVED));
         runningTaskList.put("3", taskInfo(3L, TaskPhase.KV_ALLOCATED));
         runningTaskList.put("4", taskInfo(4L, TaskPhase.RUNNING));
-        worker.setRunningTaskList(runningTaskList);
+        publishTasks(worker, runningTaskList);
 
         // 3 waiting out of the saturation point of 20 = 15%
         assertEquals(15.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
@@ -97,7 +125,7 @@ class PrefillResourceMeasureTest {
         for (int i = 1; i <= 24; i++) {
             runningTaskList.put(String.valueOf(i), taskInfo(i, TaskPhase.PENDING));
         }
-        worker.setRunningTaskList(runningTaskList);
+        publishTasks(worker, runningTaskList);
 
         // 24 waiting > the internal saturation point of 20 → capped at 100%
         assertEquals(100.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
@@ -107,7 +135,7 @@ class PrefillResourceMeasureTest {
     void empty_task_list_gives_zero_water_level() {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
-        worker.setRunningTaskList(new HashMap<>());
+        publishTasks(worker, new HashMap<>());
 
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
@@ -116,7 +144,7 @@ class PrefillResourceMeasureTest {
     void null_task_list_gives_zero_water_level() {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
-        worker.setRunningTaskList(null);
+        publishTasks(worker, null);
 
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
@@ -129,16 +157,20 @@ class PrefillResourceMeasureTest {
         runningTaskList.put("1", taskInfo(1L, TaskPhase.RUNNING));
         runningTaskList.put("2", taskInfo(2L, TaskPhase.RUNNING));
         runningTaskList.put("3", taskInfo(3L, TaskPhase.RUNNING));
-        worker.setRunningTaskList(runningTaskList);
+        publishTasks(worker, runningTaskList);
 
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 
     private WorkerStatus createAlivePrefillWorker() {
-        WorkerStatus worker = new WorkerStatus();
-        worker.setAlive(true);
-        worker.setRole(RoleType.PREFILL);
-        return worker;
+        return ResourceTestSupport.worker(
+                RoleType.PREFILL, 0L, 0L, Map.of());
+    }
+
+    private void publishTasks(
+            WorkerStatus worker, Map<String, TaskInfo> tasks) {
+        ResourceTestSupport.publish(
+                worker, true, 0L, 0L, tasks);
     }
 
     private TaskInfo taskInfo(long requestId, TaskPhase phase) {
