@@ -140,6 +140,8 @@ class WorkerBatcherPerformanceTest {
         SchedulingTestConfig.useSingleDecision(config);
         SchedulingTestConfig.useQueueCapacity(config)
                 .setMaxWaitingRequestsPerPrefillWorker(1_024);
+        config.getRouter().getRoles().getPrefill().getAvailability()
+                .setMaxPendingRequests(1_024);
         PrefillEndpoint endpoint = stablePrefillEndpoint();
         BlockingDeliveryStrategy delivery = new BlockingDeliveryStrategy();
         WorkerBatcher runtime = new WorkerBatcher(
