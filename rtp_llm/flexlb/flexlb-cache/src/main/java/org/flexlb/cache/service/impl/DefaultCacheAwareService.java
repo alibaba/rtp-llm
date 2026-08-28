@@ -99,6 +99,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
         }
     }
 
+    @Override
+    public void removeEngineBlockCache(String engineIpPort) {
+        kvCacheManager.removeEngineCache(engineIpPort);
+    }
+
     /**
      * Build success result
      */

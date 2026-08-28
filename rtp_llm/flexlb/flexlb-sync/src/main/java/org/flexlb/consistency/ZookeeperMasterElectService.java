@@ -261,7 +261,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         if (cachedMasterHostIp != null) {
             return cachedMasterHostIp;
         }
-        Logger.warn("ZKMasterElector roleId:{} currentHost:{} cachedMasterHostIp is null.", roleId, localIp);
         return null;
     }
 

@@ -8,13 +8,14 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.util.Logger;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -131,7 +132,6 @@ public class LBStatusConsistencyService implements MasterElectService {
         }
         String masterHostIp = zookeeperMasterElectService.getMasterHostIp(false);
         if (masterHostIp == null) {
-            Logger.warn("getMasterHostIpPort: masterHostIp is null.");
             return null;
         }
         return masterHostIp + ":" + serverPort;
@@ -163,8 +163,15 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     public SyncLBStatusResp dumpLBStatus() {
         SyncLBStatusResp resp = new SyncLBStatusResp();
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("consistency_enabled", isNeedConsistency());
+        snapshot.put("master", isMaster());
+        snapshot.put("local_host", localHostIp);
+        snapshot.put("master_host", getMasterHostIpPort());
+        snapshot.put("server_port", serverPort);
         resp.setSuccess(true);
-        // TODO Get master status
+        resp.setMsg("leadership snapshot");
+        resp.setLbStatus(JsonUtils.toStringOrEmpty(snapshot));
         return resp;
     }
 

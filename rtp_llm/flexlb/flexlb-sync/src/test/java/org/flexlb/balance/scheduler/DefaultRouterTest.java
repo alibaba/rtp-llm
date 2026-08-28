@@ -1,594 +1,327 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.balance.strategy.LoadBalanceStrategy;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
-import org.flexlb.config.ConfigService;
+import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
+import org.flexlb.balance.strategy.EndpointSelection;
+import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.StaticCapacityExceededException;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
-import java.lang.reflect.Field;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyLong;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.isNull;
-import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+/** Final selector/pin ownership contracts for {@link DefaultRouter}. */
 class DefaultRouterTest {
 
-    @Mock
-    private ConfigService configService;
-
-    @Mock
-    private FlexlbConfig loadBalanceConfig;
-
-    @Mock
-    private GroupRoutingPolicy groupRoutingPolicy;
-
-    @Mock
-    private LoadBalanceStrategy prefillStrategy;
-
-    @Mock
-    private LoadBalanceStrategy decodeStrategy;
-
-    @Mock
-    private LoadBalanceStrategy vitStrategy;
-
-    @Mock
-    private LoadBalanceStrategy fusionStrategy;
-
-    @Mock
-    private EndpointRegistry endpointRegistry;
-
-    @Mock
-    private BalanceContext balanceContext;
-
-    @Mock
-    private Request request;
-
-    private DefaultRouter defaultRouter;
+    private ConfiguredLoadBalanceSelector selector;
+    private GroupRoutingPolicy groupPolicy;
+    private ModelMetaConfig modelMeta;
 
     @BeforeEach
     void setUp() {
-        // Clear all status maps
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-
-        // Mock config service
-        when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        when(loadBalanceConfig.strategyFor(any(RoleType.class))).thenAnswer(inv -> {
-            RoleType roleType = inv.getArgument(0);
-            return switch (roleType) {
-                case DECODE -> LoadBalanceStrategyEnum.COST_BASED_DECODE;
-                case PDFUSION -> LoadBalanceStrategyEnum.RANDOM;
-                case PREFILL, VIT -> LoadBalanceStrategyEnum.COST_BASED_PREFILL;
-                case FRONTEND -> null;
-            };
-        });
-
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, prefillStrategy);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, decodeStrategy);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, vitStrategy);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionStrategy);
-
-        // Create scheduler instance
-        lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
-        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, endpointRegistry);
-
-        // Mock LoadBalanceStrategyFactory to return our mock load balancers
-        mockStaticLoadBalanceStrategyFactory();
-
-        // Mock balance context
-        lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
-    }
-
-    @org.junit.jupiter.api.AfterEach
-    void tearDown() {
-        // Clear all status maps after each test
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-    }
-
-    // Helper method to mock the static LoadBalanceStrategyFactory
-    private void mockStaticLoadBalanceStrategyFactory() {
-        try {
-            // Use reflection to set the loadBalanceStrategyMap in DefaultRouter
-            Field loadBalanceStrategyMapField = DefaultRouter.class.getDeclaredField("loadBalanceStrategyMap");
-            loadBalanceStrategyMapField.setAccessible(true);
-
-            @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap = (Map<RoleType, LoadBalanceStrategy>) loadBalanceStrategyMapField.get(defaultRouter);
-
-            // Put mocked LoadBalanceStrategy instances into the map
-            loadBalanceStrategyMap.put(RoleType.PREFILL, prefillStrategy);
-            loadBalanceStrategyMap.put(RoleType.DECODE, decodeStrategy);
-            loadBalanceStrategyMap.put(RoleType.VIT, vitStrategy);
-            loadBalanceStrategyMap.put(RoleType.PDFUSION, fusionStrategy);
-        } catch (Exception e) {
-            fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
-        }
+        selector = mock(ConfiguredLoadBalanceSelector.class);
+        groupPolicy = mock(GroupRoutingPolicy.class);
+        modelMeta = mock(ModelMetaConfig.class);
+        when(groupPolicy.route(org.mockito.ArgumentMatchers.any()))
+                .thenReturn(GroupRoutingDecision.none());
     }
 
     @Test
-    void should_return_response_with_no_available_worker_error_when_worker_status_is_null() {
-        // Setup - clear role type list
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+    void invalidRequestFailsBeforePolicyOrEndpointSelection() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        DefaultRouter router = router();
 
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
+        QueueRoutingResult result = router.routeForQueue(new BalanceContext());
 
-        // Verify
-        assertNotNull(response, "Response should not be null");
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_AVAILABLE_WORKER");
-        // Note: The method logs an error but doesn't fail when status is null
+        assertEquals(QueueRoutingResult.Status.REJECTED, result.status());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                result.response().getCode());
+        verify(groupPolicy, never()).route(org.mockito.ArgumentMatchers.any());
+        verify(selector, never()).selectForQueue(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RoleType.class, names = {
+            "PREFILL", "DECODE", "PDFUSION", "VIT"})
+    void missingRequiredRoleReturnsItsExactWaitDomain(RoleType role) {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(role));
+        DefaultRouter router = router();
+        BalanceContext context = context(11L);
+        when(selector.selectForQueue(context, role, null))
+                .thenReturn(EndpointSelection.unavailable(role));
+
+        QueueRoutingResult blocked = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.BLOCKED, blocked.status());
+
+        assertEquals(new PlacementKey(role, null), blocked.blocker());
     }
 
     @Test
-    void should_return_response_with_no_available_worker_error_when_model_not_in_worker_status_map() {
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
+    void projectedDecodeBlockUsesDecodeWaitDomain() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        DefaultRouter router = router();
+        BalanceContext context = context(111L);
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.unavailable(RoleType.DECODE));
 
-        // Verify
-        assertNotNull(response, "Response should not be null");
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_AVAILABLE_WORKER");
-        // Note: The method logs an error but doesn't fail when model is missing
+        QueueRoutingResult blocked = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.BLOCKED, blocked.status());
+
+        assertEquals(new PlacementKey(RoleType.DECODE, null),
+                blocked.blocker());
     }
 
     @Test
-    void should_return_success_response_with_prefill_and_decode_servers_when_prefill_selection_succeeds() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyPrefillWorker.setIp("192.168.1.1");
-        dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+    void staticCapacityFailureIsTerminalAndReleasesEarlierSelections() {
+        when(modelMeta.requiredRoles()).thenReturn(
+                List.of(RoleType.PREFILL, RoleType.DECODE));
+        DefaultRouter router = router();
+        BalanceContext context = context(12L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 12L, "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.DECODE, "g1"))
+                .thenThrow(new StaticCapacityExceededException(
+                        "seq_len exceeds every Decode worker"));
 
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+        QueueRoutingResult rejected = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.REJECTED, rejected.status());
 
-        ServerStatus prefillServerStatus = new ServerStatus();
-        prefillServerStatus.setSuccess(true);
-        prefillServerStatus.setServerIp("192.168.1.1");
-        prefillServerStatus.setHttpPort(8080);
-        prefillServerStatus.setGroup("group1");
-        prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
-
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(true);
-        decodeServerStatus.setServerIp("192.168.1.2");
-        decodeServerStatus.setHttpPort(8081);
-        decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                rejected.response().getCode());
+        verify(prefill.selection).close();
     }
 
     @Test
-    void should_return_response_with_no_prefill_worker_error_when_prefill_selection_fails() {
-        // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyPrefillWorker.setIp("192.168.1.1");
-        dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+    void queueRouteTransfersTheExactPrefillPinIntoAdmissionOwnership() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        DefaultRouter router = router();
+        BalanceContext context = context(21L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, context.getRequestId(), "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
 
-        ServerStatus prefillServerStatus = new ServerStatus();
-        prefillServerStatus.setSuccess(false);
-        prefillServerStatus.setMessage("No prefill worker available");
-        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
+        QueueRoutingResult admitted = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.ADMITTED, admitted.status());
 
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
+        assertTrue(admitted.admission().response().isSuccess());
+        assertEquals(List.of(prefill.status),
+                admitted.admission().response().getServerStatus());
+        verify(prefill.selection).takeGenerationPin();
+        verify(prefill.pin, never()).close();
 
-        // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        admitted.admission().close();
+        verify(prefill.pin).close();
     }
 
     @Test
-    void should_return_success_response_with_fusion_server_when_pdfusion_selection_succeeds() {
-        // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyFusionWorker.setIp("192.168.1.3");
-        dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+    void firstSelectedGroupChainsToLaterRolesWhenPolicyDidNotForceOne() {
+        when(modelMeta.requiredRoles())
+                .thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));
+        DefaultRouter router = router();
+        BalanceContext context = context(31L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 31L, "p", 8001, "selected-group");
+        SelectionFixture vit = selection(
+                RoleType.VIT, 31L, "v", 8002, "selected-group");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(
+                context, RoleType.VIT, "selected-group"))
+                .thenReturn(EndpointSelection.selected(vit.selection));
 
-        ServerStatus fusionServerStatus = new ServerStatus();
-        fusionServerStatus.setSuccess(true);
-        fusionServerStatus.setServerIp("192.168.1.3");
-        fusionServerStatus.setHttpPort(8082);
-        fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
-        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        QueueRoutingResult admitted = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.ADMITTED, admitted.status());
+        admitted.admission().close();
 
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
+        verify(selector).selectForQueue(context, RoleType.PREFILL, null);
+        verify(selector).selectForQueue(
+                context, RoleType.VIT, "selected-group");
+        verify(vit.pin).close();
+        verify(prefill.pin).close();
     }
 
     @Test
-    void should_return_response_with_no_pdfusion_worker_error_when_pdfusion_selection_fails() {
-        // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyFusionWorker.setIp("192.168.1.3");
-        dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+    void policyGroupRemainsAuthoritativeAcrossEveryRole() {
+        when(modelMeta.requiredRoles())
+                .thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));
+        DefaultRouter router = router();
+        BalanceContext context = context(41L);
+        when(groupPolicy.route(context))
+                .thenReturn(GroupRoutingDecision.of("forced", "test-policy"));
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 41L, "p", 8001, "other");
+        SelectionFixture vit = selection(
+                RoleType.VIT, 41L, "v", 8002, "other");
+        when(selector.selectForQueue(context, RoleType.PREFILL, "forced"))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.VIT, "forced"))
+                .thenReturn(EndpointSelection.selected(vit.selection));
 
-        ServerStatus fusionServerStatus = new ServerStatus();
-        fusionServerStatus.setSuccess(false);
-        fusionServerStatus.setMessage("No fusion worker available");
-        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        QueueRoutingResult admitted = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.ADMITTED, admitted.status());
+        admitted.admission().close();
 
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        verify(selector).selectForQueue(
+                context, RoleType.PREFILL, "forced");
+        verify(selector).selectForQueue(context, RoleType.VIT, "forced");
     }
 
     @Test
-    void should_return_success_response_with_fusion_and_vit_servers_when_both_selections_succeed() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyFusionWorker.setIp("192.168.1.3");
-        dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+    void laterSelectionFailureClosesEveryEarlierExactPinOwner() {
+        when(modelMeta.requiredRoles())
+                .thenReturn(List.of(RoleType.PREFILL, RoleType.VIT));
+        DefaultRouter router = router();
+        BalanceContext context = context(51L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 51L, "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.VIT, "g1"))
+                .thenReturn(EndpointSelection.unavailable(RoleType.VIT));
 
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyVitWorker.setIp("192.168.1.4");
-        dummyVitWorker.setPort(8083);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
+        QueueRoutingResult blocked = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.BLOCKED, blocked.status());
 
-        ServerStatus fusionServerStatus = new ServerStatus();
-        fusionServerStatus.setSuccess(true);
-        fusionServerStatus.setServerIp("192.168.1.3");
-        fusionServerStatus.setHttpPort(8082);
-        fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRole(RoleType.PDFUSION);
-        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
-
-        ServerStatus vitServerStatus = new ServerStatus();
-        vitServerStatus.setSuccess(true);
-        vitServerStatus.setServerIp("192.168.1.4");
-        vitServerStatus.setHttpPort(8083);
-        vitServerStatus.setRole(RoleType.VIT);
-        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        assertEquals(new PlacementKey(RoleType.VIT, "g1"),
+                blocked.blocker());
+        verify(prefill.selection).close();
     }
 
     @Test
-    void should_return_response_with_no_vit_worker_error_when_vit_selection_fails() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyFusionWorker.setIp("192.168.1.3");
-        dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+    void decodeMissAfterPrefillSuccessReleasesThePrefillPinOwner() {
+        when(modelMeta.requiredRoles()).thenReturn(
+                List.of(RoleType.PREFILL, RoleType.DECODE));
+        DefaultRouter router = router();
+        BalanceContext context = context(52L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 52L, "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.DECODE, "g1"))
+                .thenReturn(EndpointSelection.unavailable(RoleType.DECODE));
 
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyVitWorker.setIp("192.168.1.4");
-        dummyVitWorker.setPort(8083);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
+        QueueRoutingResult blocked = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.BLOCKED, blocked.status());
 
-        ServerStatus fusionServerStatus = new ServerStatus();
-        fusionServerStatus.setSuccess(true);
-        fusionServerStatus.setServerIp("192.168.1.3");
-        fusionServerStatus.setHttpPort(8082);
-        fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRole(RoleType.PDFUSION);
-        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
-
-        ServerStatus vitServerStatus = new ServerStatus();
-        vitServerStatus.setSuccess(false);
-        vitServerStatus.setMessage("No vit worker available");
-        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        assertEquals(new PlacementKey(RoleType.DECODE, "g1"),
+                blocked.blocker());
+        verify(prefill.selection).close();
+        verify(prefill.selection, never()).takeGenerationPin();
     }
 
     @Test
-    void should_log_error_when_master_request_is_null() {
-        // Setup
-        when(balanceContext.getRequest()).thenReturn(null);
+    void mismatchedSelectedRequestFailsClosedAndReleasesPins() {
+        when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
+        DefaultRouter router = router();
+        BalanceContext context = context(61L);
+        SelectionFixture foreign = selection(
+                RoleType.PREFILL, 999L, "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(foreign.selection));
 
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
+        assertThrows(IllegalStateException.class,
+                () -> router.routeForQueue(context));
 
-        // Verify
-        assertNotNull(response, "Response should not be null");
+        verify(foreign.selection).close();
+        verify(foreign.selection, never()).takeGenerationPin();
     }
 
     @Test
-    void should_return_response_with_no_decode_worker_error_when_decode_selection_fails() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+    void requiredTopologyIsSnapshottedAtConstruction() {
+        List<RoleType> mutable = new ArrayList<>();
+        mutable.add(RoleType.PREFILL);
+        when(modelMeta.requiredRoles()).thenReturn(mutable);
+        DefaultRouter router = router();
+        mutable.clear();
+        BalanceContext context = context(71L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 71L, "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
 
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(false);
-        decodeServerStatus.setMessage("No decode worker available");
-        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        QueueRoutingResult admitted = router.routeForQueue(context);
+        assertEquals(QueueRoutingResult.Status.ADMITTED, admitted.status());
+        admitted.admission().close();
 
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_DECODE_WORKER");
+        verify(selector).selectForQueue(context, RoleType.PREFILL, null);
     }
 
-    @Test
-    void should_return_response_with_no_prefill_worker_error_and_release_decode_cache_when_prefill_selection_fails_after_decode() {
-        // Setup - add dummy workers to trigger role types (decode comes before prefill)
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
-
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyPrefillWorker.setIp("192.168.1.1");
-        dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
-
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(true);
-        decodeServerStatus.setServerIp("192.168.1.2");
-        decodeServerStatus.setHttpPort(8081);
-        decodeServerStatus.setGroup("group1");
-        decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
-
-        ServerStatus prefillServerStatus = new ServerStatus();
-        prefillServerStatus.setSuccess(false);
-        prefillServerStatus.setMessage("No prefill worker available");
-        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
-
-        // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
-        lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081"))
-                .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), anyLong());
+    private DefaultRouter router() {
+        return new DefaultRouter(selector, groupPolicy, modelMeta);
     }
 
-    @Test
-    void should_return_success_response_with_vit_server_when_only_vit_role_exists_and_selection_succeeds() {
-        // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyVitWorker.setIp("192.168.1.5");
-        dummyVitWorker.setPort(8084);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
-
-        ServerStatus vitServerStatus = new ServerStatus();
-        vitServerStatus.setSuccess(true);
-        vitServerStatus.setServerIp("192.168.1.5");
-        vitServerStatus.setHttpPort(8084);
-        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
+    private static BalanceContext context(long requestId) {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.usePriorityQueue(config);
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(32L);
+        request.setMaxNewTokens(16);
+        BalanceContext context = new BalanceContext();
+        context.setConfig(config);
+        context.setRequest(request);
+        context.setSchedulingMetadata(SchedulingMetadata.explicit(
+                50, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+        return context;
     }
 
-    @Test
-    void should_return_response_with_no_vit_worker_error_when_only_vit_role_exists_and_selection_fails() {
-        // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyVitWorker.setIp("192.168.1.5");
-        dummyVitWorker.setPort(8084);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
-
-        ServerStatus vitServerStatus = new ServerStatus();
-        vitServerStatus.setSuccess(false);
-        vitServerStatus.setMessage("No vit worker available");
-        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+    private static SelectionFixture selection(
+            RoleType role,
+            long requestId,
+            String ip,
+            int httpPort,
+            String group) {
+        SelectedRole selection = mock(SelectedRole.class);
+        WorkerEndpoint.GenerationPin pin = mock(WorkerEndpoint.GenerationPin.class);
+        WorkerEndpoint endpoint = role == RoleType.PREFILL
+                || role == RoleType.PDFUSION
+                ? mock(PrefillEndpoint.class)
+                : mock(WorkerEndpoint.class);
+        ServerStatus status = new ServerStatus();
+        status.setSuccess(true);
+        status.setRole(role);
+        status.setRequestId(requestId);
+        status.setServerIp(ip);
+        status.setHttpPort(httpPort);
+        status.setGroup(group);
+        when(selection.serverStatus()).thenReturn(status);
+        when(selection.takeGenerationPin()).thenReturn(pin);
+        when(pin.endpoint()).thenReturn(endpoint);
+        return new SelectionFixture(selection, pin, status);
     }
 
-    @Test
-    void should_return_success_response_with_pdfusion_and_vit_servers_when_both_selections_succeed() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyFusionWorker.setIp("192.168.1.3");
-        dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
-
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyVitWorker.setIp("192.168.1.4");
-        dummyVitWorker.setPort(8083);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
-
-        ServerStatus fusionServerStatus = new ServerStatus();
-        fusionServerStatus.setSuccess(true);
-        fusionServerStatus.setServerIp("192.168.1.3");
-        fusionServerStatus.setHttpPort(8082);
-        fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
-        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
-
-        ServerStatus vitServerStatus = new ServerStatus();
-        vitServerStatus.setSuccess(true);
-        vitServerStatus.setServerIp("192.168.1.4");
-        vitServerStatus.setHttpPort(8083);
-        vitServerStatus.setRole(RoleType.VIT);
-        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-    }
-
-    @Test
-    void should_return_success_response_with_prefill_decode_and_vit_servers_when_all_selections_succeed() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyPrefillWorker.setIp("192.168.1.1");
-        dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
-
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
-
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyVitWorker.setIp("192.168.1.5");
-        dummyVitWorker.setPort(8084);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
-
-        ServerStatus prefillServerStatus = new ServerStatus();
-        prefillServerStatus.setSuccess(true);
-        prefillServerStatus.setServerIp("192.168.1.1");
-        prefillServerStatus.setHttpPort(8080);
-        prefillServerStatus.setGroup("group1");
-        prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
-
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(true);
-        decodeServerStatus.setServerIp("192.168.1.2");
-        decodeServerStatus.setHttpPort(8081);
-        decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
-
-        ServerStatus vitServerStatus = new ServerStatus();
-        vitServerStatus.setSuccess(true);
-        vitServerStatus.setServerIp("192.168.1.5");
-        vitServerStatus.setHttpPort(8084);
-        vitServerStatus.setRole(RoleType.VIT);
-        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
-    }
-
-    @Test
-    void should_force_initial_group_when_traffic_policy_matches() {
-        // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyDecodeWorker.setIp("192.168.1.2");
-        dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
-
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
-        dummyPrefillWorker.setIp("192.168.1.1");
-        dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
-
-        Request actualRequest = new Request();
-        actualRequest.setRequestId(12345L);
-        actualRequest.setSeqLen(10000L);
-        when(balanceContext.getRequest()).thenReturn(actualRequest);
-        when(groupRoutingPolicy.route(balanceContext)).thenReturn(GroupRoutingDecision.of("long-group", "long-context"));
-
-        ServerStatus decodeServerStatus = new ServerStatus();
-        decodeServerStatus.setSuccess(true);
-        decodeServerStatus.setServerIp("192.168.1.2");
-        decodeServerStatus.setHttpPort(8081);
-        decodeServerStatus.setGroup("long-group");
-        decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"))).thenReturn(decodeServerStatus);
-
-        ServerStatus prefillServerStatus = new ServerStatus();
-        prefillServerStatus.setSuccess(true);
-        prefillServerStatus.setServerIp("192.168.1.1");
-        prefillServerStatus.setHttpPort(8080);
-        prefillServerStatus.setGroup("long-group");
-        prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
-
-        // Execute
-        Response response = defaultRouter.route(balanceContext);
-
-        // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
-        verify(decodeStrategy).select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"));
-        verify(prefillStrategy).select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"));
+    private record SelectionFixture(
+            SelectedRole selection,
+            WorkerEndpoint.GenerationPin pin,
+            ServerStatus status) {
     }
 }

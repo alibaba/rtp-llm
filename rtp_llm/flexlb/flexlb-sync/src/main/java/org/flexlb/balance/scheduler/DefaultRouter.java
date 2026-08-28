@@ -1,207 +1,512 @@
 package org.flexlb.balance.scheduler;
 
-import org.apache.commons.collections4.CollectionUtils;
+import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
+
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
-import org.flexlb.balance.strategy.LoadBalanceStrategy;
-import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
+import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
+import org.flexlb.balance.strategy.EndpointSelection;
+import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.StaticCapacityExceededException;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
-import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.ArrayList;
-import java.util.EnumMap;
 import java.util.List;
-import java.util.Map;
-
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({
-        "randomStrategy",
-        "costBasedDecodeStrategy",
-        "costBasedPrefillStrategy",
-        "shortestTtftStrategy"
-})
 public class DefaultRouter implements Router {
 
-    private final Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap;
+    private final ConfiguredLoadBalanceSelector endpointSelector;
     private final GroupRoutingPolicy groupRoutingPolicy;
-    private final EndpointRegistry endpointRegistry;
+    private final List<RoleType> requiredRoles;
+    private final PlacementAvailability placementAvailability;
 
-    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
-                         EndpointRegistry endpointRegistry) {
-        this.groupRoutingPolicy = groupRoutingPolicy;
-        this.endpointRegistry = endpointRegistry;
-        FlexlbConfig config = configService.loadBalanceConfig();
-        this.loadBalanceStrategyMap = new EnumMap<>(RoleType.class);
-
-        for (RoleType roleType : RoleType.values()) {
-            LoadBalanceStrategyEnum strategy = config.strategyFor(roleType);
-            if (strategy != null) {
-                loadBalanceStrategyMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalanceStrategy(strategy));
-            }
-        }
+    public DefaultRouter(
+            ConfiguredLoadBalanceSelector endpointSelector,
+            GroupRoutingPolicy groupRoutingPolicy,
+            ModelMetaConfig modelMetaConfig) {
+        this(endpointSelector,
+                groupRoutingPolicy,
+                modelMetaConfig,
+                new PlacementAvailability());
     }
 
-    /**
-     * Routes a request to appropriate worker nodes based on model requirements and role types.
-     *
-     * <p>This method implements the core routing logic for load balancing across different
-     * worker types (Prefill, Decode, PDFusion, VIT).
-     *
-     * @param balanceContext the context containing request information and model details
-     * @return Response containing selected server statuses or error information
-     */
+    @Autowired
+    public DefaultRouter(
+            ConfiguredLoadBalanceSelector endpointSelector,
+            GroupRoutingPolicy groupRoutingPolicy,
+            ModelMetaConfig modelMetaConfig,
+            PlacementAvailability placementAvailability) {
+        this.endpointSelector = java.util.Objects.requireNonNull(
+                endpointSelector, "endpointSelector");
+        this.groupRoutingPolicy = java.util.Objects.requireNonNull(
+                groupRoutingPolicy, "groupRoutingPolicy");
+        this.requiredRoles = List.copyOf(
+                java.util.Objects.requireNonNull(
+                        modelMetaConfig, "modelMetaConfig").requiredRoles());
+        this.placementAvailability = java.util.Objects.requireNonNull(
+                placementAvailability, "placementAvailability");
+    }
+
     @Override
-    public Response route(BalanceContext balanceContext) {
-        // 1. Validate request
-        Response validationResponse = validateRequest(balanceContext);
-        if (validationResponse != null) {
-            return validationResponse;
+    public Response routeDirect(BalanceContext context) {
+        Response validationFailure = validateRequest(context);
+        if (validationFailure != null) {
+            return validationFailure;
         }
-
-        // 2. Get routing configuration
-        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
-        if (CollectionUtils.isEmpty(roleTypeList)) {
-            Logger.debug("No worker roles registered yet (total workers: {})", workerStatus.getWorkerTotalCount());
-            return Response.error(NO_AVAILABLE_WORKER);
+        try (PinnedRouting routing = selectAll(
+                context, requiredRoles, false)) {
+            if (!routing.success()) {
+                return buildFailureResponse(routing.failure().key().role());
+            }
+            return commitDirect(context, routing.selections());
+        } catch (StaticCapacityExceededException failure) {
+            return staticCapacityFailure(failure);
         }
-
-        // 3. Execute routing decision
-        RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
-
-        // 4. Build response based on routing result
-        if (routingResult.success()) {
-            return buildSuccessResponse(routingResult.serverStatusList());
-        }
-
-        rollBackRoutingFailure(balanceContext, routingResult);
-        return buildFailureResponse(routingResult);
     }
 
-    /**
-     * Validates the incoming request and checks model availability.
-     *
-     * @param balanceContext the context to validate
-     * @return error response if validation fails, null if validation succeeds
-     */
-    private Response validateRequest(BalanceContext balanceContext) {
-        if (balanceContext.getRequest() == null) {
+    @Override
+    public QueueRoutingResult routeForQueue(BalanceContext context) {
+        Response validationFailure = validateRequest(context);
+        if (validationFailure != null) {
+            return QueueRoutingResult.rejected(validationFailure);
+        }
+        try (PinnedRouting routing = selectAll(
+                context, requiredRoles, true)) {
+            if (!routing.success()) {
+                PlacementFailure failure = routing.failure();
+                return QueueRoutingResult.blocked(failure.key());
+            }
+            Response response = buildSuccessResponse(routing.serverStatuses());
+            return QueueRoutingResult.admitted(
+                    QueueRouteAdmission.prepare(
+                            context,
+                            routing.selections(),
+                            response,
+                            (exactContext, group) -> endpointSelector
+                                    .selectForQueue(
+                                            exactContext,
+                                            RoleType.DECODE,
+                                            group),
+                            placementAvailability));
+        } catch (StaticCapacityExceededException failure) {
+            return QueueRoutingResult.rejected(
+                    staticCapacityFailure(failure));
+        }
+    }
+
+    private Response validateRequest(BalanceContext context) {
+        if (context == null || context.getRequest() == null) {
             Logger.error("masterRequest is null");
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
-
-        if (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS == null) {
-            Logger.error("targetModelRoleWorkerStatus is null");
-            return Response.error(NO_AVAILABLE_WORKER);
-        }
-
         return null;
     }
 
-    /**
-     * Execute routing decision, select optimal server for each role type
-     *
-     * @param balanceContext Routing context
-     * @param roleTypeList List of required role types
-     * @return Routing result
-     */
-    private RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
-        List<ServerStatus> serverStatusList = new ArrayList<>();
-        GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(balanceContext);
-        String policyGroup = groupRoutingDecision.group();
+    private PinnedRouting selectAll(
+            BalanceContext context,
+            List<RoleType> roles,
+            boolean queueSelection) {
+        List<SelectedRole> selected = new ArrayList<>(roles.size());
+        GroupRoutingDecision groupDecision = groupRoutingPolicy.route(context);
+        String policyGroup = groupDecision.group();
         String group = policyGroup;
-        if (groupRoutingDecision.hasGroup()) {
-            Logger.info("Group routing policy selected group, requestId: {}, policy: {}, group: {}",
-                    balanceContext.getRequestId(), groupRoutingDecision.policyName(), group);
+        if (groupDecision.hasGroup()) {
+            Logger.info(
+                    "Group routing policy selected group, requestId: {}, policy: {}, group: {}",
+                    context.getRequestId(),
+                    groupDecision.policyName(),
+                    group);
         }
 
-        for (RoleType roleType : roleTypeList) {
-            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(roleType);
-            ServerStatus serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
-
-            if (!serverStatus.isSuccess()) {
-                // Selection failed, return failure result
-                Logger.warn("Failed to select {} worker: {}", roleType.getCode(), serverStatus.getMessage());
-                return RoutingResult.failure(serverStatusList, roleType, serverStatus.getMessage());
+        try {
+            for (RoleType role : roles) {
+                EndpointSelection result = queueSelection
+                        ? endpointSelector.selectForQueue(context, role, group)
+                        : directSelection(context, role, group);
+                if (!result.selected()) {
+                    Logger.debug(
+                            "Failed to select {} worker for request {}",
+                            role.getCode(), context.getRequestId());
+                    return new PinnedRouting(
+                            selected,
+                            new PlacementFailure(
+                                    new PlacementKey(
+                                            result.blockerRole(),
+                                            group)));
+                }
+                SelectedRole selection = result.endpoint();
+                try {
+                    selected.add(selection);
+                } catch (RuntimeException | Error appendFailure) {
+                    closeSelection(selection, appendFailure);
+                    throw appendFailure;
+                }
+                if (StringUtils.isBlank(policyGroup)) {
+                    group = selection.serverStatus().getGroup();
+                }
             }
-
-            // Record server selection metrics
-            serverStatusList.add(serverStatus);
-
-            // Update group for affinity-based selection of subsequent roles
-            if (StringUtils.isBlank(policyGroup)) {
-                group = serverStatus.getGroup();
-            }
-        }
-
-        return RoutingResult.success(serverStatusList);
-    }
-
-    /**
-     * Get LoadBalanceStrategy based on role type
-     */
-    private LoadBalanceStrategy getLoadBalanceStrategy(RoleType roleType) {
-        return loadBalanceStrategyMap.get(roleType);
-    }
-
-    /**
-     * Rollback handling for routing failure
-     * If partial roles succeeded but subsequent roles failed, rollback local incremental updates for previously selected roles
-     *
-     * @param balanceContext Routing context
-     * @param routingResult Routing result
-     */
-    private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
-
-        List<ServerStatus> partialResults = routingResult.serverStatusList();
-        for (ServerStatus serverStatus : partialResults) {
-            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            long requestId = balanceContext.getRequestId();
-            RoleType role = serverStatus.getRole();
-
-            WorkerEndpoint ep = endpointRegistry.get(role, serverIpPort);
-            if (ep == null) {
-                Logger.debug("DefaultRouter.rollBack: endpoint not found for ipPort={}", serverIpPort);
-                continue;
-            }
-
-            LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(role);
-            loadBalanceStrategy.rollBack(ep, requestId);
+            return new PinnedRouting(selected, null);
+        } catch (RuntimeException | Error failure) {
+            closeSelections(selected, failure);
+            throw failure;
         }
     }
 
-    private Response buildSuccessResponse(List<ServerStatus> serverStatusList) {
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setServerStatus(serverStatusList);
+    private EndpointSelection directSelection(
+            BalanceContext context, RoleType role, String group) {
+        SelectedRole selected = endpointSelector.select(
+                context, role, group);
+        return selected == null
+                ? EndpointSelection.unavailable(role)
+                : EndpointSelection.selected(selected);
+    }
+
+    private static Response staticCapacityFailure(
+            StaticCapacityExceededException failure) {
+        Response response = Response.error(
+                StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
+        response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED
+                .buildErrorMessage(failure.getMessage()));
         return response;
     }
 
-    private Response buildFailureResponse(RoutingResult routingResult) {
-        StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
-        String detailMessage = routingResult.errorMessage();
+    private Response commitDirect(BalanceContext context, List<SelectedRole> selections) {
+        List<DirectOwner> owners = new ArrayList<>(selections.size());
+        Response response;
+        try {
+            for (SelectedRole selected : selections) {
+                if (selected.serverStatus().getRequestId() != context.getRequestId()) {
+                    throw new IllegalStateException(
+                            "selected role belongs to another DIRECT request");
+                }
+                WorkerEndpoint.GenerationPin pin = selected.takeGenerationPin();
+                try {
+                    WorkerEndpoint endpoint = pin.endpoint();
+                    RoleType role = selected.serverStatus().getRole();
+                    if (role == RoleType.PREFILL || role == RoleType.PDFUSION) {
+                        if (!(endpoint instanceof PrefillEndpoint prefill)) {
+                            throw new IllegalStateException(
+                                    "Prefill selection has another endpoint type");
+                        }
+                        PrefillState.DirectRegistration registration =
+                                prefill.registerDirectRequest(
+                                        pin, context.getRequestId(), selected.prefillWorkMs());
+                        try {
+                            owners.add(new DirectPrefillOwner(pin, registration));
+                        } catch (RuntimeException | Error appendFailure) {
+                            closeDirectRegistration(
+                                    registration, appendFailure);
+                            throw appendFailure;
+                        }
+                        pin = null;
+                    } else if (role == RoleType.DECODE) {
+                        if (!(endpoint instanceof DecodeEndpoint decode)) {
+                            throw new IllegalStateException(
+                                    "Decode selection has another endpoint type");
+                        }
+                        long sequenceLength = Math.max(0L, context.getRequest().getSeqLen());
+                        long expectedKv =
+                                context.getConfig()
+                                        .decodeKvReservationTokens(
+                                                sequenceLength,
+                                                context.getRequest().getMaxNewTokens(),
+                                                selected.decodeTotalKv());
+                        DecodeEndpoint.ReservationHandle reservation =
+                                decode.reservePinned(
+                                        pin,
+                                        context.getRequestId(),
+                                        sequenceLength,
+                                        expectedKv,
+                                        context.getPriority());
+                        try {
+                            owners.add(new DirectDecodeOwner(pin, decode, reservation));
+                        } catch (RuntimeException | Error appendFailure) {
+                            rollbackDecodeReservation(
+                                    decode, reservation, appendFailure);
+                            throw appendFailure;
+                        }
+                        pin = null;
+                    } else {
+                        owners.add(new StatelessDirectOwner(pin));
+                        pin = null;
+                    }
+                } catch (RuntimeException | Error leafFailure) {
+                    if (pin != null) {
+                        closeGenerationPin(pin, leafFailure);
+                    }
+                    throw leafFailure;
+                }
+            }
+            response = buildSuccessResponse(serverStatuses(selections));
+            // Every commit leaf below is a same-thread, allocation-free ownership
+            // move. All fallible registration and response construction has
+            // already completed, so this loop cannot partially commit legally.
+            for (DirectOwner owner : owners) {
+                owner.commit();
+            }
+        } catch (RuntimeException | Error failure) {
+            rollbackDirect(owners, failure);
+            closeOwnerPins(owners, failure);
+            throw failure;
+        }
+        Throwable closeFailure = closeOwnerPins(owners, null);
+        if (closeFailure != null) {
+            throw propagate(closeFailure);
+        }
+        return response;
+    }
 
+    private static Throwable rollbackDirect(
+            List<DirectOwner> owners,
+            Throwable primaryFailure) {
+        Throwable failure = primaryFailure;
+        for (int index = owners.size() - 1; index >= 0; index--) {
+            try {
+                owners.get(index).rollback();
+            } catch (Throwable rollbackFailure) {
+                failure = appendFailure(failure, rollbackFailure);
+            }
+        }
+        return failure;
+    }
+
+    private static Throwable closeOwnerPins(
+            List<DirectOwner> owners,
+            Throwable primaryFailure) {
+        Throwable failure = primaryFailure;
+        for (int index = owners.size() - 1; index >= 0; index--) {
+            try {
+                owners.get(index).closePin();
+            } catch (Throwable closeFailure) {
+                failure = appendFailure(failure, closeFailure);
+            }
+        }
+        return failure;
+    }
+
+    private static List<ServerStatus> serverStatuses(List<SelectedRole> selections) {
+        List<ServerStatus> statuses = new ArrayList<>(selections.size());
+        for (SelectedRole selection : selections) {
+            statuses.add(selection.serverStatus());
+        }
+        return statuses;
+    }
+
+    private static Throwable closeSelections(
+            List<SelectedRole> selections,
+            Throwable primaryFailure) {
+        Throwable failure = primaryFailure;
+        for (int index = selections.size() - 1; index >= 0; index--) {
+            failure = closeSelection(selections.get(index), failure);
+        }
+        return failure;
+    }
+
+    private static Throwable closeSelection(
+            SelectedRole selection,
+            Throwable primaryFailure) {
+        try {
+            selection.close();
+        } catch (Throwable closeFailure) {
+            return appendFailure(primaryFailure, closeFailure);
+        }
+        return primaryFailure;
+    }
+
+    private static Throwable closeDirectRegistration(
+            PrefillState.DirectRegistration registration,
+            Throwable primaryFailure) {
+        try {
+            registration.close();
+        } catch (Throwable closeFailure) {
+            return appendFailure(primaryFailure, closeFailure);
+        }
+        return primaryFailure;
+    }
+
+    private static Throwable rollbackDecodeReservation(
+            DecodeEndpoint endpoint,
+            DecodeEndpoint.ReservationHandle reservation,
+            Throwable primaryFailure) {
+        try {
+            endpoint.rollbackExact(reservation);
+        } catch (Throwable rollbackFailure) {
+            return appendFailure(primaryFailure, rollbackFailure);
+        }
+        return primaryFailure;
+    }
+
+    private static Throwable closeGenerationPin(
+            WorkerEndpoint.GenerationPin pin,
+            Throwable primaryFailure) {
+        try {
+            pin.close();
+        } catch (Throwable closeFailure) {
+            return appendFailure(primaryFailure, closeFailure);
+        }
+        return primaryFailure;
+    }
+
+    private static Throwable appendFailure(
+            Throwable primaryFailure,
+            Throwable cleanupFailure) {
+        if (primaryFailure == null) {
+            return cleanupFailure;
+        }
+        if (primaryFailure != cleanupFailure) {
+            primaryFailure.addSuppressed(cleanupFailure);
+        }
+        return primaryFailure;
+    }
+
+    private static RuntimeException propagate(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            return runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        return new IllegalStateException(
+                "DIRECT route cleanup failed", failure);
+    }
+
+    private static Response buildSuccessResponse(
+            List<ServerStatus> statuses) {
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(statuses);
+        return response;
+    }
+
+    private static Response buildFailureResponse(RoleType failedRole) {
+        StrategyErrorType errorType = failedRole == null
+                ? NO_AVAILABLE_WORKER : failedRole.getErrorType();
         Response response = new Response();
         response.setSuccess(false);
         response.setCode(errorType.getErrorCode());
-        response.setErrorMessage(errorType.getErrorMsg() + ": " + detailMessage);
+        response.setErrorMessage(errorType.getErrorMsg());
         return response;
+    }
+
+    private static final class PinnedRouting implements AutoCloseable {
+        private final List<SelectedRole> selections;
+        private final PlacementFailure failure;
+
+        private PinnedRouting(
+                List<SelectedRole> selections,
+                PlacementFailure failure) {
+            this.selections = selections;
+            this.failure = failure;
+        }
+
+        private boolean success() {
+            return failure == null;
+        }
+
+        private PlacementFailure failure() {
+            return failure;
+        }
+
+        private List<SelectedRole> selections() {
+            return selections;
+        }
+
+        private List<ServerStatus> serverStatuses() {
+            return DefaultRouter.serverStatuses(selections);
+        }
+
+        @Override
+        public void close() {
+            Throwable failure = closeSelections(selections, null);
+            if (failure != null) {
+                throw propagate(failure);
+            }
+        }
+    }
+
+    private record PlacementFailure(PlacementKey key) {
+    }
+
+    private sealed interface DirectOwner {
+        void commit();
+
+        void rollback();
+
+        void closePin();
+    }
+
+    private record DirectPrefillOwner(
+            WorkerEndpoint.GenerationPin pin,
+            PrefillState.DirectRegistration registration)
+            implements DirectOwner {
+        @Override
+        public void commit() {
+            registration.commit();
+        }
+
+        @Override
+        public void rollback() {
+            registration.close();
+        }
+
+        @Override
+        public void closePin() {
+            pin.close();
+        }
+    }
+
+    private record DirectDecodeOwner(
+            WorkerEndpoint.GenerationPin pin,
+            DecodeEndpoint endpoint,
+            DecodeEndpoint.ReservationHandle reservation)
+            implements DirectOwner {
+        @Override
+        public void commit() {
+            // The canonical Decode registry already owns this exact handle.
+        }
+
+        @Override
+        public void rollback() {
+            endpoint.rollbackExact(reservation);
+        }
+
+        @Override
+        public void closePin() {
+            pin.close();
+        }
+    }
+
+    private record StatelessDirectOwner(
+            WorkerEndpoint.GenerationPin pin) implements DirectOwner {
+        @Override
+        public void commit() {
+            // Stateless roles publish only frozen response metadata.
+        }
+
+        @Override
+        public void rollback() {
+            // No role-local ownership was created.
+        }
+
+        @Override
+        public void closePin() {
+            pin.close();
+        }
     }
 }

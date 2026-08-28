@@ -2,7 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.balance.strategy.PrefillTimeFormula;
+import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
@@ -268,10 +268,6 @@ final class MockPerformanceModel {
 
     void setJitterPct(double pct) {
         this.jitterPct = pct;
-    }
-
-    void setCacheAdmissionRate(double rate) {
-        this.cacheAdmissionRate = rate;
     }
 
     long decodeMs(int outputLen, int activeBatchSize) {

@@ -6,7 +6,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -27,7 +27,7 @@ public abstract class AbstractEngineStatusSynchronizer {
 
     protected final WorkerAddressService workerAddressService;
 
-    protected final EngineWorkerStatus engineWorkerStatus;
+    protected final WorkerDirectory workerDirectory;
 
     protected final EngineHealthReporter engineHealthReporter;
 
@@ -49,12 +49,12 @@ public abstract class AbstractEngineStatusSynchronizer {
 
     public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
                                             EngineHealthReporter engineHealthReporter,
-                                            EngineWorkerStatus engineWorkerStatus,
+                                            WorkerDirectory workerDirectory,
                                             ModelMetaConfig modelMetaConfig,
                                             ConfigService configService) {
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
-        this.engineWorkerStatus = engineWorkerStatus;
+        this.workerDirectory = workerDirectory;
         this.modelMetaConfig = modelMetaConfig;
         this.flexlbConfig = configService.loadBalanceConfig();
 

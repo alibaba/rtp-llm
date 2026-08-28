@@ -110,18 +110,23 @@ if [[ "${LOAD_CLIENT_IMPL}" == "python" || "${MOCK_ENGINE_IMPL}" == "python" ]];
 fi
 
 DEFAULT_FLEXLB_CONFIG='{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "ordering": {"type": "PRIORITY", "defaultPriority": 50},
-    "capacity": {"maxOutstandingRequestsGlobal": 1000000}
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 32,
+      "maxCollectionWaitMs": 10,
+      "maxPredictedExecutionMs": 550
+    },
+    "capacity": {
+      "maxOutstandingRequestsGlobal": 1000000,
+      "maxWaitingRequestsPerPrefillWorker": 1024
+    }
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxRequests": 32,
-    "maxCollectionWaitMs": 10,
-    "maxWaitingRequestsPerPrefillWorker": 1024,
-    "earlyDispatchPredictedExecutionMs": 550,
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {
@@ -587,7 +592,9 @@ PY
 
 PROCESS_ENV_ARGS=()
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
-  mapfile -d '' -t PROCESS_ENV_ARGS < <(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
+  while IFS= read -r -d '' process_env; do
+    PROCESS_ENV_ARGS+=("${process_env}")
+  done < <(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
 import json
 import sys
 
@@ -598,7 +605,7 @@ for item in envs:
         continue
     sys.stdout.write(f"{str(item[0])}={str(item[1])}\0")
 PY
-)
+  )
 fi
 
 PROCESS_FLEXLB_CONFIG=""
