@@ -20,6 +20,9 @@ message RdmaNicRKey {
 message RdmaConnectionInfo {
     optional string ip = 1;
     optional uint32 port = 2;
+    // Identity of the peer-side XChannel learned during the RDMA Init handshake.
+    // ip:port is not unique when several QPs connect from the same process.
+    optional uint64 peer_channel = 3;
 }
 
 message RdmaBlockBufferAddrInfo {
@@ -69,7 +72,7 @@ message CacheLoadResponse {
 };
 
 message CacheTransferInfo {
-    optional uint32 partition_count = 1; 
+    optional uint32 partition_count = 1;
     optional uint32 partition_id = 2;
     repeated string local_keys = 3;
     repeated string remote_keys = 4;
@@ -88,7 +91,7 @@ message CacheTransferRequest {
 }
 
 message CacheTransferResponse {
-    optional KvCacheStoreServiceErrorCode error_code = 1; 
+    optional KvCacheStoreServiceErrorCode error_code = 1;
     optional string error_msg = 2;
     optional int64 response_send_start_time_us = 3;
 }
