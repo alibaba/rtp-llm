@@ -1401,6 +1401,75 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * Read-only eight-layer ownership projection for off-path ledger
+     * reconciliation (plan section 6, stage 1 three-way comparison).
+     *
+     * <p>Pure addition: this view changes no layer semantics and never
+     * mutates state.  It is captured under the canonical admission lock so
+     * all eight layers are one consistent snapshot — the same linearization
+     * guarantee the KV_ALLOCATED same-tick handover relies on.</p>
+     */
+    public DecodeLedgerAuditView ledgerAuditView() {
+        admissionLock.lock();
+        try {
+            Map<Long, Long> confirmedTokens = new HashMap<>();
+            trackedConfirmed.forEach((requestId, task) ->
+                    confirmedTokens.put(requestId, task.reservationToken()));
+            Set<Long> attemptIncoming = new HashSet<>();
+            for (EndpointPreemptionAttempt attempt : preemptionAttempts.values()) {
+                attemptIncoming.add(attempt.incomingRequestId);
+            }
+            return new DecodeLedgerAuditView(
+                    admissionVersion.get(),
+                    Map.copyOf(inflightRequests),
+                    engineLifecycleReservations.size(),
+                    Map.copyOf(confirmedTokens),
+                    Set.copyOf(preemptionClaims.keySet()),
+                    Set.copyOf(attemptIncoming),
+                    Set.copyOf(engineFenceProtections.keySet()),
+                    Set.copyOf(settledTombstones.keySet()),
+                    Set.copyOf(queuedPhase),
+                    Set.copyOf(engineDispatchPermits.keySet()));
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /**
+     * Immutable audit tuple over the eight endpoint layers, mapped onto the
+     * slot resource-row authorities (plan 3.1 item 2):
+     * <ol>
+     *   <li>L1 {@code inflightRequests} — A-road master reservations; slot
+     *       pRow mirrors these numerics until the KV_ALLOCATED critical
+     *       point.</li>
+     *   <li>L2 {@code engineLifecycleReservations} — engine-lifecycle
+     *       markers; count only (identities stay engine-side).</li>
+     *   <li>L3 {@code trackedConfirmed} — B-road engine projection; slot
+     *       dRow claims the same reservationToken identity.</li>
+     *   <li>L4 {@code preemptionClaims} / L4b
+     *       {@code preemptionAttemptIncomingRequestIds} — preemption
+     *       protocol ownership (slot PreemptionRegistration domain).</li>
+     *   <li>L5 {@code engineFenceProtections} — engine fence registrations.</li>
+     *   <li>L6 {@code settledTombstones} — settled request tombstones
+     *       (retention window).</li>
+     *   <li>L7 {@code queuedPhase} — queued-ownership sub-state of L1.</li>
+     *   <li>L8 {@code engineDispatchPermits} — dispatch permit holders.</li>
+     * </ol>
+     */
+    public record DecodeLedgerAuditView(
+            long admissionVersion,
+            Map<Long, RequestInflight> inflight,
+            int engineLifecycleReservationCount,
+            Map<Long, Long> confirmedReservationTokens,
+            Set<Long> preemptionClaimRequestIds,
+            Set<Long> preemptionAttemptIncomingRequestIds,
+            Set<Long> engineFenceProtectedRequestIds,
+            Set<Long> settledTombstoneRequestIds,
+            Set<Long> queuedPhaseRequestIds,
+            Set<Long> engineDispatchPermitRequestIds) {
+    }
+
+    /**
      * One on-demand routing projection captured under the canonical admission
      * lock. It is not a second owner: every value is derived from the live
      * registries and the one committed WorkerStatus holder at capture time.

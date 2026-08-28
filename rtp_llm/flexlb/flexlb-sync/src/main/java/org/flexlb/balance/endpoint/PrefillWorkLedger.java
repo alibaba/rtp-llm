@@ -229,4 +229,24 @@ public interface PrefillWorkLedger {
     long pendingRequestCount();
 
     WorkSnapshot committedSnapshot();
+
+    /**
+     * Read-only queue-side ledger projection for off-path reconciliation
+     * (plan section 6, stage 1 three-way comparison).  Implementations
+     * capture the tuple under their own lock in one short critical section
+     * and never mutate state.
+     */
+    PrefillLedgerAuditSnapshot ledgerAuditSnapshot();
+
+    /**
+     * Immutable queue-side audit tuple: the active (queued) request ids
+     * plus the committed (worker-owned) request count.  Item identity
+     * comparison beyond request ids is a scheduler-package enhancement
+     * (the frozen item type is scheduler-internal).
+     */
+    record PrefillLedgerAuditSnapshot(
+            long capturedAtMs,
+            List<Long> activeItemRequestIds,
+            long committedRequestCount) {
+    }
 }

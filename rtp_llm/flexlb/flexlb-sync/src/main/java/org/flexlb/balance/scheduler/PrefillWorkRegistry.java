@@ -1934,6 +1934,61 @@ final class PrefillWorkRegistry implements PrefillWorkLedger {
         }
     }
 
+    /**
+     * Read-only queue-side ledger projection for off-path reconciliation
+     * (plan section 6, stage 1 three-way comparison).  Pure addition: the
+     * snapshot is captured under the registry lock in one short critical
+     * section and never mutates state.
+     */
+    @Override
+    public PrefillWorkLedger.PrefillLedgerAuditSnapshot ledgerAuditSnapshot() {
+        DetailedPrefillLedgerAudit detailed = ledgerAuditSnapshotDetailed();
+        List<Long> ids = new ArrayList<>(detailed.activeItems().size());
+        for (BatchItem item : detailed.activeItems()) {
+            ids.add(item.requestId());
+        }
+        return new PrefillWorkLedger.PrefillLedgerAuditSnapshot(
+                detailed.capturedAtMs(),
+                List.copyOf(ids),
+                detailed.committedRequestCount());
+    }
+
+    /**
+     * Scheduler-package detailed audit tuple: active items carry the frozen
+     * {@link BatchItem} identities so same-package callers can compare them
+     * by reference against the owning slot's publication item.
+     */
+    DetailedPrefillLedgerAudit ledgerAuditSnapshotDetailed() {
+        lock.lock();
+        try {
+            List<BatchItem> active = new ArrayList<>();
+            long committed = 0L;
+            for (RequestEntry entry : requests.values()) {
+                if (entry.isActive()) {
+                    active.add(entry.activeItem);
+                } else {
+                    committed++;
+                }
+            }
+            return new DetailedPrefillLedgerAudit(
+                    clock.getAsLong(),
+                    List.copyOf(active),
+                    committed);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Immutable queue-side audit tuple with full item identities
+     * (scheduler-package visibility only).
+     */
+    record DetailedPrefillLedgerAudit(
+            long capturedAtMs,
+            List<BatchItem> activeItems,
+            long committedRequestCount) {
+    }
+
     private WorkSnapshot committedSnapshotUnderLock(long nowMs) {
         requireLock();
         List<WorkSnapshot.RequestWork> individual = new ArrayList<>();

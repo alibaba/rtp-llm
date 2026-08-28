@@ -230,6 +230,39 @@ public final class RequestScheduler {
         return lifecycle.ownsRequestGeneration(requestId);
     }
 
+    /**
+     * Package-private lifecycle owner access for same-package tooling
+     * (ledger reconciliation harness).  Never part of the public facade.
+     */
+    RequestLifecycleCoordinator lifecycleOwner() {
+        return lifecycle;
+    }
+
+    /**
+     * Attach the three-way ledger reconciliation harness (plan section 6,
+     * stage 1) to this scheduler's live endpoint generations.  The harness
+     * is strictly off the hot path (shadow mode): every pass re-snapshots
+     * the registry, captures each ledger under its own short critical
+     * section and never nests locks.  The listener may be null.
+     */
+    public LedgerReconciliationHarness attachLedgerReconciliation(
+            LedgerReconciliationHarness.Listener listener) {
+        return attachLedgerReconciliation(listener, 1);
+    }
+
+    /**
+     * Attached form with an explicit REAL-diff confirm window: a REAL
+     * rule fires only after it recurs this many consecutive passes,
+     * absorbing the single-snapshot tears between mutually unaligned
+     * per-domain captures.  Shadow loops should pass 2-3.
+     */
+    public LedgerReconciliationHarness attachLedgerReconciliation(
+            LedgerReconciliationHarness.Listener listener,
+            int realDiffConfirmCycles) {
+        return LedgerReconciliationHarness.attach(
+                lifecycle, endpointRegistry, listener, realDiffConfirmCycles);
+    }
+
     private static Response error(
             StrategyErrorType type, String detail) {
         return RequestLifecycleCoordinator.buildErrorResponse(type, detail);

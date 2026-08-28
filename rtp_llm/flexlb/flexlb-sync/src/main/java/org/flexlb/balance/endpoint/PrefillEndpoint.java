@@ -106,6 +106,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
         runtime.start();
     }
 
+    /**
+     * Read-only access to the canonical prefill work ledger of this
+     * endpoint generation, for off-path reconciliation tooling.  The
+     * ledger stays owned by the generation; callers receive only the
+     * audit-facing port.
+     */
+    public PrefillWorkLedger workLedger() {
+        return workLedger;
+    }
+
     /** Capture the canonical queue/work inputs for one pure route projection. */
     public RouteProjection.Inputs captureRouteProjectionInputs() {
         return runtime.captureRouteProjectionInputs();
