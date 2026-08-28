@@ -4,14 +4,7 @@ import java.util.Comparator;
 
 /**
  * Single source of truth for priority-based queue ordering across all
- * FlexLB queue layers (PR-B of the Luoli refactor).
- *
- * <p>Before this refactor the ordering logic was duplicated: the
- * Auto-TPM batcher comparator in {@code WorkerBatcher} and the probe
- * comparison in {@code PrefillQueueManager.ordersBefore} were hand-mirrored
- * copies of the same rule. The object comparator and allocation-free probe
- * helpers now delegate to the same primitive comparison, so any future
- * change to the ordering rule is made in exactly one place.
+ * FlexLB queue layers.
  *
  * <p><b>Ordering rule (STRICT):</b>
  * <ol>
@@ -20,11 +13,6 @@ import java.util.Comparator;
  *   <li>{@link Prioritized#enqueueSeq()} <em>ascending</em> (same-priority
  *       items are strictly first-in-first-out by enqueue order).</li>
  * </ol>
- *
- * <p>The previous third key — coarse admission deadline — has been
- * <em>removed</em>. The deadline was a weak signal that conflicted with FIFO
- * fairness under bursty arrivals and added complexity without measurable
- * benefit. Same-priority FIFO is now the sole tie-break after priority.
  *
  * <p>Callers that need a deterministic total order (e.g. the batcher queue
  * comparator) append a final {@code .thenComparingLong(...::requestId)} to
@@ -69,20 +57,6 @@ public final class PriorityOrdering {
                 rightPriority, rightEnqueueSeq);
         return strictOrder != 0
                 ? strictOrder : Long.compare(leftRequestId, rightRequestId);
-    }
-
-    /**
-     * Whether an existing item precedes a primitive probe in the deterministic
-     * worker order, without allocating a temporary {@link Prioritized} view.
-     */
-    public static boolean comesBefore(Prioritized item,
-                                      long itemRequestId,
-                                      int probePriority,
-                                      long probeEnqueueSeq,
-                                      long probeRequestId) {
-        return compareWithRequestId(
-                item.priority(), item.enqueueSeq(), itemRequestId,
-                probePriority, probeEnqueueSeq, probeRequestId) < 0;
     }
 
     /**

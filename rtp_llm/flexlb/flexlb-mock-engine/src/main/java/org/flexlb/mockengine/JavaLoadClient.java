@@ -11,10 +11,10 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 
@@ -1954,7 +1954,7 @@ public final class JavaLoadClient {
         final int outputLen;
         final List<Long> blockKeys;
         final List<Integer> tokenIds;
-        /** Auto-TPM QoS priority (30/40/50/60/70); 0 means unset. */
+        /** Auto-TPM QoS priority in [1, 100]; 0 means unset. */
         final int priority;
 
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,

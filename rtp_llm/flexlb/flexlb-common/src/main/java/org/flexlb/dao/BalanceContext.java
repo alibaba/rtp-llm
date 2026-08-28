@@ -1,5 +1,6 @@
 package org.flexlb.dao;
 
+import com.google.protobuf.ByteString;
 import lombok.Data;
 import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
@@ -26,7 +27,7 @@ public class BalanceContext {
     private Response response;
 
     @ToString.Exclude
-    private byte[] generateInputPbBytes;
+    private ByteString generateInputPb;
 
     //======================== Queue ========================//
 
@@ -60,7 +61,7 @@ public class BalanceContext {
 
     /**
      * Timestamp (ms) when the engine acknowledges the batch in BATCH mode.
-     * Set when PriorityScheduler confirms the EnqueueBatch acknowledgement.
+     * Set when RequestScheduler confirms the EnqueueBatch acknowledgement.
      * Used to compute ack_to_response_time_ms in FlexlbServiceImpl.completeSchedule().
      * Remains 0 for non-BATCH paths or when ACK was not received.
      */
@@ -83,38 +84,16 @@ public class BalanceContext {
     private SchedulingMetadata schedulingMetadata;
 
     /**
-     * Number of priority scheduling plan attempts consumed for this request (1-based).
-     * 0 when the priority scheduling path did not schedule it (§19.1 schedule_attempt).
-     */
-    private int scheduleAttempt;
-
-    /**
      * priority scheduling plan type that finally placed the request:
-     * normal / prefill_evict / decode_evict. Empty when not applicable
-     * (§19.1 plan_type).
+     * normal / prefill_evict / decode_evict. Empty when not applicable.
      */
     private String planType = "";
 
-    /** Cost of the committed eviction plan; 0 for a normal placement (§19.1 plan_cost). */
+    /** Cost of the committed eviction plan; 0 for normal placement. */
     private long planCost;
 
-    /** Victims preempted to place this request; 0 for a normal placement (§19.1 victim_count). */
+    /** Victims preempted to place this request; 0 for normal placement. */
     private int victimCount;
-
-    /**
-     * Prefill endpoint ("ip:httpPort") that the committed plan placed this
-     * request on. Empty until a plan commits; used by rescue logging to
-     * report the migration target.
-     */
-    private String scheduledPrefillEndpoint = "";
-
-    /**
-     * Prefill endpoint ("ip:httpPort") whose queue just rejected this
-     * request's offer (review P1-4): the priority scheduler sets it before a
-     * fallback re-route and the prefill strategy skips that worker for
-     * exactly one route (cleared on route entry). Null when unset.
-     */
-    private String excludedPrefillIpPort;
 
     //===================== Method ===================//
 

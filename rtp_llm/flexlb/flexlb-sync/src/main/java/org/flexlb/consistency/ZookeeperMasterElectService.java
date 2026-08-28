@@ -92,7 +92,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         initializeRoleId();
         initializeIpAndPort();
         initializeZookeeperClient();
-        scheduleMasterUpdateTask();
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_INIT);
     }
 
@@ -149,11 +148,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             closeLeaderSelector();
             throw new RuntimeException("Initialization failed", e);
         }
-    }
-
-    private void scheduleMasterUpdateTask() {
-        LBStatusConsistencyService.SCHEDULED_EXECUTOR_SERVICE.scheduleWithFixedDelay(
-                this::updateLatestMaster, 0, 5, TimeUnit.SECONDS);
     }
 
     /**
@@ -261,7 +255,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         if (cachedMasterHostIp != null) {
             return cachedMasterHostIp;
         }
-        Logger.warn("ZKMasterElector roleId:{} currentHost:{} cachedMasterHostIp is null.", roleId, localIp);
         return null;
     }
 
@@ -360,6 +353,13 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             } catch (Exception e) {
                 LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} getLeaderID error.", roleId, localIp, e);
             }
+        }
+    }
+
+    @Scheduled(fixedDelay = 5000L)
+    private void updateLatestMasterPeriodically() {
+        if (lbConsistencyConfig.isNeedConsistency()) {
+            updateLatestMaster();
         }
     }
 

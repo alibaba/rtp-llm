@@ -349,6 +349,14 @@
                             --add-opens java.instrument/sun.instrument=ALL-UNNAMED
                         </argLine>
                     </configuration>
+                    <executions>
+                        <execution>
+                            <id>default-test</id>
+                            <configuration>
+                                <excludedGroups>performance-regression</excludedGroups>
+                            </configuration>
+                        </execution>
+                    </executions>
                 </plugin>
             </plugins>
         </pluginManagement>
@@ -368,10 +376,9 @@
                                 <id>default-test</id>
                                 <configuration combine.self="override">
                                     <includes>
-                                        <include>**/SchedulingConfigAndExpirationPerformanceTest.java</include>
-                                        <include>**/AutoTpmSchedulingOverheadPerfTest.java</include>
-                                        <include>**/CostBasedPrefillRoutingPerformanceTest.java</include>
+                                        <include>**/WorkerBatcherPerformanceTest.java</include>
                                     </includes>
+                                    <groups>performance-regression</groups>
                                     <forkCount>1</forkCount>
                                     <reuseForks>false</reuseForks>
                                     <failIfNoTests>false</failIfNoTests>

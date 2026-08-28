@@ -1,12 +1,10 @@
 package org.flexlb.cache.core;
 
-import com.google.common.collect.Sets;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,6 +37,9 @@ public class GlobalCacheIndex {
      */
     private final LongAdder totalBlocks = new LongAdder();
     private final LongAdder totalMappings = new LongAdder();
+    /** Per-caller compaction storage; cache queries never retain this array. */
+    private final ThreadLocal<String[]> prefixCandidates =
+            ThreadLocal.withInitial(() -> new String[0]);
 
     /**
      * Add cache block to specified engine
@@ -56,7 +57,7 @@ public class GlobalCacheIndex {
         try {
             Set<String> engines = blockToEnginesMap.computeIfAbsent(blockCacheKey, k -> {
                 totalBlocks.increment();
-                return Sets.newConcurrentHashSet();
+                return ConcurrentHashMap.newKeySet();
             });
 
             boolean added = engines.add(engineIpPort);
@@ -156,38 +157,65 @@ public class GlobalCacheIndex {
     private Map<String, Integer> calculatePrefixMatchLength(List<String> engineIpPorts,
                                                             List<Long> blockCacheKeys) {
 
-        Map<String, Integer> result = new HashMap<>(engineIpPorts.size());
+        Set<String> firstBlockOwners = getEnginesForBlock(
+                blockCacheKeys.getFirst());
+        if (firstBlockOwners.isEmpty()) {
+            return Collections.emptyMap();
+        }
 
-        // Initialize all engines as candidates, set of engines with undetermined prefix length
-        Set<String> candidateEngines = Sets.newHashSet(engineIpPorts);
+        // Compact matching addresses in place. The selector already owns a
+        // unique immutable fleet view, so a String[] is sufficient here and
+        // avoids one HashSet node per engine on every request.
+        String[] candidates = prefixCandidates.get();
+        if (candidates.length < engineIpPorts.size()) {
+            candidates = new String[engineIpPorts.size()];
+            prefixCandidates.set(candidates);
+        }
+        for (int index = 0; index < engineIpPorts.size(); index++) {
+            candidates[index] = engineIpPorts.get(index);
+        }
+        int survivorCount = 0;
+        for (int candidateIndex = 0;
+                candidateIndex < engineIpPorts.size(); candidateIndex++) {
+            String candidate = candidates[candidateIndex];
+            if (firstBlockOwners.contains(candidate)) {
+                candidates[survivorCount++] = candidate;
+            }
+        }
+        if (survivorCount == 0) {
+            return Collections.emptyMap();
+        }
 
-        // Iterate through each block, gradually filter candidate engines
-        for (int i = 0; i < blockCacheKeys.size(); i++) {
-            Long blockCacheKey = blockCacheKeys.get(i);
-            Set<String> blockOwners = getEnginesForBlock(blockCacheKey);
-
-            // Filter candidate engines: only keep engines that exist in current block
-            Iterator<String> candidates = candidateEngines.iterator();
-            while (candidates.hasNext()) {
-                String candidateEngine = candidates.next();
-                if (blockOwners.isEmpty() || !blockOwners.contains(candidateEngine)) {
-                    // This engine does not exist in current block, prefix match interrupted
-                    result.put(candidateEngine, i);
-                    candidates.remove();
+        Map<String, Integer> result = null;
+        for (int blockIndex = 1;
+                blockIndex < blockCacheKeys.size(); blockIndex++) {
+            Set<String> blockOwners = getEnginesForBlock(
+                    blockCacheKeys.get(blockIndex));
+            int nextSurvivorCount = 0;
+            for (int candidateIndex = 0;
+                    candidateIndex < survivorCount; candidateIndex++) {
+                String candidate = candidates[candidateIndex];
+                if (blockOwners.contains(candidate)) {
+                    candidates[nextSurvivorCount++] = candidate;
+                } else {
+                    if (result == null) {
+                        result = new HashMap<>();
+                    }
+                    result.put(candidate, blockIndex);
                 }
             }
-
-            // Exit early if no candidate engines remain
-            if (candidateEngines.isEmpty()) {
-                break;
+            survivorCount = nextSurvivorCount;
+            if (survivorCount == 0) {
+                return result == null ? Collections.emptyMap() : result;
             }
         }
 
-        // Process remaining candidate engines (they matched all blocks)
-        for (String remainingEngine : candidateEngines) {
-            result.put(remainingEngine, blockCacheKeys.size());
+        if (result == null) {
+            result = new HashMap<>(survivorCount);
         }
-
+        for (int index = 0; index < survivorCount; index++) {
+            result.put(candidates[index], blockCacheKeys.size());
+        }
         return result;
     }
 

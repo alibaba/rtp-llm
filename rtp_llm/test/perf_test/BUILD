@@ -89,6 +89,22 @@ py_test(
     tags = ["manual"],
 )
 
+# Generic model-agnostic entrypoint. It intentionally has no model-specific
+# defaults; pass model/workload/engine settings with --test_arg at invocation.
+py_test(
+    name = "model_perf_test",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    tags = ["manual"],
+)
+
 # V4-Flash CP=4 + EP=4 prefill profile sweep from 64k to 1M input.
 # Manual-only — drives batch_size=1 prefill requests through the perf
 # test framework so per-input_len timeline JSONs land in TEST_UNDECLARED_

@@ -1,9 +1,11 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.resource.PrefillResourceMeasure;
-import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -11,126 +13,193 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.LoadBalanceStrategyEnum;
-import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.util.Arrays;
-import java.util.Collections;
+import java.util.AbstractList;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
-@Component("costBasedPrefillStrategy")
-public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
+@Component
+public class CostBasedPrefillStrategy {
 
-    private final EngineWorkerStatus engineWorkerStatus;
+    private static final int LRU_CLAIM_ATTEMPTS = 2;
+    private static final ThreadLocal<PrefillCandidateSet.Scratch> CANDIDATE_SCRATCH =
+            ThreadLocal.withInitial(PrefillCandidateSet.Scratch::new);
+
+    private final WorkerDirectory workerDirectory;
     private final CacheAwareService cacheAwareService;
-    private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
-    private final ThreadLocal<CandidateSet> candidateSets =
-            ThreadLocal.withInitial(CandidateSet::new);
+    private final AtomicLong equalTtftCursor = new AtomicLong();
+    private final AtomicLong equalCacheLeaderCursor = new AtomicLong();
 
-    public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
+    public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
-                                    ResourceMeasureFactory resourceMeasureFactory,
                                     EngineHealthReporter engineHealthReporter) {
-        this.engineWorkerStatus = engineWorkerStatus;
+        this.workerDirectory = workerDirectory;
         this.cacheAwareService = cacheAwareService;
-        this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
 
-    @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        try {
-            return doSelect(balanceContext, roleType, group);
-        } catch (Exception e) {
-            Logger.warn("{} select failed", LoadBalanceStrategyEnum.COST_BASED_PREFILL.getName(), e);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-    }
-
-    @Override
-    public void rollBack(WorkerEndpoint ep, long requestId) {
-        // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by PriorityScheduler — no-op here.
-        if (ep instanceof PrefillEndpoint pe) {
-            pe.releaseBatch(requestId);
-        }
-    }
-
-    private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
+    public PlacementResult<SelectedRole, RoleType> select(
+            BalanceContext balanceContext,
+            RoleType roleType,
+            String group) {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
-        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group,
-                config.resourceMeasureFor(roleType), balanceContext.getExcludedPrefillIpPort());
-        CandidateSet eligible = filterResult.endpoints();
-        if (eligible.size() == 0) {
-            Logger.debug("Prefill select failed: no available endpoints, request_id={}, rejections={}",
-                    requestId, filterResult.rejections());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        EndpointDiscovery discovery = discoverAliveEndpoints(roleType, group);
+        if (discovery.registeredCount() == 0) {
+            Logger.debug("Prefill select failed: no registered endpoints, request_id={}",
+                    requestId);
+            return PlacementResult.blocked(roleType);
         }
-
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-
-        FilterResult hardFilterResult = applyHardFilters(eligible, balanceContext, config, cacheMatchResults);
-        CandidateSet survivors = hardFilterResult.candidates();
-
-        // First pass: find the exact minimum score.
-        long minScore = Long.MAX_VALUE;
-        for (int i = 0; i < survivors.size(); i++) {
-            long score = survivors.score(i);
-            if (score < minScore) {
-                minScore = score;
+        Map<String, Integer> cacheMatchResults =
+                getCacheMatchResults(balanceContext, roleType, discovery);
+        Map<String, Integer> rejections = new java.util.HashMap<>();
+        Map<RoleType, Integer> poolWideBlockers =
+                new EnumMap<>(RoleType.class);
+        PrefillCandidateSet survivors = evaluateCandidates(
+                discovery,
+                balanceContext,
+                config,
+                cacheMatchResults,
+                rejections,
+                poolWideBlockers);
+        if (survivors.size() == 0) {
+            Logger.debug(
+                    "Prefill select failed: no available endpoints, request_id={},"
+                        + " rejections={}",
+                    requestId,
+                    rejections);
+            RoleType poolWideBlocker = provenPoolWideBlocker(
+                    poolWideBlockers,
+                    discovery.registeredCount());
+            if (poolWideBlocker != null) {
+                return PlacementResult.blocked(poolWideBlocker);
             }
+            return PlacementResult.blocked(roleType);
         }
 
-        int selectedIndex = selectBestCandidate(
-                survivors, minScore, balanceContext, roleType, group, seqLen, config);
+        boolean modeledSelection = survivors.selectable(0);
+        final int selectedIndex;
+        if (modeledSelection) {
+            selectedIndex = selectBestCandidate(
+                    survivors,
+                    survivors.minimumProjectedTtftMs,
+                    roleType,
+                    group,
+                    seqLen,
+                    config);
+        } else {
+            // Existing Engine work has no honest duration. This path never
+            // invents a TTFT or passes the candidates through TTFT/cache policy.
+            selectedIndex = selectUnmodeledCandidate(survivors);
+        }
 
         if (selectedIndex < 0) {
-            Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
-            hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
-            Logger.debug("Prefill select failed: all filtered out, request_id={}, rejections={}",
-                    requestId, merged);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            Logger.debug(
+                    "Prefill select failed: all filtered out, request_id={}, rejections={}",
+                    requestId,
+                    rejections);
+            return PlacementResult.blocked(roleType);
         }
 
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
         long bestCacheHit = survivors.cacheHit(selectedIndex);
-        long selectedScore = survivors.score(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
-        reportSelectedEstimates(
-                roleType, best, config, selectedScore, selectedPrefillMs);
-        reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
-
-        return buildServerStatus(
+        WorkerEndpoint.GenerationPin selectedPin =
+                workerDirectory.captureEndpoint(
+                        roleType,
+                        survivors.endpointAddress(selectedIndex));
+        if (selectedPin == null || selectedPin.endpoint() != best) {
+            if (selectedPin != null) {
+                selectedPin.close();
+            }
+            // The planning endpoint retired or was replaced after the
+            // full-fleet snapshot. Re-enter the queue rather than
+            // transferring ownership for a stale generation.
+            return PlacementResult.blocked(roleType);
+        }
+        OptionalLong selectedTtft = modeledSelection
+                ? OptionalLong.of(survivors.projectedTtftMs(selectedIndex))
+                : OptionalLong.empty();
+        SelectedRole selectedRole = buildSelectedRole(
                 best,
                 roleType,
                 requestId,
-                selectedScore,
+                selectedTtft,
                 selectedPrefillMs,
-                balanceContext,
-                bestCacheHit);
+                bestCacheHit,
+                survivors.ownershipVersion(selectedIndex),
+                selectedPin);
+        reportSelectedEstimates(
+                roleType,
+                best,
+                config,
+                selectedTtft,
+                selectedPrefillMs);
+        reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
+        reportRoutingCacheMatchMetrics(
+                roleType,
+                survivors.routingCacheMatchTokens(selectedIndex),
+                survivors.maximumRoutingCacheMatchTokens,
+                seqLen);
+        return PlacementResult.success(selectedRole);
     }
 
     /**
-     * Select from candidates that already passed CostBasedPrefill's hard filters.
-     * Subclasses may add a bounded preference and delegate here for exact baseline fallback.
+     * Select an unmodeled candidate by coherent pending ownership, then live LRU. The clock is a
+     * fairness hint only; races may change ordering but can never turn a non-empty candidate set
+     * into an availability failure.
      */
-    protected int selectBestCandidate(CandidateSet survivors,
-                                      long minScore,
-                                      BalanceContext balanceContext,
+    private static int selectUnmodeledCandidate(PrefillCandidateSet candidates) {
+        int selectedIndex = -1;
+        long selectedPending = Long.MAX_VALUE;
+        long selectedTime = Long.MAX_VALUE;
+        for (int i = 0; i < candidates.size(); i++) {
+            if (!candidates.engineWorkUnmodeled(i)) {
+                throw new IllegalStateException(
+                        "unmodeled selection received a modeled candidate");
+            }
+            long pending = candidates.pendingCount(i);
+            long lastSelected = candidates.endpoint(i).getLastSelectedTime().get();
+            if (selectedIndex < 0
+                    || pending < selectedPending
+                    || pending == selectedPending && lastSelected < selectedTime) {
+                selectedIndex = i;
+                selectedPending = pending;
+                selectedTime = lastSelected;
+            }
+        }
+        if (selectedIndex >= 0) {
+            long nowMicros = TimeUnit.NANOSECONDS.toMicros(
+                    System.nanoTime());
+            candidates.endpoint(selectedIndex).getLastSelectedTime().updateAndGet(
+                    current -> current == Long.MAX_VALUE
+                            ? Long.MAX_VALUE
+                            : Math.max(nowMicros, current + 1L));
+        }
+        return selectedIndex;
+    }
+
+    /** Select from candidates that already passed the common hard filters. */
+    private int selectBestCandidate(PrefillCandidateSet survivors,
+                                      long minProjectedTtftMs,
                                       RoleType roleType,
                                       String group,
                                       long seqLen,
@@ -139,441 +208,657 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return -1;
         }
 
-        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
-                .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineCandidate(survivors, minScore, config);
-        }
-
-        long referenceHitTokens = 0L;
-        for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.score(i) == minScore) {
-                referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
+        RoutingConfig.CandidateChoiceConfig choice = config.getRouter()
+                .getRoles().getPrefill().getCandidateChoice();
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter()
+                .getRoles().getPrefill().getCacheAffinity();
+        BitSet preferredCandidates = new BitSet(survivors.size());
+        long affinityCutoffMs = 0L;
+        String affinityReason = null;
+        if (cacheAffinity != null) {
+            long referenceHitTokens = 0L;
+            long minHitTokens = survivors.minimumCacheHit;
+            long maxHitTokens = survivors.maximumCacheHit;
+            affinityCutoffMs = saturatingAdd(
+                    minProjectedTtftMs,
+                    Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
+            affinityReason = "NO_CACHE_LEAD";
+            if (maxHitTokens > minHitTokens) {
+                for (int i = 0; i < survivors.size(); i++) {
+                    if (survivors.projectedTtftMs(i)
+                            == minProjectedTtftMs) {
+                        referenceHitTokens = Math.max(
+                                referenceHitTokens,
+                                survivors.cacheHit(i));
+                    }
+                }
+                boolean minimumHitRateMet = false;
+                double minimumHitRate = normalizedHitRate(
+                        cacheAffinity.getMinPrefixHitPercent());
+                for (int i = 0; i < survivors.size(); i++) {
+                    long hitTokens = survivors.cacheHit(i);
+                    if (hitTokens <= minHitTokens
+                            || hitTokens < referenceHitTokens
+                            || minimumHitRate > 0.0
+                                    && (seqLen <= 0L
+                                        || hitTokens
+                                                * RoutingConfig.PERCENTAGE_SCALE
+                                                / seqLen
+                                                < minimumHitRate)) {
+                        continue;
+                    }
+                    minimumHitRateMet = true;
+                    if (survivors.projectedTtftMs(i) <= affinityCutoffMs) {
+                        preferredCandidates.set(i);
+                    }
+                }
+                affinityReason = !preferredCandidates.isEmpty()
+                        ? "CACHE_LEADER"
+                        : minimumHitRateMet ? "OVER_CAP" : "LOW_CACHE_HIT";
             }
         }
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                survivors.size(),
-                survivors::score,
-                survivors::cacheHit,
-                minScore,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
 
-        int selectedIndex;
-        if (affinity.hasPreference()) {
-            selectedIndex = selectCacheLeader(survivors, affinity);
-        } else {
-            selectedIndex = selectBaselineCandidate(survivors, minScore, config);
+        if (choice.getType()
+                == RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL) {
+            return selectLeastRecentlyUsed(
+                    survivors, preferredCandidates, cacheAffinity != null,
+                    affinityReason, affinityCutoffMs, minProjectedTtftMs,
+                    roleType, group, config);
         }
 
-        if (selectedIndex >= 0) {
-            String reason = affinity.reason().name();
+        int selectedIndex;
+        if (!preferredCandidates.isEmpty()) {
+            selectedIndex = selectCacheLeader(survivors, preferredCandidates);
+        } else {
+            selectedIndex = selectBaselineCandidate(
+                    survivors, minProjectedTtftMs, config);
+        }
+
+        if (selectedIndex >= 0 && cacheAffinity != null) {
             reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(), reason);
-            Logger.debug(
-                    "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
-                            + "selected: {}, minScoreMs: {}, selectedScoreMs: {}, "
-                            + "scoreCutoffMs: {}, hitTokens: {}, reason: {}",
-                    roleType,
-                    group,
-                    survivors.endpoint(selectedIndex).ipPort(),
-                    affinity.minScoreMs(),
-                    survivors.score(selectedIndex),
-                    affinity.scoreCutoffMs(),
-                    survivors.cacheHit(selectedIndex),
-                    reason);
+                    roleType, survivors.endpoint(selectedIndex).getIp(),
+                    affinityReason);
+            if (Logger.isDebugEnabled()) {
+                Logger.debug(
+                        "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
+                                + "selected: {}, minProjectedTtftMs: {}, "
+                                + "selectedProjectedTtftMs: {}, ttftCutoffMs: {}, "
+                                + "hitTokens: {}, reason: {}",
+                        roleType,
+                        group,
+                        survivors.endpointAddress(selectedIndex),
+                        minProjectedTtftMs,
+                        survivors.projectedTtftMs(selectedIndex),
+                        affinityCutoffMs,
+                        survivors.cacheHit(selectedIndex),
+                        affinityReason);
+            }
+        }
+        return selectedIndex;
+    }
+
+    private static double normalizedHitRate(double configuredRate) {
+        if (Double.isNaN(configuredRate)
+                || configuredRate == Double.POSITIVE_INFINITY) {
+            return RoutingConfig.PERCENTAGE_SCALE;
+        }
+        if (configuredRate == Double.NEGATIVE_INFINITY) {
+            return 0.0;
+        }
+        return Math.min(
+                RoutingConfig.PERCENTAGE_SCALE,
+                Math.max(0.0, configuredRate));
+    }
+
+    private int selectLeastRecentlyUsed(
+            PrefillCandidateSet candidates,
+            BitSet preferredCandidates,
+            boolean affinityEnabled,
+            String affinityReason,
+            long affinityCutoffMs,
+            long minProjectedTtftMs,
+            RoleType roleType,
+            String group,
+            FlexlbConfig config) {
+        int selectedIndex = claimLeastRecentlyUsed(
+                candidates,
+                preferredCandidates,
+                candidates.shortestTtftPool(
+                        config.shortestTtftCandidateCount(candidates.size())));
+        if (selectedIndex < 0) {
+            return -1;
+        }
+        if (affinityEnabled) {
+            String reason = contains(preferredCandidates, selectedIndex)
+                    ? "CACHE_LEADER"
+                    : affinityReason;
+            reportCacheAffinityDecision(
+                    roleType, candidates.endpoint(selectedIndex).getIp(), reason);
+            if (Logger.isDebugEnabled()) {
+                Logger.debug(
+                        "Prefill LRU cache-affinity decision - role: {}, group: {}, "
+                                + "selected: {}, minTtftMs: {}, selectedTtftMs: {}, "
+                                + "ttftCutoffMs: {}, hitTokens: {}, reason: {}",
+                        roleType,
+                        group,
+                        candidates.endpointAddress(selectedIndex),
+                        minProjectedTtftMs,
+                        candidates.projectedTtftMs(selectedIndex),
+                        affinityCutoffMs,
+                        candidates.cacheHit(selectedIndex),
+                        reason);
+            }
         }
         return selectedIndex;
     }
 
     /** Preserve CostBasedPrefill's original tie-window selection when affinity is disabled or gated off. */
     private int selectBaselineCandidate(
-            CandidateSet survivors, long minScore, FlexlbConfig config) {
+            PrefillCandidateSet survivors,
+            long minProjectedTtftMs,
+            FlexlbConfig config) {
 
         long tieThreshold = 0L;
-        RoutingConfig.PrefillSelectorConfig selector = config.getRouter().getRoles()
-                .getPrefill().getSelector();
-        RoutingConfig.CandidateChoiceConfig candidateChoice =
-                ((RoutingConfig.EstimatedTtftSelectorConfig) selector).getCandidateChoice();
-        if (candidateChoice instanceof RoutingConfig.RandomWithinToleranceConfig random) {
-            long percentageThreshold = (long) (minScore * random.getRelativeTolerance());
+        RoutingConfig.CandidateChoiceConfig candidateChoice = config.getRouter()
+                .getRoles().getPrefill().getCandidateChoice();
+        if (candidateChoice.getType()
+                == RoutingConfig.CandidateChoiceType.RANDOM_WITHIN_TOLERANCE) {
+            long percentageThreshold = (long) (
+                    minProjectedTtftMs
+                            * candidateChoice.getRelativeTolerance());
             tieThreshold = Math.max(
                     Math.max(0L, percentageThreshold),
-                    Math.max(0L, random.getMinimumToleranceMs()));
+                    Math.max(0L, candidateChoice.getMinimumToleranceMs()));
         }
-        long scoreCutoff = saturatingAdd(minScore, tieThreshold);
-        int selectedIndex = -1;
-        int tiedCount = 0;
+        long ttftCutoffMs = saturatingAdd(minProjectedTtftMs, tieThreshold);
+        int eligibleCount = 0;
+        boolean allExactlyEqual = true;
         for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.score(i) <= scoreCutoff
-                    && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
-                selectedIndex = i;
+            long projectedTtftMs = survivors.projectedTtftMs(i);
+            if (projectedTtftMs <= ttftCutoffMs) {
+                eligibleCount++;
+                allExactlyEqual &= projectedTtftMs == minProjectedTtftMs;
             }
         }
-        return selectedIndex;
+        if (eligibleCount == 0) {
+            return -1;
+        }
+        int selectedOffset = allExactlyEqual
+                ? (int) Math.floorMod(
+                        equalTtftCursor.getAndIncrement(),
+                        (long) eligibleCount)
+                : ThreadLocalRandom.current().nextInt(eligibleCount);
+        for (int i = 0; i < survivors.size(); i++) {
+            if (survivors.projectedTtftMs(i) <= ttftCutoffMs
+                    && selectedOffset-- == 0) {
+                return i;
+            }
+        }
+        throw new IllegalStateException(
+                "TTFT candidate count changed during immutable selection");
     }
 
-    /** Randomize only endpoints that have the same best cache hit and score. */
+    /** Fairly rotate only endpoints with the same best cache hit and projected TTFT. */
     private int selectCacheLeader(
-            CandidateSet survivors, CacheAffinityPolicy.Decision affinity) {
-        int firstIndex = affinity.preferredIndex(0);
-        long bestHit = survivors.cacheHit(firstIndex);
-        long bestScore = survivors.score(firstIndex);
-        int selectedIndex = firstIndex;
-        int tiedCount = 1;
-        for (int i = 1; i < affinity.preferredCount(); i++) {
-            int candidateIndex = affinity.preferredIndex(i);
-            if (survivors.cacheHit(candidateIndex) != bestHit
-                    || survivors.score(candidateIndex) != bestScore) {
-                break;
+            PrefillCandidateSet survivors, BitSet preferredCandidates) {
+        long bestHit = Long.MIN_VALUE;
+        long bestProjectedTtftMs = Long.MAX_VALUE;
+        int tiedCount = 0;
+        for (int candidateIndex = 0;
+                candidateIndex < survivors.size(); candidateIndex++) {
+            if (!contains(preferredCandidates, candidateIndex)) {
+                continue;
             }
-            if (ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
-                selectedIndex = candidateIndex;
+            long hit = survivors.cacheHit(candidateIndex);
+            long projectedTtftMs = survivors.projectedTtftMs(candidateIndex);
+            if (hit > bestHit
+                    || hit == bestHit && projectedTtftMs < bestProjectedTtftMs) {
+                bestHit = hit;
+                bestProjectedTtftMs = projectedTtftMs;
+                tiedCount = 1;
+            } else if (hit == bestHit
+                    && projectedTtftMs == bestProjectedTtftMs) {
+                tiedCount++;
             }
         }
-        return selectedIndex;
+        if (tiedCount == 0) {
+            return -1;
+        }
+        int selectedOffset = (int) Math.floorMod(
+                equalCacheLeaderCursor.getAndIncrement(),
+                (long) tiedCount);
+        for (int candidateIndex = 0;
+                candidateIndex < survivors.size(); candidateIndex++) {
+            if (!contains(preferredCandidates, candidateIndex)
+                    || survivors.cacheHit(candidateIndex) != bestHit
+                    || survivors.projectedTtftMs(candidateIndex)
+                            != bestProjectedTtftMs) {
+                continue;
+            }
+            if (selectedOffset-- == 0) {
+                return candidateIndex;
+            }
+        }
+        throw new IllegalStateException(
+                "cache-leader count changed during immutable selection");
     }
 
-    private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
-    protected static final class CandidateSet {
-        private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
-        private long[] cacheHits = new long[0];
-        private long[] scores = new long[0];
-        private long[] prefillMs = new long[0];
-        private long[] endpointWaitMs = new long[0];
-        private long[] pendingCounts = new long[0];
-        private int size;
-
-        private void reset(int expectedCapacity) {
-            if (expectedCapacity > endpoints.length) {
-                grow(expectedCapacity);
+    /** Claim the least-recently-used live clock, retrying one exact CAS race. */
+    private static int claimLeastRecentlyUsed(
+            PrefillCandidateSet candidates,
+            BitSet preferredCandidates,
+            BitSet baselineCandidates) {
+        BitSet pool = preferredCandidates.isEmpty()
+                ? baselineCandidates : preferredCandidates;
+        for (int attempt = 0; attempt < LRU_CLAIM_ATTEMPTS; attempt++) {
+            int selectedIndex = -1;
+            AtomicLong selectedClock = null;
+            long selectedValue = Long.MAX_VALUE;
+            for (int i = pool.nextSetBit(0);
+                    i >= 0;
+                    i = pool.nextSetBit(i + 1)) {
+                AtomicLong clock = candidates.endpoint(i)
+                        .getLastSelectedTime();
+                long value = clock.get();
+                if (selectedIndex < 0
+                        || value < selectedValue
+                        || value == selectedValue
+                                && (candidates.projectedTtftMs(i)
+                                        < candidates.projectedTtftMs(
+                                                selectedIndex)
+                                    || candidates.projectedTtftMs(i)
+                                        == candidates.projectedTtftMs(
+                                                selectedIndex)
+                                        && i < selectedIndex)) {
+                    selectedIndex = i;
+                    selectedClock = clock;
+                    selectedValue = value;
+                }
             }
-            size = 0;
-        }
-
-        private void addEndpoint(PrefillEndpoint endpoint) {
-            if (size == endpoints.length) {
-                grow(size + 1);
+            if (selectedIndex < 0) {
+                return -1;
             }
-            endpoints[size++] = endpoint;
+            if (attempt == 0) {
+                long nowMicros = TimeUnit.NANOSECONDS.toMicros(
+                        System.nanoTime());
+                if (selectedClock.compareAndSet(
+                        selectedValue,
+                        nextSelectionTime(selectedValue, nowMicros))) {
+                    return selectedIndex;
+                }
+            } else {
+                publishMonotonically(selectedClock);
+                return selectedIndex;
+            }
+        }
+        throw new IllegalStateException("unreachable LRU claim state");
+    }
+
+    private static void publishMonotonically(AtomicLong clock) {
+        long nowMicros = TimeUnit.NANOSECONDS.toMicros(
+                System.nanoTime());
+        clock.updateAndGet(current -> nextSelectionTime(current, nowMicros));
+    }
+
+    private static long nextSelectionTime(long current, long nowMicros) {
+        return current == Long.MAX_VALUE
+                ? Long.MAX_VALUE : Math.max(nowMicros, current + 1L);
+    }
+
+    private static boolean contains(BitSet candidates, int index) {
+        return candidates.get(index);
+    }
+
+    private record EndpointDiscovery(
+            List<EndpointRegistry.PrefillRoutingEntry> candidates) {
+
+        private EndpointDiscovery {
+            candidates = java.util.Objects.requireNonNull(
+                    candidates, "candidates");
         }
 
-        private void setCandidate(int index, PrefillEndpoint endpoint,
-                                  long cacheHit, long score, long singlePrefillMs,
-                                  long waitMs, long pendingCount) {
-            endpoints[index] = endpoint;
-            cacheHits[index] = cacheHit;
-            scores[index] = score;
-            prefillMs[index] = singlePrefillMs;
-            endpointWaitMs[index] = waitMs;
-            pendingCounts[index] = pendingCount;
+        private int registeredCount() {
+            return candidates.size();
         }
 
-        private void grow(int requiredCapacity) {
-            int newCapacity = Math.max(requiredCapacity,
-                    Math.max(16, endpoints.length + (endpoints.length >> 1)));
-            endpoints = Arrays.copyOf(endpoints, newCapacity);
-            cacheHits = Arrays.copyOf(cacheHits, newCapacity);
-            scores = Arrays.copyOf(scores, newCapacity);
-            prefillMs = Arrays.copyOf(prefillMs, newCapacity);
-            endpointWaitMs = Arrays.copyOf(endpointWaitMs, newCapacity);
-            pendingCounts = Arrays.copyOf(pendingCounts, newCapacity);
-        }
+        /** Zero-copy address view over the exact fleet used by this decision. */
+        private List<String> addresses() {
+            return new AbstractList<>() {
+                @Override
+                public String get(int index) {
+                    return candidates.get(index).address();
+                }
 
-        private void moveSelectionFields(int from, int to) {
-            endpoints[to] = endpoints[from];
-            cacheHits[to] = cacheHits[from];
-            scores[to] = scores[from];
-            prefillMs[to] = prefillMs[from];
-        }
-
-        private void setSelectionFields(int index, PrefillEndpoint endpoint,
-                                        long cacheHit, long score, long singlePrefillMs) {
-            endpoints[index] = endpoint;
-            cacheHits[index] = cacheHit;
-            scores[index] = score;
-            prefillMs[index] = singlePrefillMs;
-        }
-
-        protected PrefillEndpoint endpoint(int index) {
-            return endpoints[index];
-        }
-
-        protected long cacheHit(int index) {
-            return cacheHits[index];
-        }
-
-        protected long score(int index) {
-            return scores[index];
-        }
-
-        protected long prefillMs(int index) {
-            return prefillMs[index];
-        }
-
-        protected int size() {
-            return size;
+                @Override
+                public int size() {
+                    return candidates.size();
+                }
+            };
         }
     }
-    private record FilterResult(CandidateSet candidates, Map<String, Integer> rejections) {}
 
-    private FilterResult applyHardFilters(CandidateSet eligible, BalanceContext balanceContext,
-                                          FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
+    private PrefillCandidateSet evaluateCandidates(
+            EndpointDiscovery discovery,
+            BalanceContext balanceContext,
+            FlexlbConfig config,
+            Map<String, Integer> cacheMatchResults,
+            Map<String, Integer> rejections,
+            Map<RoleType, Integer> poolWideBlockers) {
         Request request = balanceContext.getRequest();
-        long seqLen = request.getSeqLen();
-        RoutingConfig.EstimatedTtftSelectorConfig selector =
-                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
-                        .getPrefill().getSelector();
-        RoutingConfig.CandidateChoiceConfig candidateChoice = selector.getCandidateChoice();
+        int eligibleSize = discovery.candidates().size();
+        PrefillCandidateSet.Scratch scratch = CANDIDATE_SCRATCH.get();
+        scratch.reset(eligibleSize);
+        PrefillCandidateSet modeled = scratch.modeled;
+        PrefillCandidateSet unmodeled = scratch.unmodeled;
+        long planningAtMs = System.currentTimeMillis();
+        RouteProjection.Session projectionSession = RouteProjection.session();
+
+        // Build one coherent projection per live endpoint. Cache
+        // hit is part of both the incoming service prediction and batch-group
+        // boundary planning; availability consumes this projection's pending
+        // count instead of taking a second, potentially contradictory snapshot.
+        RouteProjection.Demand projectionDemand = projectionDemand(config);
+        for (int i = 0; i < discovery.candidates().size(); i++) {
+            EndpointRegistry.PrefillRoutingEntry routingEntry =
+                    discovery.candidates().get(i);
+            PrefillEndpoint ep = routingEntry.endpoint();
+            String endpointAddress = routingEntry.address();
+            CacheTokenMatch cacheMatch =
+                    calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
+            long cacheHit = cacheMatch.effectiveHitTokens();
+            long routingCacheMatchTokens = cacheMatch.routingHitTokens();
+            RouteProjection.Inputs projectionInputs =
+                    ep.captureRouteProjectionInputs();
+            PrefillTimePredictor predictor = ep.getPredictor();
+            RouteProjection.CandidateView projection =
+                    projectionSession.projectView(
+                            projectionInputs,
+                            request.getRequestId(),
+                            balanceContext.getPriority(),
+                            planningAtMs,
+                            // RequestRegistry owns terminal deadlines.
+                            // Selection scores endpoint work only; an expiry race
+                            // must not be reported as a capacity blocker.
+                            Long.MAX_VALUE,
+                            request.getSeqLen(),
+                            cacheHit,
+                            routingCacheMatchTokens,
+                            projectionDemand,
+                            predictor == null
+                                    ? null : predictor.evaluator(),
+                            ep.deliveryProjection(),
+                            planningAtMs);
+            boolean modeledProjection = projection.selectable();
+            boolean unmodeledProjection = projection.engineWorkUnmodeled();
+            if (!modeledProjection && !unmodeledProjection) {
+                RoleType blockerRole = projection.blockerRole();
+                if (blockerRole != null) {
+                    poolWideBlockers.merge(
+                            blockerRole, 1, Integer::sum);
+                }
+                rejections.merge(
+                        "PROJECTION_"
+                                + projection.state().name()
+                                + "_"
+                                + projection.detail(),
+                        1,
+                        Integer::sum);
+                continue;
+            }
+
+            if (modeledProjection) {
+                modeled.addCandidate(
+                        endpointAddress, ep, projection,
+                        projectionInputs.ownershipVersion());
+            } else {
+                unmodeled.addCandidate(
+                        endpointAddress, ep, projection,
+                        projectionInputs.ownershipVersion());
+            }
+            // One routing request may inspect hundreds of endpoints. Keep the
+            // per-candidate diagnostic at TRACE so enabling ordinary DEBUG
+            // cannot turn the selection hot path into a log flood.
+            if (Logger.isTraceEnabled()) {
+                if (modeledProjection) {
+                    Logger.trace(
+                            "Prefill projection - ip: {}, order: {}, hitCache: {}, "
+                                    + "ttftMs: {}, drainMs: {}",
+                            endpointAddress,
+                            config.isPriorityOrdering() ? "PRIORITY" : "FIFO",
+                            cacheHit,
+                            projection.requiredProjectedTtftMs(),
+                            projection.hasProjectedDrain()
+                                    ? Long.toString(
+                                            projection.requiredProjectedDrainMs())
+                                    : projectionDemand.drainRequired()
+                                            ? "unknown"
+                                            : "not-requested");
+                } else {
+                    Logger.trace(
+                            "Prefill projection unmodeled - ip: {}, pendingRequests: {},"
+                                    + " reason: engine_work",
+                            endpointAddress,
+                            projection.requiredPendingCount());
+                }
+            }
+        }
+
+        if (modeled.size() != 0) {
+            return rejectOutliers(
+                    modeled, config, rejections);
+        }
+        return unmodeled;
+    }
+
+    private PrefillCandidateSet rejectOutliers(
+            PrefillCandidateSet feasible,
+            FlexlbConfig config,
+            Map<String, Integer> rejections) {
         RoutingConfig.OutlierRejectionConfig outlier =
-                candidateChoice instanceof RoutingConfig.RandomWithinToleranceConfig random
-                        ? random.getOutlierRejection()
-                        : candidateChoice instanceof RoutingConfig.BestOnlyConfig best
-                                ? best.getOutlierRejection() : null;
+                outlierRejection(config.getRouter().getRoles().getPrefill()
+                        .getCandidateChoice());
         double hotspotMultiplier = outlier == null
                 ? 0.0 : outlier.getMaxPendingVsAverageMultiplier();
         double imbalanceMultiplier = outlier == null
-                ? 0.0 : outlier.getMaxWaitVsAverageMultiplier();
-        boolean schedulerOwnsRequest = queueSchedulerOwnsRequest(balanceContext);
-        boolean priorityOrdered = schedulerOwnsRequest && config.isPriorityOrdering();
-
-        int eligibleSize = eligible.size();
-        CandidateSet feasible = eligible;
-        Map<String, Integer> rejections = new java.util.HashMap<>();
-        FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(seqLen);
-        long sumWaitMs = 0;
-        long sumPendingCount = 0;
-
-        // Round 1: cache wait time / pending count for feasible endpoints.
-        int feasibleCount = 0;
-        for (int i = 0; i < eligibleSize; i++) {
-            PrefillEndpoint ep = eligible.endpoint(i);
-            PrefillTimePredictor predictor = ep.getPredictor();
-            if (predictor == null) {
-                rejections.merge("PREDICTOR_MISSING", 1, Integer::sum);
-                continue;
-            }
-
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults, request);
-            // Cache 收益已折进 estimate(predictor, cacheHit)（hitTokens 参与公式求值），不再单列扣减
-            long singlePrefillMs = Math.max(0L, formulaEstimateMemo.estimate(predictor, cacheHit));
-
-            long endpointWaitMs = ep.realWaitTimeMs();
-            if (endpointWaitMs == Long.MAX_VALUE) {
-                // An unavailable ledger estimate is deliberately not a numeric wait
-                // estimate. Treat this worker as unavailable for this selection;
-                // adding the sentinel would wrap the score negative and make the
-                // least observable worker look best.
-                rejections.merge("WAIT_ESTIMATE_UNAVAILABLE", 1, Integer::sum);
-                continue;
-            }
-            endpointWaitMs = Math.max(0L, endpointWaitMs);
-
-            long serviceWaitMs = saturatingAdd(endpointWaitMs, singlePrefillMs);
-            long pendingCount = ep.realPendingCount();
-            // Priority ordering adds the exact queue prefix estimate; FIFO
-            // batch dispatch uses the batcher's aggregate wait estimate.
-            long batcherWaitMs = estimatedBatcherWaitMs(
-                    ep, balanceContext, schedulerOwnsRequest, priorityOrdered);
-            long score = saturatingAdd(serviceWaitMs, batcherWaitMs);
-            feasible.setCandidate(feasibleCount++, ep, cacheHit, score, singlePrefillMs,
-                    endpointWaitMs, pendingCount);
-            sumWaitMs = saturatingAdd(sumWaitMs, endpointWaitMs);
-            sumPendingCount = saturatingAdd(sumPendingCount, Math.max(0L, pendingCount));
+                ? 0.0 : outlier.getMaxProjectedDrainVsAverageMultiplier();
+        if (hotspotMultiplier <= 0.0 && imbalanceMultiplier <= 0.0) {
+            return feasible;
         }
-        feasible.size = feasibleCount;
-
-        if (feasible.size() == 0) {
-            return new FilterResult(feasible, rejections);
-        }
-
-        long avgWaitMs = sumWaitMs / feasible.size();
-        long avgPendingCount = sumPendingCount / feasible.size();
-
-        // Round 2: hotspot / imbalance filter using cached values (no re-computation)
-        int survivorCount = 0;
-        PrefillEndpoint leastLoadedEndpoint = null;
-        long leastLoadedCacheHit = 0;
-        long leastLoadedScore = 0;
-        long leastLoadedPrefillMs = 0;
-        long leastWaitMs = Long.MAX_VALUE;
         int feasibleSize = feasible.size();
+        long avgDrainMs = feasible.knownDrainCount == 0
+                ? 0L
+                : feasible.projectedDrainTotalMs / feasible.knownDrainCount;
+        long avgPendingCount = feasible.pendingRequestTotal / feasibleSize;
+
+        // Balanced fleets are the dominant path. The maxima were reduced
+        // while candidates were projected, so prove that no outlier can be
+        // rejected without walking all endpoints a second time.
+        boolean mayRejectHotspot = hotspotMultiplier > 0.0
+                && avgPendingCount > 0L
+                && feasible.maximumPendingCount
+                        > avgPendingCount * hotspotMultiplier;
+        boolean mayRejectDrain = imbalanceMultiplier > 0.0
+                && avgDrainMs > 0L
+                && feasible.maximumProjectedDrainMs
+                        > avgDrainMs * imbalanceMultiplier;
+        if (!mayRejectHotspot && !mayRejectDrain) {
+            return feasible;
+        }
+
+        // Round 2: hotspot / drain-imbalance filter using the same projections.
+        int retainedCount = 0;
+        int leastLoadedIndex = -1;
+        long leastDrainMs = Long.MAX_VALUE;
+        int leastPendingIndex = -1;
+        long leastPendingCount = Long.MAX_VALUE;
+        int hotspotRejected = 0;
+        int imbalanceRejected = 0;
+        feasible.beginRetainedSummary();
         for (int i = 0; i < feasibleSize; i++) {
-            long endpointWaitMs = feasible.endpointWaitMs[i];
-            long pendingCount = feasible.pendingCounts[i];
+            long pendingCount = feasible.pendingCount(i);
 
-            if (endpointWaitMs < leastWaitMs) {
-                leastWaitMs = endpointWaitMs;
-                leastLoadedEndpoint = feasible.endpoint(i);
-                leastLoadedCacheHit = feasible.cacheHit(i);
-                leastLoadedScore = feasible.score(i);
-                leastLoadedPrefillMs = feasible.prefillMs(i);
+            if (feasible.hasProjectedDrain(i)
+                    && feasible.projectedDrainMs(i) < leastDrainMs) {
+                leastDrainMs = feasible.projectedDrainMs(i);
+                leastLoadedIndex = i;
+            }
+            if (pendingCount < leastPendingCount) {
+                leastPendingCount = pendingCount;
+                leastPendingIndex = i;
             }
 
-            if (hotspotMultiplier > 0 && avgPendingCount > 0 && pendingCount > avgPendingCount * hotspotMultiplier) {
-                rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
-                continue;
+            boolean rejected = false;
+            if (mayRejectHotspot
+                    && pendingCount > avgPendingCount * hotspotMultiplier) {
+                hotspotRejected++;
+                rejected = true;
             }
-            if (imbalanceMultiplier > 0 && avgWaitMs > 0 && endpointWaitMs > avgWaitMs * imbalanceMultiplier) {
-                rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
-                continue;
+            if (!rejected && mayRejectDrain
+                    && feasible.hasProjectedDrain(i)
+                    && feasible.projectedDrainMs(i)
+                    > avgDrainMs * imbalanceMultiplier) {
+                imbalanceRejected++;
+                rejected = true;
             }
-
-            feasible.moveSelectionFields(i, survivorCount++);
+            if (!rejected) {
+                feasible.retainAndSummarize(i, retainedCount++);
+            }
         }
 
-        if (survivorCount == 0 && leastLoadedEndpoint != null) {
-            feasible.setSelectionFields(
-                    0,
-                    leastLoadedEndpoint,
-                    leastLoadedCacheHit,
-                    leastLoadedScore,
-                    leastLoadedPrefillMs);
-            survivorCount = 1;
+        if (hotspotRejected > 0) {
+            rejections.merge(
+                    "HOTSPOT_FILTERED", hotspotRejected, Integer::sum);
         }
-        feasible.size = survivorCount;
+        if (imbalanceRejected > 0) {
+            rejections.merge(
+                    "IMBALANCE_FILTERED", imbalanceRejected, Integer::sum);
+        }
+        if (retainedCount == feasibleSize) {
+            return feasible;
+        }
 
-        return new FilterResult(feasible, rejections);
+        if (retainedCount == 0) {
+            int requiredSurvivorIndex = leastLoadedIndex >= 0
+                    ? leastLoadedIndex : leastPendingIndex;
+            if (requiredSurvivorIndex >= 0) {
+                feasible.retainAndSummarize(
+                        requiredSurvivorIndex, retainedCount++);
+            }
+        }
+
+        feasible.finishRetainedSummary(retainedCount);
+        return feasible;
     }
 
-    private long estimatedBatcherWaitMs(PrefillEndpoint ep,
-                                        BalanceContext balanceContext,
-                                        boolean schedulerOwnsRequest,
-                                        boolean priorityOrdered) {
-        if (!schedulerOwnsRequest) {
-            return 0L;
+    static RoleType provenPoolWideBlocker(
+            Map<RoleType, Integer> blockers,
+            int registeredEndpoints) {
+        if (registeredEndpoints <= 0) {
+            return null;
         }
-        long waitMs = priorityOrdered
-                ? ep.batcherEstimatedWaitMs(
-                        balanceContext.getPriority(),
-                        balanceContext.getRequestId())
-                : ep.batcherWaitMs();
-        return Math.max(0L, waitMs);
+        for (Map.Entry<RoleType, Integer> blocker : blockers.entrySet()) {
+            if (blocker.getValue() >= registeredEndpoints) {
+                return blocker.getKey();
+            }
+        }
+        return null;
     }
 
-    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group,
-                                                       ResourceMeasureIndicatorEnum indicator,
-                                                       String excludedIpPort) {
-        CandidateSet result = candidateSets.get();
-        result.reset(engineWorkerStatus.getModelWorkerCapacity(roleType));
-        PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
-        if (measure == null) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
-        }
-        Map<String, Integer> rejections = new java.util.HashMap<>();
-
-        PrefillEndpoint[] excludedEligible = new PrefillEndpoint[1];
-        int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
-            if (!(ep instanceof PrefillEndpoint pe)) {
-                return;
-            }
-            if (!pe.getStatus().isAlive()) {
-                rejections.merge("NOT_ALIVE", 1, Integer::sum);
-                return;
-            }
-            if (!measure.isResourceAvailable(pe)) {
-                rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
-                return;
-            }
-            // P1-4: skip the worker whose queue just rejected the offer — the
-            // fallback re-route must land elsewhere (kept below when it is
-            // the only eligible worker).
-            if (excludedIpPort != null && excludedIpPort.equals(ipPort)) {
-                excludedEligible[0] = pe;
-                rejections.merge("EXCLUDED_RETRY", 1, Integer::sum);
-                return;
-            }
-            result.addEndpoint(pe);
-        });
-        if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
-        }
-        if (result.size() == 0 && excludedEligible[0] != null) {
-            // P1-4: single-worker (or fully-filtered) cluster — excluding the
-            // only eligible worker would turn a queue-full retry into a hard
-            // NO_AVAILABLE_WORKER; retain that worker as the retry candidate.
-            result.addEndpoint(excludedEligible[0]);
-        }
-        return new EndpointFilterResult(result, rejections);
+    /**
+     * Drain is a cost-policy input only when drain-imbalance rejection is live.
+     * Pending-count filtering and final TTFT choice do not consume it.
+     */
+    private RouteProjection.Demand projectionDemand(FlexlbConfig config) {
+        RoutingConfig.OutlierRejectionConfig outlier =
+                outlierRejection(config.getRouter().getRoles().getPrefill()
+                        .getCandidateChoice());
+        return outlier != null
+                && outlier.getMaxProjectedDrainVsAverageMultiplier() > 0.0
+                ? RouteProjection.Demand.TTFT_AND_DRAIN
+                : RouteProjection.Demand.TTFT_ONLY;
     }
 
-    private static final class FormulaEstimateMemo {
-        private static final int MAX_CACHE_HITS = 16;
-
-        private final long seqLen;
-        private String formulaKey;
-        private long[] estimates;
-        private int estimateCount;
-
-        private FormulaEstimateMemo(long seqLen) {
-            this.seqLen = seqLen;
-        }
-
-        private long estimate(PrefillTimePredictor predictor, long cacheHit) {
-            if (!(predictor instanceof FormulaPredictor formulaPredictor)) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            String key = formulaPredictor.immutableFormulaKey();
-            if (formulaKey == null) {
-                formulaKey = key;
-                estimates = new long[MAX_CACHE_HITS * 2];
-            } else if (!formulaKey.equals(key)) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            for (int i = 0; i < estimateCount; i++) {
-                int offset = i * 2;
-                if (estimates[offset] == cacheHit) {
-                    return estimates[offset + 1];
-                }
-            }
-            long estimate = predictor.estimateMs(seqLen, cacheHit);
-            if (estimateCount < MAX_CACHE_HITS) {
-                int offset = estimateCount++ * 2;
-                estimates[offset] = cacheHit;
-                estimates[offset + 1] = estimate;
-            }
-            return estimate;
-        }
+    private static RoutingConfig.OutlierRejectionConfig outlierRejection(
+            RoutingConfig.CandidateChoiceConfig candidateChoice) {
+        return switch (candidateChoice.getType()) {
+            case RANDOM_WITHIN_TOLERANCE, BEST_ONLY ->
+                    candidateChoice.getOutlierRejection();
+            case LEAST_RECENTLY_USED_IN_POOL -> null;
+        };
     }
 
-    private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
+    private EndpointDiscovery discoverAliveEndpoints(
+            RoleType roleType,
+            String group) {
+        List<EndpointRegistry.PrefillRoutingEntry> directory =
+                workerDirectory.prefillRoutingSnapshot(roleType);
+        if (group == null) {
+            return new EndpointDiscovery(directory);
+        }
+        List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
+        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
+            WorkerStatus.TopologySnapshot topology = entry.endpoint()
+                    .getStatus().topologySnapshot();
+            if (group.equals(topology.group())) {
+                matching.add(entry);
+            }
+        }
+        return new EndpointDiscovery(List.copyOf(matching));
+    }
+
+    private Map<String, Integer> getCacheMatchResults(
+            BalanceContext balanceContext,
+            RoleType roleType,
+            EndpointDiscovery discovery) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
+        return cacheAwareService.findMatchingEngines(
+                blockCacheKeys, roleType, discovery.addresses());
     }
 
-    private long calculateCacheHit(PrefillEndpoint ep,
-                                   Map<String, Integer> cacheMatchResults,
-                                   Request request) {
-        if (cacheMatchResults == null || request == null) {
-            return 0L;
+    private record CacheTokenMatch(
+            long effectiveHitTokens,
+            long routingHitTokens) {
+        private static final CacheTokenMatch NONE =
+                new CacheTokenMatch(0L, 0L);
+    }
+
+    private CacheTokenMatch calculateCacheMatch(
+            PrefillEndpoint ep,
+            String endpointAddress,
+            Map<String, Integer> cacheMatchResults,
+            Request request) {
+        if (cacheMatchResults == null || cacheMatchResults.isEmpty() || request == null) {
+            return CacheTokenMatch.NONE;
         }
         long seqLen = request.getSeqLen();
         if (seqLen <= 0L) {
-            return 0L;
+            return CacheTokenMatch.NONE;
         }
-        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
+        Integer prefixMatchLength = cacheMatchResults.get(endpointAddress);
         if (prefixMatchLength == null || prefixMatchLength <= 0) {
-            return 0L;
+            return CacheTokenMatch.NONE;
         }
         long blockSize = request.getCacheKeyBlockSize();
-        if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
-            blockSize = ep.getStatus().getCacheStatus().getBlockSize();
+        WorkerStatus status = ep.getStatus();
+        CacheStatus cacheStatus = status == null ? null : status.getCacheStatus();
+        if (blockSize <= 0L && cacheStatus != null) {
+            blockSize = cacheStatus.getBlockSize();
         }
         if (blockSize <= 0L) {
-            return 0L;
+            return CacheTokenMatch.NONE;
         }
         long rawHit;
         try {
-            rawHit = Math.multiplyExact(blockSize, prefixMatchLength.longValue());
+            rawHit = Math.multiplyExact(
+                    blockSize, prefixMatchLength.longValue());
         } catch (ArithmeticException overflow) {
             rawHit = seqLen;
         }
-        if (rawHit >= seqLen) {
-            return Math.max(0L, seqLen - blockSize);
-        }
-        return Math.max(0L, rawHit);
+        long routingHit = Math.min(seqLen, Math.max(0L, rawHit));
+        long effectiveHit = rawHit >= seqLen
+                ? Math.max(0L, seqLen - blockSize)
+                : routingHit;
+        return new CacheTokenMatch(effectiveHit, routingHit);
     }
 
     private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
@@ -581,18 +866,27 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
     }
 
-    private void reportSelectedEstimates(RoleType roleType,
-                                         PrefillEndpoint endpoint,
-                                         FlexlbConfig config,
-                                         long estimatedTtftMs,
-                                         long executionTimeMs) {
-        String deliveryMode = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
+    /**
+     * Publish only estimates that were part of the actual selection decision.
+     * Unmodeled selections intentionally have no projected TTFT, so emitting a
+     * fabricated value for them would corrupt the metric distribution.
+     */
+    private void reportSelectedEstimates(
+            RoleType roleType,
+            PrefillEndpoint endpoint,
+            FlexlbConfig config,
+            OptionalLong projectedTtftMs,
+            long executionTimeMs) {
+        if (projectedTtftMs.isEmpty()) {
+            return;
+        }
+        String deliveryMode = config.getDispatcher().typeName();
         try {
             engineHealthReporter.reportPrefillSelectedEstimates(
                     roleType,
                     endpoint.getIp(),
                     deliveryMode,
-                    estimatedTtftMs,
+                    projectedTtftMs.getAsLong(),
                     executionTimeMs);
         } catch (RuntimeException telemetryFailure) {
             Logger.warn(
@@ -601,43 +895,72 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
     }
 
-    private ServerStatus buildServerStatus(PrefillEndpoint ep,
-                                           RoleType roleType,
-                                           long requestId,
-                                           long score,
-                                           long selectedPrefillMs,
-                                           BalanceContext balanceContext,
-                                           long bestCacheHit) {
-        // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
-        if (strategyOwnsInflightTracking(balanceContext)) {
-            ep.commitBatch(requestId, selectedPrefillMs, Collections.emptyList());
-        }
-
-        // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
-        DebugInfo debugInfo = new DebugInfo();
-        debugInfo.setHitCacheLen(bestCacheHit);
-
-        ServerStatus result = new ServerStatus();
-        result.setSuccess(true);
-        result.setRole(roleType);
-        result.setRequestId(requestId);
-        result.setPrefillTime(score);
-        result.setGroup(ep.getStatus().getGroup());
-        result.setServerIp(ep.getIp());
-        result.setHttpPort(ep.getHttpPort());
-        result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
-        result.setDpRank(ep.getStatus().getDpRank());
-        result.setDebugInfo(debugInfo);
-        return result;
+    private void reportRoutingCacheMatchMetrics(
+            RoleType roleType,
+            long selectedHitTokens,
+            long candidateMaxHitTokens,
+            long totalTokens) {
+        engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(
+                roleType, selectedHitTokens, totalTokens);
+        engineHealthReporter.reportRoutingCandidateMaxCacheMatchMetrics(
+                roleType, candidateMaxHitTokens);
     }
 
-    protected void reportCacheAffinityDecision(RoleType roleType,
-                                               String engineIp,
-                                               String decision) {
+    private SelectedRole buildSelectedRole(
+            PrefillEndpoint ep,
+            RoleType roleType,
+            long requestId,
+            OptionalLong projectedTtftMs,
+            long selectedPrefillMs,
+            long bestCacheHit,
+            long placementVersion,
+            WorkerEndpoint.GenerationPin selectedPin) {
+        try {
+            // Populate DebugInfo so ScheduledRequest.hitCache() can read
+            // hitCacheLen for batch metrics.
+            DebugInfo debugInfo = new DebugInfo();
+            debugInfo.setHitCacheLen(bestCacheHit);
+
+            if (selectedPin == null || selectedPin.endpoint() != ep) {
+                throw new IllegalStateException(
+                        "selected Prefill endpoint generation changed before handoff");
+            }
+            WorkerStatus workerStatus = ep.getStatus();
+            WorkerStatus.TopologySnapshot topology = workerStatus.topologySnapshot();
+            WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
+            ServerStatus result = new ServerStatus();
+            result.setRole(roleType);
+            result.setRequestId(requestId);
+            if (projectedTtftMs.isPresent()) {
+                result.setPrefillTime(projectedTtftMs.getAsLong());
+            }
+            // For an unmodeled selection, leave the public primitive field unset.
+            // Its default zero is wire-compatible metadata only: production code
+            // never reads it as a TTFT (RequestScheduler only copies the DTO).
+            result.setGroup(topology.group());
+            result.setServerIp(topology.ip());
+            result.setHttpPort(topology.port());
+            result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
+            result.setDpRank(status.dpRank());
+            result.setDebugInfo(debugInfo);
+            result.setSuccess(true);
+            WorkerEndpoint.GenerationPin ownedPin = selectedPin;
+            selectedPin = null;
+            return SelectedRole.prefill(
+                    ownedPin, result, selectedPrefillMs, placementVersion);
+        } finally {
+            if (selectedPin != null) {
+                selectedPin.close();
+            }
+        }
+    }
+
+    private void reportCacheAffinityDecision(
+            RoleType roleType, String engineIp, String decision) {
         engineHealthReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
     }
 
-    protected static long saturatingAdd(long left, long right) {
+    private static long saturatingAdd(long left, long right) {
         if (right > 0L && left > Long.MAX_VALUE - right) {
             return Long.MAX_VALUE;
         }
@@ -647,17 +970,4 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return left + right;
     }
 
-    /** Whether this request is owned by the common queue/batch scheduler. */
-    private static boolean queueSchedulerOwnsRequest(BalanceContext balanceContext) {
-        if (balanceContext == null || balanceContext.getConfig() == null) {
-            return false;
-        }
-        FlexlbConfig config = balanceContext.getConfig();
-        return config.isQueue();
-    }
-
-    /** Whether this strategy, rather than PriorityScheduler, owns Prefill accounting. */
-    private static boolean strategyOwnsInflightTracking(BalanceContext balanceContext) {
-        return !queueSchedulerOwnsRequest(balanceContext);
-    }
 }
