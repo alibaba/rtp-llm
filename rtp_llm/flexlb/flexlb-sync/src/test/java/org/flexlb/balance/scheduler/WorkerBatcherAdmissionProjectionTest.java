@@ -212,6 +212,7 @@ class WorkerBatcherAdmissionProjectionTest {
                 prefillEndpoint,
                 null,
                 null,
+                0L,
                 enqueuedAtMs);
     }
 

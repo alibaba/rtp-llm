@@ -190,6 +190,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong admissionVersion = new AtomicLong();
 
     /**
+     * Bounded seqlock retry budget for {@link #ledgerAuditView()}: a
+     * capture whose version moved (an admission writer interleaved with
+     * the lock-free layer reads) is retried at most this many times
+     * before the last capture is returned torn for the reconciliation
+     * confirm-window to absorb.
+     */
+    private static final int LEDGER_CAPTURE_MAX_ATTEMPTS = 4;
+
+    /**
      * Generation-local, non-authoritative cache for bulk routing traversal.
      *
      * <p>Both key components are required: local admission mutations advance
@@ -1405,20 +1414,32 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * reconciliation (plan section 6, stage 1 three-way comparison).
      *
      * <p>Pure addition: this view changes no layer semantics and never
-     * mutates state.  <b>Capture consistency contract (stage-1 fix D1):</b>
-     * the five HashMap-backed layers (L2 count, L4 claims, L4b attempt
-     * incoming, L5 protections, L6 tombstones) are copied inside one short
-     * admission-lock critical section — O(|claims|+|protections|+|tombstones|),
-     * never O(|L1|) — while the four concurrent-container layers (L1
-     * inflight, L3 confirmed, L7 queued phase, L8 dispatch permits) are
-     * copied lock-free right after it, each individually atomic (weakly
-     * consistent iterator) but mutually unaligned by up to one admission
-     * tick.  Cross-layer tears in this window are exactly what the
-     * harness confirm-window absorbs; the lock budget no longer scales
-     * with the running-request count, so the 10 ms reconciliation period
-     * cannot squeeze {@code admission} / {@code doCalibrate}.</p>
+     * mutates state.  <b>Capture consistency contract (stage-1 fix D1,
+     * rebase-round hardening):</b> the five HashMap-backed layers (L2 count,
+     * L4 claims, L4b attempt incoming, L5 protections, L6 tombstones) are
+     * copied inside one short admission-lock critical section —
+     * O(|claims|+|protections|+|tombstones|), never O(|L1|) — while the four
+     * concurrent-container layers (L1 inflight, L3 confirmed, L7 queued
+     * phase, L8 dispatch permits) are copied lock-free right after it.
+     * A third lock-guarded version recheck then certifies the capture:
+     * every writer mutates these layers and bumps {@code admissionVersion}
+     * inside one admission-lock critical section, so acquiring the lock
+     * with an unchanged version proves no writer interleaved between the
+     * two lock phases — the eight layers form one consistent snapshot
+     * (this is what lets the KV-allocated same-tick atomicity auditor
+     * observe real intermediate states instead of reader-side tears).  A
+     * moved version retries the capture (bounded, see
+     * {@link #LEDGER_CAPTURE_MAX_ATTEMPTS}); under extreme admission
+     * contention the last capture is returned torn — exactly the window
+     * the harness confirm-window absorbs.  The lock budget still never
+     * scales with the running-request count, so the 10 ms reconciliation
+     * period cannot squeeze {@code admission} / {@code doCalibrate}.</p>
      */
     public DecodeLedgerAuditView ledgerAuditView() {
+        DecodeLedgerAuditView captured = null;
+        for (int captureAttempt = 0;
+                captureAttempt < LEDGER_CAPTURE_MAX_ATTEMPTS;
+                captureAttempt++) {
         // Phase 1 — admission lock: admissionVersion plus the five
         // HashMap-backed layers (small key sets; the critical section is
         // bounded by the preemption / fence / tombstone populations, not
@@ -1451,7 +1472,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         Map<Long, Long> confirmedTokens = new HashMap<>();
         trackedConfirmed.forEach((requestId, task) ->
                 confirmedTokens.put(requestId, task.reservationToken()));
-        return new DecodeLedgerAuditView(
+        captured = new DecodeLedgerAuditView(
                 version,
                 Map.copyOf(inflightRequests),
                 lifecycleReservationCount,
@@ -1464,6 +1485,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 Set.copyOf(engineDispatchPermits.keySet()),
                 inflightKvReservedTotal.get(),
                 inflightExpectedKvReservedTotal.get());
+        // Phase 3 — admission lock: version revalidation.  Acquiring the
+        // lock proves any prior writer finished its full critical section
+        // (layer mutations plus the version bump happen together under
+        // the lock), so an unchanged version certifies that no writer
+        // interleaved with the Phase 2 reads — all eight layers belong to
+        // one quiet window.  The critical section is a single volatile
+        // read, so it cannot contend meaningfully with admission.
+        admissionLock.lock();
+        try {
+            if (admissionVersion.get() == version) {
+                return captured;
+            }
+        } finally {
+            admissionLock.unlock();
+        }
+        }
+        // Bounded-retry fallback: extreme admission contention (a writer
+        // landing inside every capture window) returns the last capture
+        // torn; the reconciliation harness confirm-window absorbs exactly
+        // these single-snapshot tears.
+        return captured;
     }
 
     /**

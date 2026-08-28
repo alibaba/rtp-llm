@@ -61,6 +61,16 @@ class LedgerReconciliationSoakTest {
             h.fixedWindowDecision().setMaxRequests(2);
             h.config.queueScheduler().getCapacity()
                     .setMaxWaitingRequestsPerPrefillWorker(1024);
+            // Mock-engine requests routinely finish inside one pump
+            // sampling gap, so the decode acceptance fact is never
+            // observed and the admission permit falls back to the 30 s
+            // delivered-not-accepted timeout.  Sustained batch traffic
+            // (~200 req/s) would exhaust the production default of 200
+            // permits within a second; this soak targets ledger
+            // reconciliation, not the admission capacity gate, so raise
+            // the ceiling for the soak window only.
+            h.config.queueScheduler().getLifecycle()
+                    .setMaxDeliveredNotAcceptedRequestsGlobal(100_000);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);
 
