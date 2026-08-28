@@ -34,8 +34,11 @@ bash run_online_eval.sh
 | prefill.scale | 1.0 | Prefill-specific multiplier |
 | prefill.max_waiting_batches | 0 | Cap on queued (not-running) prefill batches per engine; excess enqueues are rejected (backpressure). `0` (shipped default) = zero-waiting fail-fast: a batch is accepted only when the engine is idle (a `max_prefill_concurrency` slot is free), otherwise rejected immediately. Positive n allows up to n queued batches — rule of thumb: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom); for 1x-scale runs where a batch takes ~330–400 ms, use 1–2. Absent field or negative = unbounded queue (legacy behavior) |
 | decode.scale | 1.0 | Decode-specific multiplier |
-| decode.step_ms_by_batch | [[1,1.0],...] | Per-step latency by batch size |
-| decode.per_token_ms | null | Fixed per-token decode latency (ms); when set, overrides step_ms_by_batch curve (e.g. 45.0 ≈ DeepSeek V3 ~22 tok/s) |
+| decode.step_base_ms | 19.5 | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared |
+| decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (production DSv4 fit) |
+| decode.tokens_per_step | 2.6 | MTP acceptance fold: tokens produced per running stream per decode step (production DSv4 accepts 2.54–2.88). Steps for output_len tokens = ceil(output_len / tokens_per_step) |
+| decode.step_ms_by_batch | null | Explicit per-step latency curve [[batch, step_ms], ...]; when declared it overrides the linear fit (mutually exclusive with step_base_ms/step_per_running_ms). Absent → linear production fit |
+| ~~decode.per_token_ms~~ | — | REMOVED (task #69): fixed per-token latency was a V3-era no-MTP single-stream caliber that overstated low-batch decode ~5.5× and full-batch ~2.8×. Declaring it now fails fast with a migration hint |
 | jitter_pct | 0.0 | Random jitter (±%) |
 
 ### Runtime HTTP API

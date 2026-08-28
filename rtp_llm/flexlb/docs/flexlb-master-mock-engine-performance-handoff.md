@@ -218,12 +218,19 @@ prefill_ms = formula(batchSize, inputTokens, computeTokens,
                      hitCacheTokens, hasHitCache) * prefill.scale * sleep_scale
 ```
 
-Decode 时间由输出长度和实时 active batch 决定：
+Decode 时间按 per-step 口径计费（task #69 生产对齐）：每个 step 推进
+tokens_per_step 个 token（MTP 折算，生产 DSv4 accept 2.54–2.88），step 时长
+优先用显式 step_ms_by_batch 曲线，否则用线性生产拟合 19.5 + 0.175 × running：
 
 ```text
-decode_ms = output_len * interpolate(step_ms_by_batch, active_batch)
+decode_ms = ceil(output_len / tokens_per_step)
+            * (step_base_ms + step_per_running_ms * running)   # 或 curve(batch)
             * decode.scale * sleep_scale
 ```
+
+低批（running=4）≈ 515 tok/s、满批（running=128）≈ 7900 tok/s，
+与生产实测（519 / 7726）对齐；旧的固定 per_token_ms=45 口径已删除
+（低批高估 ~5.5x、满批高估 ~2.8x）。
 
 `fast_ab` 模型的 `sleep_scale=0.1` 用于给 mock 留出吞吐余量，避免下面的模拟 engine 先卡住 Master。它适合隔离 Master 调度上限，不代表真实 LLM engine 的绝对 TTFT 或端到端容量。需要评估真实 engine 容量时，必须换成真实测得的 performance model，并重新确认 mock 不成为瓶颈。
 
