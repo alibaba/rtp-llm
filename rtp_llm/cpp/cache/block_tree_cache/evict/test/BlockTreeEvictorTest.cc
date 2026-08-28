@@ -1219,6 +1219,74 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
     group_->unreferenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{node, {source}}}}, BlockTreeRefType::CACHE);
 }
 
+TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsDeviceParentOfLoadingChildUnlessForceDropping) {
+    auto host_pool = makePageableHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+
+    const auto device_blocks = device_pool_->malloc(2);
+    ASSERT_TRUE(device_blocks.has_value());
+    ASSERT_EQ(device_blocks->size(), 2u);
+    const BlockIdxType host_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+
+    auto path =
+        insert({100, 200}, {{makeResource(Tier::DEVICE, (*device_blocks)[0])}, {makeResource(Tier::HOST, host_block)}});
+    auto rival = insert({300}, {{makeResource(Tier::DEVICE, (*device_blocks)[1])}});
+    ASSERT_EQ(path.inserted_nodes.size(), 2u);
+    TreeNode* parent = path.inserted_nodes[0];
+    TreeNode* child  = path.inserted_nodes[1];
+    ASSERT_NE(insertedNode(rival), nullptr);
+    ASSERT_EQ(evictor_->candidateStats().device_candidates, 2u);
+
+    for (GroupSetTransferState state : {GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING}) {
+        child->group_set_resources[0].transfer_state = state;
+
+        auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false);
+        ASSERT_TRUE(victim.has_value());
+        EXPECT_EQ(victim->node, insertedNode(rival));
+        EXPECT_EQ(evictor_->candidateStats().device_candidates, 2u);
+
+        victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/true);
+        ASSERT_TRUE(victim.has_value());
+        EXPECT_EQ(victim->node, parent);
+        EXPECT_EQ(evictor_->candidateStats().device_candidates, 2u);
+    }
+
+    child->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    const auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->node, parent);
+}
+
+TEST_F(BlockTreeEvictorTest, ChooseVictimReturnsEmptyWhenAllDeviceCandidatesAreSkipped) {
+    auto host_pool = makePageableHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+
+    const auto device_blocks = device_pool_->malloc(1);
+    ASSERT_TRUE(device_blocks.has_value());
+    ASSERT_EQ(device_blocks->size(), 1u);
+    const BlockIdxType host_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+
+    auto path = insert({100, 200},
+                       {{makeResource(Tier::DEVICE, device_blocks->front())}, {makeResource(Tier::HOST, host_block)}});
+    ASSERT_EQ(path.inserted_nodes.size(), 2u);
+    TreeNode* parent = path.inserted_nodes[0];
+    TreeNode* child  = path.inserted_nodes[1];
+    ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
+
+    child->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
+    EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false).has_value());
+    EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
+
+    const auto forced = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/true);
+    ASSERT_TRUE(forced.has_value());
+    EXPECT_EQ(forced->node, parent);
+    EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
+}
+
 TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) {
     const auto allocated = device_pool_->malloc(3);
     ASSERT_TRUE(allocated.has_value());

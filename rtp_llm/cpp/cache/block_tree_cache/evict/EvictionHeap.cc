@@ -77,10 +77,13 @@ void EvictionHeap::erase(TreeNode* node) {
     index_.erase(it);
 }
 
-std::optional<EvictionEntry> EvictionHeap::best() const {
-    if (ordered_.empty())
-        return std::nullopt;
-    return *ordered_.begin();
+std::optional<EvictionEntry> EvictionHeap::best(const std::function<bool(TreeNode*)>& can_evict) const {
+    for (const EvictionEntry& entry : ordered_) {
+        if (can_evict(entry.node)) {
+            return entry;
+        }
+    }
+    return std::nullopt;
 }
 
 bool EvictionHeap::contains(TreeNode* node) const {
