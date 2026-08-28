@@ -66,7 +66,7 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     @Test
-    void commitInflightPublishesWithoutOwningTheExactSlotMonitor()
+    void itemPublicationDoesNotOwnTheExactSlotMonitor()
             throws Exception {
         Registered registered = registerItem(101L);
         RequestSlot slot = lifecycle.requestSlot(registered.item().requestId());
@@ -88,7 +88,7 @@ class RequestLifecycleDeliveryLockContractTest {
 
         try {
             Future<Boolean> committed = owner.submit(() ->
-                    lifecycle.commitInflight(
+                    lifecycle.commitItemForPublication(
                             registered.item(),
                             false,
                             () -> {
@@ -124,11 +124,11 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     @Test
-    void commitInflightRequiresAnExactAdmissionMutation() {
+    void itemPublicationRequiresAnExactAdmissionMutation() {
         Registered registered = registerItem(106L);
         boolean[] publicationCalled = new boolean[1];
 
-        assertFalse(lifecycle.commitInflight(
+        assertFalse(lifecycle.commitItemForPublication(
                 registered.item(), false, () -> {
                     publicationCalled[0] = true;
                     return true;
@@ -146,7 +146,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
-            assertFalse(lifecycle.commitInflight(
+            assertFalse(lifecycle.commitItemForPublication(
                     registered.item(), true, () -> false));
             synchronized (slot) {
                 assertNull(slot.activeItem());
@@ -169,7 +169,7 @@ class RequestLifecycleDeliveryLockContractTest {
             assertNotNull(admission);
             IllegalStateException actual = assertThrows(
                     IllegalStateException.class,
-                    () -> lifecycle.commitInflight(
+                    () -> lifecycle.commitItemForPublication(
                             registered.item(), false, () -> {
                                 throw expected;
                             }));
@@ -190,7 +190,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
-            assertTrue(lifecycle.commitInflight(
+            assertTrue(lifecycle.commitItemForPublication(
                     registered.item(), false, () -> {
                         preparedBeforeResolution[0] = lifecycle.prepareIfOwned(
                                 registered.item(), () -> Boolean.TRUE)
@@ -220,7 +220,7 @@ class RequestLifecycleDeliveryLockContractTest {
             assertNotNull(admission);
             try {
                 Future<Boolean> publication = operations.submit(() ->
-                        lifecycle.commitInflight(
+                        lifecycle.commitItemForPublication(
                                 registered.item(), false, () -> {
                                     publicationEntered.countDown();
                                     await(releasePublication);
@@ -270,7 +270,7 @@ class RequestLifecycleDeliveryLockContractTest {
             assertNotNull(admission);
             try {
                 Future<Boolean> publication = operations.submit(() ->
-                        lifecycle.commitInflight(
+                        lifecycle.commitItemForPublication(
                                 registered.item(), false, () -> {
                                     queuePublished.countDown();
                                     await(returnFromPublication);
@@ -308,7 +308,7 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
-            assertTrue(lifecycle.commitInflight(
+            assertTrue(lifecycle.commitItemForPublication(
                     registered.item(), false, () -> true));
         }
         RequestSlot slot = lifecycle.requestSlot(registered.item().requestId());
@@ -414,12 +414,7 @@ class RequestLifecycleDeliveryLockContractTest {
             throws Exception {
         Registered registered = registerItem(
                 205L, null, mock(DecodeEndpoint.class));
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                registered.item().requestId(),
-                registered.future(),
-                1,
-                10L));
-        bind(registered);
+        bindRoute(registered, 1, 10L);
 
         SlotDeliveryPort.Claim claim = lifecycle.tryClaimForDelivery(
                 registered.item(),
@@ -441,8 +436,24 @@ class RequestLifecycleDeliveryLockContractTest {
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
-            assertTrue(lifecycle.commitInflight(
+            assertTrue(lifecycle.commitItemForPublication(
                     registered.item(), false, () -> true));
+        }
+    }
+
+    private void bindRoute(
+            Registered registered,
+            int limit,
+            long acceptanceTimeoutMs) {
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                    lifecycle.commitRoute(
+                            registered.item(), false, limit,
+                            acceptanceTimeoutMs, () -> true));
         }
     }
 

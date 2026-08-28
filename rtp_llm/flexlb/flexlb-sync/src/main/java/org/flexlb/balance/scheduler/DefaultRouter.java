@@ -10,9 +10,12 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
+import org.flexlb.balance.strategy.EndpointSelection;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.StaticCapacityExceededException;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -49,11 +52,14 @@ public class DefaultRouter implements Router {
         if (validationFailure != null) {
             return validationFailure;
         }
-        try (PinnedRouting routing = selectAll(context, requiredRoles)) {
+        try (PinnedRouting routing = selectAll(
+                context, requiredRoles, false)) {
             if (!routing.success()) {
-                return buildFailureResponse(routing.failedRole());
+                return buildFailureResponse(routing.failure().key().role());
             }
             return commitDirect(context, routing.selections());
+        } catch (StaticCapacityExceededException failure) {
+            return staticCapacityFailure(failure);
         }
     }
 
@@ -63,15 +69,20 @@ public class DefaultRouter implements Router {
         if (validationFailure != null) {
             return new QueueRoutingResult.Rejected(validationFailure);
         }
-        try (PinnedRouting routing = selectAll(context, requiredRoles)) {
+        try (PinnedRouting routing = selectAll(
+                context, requiredRoles, true)) {
             if (!routing.success()) {
-                return new QueueRoutingResult.Rejected(
-                        buildFailureResponse(routing.failedRole()));
+                PlacementFailure failure = routing.failure();
+                return new QueueRoutingResult.Blocked(
+                        failure.key(), failure.poolUnavailable());
             }
             Response response = buildSuccessResponse(routing.serverStatuses());
             return new QueueRoutingResult.Admitted(
                     QueueRouteAdmission.prepare(
                             context, routing.selections(), response));
+        } catch (StaticCapacityExceededException failure) {
+            return new QueueRoutingResult.Rejected(
+                    staticCapacityFailure(failure));
         }
     }
 
@@ -85,7 +96,8 @@ public class DefaultRouter implements Router {
 
     private PinnedRouting selectAll(
             BalanceContext context,
-            List<RoleType> roles) {
+            List<RoleType> roles,
+            boolean queueSelection) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         GroupRoutingDecision groupDecision = groupRoutingPolicy.route(context);
         String policyGroup = groupDecision.group();
@@ -100,12 +112,20 @@ public class DefaultRouter implements Router {
 
         try {
             for (RoleType role : roles) {
-                SelectedRole selection = endpointSelector.select(
-                        context, role, group);
-                if (selection == null) {
-                    Logger.warn("Failed to select {} worker", role.getCode());
-                    return new PinnedRouting(selected, role);
+                EndpointSelection result = queueSelection
+                        ? endpointSelector.selectForQueue(context, role, group)
+                        : directSelection(context, role, group);
+                if (!result.found()) {
+                    Logger.debug(
+                            "Failed to select {} worker for request {}",
+                            role.getCode(), context.getRequestId());
+                    return new PinnedRouting(
+                            selected,
+                            new PlacementFailure(
+                                    new PlacementKey(role, group),
+                                    result.poolUnavailable()));
                 }
+                SelectedRole selection = result.selected();
                 try {
                     selected.add(selection);
                 } catch (RuntimeException | Error appendFailure) {
@@ -121,6 +141,25 @@ public class DefaultRouter implements Router {
             closeSelections(selected, failure);
             throw failure;
         }
+    }
+
+    private EndpointSelection directSelection(
+            BalanceContext context, RoleType role, String group) {
+        SelectedRole selected = endpointSelector.select(
+                context, role, group);
+        return selected == null
+                ? EndpointSelection.unavailablePool()
+                : EndpointSelection.selected(selected);
+    }
+
+    private static Response staticCapacityFailure(
+            StaticCapacityExceededException failure) {
+        Response response = Response.error(
+                StrategyErrorType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED);
+        response.setErrorMessage(StrategyErrorType.RESOURCE_EXHAUSTED
+                .buildErrorMessage(failure.getMessage()));
+        return response;
     }
 
     private Response commitDirect(BalanceContext context, List<SelectedRole> selections) {
@@ -343,21 +382,21 @@ public class DefaultRouter implements Router {
 
     private static final class PinnedRouting implements AutoCloseable {
         private final List<SelectedRole> selections;
-        private final RoleType failedRole;
+        private final PlacementFailure failure;
 
         private PinnedRouting(
                 List<SelectedRole> selections,
-                RoleType failedRole) {
+                PlacementFailure failure) {
             this.selections = selections;
-            this.failedRole = failedRole;
+            this.failure = failure;
         }
 
         private boolean success() {
-            return failedRole == null;
+            return failure == null;
         }
 
-        private RoleType failedRole() {
-            return failedRole;
+        private PlacementFailure failure() {
+            return failure;
         }
 
         private List<SelectedRole> selections() {
@@ -375,6 +414,11 @@ public class DefaultRouter implements Router {
                 throw propagate(failure);
             }
         }
+    }
+
+    private record PlacementFailure(
+            PlacementKey key,
+            boolean poolUnavailable) {
     }
 
     private sealed interface DirectOwner {

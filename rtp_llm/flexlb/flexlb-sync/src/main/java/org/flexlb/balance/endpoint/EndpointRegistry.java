@@ -1,12 +1,14 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -147,6 +149,7 @@ public class EndpointRegistry {
     private final BatchSchedulerReporter reporter;
     private final DeliveryStrategy deliveryStrategy;
     private final PrefillGenerationRuntime.Factory runtimeFactory;
+    private final PlacementAvailability placementAvailability;
     private final Object lifecycleGate = new Object();
     private RegistryPhase registryPhase = RegistryPhase.OPEN;
     private int inflightPublications;
@@ -214,6 +217,17 @@ public class EndpointRegistry {
                             BatchSchedulerReporter reporter,
                             DeliveryStrategy deliveryStrategy,
                             PrefillGenerationRuntime.Factory runtimeFactory) {
+        this(configService, requestRuntime, reporter, deliveryStrategy,
+                runtimeFactory, new PlacementAvailability());
+    }
+
+    @Autowired
+    public EndpointRegistry(ConfigService configService,
+                            EndpointRequestRuntime requestRuntime,
+                            BatchSchedulerReporter reporter,
+                            DeliveryStrategy deliveryStrategy,
+                            PrefillGenerationRuntime.Factory runtimeFactory,
+                            PlacementAvailability placementAvailability) {
         this.configService = java.util.Objects.requireNonNull(
                 configService, "configService");
         this.requestRuntime = java.util.Objects.requireNonNull(
@@ -223,6 +237,8 @@ public class EndpointRegistry {
                 deliveryStrategy, "deliveryStrategy");
         this.runtimeFactory = java.util.Objects.requireNonNull(
                 runtimeFactory, "runtimeFactory");
+        this.placementAvailability = java.util.Objects.requireNonNull(
+                placementAvailability, "placementAvailability");
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -685,6 +701,7 @@ public class EndpointRegistry {
                 throw propagate(retirementFailure, ipPort);
             }
         }
+        signalPublishedEndpoint(result);
         return result;
     }
 
@@ -737,6 +754,7 @@ public class EndpointRegistry {
             BiFunction<String, T, T> publicationAction) {
         try {
             mutateEndpointMap(endpoints, ipPort, publicationAction);
+            signalPublishedEndpoint(candidate);
             return publication;
         } catch (Throwable publicationFailure) {
             withdrawAndCloseCandidate(
@@ -1124,14 +1142,16 @@ public class EndpointRegistry {
                 deliveryStrategy,
                 runtimeFactory,
                 requestRuntime,
-                reporter);
+                reporter,
+                placementAvailability);
     }
 
     private DecodeEndpoint createDecodeEndpoint(
             WorkerStatus status,
             WorkerStatus.EngineObservation engineStatus) {
         prepareEndpointMetrics(RoleType.DECODE, status);
-        return new DecodeEndpoint(status, requestRuntime);
+        return new DecodeEndpoint(
+                status, requestRuntime, placementAvailability);
     }
 
     private SimpleWorkerEndpoint createSimpleEndpoint(
@@ -1149,6 +1169,16 @@ public class EndpointRegistry {
             Logger.warn("Endpoint metric preparation failed: role={}, engine={}",
                     roleType, status.getIp(), telemetryFailure);
         }
+    }
+
+    private void signalPublishedEndpoint(WorkerEndpoint endpoint) {
+        if (endpoint == null) {
+            return;
+        }
+        WorkerStatus.TopologySnapshot topology =
+                endpoint.getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(
+                endpoint.getStatus().getRole(), topology.group());
     }
 
     public void close() {

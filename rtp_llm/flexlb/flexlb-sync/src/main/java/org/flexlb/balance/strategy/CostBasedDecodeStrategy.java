@@ -96,6 +96,46 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 softQueuePlacement);
     }
 
+    @Override
+    public EndpointSelection selectForQueue(
+            BalanceContext context, RoleType roleType, String group) {
+        SelectedRole selected = select(context, roleType, group);
+        if (selected != null) {
+            return EndpointSelection.selected(selected);
+        }
+        return queueMissBlocksPool(context, group)
+                ? EndpointSelection.unavailablePool()
+                : EndpointSelection.requestUnavailable();
+    }
+
+    /** Re-read only after a miss; successful routing pays no extra traversal. */
+    private boolean queueMissBlocksPool(
+            BalanceContext context, String group) {
+        if (!context.getConfig().isPriorityOrdering()) {
+            // FIFO selection deliberately bypasses transient Decode pressure;
+            // an ordinary pool-wide miss is caught by exact reservation.
+            return false;
+        }
+        ResourceMeasureIndicatorEnum indicator =
+                context.getConfig().resourceMeasureFor(RoleType.DECODE);
+        DecodeResourceMeasure measure = (DecodeResourceMeasure)
+                resourceMeasureFactory.getMeasure(indicator);
+        if (measure == null) {
+            return true;
+        }
+        List<EndpointRegistry.DecodeRoutingSnapshot> snapshots =
+                engineWorkerStatus.decodeWorkerRoutingSnapshot(group);
+        if (snapshots.isEmpty()) {
+            return true;
+        }
+        for (EndpointRegistry.DecodeRoutingSnapshot snapshot : snapshots) {
+            if (measure.isResourceAvailable(snapshot.routing())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private SnapshotSelection selectFromSnapshots(
             BalanceContext balanceContext,
             RoleType roleType,
@@ -106,7 +146,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             boolean softQueuePlacement) {
         EndpointFilterResult<EndpointRegistry.DecodeRoutingSnapshot> filterResult =
                 getAvailableEndpointSnapshots(
-                        group, indicator, softQueuePlacement);
+                        group, indicator, softQueuePlacement, seqLen);
         List<EndpointRegistry.DecodeRoutingSnapshot> eligible =
                 filterResult.candidates();
         if (eligible.isEmpty()) {
@@ -276,7 +316,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             getAvailableEndpointSnapshots(
             String group,
             ResourceMeasureIndicatorEnum indicator,
-            boolean softQueuePlacement) {
+            boolean softQueuePlacement,
+            long seqLen) {
         DecodeResourceMeasure measure =
                 (DecodeResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
@@ -290,6 +331,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return new EndpointFilterResult<>(
                     snapshots, Map.of("NO_REGISTERED", 1), 0);
         }
+        rejectIfPhysicalCapacityIsTooSmall(snapshots, seqLen);
         if (softQueuePlacement) {
             return new EndpointFilterResult<>(
                     snapshots, Map.of(), registered);
@@ -321,6 +363,24 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                 Collections.unmodifiableList(filtered),
                 Map.of("RESOURCE_UNAVAILABLE", unavailable),
                 registered);
+    }
+
+    private static void rejectIfPhysicalCapacityIsTooSmall(
+            List<EndpointRegistry.DecodeRoutingSnapshot> endpoints,
+            long requiredKv) {
+        long maximum = 0L;
+        for (EndpointRegistry.DecodeRoutingSnapshot endpoint : endpoints) {
+            long physicalKv = endpoint.routing().totalKv();
+            if (physicalKv <= 0L) {
+                return;
+            }
+            maximum = Math.max(maximum, physicalKv);
+        }
+        if (Math.max(0L, requiredKv) > maximum) {
+            throw new StaticCapacityExceededException(
+                    "Decode request seq_len=" + requiredKv
+                            + " exceeds max known physical KV=" + maximum);
+        }
     }
 
     private EndpointFilterResult<DecodeCandidate> getAvailableEndpoints(

@@ -27,7 +27,8 @@ import java.util.concurrent.CompletableFuture;
  * canonicalized by {@link RequestLifecycleCoordinator}.
  */
 @Component
-public final class RequestScheduler {
+public final class RequestScheduler
+        implements RequestShutdownOrchestrator.Placement {
 
     private final ConfigService configService;
     private final Router router;
@@ -35,6 +36,18 @@ public final class RequestScheduler {
     private final BatchSchedulerReporter reporter;
     private final AdmissionFallback admissionFallback;
     private final RequestLifecycleCoordinator lifecycle;
+    private final PendingPlacementCoordinator pendingPlacement;
+
+    RequestScheduler(
+            ConfigService configService,
+            Router router,
+            EndpointRegistry endpointRegistry,
+            BatchSchedulerReporter reporter,
+            AdmissionFallback admissionFallback,
+            RequestLifecycleCoordinator lifecycle) {
+        this(configService, router, endpointRegistry, reporter,
+                admissionFallback, lifecycle, new PlacementAvailability());
+    }
 
     @Autowired
     RequestScheduler(
@@ -43,7 +56,8 @@ public final class RequestScheduler {
             EndpointRegistry endpointRegistry,
             BatchSchedulerReporter reporter,
             AdmissionFallback admissionFallback,
-            RequestLifecycleCoordinator lifecycle) {
+            RequestLifecycleCoordinator lifecycle,
+            PlacementAvailability placementAvailability) {
         this.configService = Objects.requireNonNull(
                 configService, "configService");
         this.router = Objects.requireNonNull(router, "router");
@@ -53,6 +67,9 @@ public final class RequestScheduler {
         this.admissionFallback = Objects.requireNonNull(
                 admissionFallback, "admissionFallback");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
+        this.pendingPlacement = new PendingPlacementCoordinator(
+                Objects.requireNonNull(
+                        placementAvailability, "placementAvailability"));
     }
 
     /** Route one request and hand its exact generation to the lifecycle owner. */
@@ -79,105 +96,147 @@ public final class RequestScheduler {
             return future;
         }
 
-        try {
-            routeRegistered(context, future, activeConfig);
-        } catch (Throwable failure) {
-            Logger.error(
-                    "RequestScheduler submit failed for request id: {}",
-                    context.getRequestId(), failure);
-            future.complete(error(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
-                    "Submit failed: " + failure.getMessage()));
+        boolean priorityOrdering = activeConfig.isPriorityOrdering();
+        long availabilitySequence = pendingPlacement.availabilitySequence();
+        PendingPlacementCoordinator.AttemptResult initial =
+                attemptPlacement(context, future, priorityOrdering);
+        if (initial == PendingPlacementCoordinator.AttemptResult
+                .Finished.INSTANCE) {
+            return future;
         }
+        PlacementRequest placement = new PlacementRequest(
+                context, future, priorityOrdering);
+        PendingPlacementCoordinator.Handle handle = pendingPlacement.park(
+                placement,
+                (PendingPlacementCoordinator.AttemptResult.Blocked) initial,
+                availabilitySequence);
+        future.whenComplete((ignored, failure) -> handle.close());
         return future;
     }
 
-    private void routeRegistered(
+    /** One fresh full-selection and exact ownership attempt. */
+    private PendingPlacementCoordinator.AttemptResult attemptPlacement(
             BalanceContext context,
             CompletableFuture<Response> future,
-            FlexlbConfig config) {
+            boolean priorityOrdering) {
+        if (future.isDone()) {
+            return finished();
+        }
         RequestLifecycleCoordinator.AdmissionScope mutation =
                 lifecycle.beginAdmission(context.getRequestId(), future);
         if (mutation == null) {
-            return;
+            return finished();
         }
 
+        QueueRoutingResult.Blocked blocked = null;
         try (mutation) {
-            if (!tryInstallDecodeAcceptanceGuard(context, future, config)) {
-                mutation.close();
-                if (!future.isDone()) {
-                    AdmissionFailure failure =
-                            AdmissionFailure.resourceExhausted();
-                    int limit = config.queueScheduler().getLifecycle()
-                            .getMaxDeliveredNotAcceptedRequestsGlobal();
-                    future.complete(RequestLifecycleCoordinator
-                            .buildAdmissionErrorResponse(
-                                    failure,
-                                    "post-success backpressure: "
-                                            + "active_admissions="
-                                            + lifecycle.decodeAcceptanceCount()
-                                            + " limit=" + limit));
-                }
-                return;
-            }
             QueueRoutingResult routing = router.routeForQueue(context);
             if (routing instanceof QueueRoutingResult.Rejected rejected) {
                 mutation.close();
-                if (!admissionFallback.tryAdmit(context, future)) {
-                    future.complete(rejected.response());
-                }
-                return;
+                future.complete(rejected.response());
+                return finished();
             }
-
-            QueueRouteAdmission admission =
-                    ((QueueRoutingResult.Admitted) routing).admission();
-            StrategyErrorType failureType = null;
-            String failureDetail = null;
-            boolean tryFallback = false;
-            try (admission) {
-                if (lifecycle.isShuttingDown()) {
-                    failureType = StrategyErrorType.BATCH_DISPATCH_FAILED;
-                    failureDetail = "request scheduler is shutting down";
-                } else {
-                    BatchItem item = admission.buildItem(
-                            context, future, System.currentTimeMillis());
-                    context.setRouteSubmittedNanos(System.nanoTime());
-                    if (!admission.commitTo(lifecycle, item, false)) {
-                        tryFallback = lifecycle.isAdmissionOpen(
-                                context.getRequestId(), future);
+            if (routing instanceof QueueRoutingResult.Blocked unavailable) {
+                blocked = unavailable;
+            } else {
+                QueueRouteAdmission admission =
+                        ((QueueRoutingResult.Admitted) routing).admission();
+                try (admission) {
+                    QueueRouteAdmission.PublishResult publication =
+                            admission.tryPublish(context, future, lifecycle);
+                    if (publication instanceof
+                            QueueRouteAdmission.PublishResult.Published published) {
+                        reportRouteSubmitted(context, published.item());
+                        return finished();
+                    }
+                    if (publication instanceof
+                            QueueRouteAdmission.PublishResult.Blocked unavailable) {
+                        blocked = new QueueRoutingResult.Blocked(
+                                unavailable.blocker(),
+                                unavailable.poolUnavailable());
+                    } else if (publication == QueueRouteAdmission.PublishResult
+                            .AcceptanceLimitReached.INSTANCE) {
+                        mutation.close();
+                        completeAcceptanceLimit(context, future);
+                        return finished();
                     } else {
-                        reportRouteSubmitted(context, item);
+                        return finished();
                     }
                 }
             }
-
-            if (tryFallback) {
-                mutation.close();
-                if (admissionFallback.tryAdmit(context, future)) {
-                    return;
-                }
-                failureType = StrategyErrorType.BATCH_DISPATCH_FAILED;
-                failureDetail =
-                        "Worker scheduling queue rejected request";
-            }
-            if (failureType != null) {
-                mutation.close();
-                future.complete(error(failureType, failureDetail));
-            }
         }
+
+        if (future.isDone() || !lifecycle.isAdmissionOpen(
+                context.getRequestId(), future)) {
+            return finished();
+        }
+        if (priorityOrdering
+                && admissionFallback.tryAdmit(context, future)) {
+            return finished();
+        }
+        return new PendingPlacementCoordinator.AttemptResult.Blocked(
+                blocked.blocker(), blocked.poolUnavailable());
     }
 
-    private boolean tryInstallDecodeAcceptanceGuard(
+    private void completeAcceptanceLimit(
             BalanceContext context,
-            CompletableFuture<Response> future,
-            FlexlbConfig config) {
-        return lifecycle.tryInstallDecodeAcceptanceGuard(
-                context.getRequestId(),
-                future,
-                config.queueScheduler().getLifecycle()
-                        .getMaxDeliveredNotAcceptedRequestsGlobal(),
-                config.queueScheduler().getLifecycle()
-                        .getDeliveredNotAcceptedTimeoutMs());
+            CompletableFuture<Response> future) {
+        AdmissionFailure failure = AdmissionFailure.resourceExhausted();
+        int limit = context.getConfig().queueScheduler().getLifecycle()
+                .getMaxDeliveredNotAcceptedRequestsGlobal();
+        future.complete(RequestLifecycleCoordinator
+                .buildAdmissionErrorResponse(
+                        failure,
+                        "post-success backpressure: active_admissions="
+                                + lifecycle.decodeAcceptanceCount()
+                                + " limit=" + limit));
+    }
+
+    private static PendingPlacementCoordinator.AttemptResult finished() {
+        return PendingPlacementCoordinator.AttemptResult.Finished.INSTANCE;
+    }
+
+    private final class PlacementRequest
+            implements PendingPlacementCoordinator.Work {
+        private final BalanceContext context;
+        private final CompletableFuture<Response> future;
+        private final boolean priorityOrdering;
+
+        private PlacementRequest(
+                BalanceContext context,
+                CompletableFuture<Response> future,
+                boolean priorityOrdering) {
+            this.context = context;
+            this.future = future;
+            this.priorityOrdering = priorityOrdering;
+        }
+
+        @Override
+        public int priority() {
+            return context.getPriority();
+        }
+
+        @Override
+        public boolean priorityOrdering() {
+            return priorityOrdering;
+        }
+
+        @Override
+        public boolean done() {
+            return future.isDone();
+        }
+
+        @Override
+        public PendingPlacementCoordinator.AttemptResult attempt() {
+            return attemptPlacement(context, future, priorityOrdering);
+        }
+
+        @Override
+        public void fail(Throwable failure) {
+            future.complete(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Placement failed: " + failure.getMessage()));
+        }
     }
 
     private void reportRouteSubmitted(
@@ -206,7 +265,7 @@ public final class RequestScheduler {
     }
 
     public int getQueuedRequestCount() {
-        long queued = 0L;
+        long queued = pendingPlacement.size();
         for (PrefillEndpoint endpoint
                 : endpointRegistry.snapshotPrefillEndpoints().values()) {
             queued += endpoint.queuedRequestCount();
@@ -228,6 +287,11 @@ public final class RequestScheduler {
 
     public boolean ownsRequestGeneration(long requestId) {
         return lifecycle.ownsRequestGeneration(requestId);
+    }
+
+    @Override
+    public void closePlacement() {
+        pendingPlacement.close();
     }
 
     private static Response error(

@@ -351,8 +351,7 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
      * dispatch, completion, expiration, and rollback behave identically.
      * Mirrors the duplicate-request check in {@link #submit}.
      */
-    @Override
-    public boolean commitInflight(
+    boolean commitItemForPublication(
             BatchItem item,
             boolean priorityAdmission,
             InflightCommitPort.ActivePublication publication) {
@@ -395,6 +394,94 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
             slot.rollbackItemPublication(item);
         }
         return false;
+    }
+
+    @Override
+    public InflightCommitPort.RouteCommitResult commitRoute(
+            BatchItem item,
+            boolean priorityAdmission,
+            int acceptanceLimit,
+            long acceptanceTimeoutMs,
+            InflightCommitPort.ActivePublication publication) {
+        Objects.requireNonNull(publication, "publication");
+        if (item == null || item.decodeEp() == null) {
+            return commitItemForPublication(item, priorityAdmission, publication)
+                    ? InflightCommitPort.RouteCommitResult.PUBLISHED
+                    : InflightCommitPort.RouteCommitResult.REQUEST_CLOSED;
+        }
+        if (acceptanceLimit < 0 || acceptanceTimeoutMs < 0L) {
+            throw new IllegalArgumentException(
+                    "Decode acceptance limits must be non-negative");
+        }
+        if (shuttingDown.get() || item.future().isDone()) {
+            return InflightCommitPort.RouteCommitResult.REQUEST_CLOSED;
+        }
+        RequestSlot slot = requestSlots.get(item.requestId());
+        if (slot == null || !slot.ownsFuture(item.future())) {
+            return InflightCommitPort.RouteCommitResult.REQUEST_CLOSED;
+        }
+
+        boolean permitAcquired = false;
+        try {
+            RequestSlot.AdmissionCleanup immediate;
+            synchronized (slot) {
+                if (!isCurrentSlot(slot) || !slot.isOpen()) {
+                    return InflightCommitPort.RouteCommitResult.REQUEST_CLOSED;
+                }
+                if (!tryAcquireDecodeAcceptancePermit(acceptanceLimit)) {
+                    return InflightCommitPort.RouteCommitResult
+                            .ACCEPTANCE_LIMIT_REACHED;
+                }
+                permitAcquired = true;
+                if (!slot.tryBindItemForPublication(
+                        item, priorityAdmission)) {
+                    return InflightCommitPort.RouteCommitResult.REQUEST_CLOSED;
+                }
+                immediate = slot.bindAdmissionResources(
+                        this::releaseDecodeAcceptancePermit,
+                        acceptanceTimeoutMs);
+                permitAcquired = false;
+                if (immediate != null) {
+                    slot.rollbackItemPublication(item);
+                }
+            }
+            if (immediate != null) {
+                releaseAdmissionCleanup(immediate);
+                return InflightCommitPort.RouteCommitResult.REQUEST_CLOSED;
+            }
+            if (publication.publish()) {
+                return InflightCommitPort.RouteCommitResult.PUBLISHED;
+            }
+            releaseAdmissionCleanup(
+                    rollbackAdmissionPublication(slot, item));
+            return InflightCommitPort.RouteCommitResult.PUBLICATION_REJECTED;
+        } catch (RuntimeException | Error failure) {
+            RequestSlot.AdmissionCleanup cleanup = null;
+            try {
+                synchronized (slot) {
+                    if (slot.activeItem() == item) {
+                        cleanup = slot.rollbackAdmissionPublication(item);
+                    }
+                }
+            } catch (RuntimeException | Error rollbackFailure) {
+                if (rollbackFailure != failure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+            }
+            releaseAdmissionCleanup(cleanup);
+            throw failure;
+        } finally {
+            if (permitAcquired) {
+                releaseDecodeAcceptancePermit();
+            }
+        }
+    }
+
+    private RequestSlot.AdmissionCleanup rollbackAdmissionPublication(
+            RequestSlot slot, BatchItem item) {
+        synchronized (slot) {
+            return slot.rollbackAdmissionPublication(item);
+        }
     }
 
     @Override
@@ -647,35 +734,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         consumeFenceStart(entry, fenceReduction, false);
     }
 
-    boolean tryInstallDecodeAcceptanceGuard(
-            long requestId,
-            CompletableFuture<?> future,
-            int limit,
-            long acceptanceTimeoutMs) {
-        if (limit < 0) {
-            throw new IllegalArgumentException("limit must be non-negative");
-        }
-        if (acceptanceTimeoutMs < 0) {
-            throw new IllegalArgumentException("acceptanceTimeoutMs must be non-negative");
-        }
-        if (!tryAcquireDecodeAcceptancePermit(limit)) {
-            return false;
-        }
-        boolean bound = false;
-        try {
-            bound = bindAdmissionResources(
-                    requestId,
-                    future,
-                    this::releaseDecodeAcceptancePermit,
-                    acceptanceTimeoutMs);
-            return bound;
-        } finally {
-            if (!bound) {
-                releaseDecodeAcceptancePermit();
-            }
-        }
-    }
-
     int decodeAcceptanceCount() {
         return Math.max(0, decodeAcceptanceCount.get());
     }
@@ -708,27 +766,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
                 return;
             }
         }
-    }
-
-    private boolean bindAdmissionResources(
-            long requestId,
-            CompletableFuture<?> future,
-            Runnable releasePermit,
-            long acceptanceTimeoutMs) {
-        RequestSlot entry = requestSlots.get(requestId);
-        if (entry == null || !entry.ownsFuture(future)) {
-            return false;
-        }
-        RequestSlot.AdmissionCleanup immediateRelease;
-        synchronized (entry) {
-            if (!isCurrentSlot(entry) || !entry.isOpen()) {
-                return false;
-            }
-            immediateRelease = entry.bindAdmissionResources(
-                    releasePermit, acceptanceTimeoutMs);
-        }
-        releaseAdmissionCleanup(immediateRelease);
-        return true;
     }
 
     private void fenceAfterDeliveryTimeout(BatchItem item, String detail) {
@@ -2131,7 +2168,7 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         DecodeEndpoint.ReservationHandle reservation =
                 item.decodeReservation();
         if (decodeEp != null && reservation != null) {
-            decodeEp.rollbackExact(reservation);
+            decodeEp.releasePlacementExact(reservation);
         }
     }
 

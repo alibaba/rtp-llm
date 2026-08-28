@@ -9,6 +9,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.QueueRoutingResult;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
@@ -196,6 +197,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
         config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
+        config.getRouter().getRoles().getPrefill().getAvailability()
+                .setMaxPendingRequests(1024);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         routeFn = this::defaultRoute;
@@ -466,7 +469,20 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     private QueueRoutingResult routeResult(BalanceContext context) {
-        return schedulerRuntime.routeResult(context, routeFn.apply(context));
+        Response response = routeFn.apply(context);
+        if (!response.isSuccess()
+                && response.getCode()
+                        == StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()) {
+            return new QueueRoutingResult.Blocked(
+                    PlacementKey.anyGroup(RoleType.PREFILL), true);
+        }
+        if (!response.isSuccess()
+                && response.getCode()
+                        == StrategyErrorType.NO_DECODE_WORKER.getErrorCode()) {
+            return new QueueRoutingResult.Blocked(
+                    PlacementKey.anyGroup(RoleType.DECODE), true);
+        }
+        return schedulerRuntime.routeResult(context, response);
     }
 
     private static ServerStatus server(

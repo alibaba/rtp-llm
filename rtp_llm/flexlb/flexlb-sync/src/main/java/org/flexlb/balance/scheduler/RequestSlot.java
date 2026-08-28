@@ -154,6 +154,14 @@ final class RequestSlot extends RequestLifecycle {
         assertInvariant();
     }
 
+    /** Roll back an unpublished item and its exact acceptance capability. */
+    AdmissionCleanup rollbackAdmissionPublication(BatchItem exact) {
+        rollbackItemPublication(exact);
+        AdmissionCleanup cleanup = detachAdmissionCleanup(true);
+        assertInvariant();
+        return cleanup;
+    }
+
     /** Exact ACTIVE item, or null when this generation no longer owns one. */
     BatchItem activeItem() {
         requireSlotLock("active item lookup");

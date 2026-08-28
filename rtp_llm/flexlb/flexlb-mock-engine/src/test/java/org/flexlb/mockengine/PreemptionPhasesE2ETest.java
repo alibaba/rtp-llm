@@ -274,22 +274,20 @@ class PreemptionPhasesE2ETest {
             h.fixedWindowDecision().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
+            // Isolate the slot/equal-priority contract from expected-KV
+            // admission; hard KV remains exact through the 128/256 fixture.
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxKvUsagePercent(0);
             h.setDecodeKvCapacity(0, 128, 256);
             // P50 占据 decode 唯一槽位 + prefill 唯一队列位
             CompletableFuture<Response> holder = h.scheduler.submit(h.context(501, 50));
             assertFalse(holder.isDone());
             assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(501L));
 
-            // 同优新请求：decode 槽位满时路由立即失败，不进入
-            // queued-timeout classifier，因此保留原始 8403/UNSPECIFIED。
+            // 同优新请求不能抢占，也不能把瞬时容量不足变成终态 8403；
+            // 它保持未绑定，等待精确 Decode 容量变化。
             CompletableFuture<Response> equal = h.scheduler.submit(h.context(502, 50));
-            Response equalResp = equal.get(2, TimeUnit.SECONDS);
-            assertFalse(equalResp.isSuccess());
-            assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(),
-                    equalResp.getCode(),
-                    "immediate route rejection must preserve NO_DECODE_WORKER");
-            assertEquals(AdmissionRejectReason.UNSPECIFIED,
-                    equalResp.getAdmissionRejectReason());
+            assertFalse(equal.isDone());
 
             // victim 完全不受影响
             assertFalse(holder.isDone());

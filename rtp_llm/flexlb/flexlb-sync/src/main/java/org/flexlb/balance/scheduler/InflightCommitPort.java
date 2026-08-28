@@ -3,6 +3,13 @@ package org.flexlb.balance.scheduler;
 /** Narrow exact-slot commit capability used by route placement. */
 interface InflightCommitPort {
 
+    enum RouteCommitResult {
+        PUBLISHED,
+        REQUEST_CLOSED,
+        ACCEPTANCE_LIMIT_REACHED,
+        PUBLICATION_REJECTED
+    }
+
     /**
      * Publish the exact item into the ACTIVE endpoint queue.
      *
@@ -19,15 +26,11 @@ interface InflightCommitPort {
         boolean publish();
     }
 
-    /**
-     * Bind and publish one exact request generation.
-     *
-     * <p>The caller must retain that generation's admission mutation until
-     * this method returns. The mutation defers cancellation and endpoint
-     * terminal facts while the slot and queue sides are resolved separately.
-     */
-    boolean commitInflight(
+    /** Bind the Decode acceptance guard in the same transaction as the item. */
+    RouteCommitResult commitRoute(
             BatchItem item,
             boolean priorityAdmission,
+            int acceptanceLimit,
+            long acceptanceTimeoutMs,
             ActivePublication publication);
 }

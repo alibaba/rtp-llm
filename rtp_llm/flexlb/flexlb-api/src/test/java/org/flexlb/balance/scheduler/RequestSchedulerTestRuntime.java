@@ -40,6 +40,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private final RequestLifecycleCoordinator lifecycle;
+    private final PlacementAvailability placementAvailability =
+            new PlacementAvailability();
     private final EndpointRegistry registry;
     private final RequestScheduler scheduler;
     private final RequestExpirationOrchestrator expiration;
@@ -78,7 +80,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 lifecycle,
                 batchReporter,
                 deliveryStrategy,
-                new WorkerBatcherFactory());
+                new WorkerBatcherFactory(),
+                placementAvailability);
         AdmissionFallback noPriorityTakeover = (context, future) -> false;
         this.scheduler = new RequestScheduler(
                 configService,
@@ -86,11 +89,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 registry,
                 batchReporter,
                 noPriorityTakeover,
-                lifecycle);
+                lifecycle,
+                placementAvailability);
         this.expiration = new RequestExpirationOrchestrator(
                 lifecycle, registry);
         this.shutdown = new RequestShutdownOrchestrator(
-                lifecycle, registry);
+                lifecycle, registry, scheduler);
     }
 
     public RequestScheduler scheduler() {

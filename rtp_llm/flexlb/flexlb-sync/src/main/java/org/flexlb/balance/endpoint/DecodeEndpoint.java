@@ -2,6 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.execution.TtlEvictor;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -52,6 +53,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     .thenComparingLong(ReservationHandle::reservationToken);
 
     private final EndpointEventSink endpointEventSink;
+    private final PlacementAvailability placementAvailability;
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
     /** Exact shadow identities already transferred beyond Master rollback. Guarded by admissionLock. */
     private final Set<RequestInflight> engineLifecycleReservations =
@@ -208,9 +210,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public DecodeEndpoint(
             WorkerStatus status,
             EndpointEventSink endpointEventSink) {
+        this(status, endpointEventSink, new PlacementAvailability());
+    }
+
+    DecodeEndpoint(
+            WorkerStatus status,
+            EndpointEventSink endpointEventSink,
+            PlacementAvailability placementAvailability) {
         super(status);
         this.endpointEventSink = java.util.Objects.requireNonNull(
                 endpointEventSink, "endpointEventSink");
+        this.placementAvailability = java.util.Objects.requireNonNull(
+                placementAvailability, "placementAvailability");
         this.requestEvictor = TtlEvictor.withKeyCallback(
                 inflightRequests, (requestId, req) -> {
                     engineLifecycleReservations.remove(req);
@@ -553,6 +564,38 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /**
+     * Acquire queued ownership only if this exact generation can still accept
+     * the request. A null result mutates nothing.
+     */
+    public ReservationHandle tryReserveQueuedPinned(
+            GenerationPin pin,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
+        java.util.Objects.requireNonNull(capacity, "capacity");
+        admissionLock.lock();
+        try {
+            requirePinnedGeneration(pin);
+            if (!requestIdAvailableForReservationLocked(requestId)) {
+                throw new IllegalStateException(
+                        "Decode request already has an owner: " + requestId);
+            }
+            if (queuedPlacementIsFullLocked(
+                    kvTokens, expectedKvTokens, capacity)) {
+                return null;
+            }
+            ReservationHandle reservation = reserveLocked(
+                    requestId, kvTokens, expectedKvTokens, priority);
+            addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
+            return reservation;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
     /** Remove every local owner for one request. Caller holds admissionLock. */
     private boolean releaseLocked(long requestId) {
         boolean changed = removeEngineDispatchPermitLocked(requestId);
@@ -604,13 +647,25 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * that owner must consume an authoritative terminal instead.</p>
      */
     public void rollbackExact(ReservationHandle reservation) {
+        releaseLocalReservationExact(reservation);
+    }
+
+    /** Release capacity owned by a published placement and wake that domain. */
+    public void releasePlacementExact(ReservationHandle reservation) {
+        if (releaseLocalReservationExact(reservation)) {
+            signalPlacementCapacityChanged();
+        }
+    }
+
+    private boolean releaseLocalReservationExact(
+            ReservationHandle reservation) {
         if (reservation == null) {
             throw new IllegalArgumentException(
                     "Decode reservation is required for rollback");
         }
         if (reservation.endpointGenerationId()
                 != getStatus().getGenerationId()) {
-            return;
+            return false;
         }
         boolean capacityChanged = false;
         admissionLock.lock();
@@ -648,7 +703,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     throw rollbackInvariant(reservation,
                             "exact ownership already crossed local shadow rollback");
                 }
-                return;
+                return false;
             }
             if (exactEngineLifecycle
                     || exactConfirmed || exactProtection
@@ -680,6 +735,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
+        return capacityChanged;
     }
 
     /**
@@ -745,6 +801,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         if (released) {
             notifyEngineDispatchCapacityListeners();
+            signalPlacementCapacityChanged();
         }
         return released;
     }
@@ -2156,14 +2213,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
         List<WorkerStatusFact> facts;
+        boolean placementCapacityImproved;
         admissionLock.lock();
         try {
+            DecodeRoutingView before = routingViewLocked();
             facts = doCalibrate(
                     observation.engine(), observation.finishedTasks());
             if (!observation.alive()) {
                 beginRetirement();
             }
             ws.publishPreparedStatus(prepared);
+            placementCapacityImproved = placementCapacityImproved(
+                    before, routingViewLocked());
         } catch (RuntimeException | Error failure) {
             beginRetirement();
             throw failure;
@@ -2171,7 +2232,25 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         notifyEngineDispatchCapacityListeners();
+        if (placementCapacityImproved) {
+            signalPlacementCapacityChanged();
+        }
         return new StatusReduction(this, facts);
+    }
+
+    private static boolean placementCapacityImproved(
+            DecodeRoutingView before,
+            DecodeRoutingView after) {
+        return after.engineLoad() < before.engineLoad()
+                || after.realKvAvailable() > before.realKvAvailable()
+                || after.realKvUsed() < before.realKvUsed();
+    }
+
+    private void signalPlacementCapacityChanged() {
+        WorkerStatus.TopologySnapshot topology =
+                getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(
+                RoleType.DECODE, topology.group());
     }
 
     @Override
@@ -3220,6 +3299,49 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 inflightRequests.size() - queuedPhaseCount.get());
         return confirmedRunningCount + engineFacingInflight
                 + activeEngineDispatchPermitCount;
+    }
+
+    /** Exact capacity gate for a reservation which remains Prefill-queued. */
+    private boolean queuedPlacementIsFullLocked(
+            long hardKvTokens,
+            long expectedKvTokens,
+            AdmissionCapacity capacity) {
+        long occupiedSlots = engineDispatchHardGateUsageLocked();
+        if (capacity.maxEngineRequests() > 0L
+                && occupiedSlots >= capacity.maxEngineRequests()) {
+            return true;
+        }
+
+        WorkerStatus.EngineObservation status =
+                getStatus().committedWorkerStatus().fields();
+        long totalKv = status.totalKvCacheTokens();
+        if (totalKv <= 0L) {
+            return false;
+        }
+        long hardAvailable = Math.max(
+                0L,
+                status.availableKvCacheTokens()
+                        - inflightKvReservedTotal.get()
+                        - priorityPreemptionHeldKv.get()
+                        - engineFenceHeldKv.get());
+        if (hardKvTokens > hardAvailable) {
+            return true;
+        }
+        if (capacity.maxKvUsagePercent() == 0L) {
+            return false;
+        }
+        long reportedUsed = Math.max(
+                0L, totalKv - status.availableKvCacheTokens());
+        long expectedUsed = saturatedAddNonNegative(
+                saturatedAddNonNegative(
+                        reportedUsed, inflightExpectedKvReservedTotal.get()),
+                saturatedAddNonNegative(
+                        priorityPreemptionHeldExpectedKv.get(),
+                        engineFenceHeldExpectedKv.get()));
+        long projected = saturatedAddNonNegative(
+                expectedUsed, expectedKvTokens);
+        return (double) projected * 100.0
+                > (double) capacity.maxKvUsagePercent() * (double) totalKv;
     }
 
     /** Caller holds admissionLock; this is the authoritative pre-admission gate. */

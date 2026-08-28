@@ -70,16 +70,23 @@ public class RandomStrategy implements LoadBalanceStrategy {
         // detach or same-address replacement still linearizes exactly.
         int size = candidateAddresses.size();
         int startIndex = ThreadLocalRandom.current().nextInt(size);
+        PhysicalDecodeCapacity physicalCapacity = roleType == RoleType.DECODE
+                ? new PhysicalDecodeCapacity(
+                        balanceContext.getRequest().getSeqLen())
+                : null;
         for (int offset = 0; offset < size; offset++) {
             String address = candidateAddresses.get((startIndex + offset) % size);
             WorkerEndpoint.GenerationPin pin =
                     engineWorkerStatus.captureModelWorkerEndpoint(roleType, address);
             if (pin == null) {
+                if (physicalCapacity != null) {
+                    physicalCapacity.markUnknown();
+                }
                 continue;
             }
             try {
                 RoutingCandidate selected = snapshotIfAvailable(
-                        config, roleType, group, pin);
+                        config, roleType, group, pin, physicalCapacity);
                 if (selected == null) {
                     continue;
                 }
@@ -101,6 +108,9 @@ public class RandomStrategy implements LoadBalanceStrategy {
                 }
             }
         }
+        if (physicalCapacity != null) {
+            physicalCapacity.rejectIfImpossible();
+        }
         logger.warn("No serviceable workers available out of {} total workers", size);
         return null;
     }
@@ -114,7 +124,8 @@ public class RandomStrategy implements LoadBalanceStrategy {
             FlexlbConfig config,
             RoleType roleType,
             String group,
-            WorkerEndpoint.GenerationPin pin) {
+            WorkerEndpoint.GenerationPin pin,
+            PhysicalDecodeCapacity physicalCapacity) {
         WorkerEndpoint ep = pin.endpoint();
         if (ep == null) {
             return null;
@@ -129,6 +140,9 @@ public class RandomStrategy implements LoadBalanceStrategy {
         ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
         if (ep instanceof DecodeEndpoint decodeEndpoint) {
             DecodeEndpoint.DecodeRoutingView view = decodeEndpoint.routingView();
+            if (!physicalCapacity.accepts(view.totalKv())) {
+                return null;
+            }
             boolean available = !(resourceMeasure instanceof DecodeResourceMeasure measure)
                     || measure.isResourceAvailable(view);
             return available ? new RoutingCandidate(ep, view, topology) : null;
@@ -140,6 +154,41 @@ public class RandomStrategy implements LoadBalanceStrategy {
             return null;
         }
         return new RoutingCandidate(ep, null, topology);
+    }
+
+    /** Tracks immutable capacity without treating a transient load as static. */
+    private static final class PhysicalDecodeCapacity {
+        private final long requiredKv;
+        private long maximumKnown;
+        private boolean observed;
+        private boolean unknown;
+
+        private PhysicalDecodeCapacity(long requiredKv) {
+            this.requiredKv = Math.max(0L, requiredKv);
+        }
+
+        private boolean accepts(long physicalKv) {
+            observed = true;
+            if (physicalKv <= 0L) {
+                unknown = true;
+                return true;
+            }
+            maximumKnown = Math.max(maximumKnown, physicalKv);
+            return requiredKv <= physicalKv;
+        }
+
+        private void markUnknown() {
+            unknown = true;
+        }
+
+        private void rejectIfImpossible() {
+            if (observed && !unknown && requiredKv > maximumKnown) {
+                throw new StaticCapacityExceededException(
+                        "Decode request seq_len=" + requiredKv
+                                + " exceeds max known physical KV="
+                                + maximumKnown);
+            }
+        }
     }
 
     private SelectedRole buildSelectedRole(

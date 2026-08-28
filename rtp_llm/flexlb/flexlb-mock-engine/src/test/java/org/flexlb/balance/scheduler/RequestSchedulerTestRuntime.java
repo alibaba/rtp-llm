@@ -31,6 +31,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     private final RequestLifecycleCoordinator lifecycle;
+    private final PlacementAvailability placementAvailability =
+            new PlacementAvailability();
     private final BindingRouter router = new BindingRouter();
     private final EndpointRegistry registry;
     private final EvictionManager evictionManager;
@@ -57,7 +59,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         new BatchPrefillAdmission(batchIds::incrementAndGet),
                         lifecycle,
                         new DeliveryTelemetryAdapter(batchReporter)),
-                new WorkerBatcherFactory());
+                new WorkerBatcherFactory(),
+                placementAvailability);
         EvictionPlacementAdapter placement = new EvictionPlacementAdapter(
                 router,
                 evictionPrefillSelector,
@@ -77,9 +80,10 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 registry,
                 batchReporter,
                 evictionManager,
-                lifecycle);
+                lifecycle,
+                placementAvailability);
         this.shutdown = new RequestShutdownOrchestrator(
-                lifecycle, registry);
+                lifecycle, registry, scheduler);
     }
 
     public RequestScheduler scheduler() {

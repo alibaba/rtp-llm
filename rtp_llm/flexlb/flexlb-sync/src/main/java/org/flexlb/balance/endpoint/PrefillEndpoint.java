@@ -9,6 +9,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -31,6 +32,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final EndpointEvent.PrefillGenerationRetired retirementEvent;
     private final EndpointEventSink endpointEventSink;
     private final BatchSchedulerReporter reporter;
+    private final PlacementAvailability placementAvailability;
 
     public enum StatusSemantics {
         PREFILL_STAGE,
@@ -80,10 +82,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     PrefillGenerationRuntime.Factory runtimeFactory,
                     EndpointRequestRuntime requestRuntime,
                     BatchSchedulerReporter reporter) {
+        this(status, config, deliveryStrategy, runtimeFactory,
+                requestRuntime, reporter, new PlacementAvailability());
+    }
+
+    PrefillEndpoint(WorkerStatus status,
+                    FlexlbConfig config,
+                    DeliveryStrategy deliveryStrategy,
+                    PrefillGenerationRuntime.Factory runtimeFactory,
+                    EndpointRequestRuntime requestRuntime,
+                    BatchSchedulerReporter reporter,
+                    PlacementAvailability placementAvailability) {
         super(status);
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.endpointEventSink = java.util.Objects.requireNonNull(
                 requestRuntime, "requestRuntime");
+        this.placementAvailability = java.util.Objects.requireNonNull(
+                placementAvailability, "placementAvailability");
         this.predictor = createPredictor(config);
         this.retirementEvent =
                 new EndpointEvent.PrefillGenerationRetired(this);
@@ -122,6 +137,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
             DeliveryItem exactItem) {
         requirePinnedGeneration(exactPin);
         return runtime.offer(exactItem);
+    }
+
+    /** Exact queue-capacity commit for a fresh placement attempt. */
+    public boolean offerPinnedForPlacement(
+            GenerationPin exactPin,
+            DeliveryItem exactItem) {
+        requirePinnedGeneration(exactPin);
+        return runtime.offerForPlacement(exactItem);
+    }
+
+    /** Publish a role/group-scoped edge after real queue or status progress. */
+    public void signalPlacementCapacityChanged() {
+        WorkerStatus.TopologySnapshot topology =
+                getStatus().topologySnapshot();
+        placementAvailability.capacityChanged(
+                getStatus().getRole(), topology.group());
     }
 
     /** Remove only the supplied canonical ACTIVE queue identity. */

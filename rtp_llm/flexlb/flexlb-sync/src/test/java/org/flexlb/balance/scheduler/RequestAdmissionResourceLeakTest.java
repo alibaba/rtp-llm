@@ -70,7 +70,7 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void normalSubmitRejectionReleasesItsInstalledGuard() {
+    void normalSubmitRejectionNeverInstallsAnAcceptanceGuard() {
         BalanceContext context = context(51L);
         Router router = mock(Router.class);
         QueueRoutingResult.Rejected rejected =
@@ -78,8 +78,8 @@ class RequestAdmissionResourceLeakTest {
                         RequestLifecycleCoordinator.buildErrorResponse(
                                 StrategyErrorType.NO_PREFILL_WORKER, null));
         when(router.routeForQueue(context)).thenAnswer(invocation -> {
-            assertEquals(1, lifecycle.decodeAcceptanceCount(),
-                    "normal submission must bind before routing");
+            assertEquals(0, lifecycle.decodeAcceptanceCount(),
+                    "unpublished placement must not own an acceptance guard");
             return rejected;
         });
         RequestScheduler scheduler = new RequestScheduler(
@@ -95,28 +95,78 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                 response.getCode());
         assertEquals(0, lifecycle.decodeAcceptanceCount(),
-                "route rejection must terminalize and detach the guard");
+                "route rejection cannot leak an unbound guard");
+        scheduler.closePlacement();
     }
 
     @Test
-    void failedAndDuplicateGuardInstallationKeepExactPermitOwnership() {
-        CompletableFuture<Response> canonical =
-                lifecycle.register(context(101L), 4);
+    void publishedRouteBindsAcceptanceGuardExactlyOnce() {
+        Registered registered = registerItem(61L);
 
-        assertFalse(lifecycle.tryInstallDecodeAcceptanceGuard(
-                999L, canonical, 0, 30_000L));
-        assertFalse(lifecycle.tryInstallDecodeAcceptanceGuard(
-                101L, new CompletableFuture<>(), 0, 30_000L));
-        assertEquals(0, lifecycle.decodeAcceptanceCount(),
-                "a rejected bind must return its newly acquired permit");
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(61L, registered.future())) {
+            assertNotNull(admission);
+            assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                    lifecycle.commitRoute(
+                            registered.item(), false, 1, 30_000L,
+                            () -> true));
+        }
 
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                101L, canonical, 0, 30_000L));
-        assertThrows(IllegalStateException.class,
-                () -> lifecycle.tryInstallDecodeAcceptanceGuard(
-                        101L, canonical, 0, 30_000L));
+        assertEquals(1, lifecycle.decodeAcceptanceCount());
+        lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals(0, lifecycle.decodeAcceptanceCount());
+    }
+
+    @Test
+    void declinedRoutePublicationReleasesGuardAndItem() {
+        Registered registered = registerItem(62L);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(62L, registered.future())) {
+            assertNotNull(admission);
+            assertEquals(
+                    InflightCommitPort.RouteCommitResult.PUBLICATION_REJECTED,
+                    lifecycle.commitRoute(
+                            registered.item(), false, 1, 30_000L,
+                            () -> false));
+            assertEquals(0, lifecycle.decodeAcceptanceCount());
+            assertTrue(lifecycle.isAdmissionOpen(
+                    62L, registered.future()));
+            assertNull(activeItem(62L));
+        }
+    }
+
+    @Test
+    void throwingRoutePublicationReleasesGuardAndItem() {
+        Registered registered = registerItem(63L);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(63L, registered.future())) {
+            assertNotNull(admission);
+            assertThrows(IllegalStateException.class,
+                    () -> lifecycle.commitRoute(
+                            registered.item(), false, 1, 30_000L,
+                            () -> {
+                                throw new IllegalStateException("publish failed");
+                            }));
+            assertEquals(0, lifecycle.decodeAcceptanceCount());
+            assertTrue(lifecycle.isAdmissionOpen(
+                    63L, registered.future()));
+            assertNull(activeItem(63L));
+        }
+    }
+
+    @Test
+    void duplicateRouteCommitReleasesOnlyItsNewPermit() {
+        Registered registered = registerItem(101L);
+        bindRoute(registered, 0, 30_000L);
+
+        assertEquals(InflightCommitPort.RouteCommitResult.REQUEST_CLOSED,
+                lifecycle.commitRoute(
+                        registered.item(), false, 0, 30_000L,
+                        () -> true));
         assertEquals(1, lifecycle.decodeAcceptanceCount(),
-                "a duplicate bind may release only its own permit");
+                "a duplicate commit may release only its own permit");
 
         lifecycle.cancelRequest(101L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
@@ -124,13 +174,15 @@ class RequestAdmissionResourceLeakTest {
 
     @Test
     void deferredCancellationReleasesGuardWhenAdmissionScopeCloses() {
-        CompletableFuture<Response> future =
-                lifecycle.register(context(201L), 4);
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                201L, future, 1, 30_000L));
+        Registered registered = registerItem(201L);
+        CompletableFuture<Response> future = registered.future();
         RequestLifecycleCoordinator.AdmissionScope admission =
                 lifecycle.beginAdmission(201L, future);
         assertNotNull(admission);
+        assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                lifecycle.commitRoute(
+                        registered.item(), false, 1, 30_000L,
+                        () -> true));
 
         RequestLifecycleSnapshot requested = lifecycle.cancelRequest(
                 201L, 0L, CancelReason.CLIENT_CANCELLED);
@@ -147,30 +199,25 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void guardInstalledAfterDecodeOwnershipIsReleasedImmediately() {
+    void duplicateCommitAfterDecodeOwnershipCannotInstallAnotherGuard() {
         Registered registered = registerItem(301L);
         bind(registered);
         publishDecodeAccepted(registered);
         assertDecodeOwned(registered.item().requestId());
 
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                registered.item().requestId(),
-                registered.future(),
-                1,
-                30_000L));
+        assertEquals(InflightCommitPort.RouteCommitResult.REQUEST_CLOSED,
+                lifecycle.commitRoute(
+                        registered.item(), false, 1, 30_000L,
+                        () -> true));
         assertEquals(0, lifecycle.decodeAcceptanceCount(),
-                "Decode already owns the request, so no acceptance guard remains");
+                "Decode already owns the request, so no second guard remains");
     }
 
     @Test
     void decodeAcceptanceReleasesGuardBeforeItsTimeout() throws Exception {
         Registered registered = registerItem(401L);
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                registered.item().requestId(),
-                registered.future(),
-                1,
-                30_000L));
-        bindAndAcknowledge(registered);
+        bindRoute(registered, 1, 30_000L);
+        acknowledge(registered);
         assertEquals(1, lifecycle.decodeAcceptanceCount());
 
         publishDecodeAccepted(registered);
@@ -260,19 +307,47 @@ class RequestAdmissionResourceLeakTest {
         return releases;
     }
 
+    private BatchItem activeItem(long requestId) {
+        RequestSlot slot = lifecycle.requestSlot(requestId);
+        assertNotNull(slot);
+        synchronized (slot) {
+            return slot.activeItem();
+        }
+    }
+
     private void bind(Registered registered) {
         try (RequestLifecycleCoordinator.AdmissionScope admission =
                      lifecycle.beginAdmission(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
-            assertTrue(lifecycle.commitInflight(
+            assertTrue(lifecycle.commitItemForPublication(
                     registered.item(), false, () -> true));
+        }
+    }
+
+    private void bindRoute(
+            Registered registered,
+            int limit,
+            long acceptanceTimeoutMs) {
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                    lifecycle.commitRoute(
+                            registered.item(), false, limit,
+                            acceptanceTimeoutMs, () -> true));
         }
     }
 
     private void bindAndAcknowledge(Registered registered) {
         bind(registered);
+        acknowledge(registered);
+    }
+
+    private void acknowledge(Registered registered) {
         SlotDeliveryPort.Claim claim = lifecycle.tryClaimForDelivery(
                 registered.item(),
                 SlotDeliveryPort.Identity.commitConfirmation(),

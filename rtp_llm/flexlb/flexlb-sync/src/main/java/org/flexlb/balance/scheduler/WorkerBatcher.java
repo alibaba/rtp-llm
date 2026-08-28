@@ -83,6 +83,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     private final DeliveryStrategy deliveryStrategy;
     private final DeliveryLifecyclePort deliveryLifecycle;
     private final PriorityBlockingQueue<BatchItem> queue;
+    private final long maximumPendingRequests;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
      * delivery and drain. It is exposed in diagnostic snapshots.
@@ -136,6 +137,8 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         boolean priorityOrdering = config.isPriorityOrdering();
         this.deliveryStrategy = deliveryStrategy;
         this.deliveryLifecycle = deliveryLifecycle;
+        this.maximumPendingRequests = config.getRouter().getRoles()
+                .getPrefill().getAvailability().getMaxPendingRequests();
         Comparator<BatchItem> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         Comparator<GroupPlanner.Item> projectionOrder =
@@ -194,6 +197,28 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
             return false;
         }
         return enqueue(item, ctx.maxQueueCapacity()) == OfferResult.OFFERED;
+    }
+
+    @Override
+    public boolean offerForPlacement(DeliveryItem exactItem) {
+        BatchItem item = (BatchItem) exactItem;
+        assert item.prefillEp() == prefillEndpoint
+                : "incoming item belongs to another Prefill generation";
+        if (runtimeState != RuntimeState.RUNNING || stopped) {
+            return false;
+        }
+        queueLock.lock();
+        try {
+            if (maximumPendingRequests > 0L
+                    && workRegistry.pendingRequestCount()
+                            >= maximumPendingRequests) {
+                return false;
+            }
+            return enqueueUnderLock(item, ctx.maxQueueCapacity())
+                    == OfferResult.OFFERED;
+        } finally {
+            queueLock.unlock();
+        }
     }
 
     private enum OfferResult {
@@ -540,6 +565,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
             queueLock.unlock();
         }
         if (removed) {
+            prefillEndpoint.signalPlacementCapacityChanged();
             try {
                 Logger.debug(
                         "[request-scheduler] exact queue remove: worker={} reason={} request_id={}",
@@ -649,6 +675,13 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         }
 
         BatcherCycleResult result = groupPolicy.processQueue(ctx);
+        if (result instanceof BatcherCycleResult.Admitted
+                || result == BatcherCycleResult.Outcome.QUEUE_CHANGED) {
+            // Only a committed removal creates a new queue seat. Advisory
+            // waits and delivery-capacity misses must not feed placement back
+            // into itself.
+            prefillEndpoint.signalPlacementCapacityChanged();
+        }
         if (result instanceof BatcherCycleResult.CapacityBlocked blocked) {
             awaitBlockedHeadCapacity(blocked);
         } else if (result
@@ -795,6 +828,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         } finally {
             queueLock.unlock();
         }
+        prefillEndpoint.signalPlacementCapacityChanged();
     }
 
 }

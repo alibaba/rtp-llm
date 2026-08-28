@@ -5,7 +5,9 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
+import org.flexlb.balance.strategy.EndpointSelection;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.StaticCapacityExceededException;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -60,7 +62,7 @@ class DefaultRouterTest {
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 rejected.response().getCode());
         verify(groupPolicy, never()).route(org.mockito.ArgumentMatchers.any());
-        verify(selector, never()).select(
+        verify(selector, never()).selectForQueue(
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any());
@@ -69,18 +71,42 @@ class DefaultRouterTest {
     @ParameterizedTest
     @EnumSource(value = RoleType.class, names = {
             "PREFILL", "DECODE", "PDFUSION", "VIT"})
-    void missingRequiredRoleUsesThatRolesPublicFailureCode(RoleType role) {
+    void missingRequiredRoleReturnsItsExactWaitDomain(RoleType role) {
         when(modelMeta.requiredRoles()).thenReturn(List.of(role));
         DefaultRouter router = router();
         BalanceContext context = context(11L);
-        when(selector.select(context, role, null)).thenReturn(null);
+        when(selector.selectForQueue(context, role, null))
+                .thenReturn(EndpointSelection.unavailablePool());
+
+        QueueRoutingResult.Blocked blocked = assertInstanceOf(
+                QueueRoutingResult.Blocked.class,
+                router.routeForQueue(context));
+
+        assertEquals(new PlacementKey(role, null), blocked.blocker());
+        assertTrue(blocked.poolUnavailable());
+    }
+
+    @Test
+    void staticCapacityFailureIsTerminalAndReleasesEarlierSelections() {
+        when(modelMeta.requiredRoles()).thenReturn(
+                List.of(RoleType.PREFILL, RoleType.DECODE));
+        DefaultRouter router = router();
+        BalanceContext context = context(12L);
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 12L, "p", 8001, "g1");
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.DECODE, "g1"))
+                .thenThrow(new StaticCapacityExceededException(
+                        "seq_len exceeds every Decode worker"));
 
         QueueRoutingResult.Rejected rejected = assertInstanceOf(
                 QueueRoutingResult.Rejected.class,
                 router.routeForQueue(context));
 
-        assertEquals(role.getErrorType().getErrorCode(),
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 rejected.response().getCode());
+        verify(prefill.selection).close();
     }
 
     @Test
@@ -90,8 +116,8 @@ class DefaultRouterTest {
         BalanceContext context = context(21L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, context.getRequestId(), "p", 8001, "g1");
-        when(selector.select(context, RoleType.PREFILL, null))
-                .thenReturn(prefill.selection);
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
 
         QueueRoutingResult.Admitted admitted = assertInstanceOf(
                 QueueRoutingResult.Admitted.class,
@@ -117,18 +143,20 @@ class DefaultRouterTest {
                 RoleType.PREFILL, 31L, "p", 8001, "selected-group");
         SelectionFixture vit = selection(
                 RoleType.VIT, 31L, "v", 8002, "selected-group");
-        when(selector.select(context, RoleType.PREFILL, null))
-                .thenReturn(prefill.selection);
-        when(selector.select(context, RoleType.VIT, "selected-group"))
-                .thenReturn(vit.selection);
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(
+                context, RoleType.VIT, "selected-group"))
+                .thenReturn(EndpointSelection.selected(vit.selection));
 
         QueueRoutingResult.Admitted admitted = assertInstanceOf(
                 QueueRoutingResult.Admitted.class,
                 router.routeForQueue(context));
         admitted.admission().close();
 
-        verify(selector).select(context, RoleType.PREFILL, null);
-        verify(selector).select(context, RoleType.VIT, "selected-group");
+        verify(selector).selectForQueue(context, RoleType.PREFILL, null);
+        verify(selector).selectForQueue(
+                context, RoleType.VIT, "selected-group");
         verify(vit.pin).close();
         verify(prefill.pin).close();
     }
@@ -145,18 +173,19 @@ class DefaultRouterTest {
                 RoleType.PREFILL, 41L, "p", 8001, "other");
         SelectionFixture vit = selection(
                 RoleType.VIT, 41L, "v", 8002, "other");
-        when(selector.select(context, RoleType.PREFILL, "forced"))
-                .thenReturn(prefill.selection);
-        when(selector.select(context, RoleType.VIT, "forced"))
-                .thenReturn(vit.selection);
+        when(selector.selectForQueue(context, RoleType.PREFILL, "forced"))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.VIT, "forced"))
+                .thenReturn(EndpointSelection.selected(vit.selection));
 
         QueueRoutingResult.Admitted admitted = assertInstanceOf(
                 QueueRoutingResult.Admitted.class,
                 router.routeForQueue(context));
         admitted.admission().close();
 
-        verify(selector).select(context, RoleType.PREFILL, "forced");
-        verify(selector).select(context, RoleType.VIT, "forced");
+        verify(selector).selectForQueue(
+                context, RoleType.PREFILL, "forced");
+        verify(selector).selectForQueue(context, RoleType.VIT, "forced");
     }
 
     @Test
@@ -167,17 +196,17 @@ class DefaultRouterTest {
         BalanceContext context = context(51L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 51L, "p", 8001, "g1");
-        when(selector.select(context, RoleType.PREFILL, null))
-                .thenReturn(prefill.selection);
-        when(selector.select(context, RoleType.VIT, "g1"))
-                .thenReturn(null);
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
+        when(selector.selectForQueue(context, RoleType.VIT, "g1"))
+                .thenReturn(EndpointSelection.unavailablePool());
 
-        QueueRoutingResult.Rejected rejected = assertInstanceOf(
-                QueueRoutingResult.Rejected.class,
+        QueueRoutingResult.Blocked blocked = assertInstanceOf(
+                QueueRoutingResult.Blocked.class,
                 router.routeForQueue(context));
 
-        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(),
-                rejected.response().getCode());
+        assertEquals(new PlacementKey(RoleType.VIT, "g1"),
+                blocked.blocker());
         verify(prefill.selection).close();
     }
 
@@ -188,8 +217,8 @@ class DefaultRouterTest {
         BalanceContext context = context(61L);
         SelectionFixture foreign = selection(
                 RoleType.PREFILL, 999L, "p", 8001, "g1");
-        when(selector.select(context, RoleType.PREFILL, null))
-                .thenReturn(foreign.selection);
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(foreign.selection));
 
         assertThrows(IllegalStateException.class,
                 () -> router.routeForQueue(context));
@@ -208,15 +237,15 @@ class DefaultRouterTest {
         BalanceContext context = context(71L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 71L, "p", 8001, "g1");
-        when(selector.select(context, RoleType.PREFILL, null))
-                .thenReturn(prefill.selection);
+        when(selector.selectForQueue(context, RoleType.PREFILL, null))
+                .thenReturn(EndpointSelection.selected(prefill.selection));
 
         QueueRoutingResult.Admitted admitted = assertInstanceOf(
                 QueueRoutingResult.Admitted.class,
                 router.routeForQueue(context));
         admitted.admission().close();
 
-        verify(selector).select(context, RoleType.PREFILL, null);
+        verify(selector).selectForQueue(context, RoleType.PREFILL, null);
     }
 
     private DefaultRouter router() {

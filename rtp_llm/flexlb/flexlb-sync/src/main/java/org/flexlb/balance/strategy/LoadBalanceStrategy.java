@@ -17,4 +17,16 @@ public interface LoadBalanceStrategy {
      * must be consumed or closed by the caller.
      */
     SelectedRole select(BalanceContext context, RoleType roleType, String group);
+
+    /**
+     * Queue selection additionally says whether a miss applies to the whole
+     * observed pool. Strategies with request-specific filters override this.
+     */
+    default EndpointSelection selectForQueue(
+            BalanceContext context, RoleType roleType, String group) {
+        SelectedRole selected = select(context, roleType, group);
+        return selected == null
+                ? EndpointSelection.unavailablePool()
+                : EndpointSelection.selected(selected);
+    }
 }

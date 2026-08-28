@@ -41,6 +41,11 @@ class PriorityLatencyE2ETest {
             h.fixedWindowDecision().setMaxRequests(200);
             h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
             h.config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
+            // This case measures Prefill priority ordering, not Decode KV
+            // admission. Keep the independent Decode expected-KV gate out of
+            // the fixture so every request reaches the queue under test.
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxKvUsagePercent(0);
 
             Map<Long, Long> submitNanos = new HashMap<>();
             Map<Long, Integer> priorityByRid = new HashMap<>();

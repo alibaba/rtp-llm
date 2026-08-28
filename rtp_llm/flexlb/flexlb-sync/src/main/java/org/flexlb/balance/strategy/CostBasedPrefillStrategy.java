@@ -61,6 +61,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     @Override
     public SelectedRole select(BalanceContext balanceContext, RoleType roleType, String group) {
+        return selectForQueue(balanceContext, roleType, group).selected();
+    }
+
+    @Override
+    public EndpointSelection selectForQueue(
+            BalanceContext balanceContext,
+            RoleType roleType,
+            String group) {
         try {
             return doSelect(balanceContext, roleType, group);
         } finally {
@@ -72,7 +80,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     protected void releasePerSelectionState() {
     }
 
-    private SelectedRole doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
+    private EndpointSelection doSelect(
+            BalanceContext balanceContext,
+            RoleType roleType,
+            String group) {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
@@ -83,14 +94,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             Logger.debug("Prefill select failed: no registered endpoints, request_id={}",
                     requestId);
             discovery.close();
-            return null;
+            return EndpointSelection.unavailablePool();
         }
         PrefillResourceMeasure resourceMeasure = (PrefillResourceMeasure)
                 resourceMeasureFactory.getMeasure(config.resourceMeasureFor(roleType));
         if (resourceMeasure == null) {
             Logger.debug("Prefill select failed: no resource measure, request_id={}", requestId);
             discovery.close();
-            return null;
+            return EndpointSelection.unavailablePool();
         }
 
         try (discovery) {
@@ -139,7 +150,11 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                 + " rejections={}",
                             requestId,
                             rejections);
-                    return null;
+                    int capacityMisses = rejections.getOrDefault(
+                            "RESOURCE_UNAVAILABLE", 0);
+                    return capacityMisses >= discovery.registeredCount()
+                            ? EndpointSelection.unavailablePool()
+                            : EndpointSelection.requestUnavailable();
                 }
 
                 boolean modeledSelection =
@@ -174,7 +189,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                             "Prefill select failed: all filtered out, request_id={}, rejections={}",
                             requestId,
                             rejections);
-                    return null;
+                    return EndpointSelection.requestUnavailable();
                 }
 
                 PrefillEndpoint best = selectedCandidates.endpoint(selectedIndex);
@@ -204,7 +219,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                 selectedCandidate.projection().projectedTtftMs(),
                                 selectedPrefillMs,
                                 bestCacheHit);
-                return selectedRole;
+                return EndpointSelection.selected(selectedRole);
             }
         }
     }

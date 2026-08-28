@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -9,6 +10,10 @@ import java.util.Objects;
 /** Owns the one ordered shutdown protocol for request and endpoint lifecycles. */
 @Component
 final class RequestShutdownOrchestrator {
+
+    interface Placement {
+        void closePlacement();
+    }
 
     interface Lifecycle {
         boolean closeAdmissionAndAwaitMutations();
@@ -22,11 +27,21 @@ final class RequestShutdownOrchestrator {
 
     private final Lifecycle lifecycle;
     private final EndpointRegistry registry;
+    private final Placement placement;
 
     RequestShutdownOrchestrator(
             Lifecycle lifecycle, EndpointRegistry registry) {
+        this(lifecycle, registry, () -> { });
+    }
+
+    @Autowired
+    RequestShutdownOrchestrator(
+            Lifecycle lifecycle,
+            EndpointRegistry registry,
+            Placement placement) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.registry = Objects.requireNonNull(registry, "registry");
+        this.placement = Objects.requireNonNull(placement, "placement");
     }
 
     @PreDestroy
@@ -34,11 +49,16 @@ final class RequestShutdownOrchestrator {
         Throwable failure = null;
         boolean ownsShutdown;
         try {
+            placement.closePlacement();
+        } catch (Throwable closeFailure) {
+            failure = closeFailure;
+        }
+        try {
             ownsShutdown = lifecycle.closeAdmissionAndAwaitMutations();
         } catch (Throwable closeFailure) {
             // The production gate is total. If an implementation violates that
             // contract, retain the failure and still attempt every close leaf.
-            failure = closeFailure;
+            failure = append(failure, closeFailure);
             ownsShutdown = true;
         }
         if (!ownsShutdown) {

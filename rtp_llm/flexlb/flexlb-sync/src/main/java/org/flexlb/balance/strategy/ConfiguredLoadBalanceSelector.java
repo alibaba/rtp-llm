@@ -27,6 +27,19 @@ public final class ConfiguredLoadBalanceSelector {
             BalanceContext context,
             RoleType role,
             String group) {
+        return strategyFor(context, role).select(context, role, group);
+    }
+
+    public EndpointSelection selectForQueue(
+            BalanceContext context,
+            RoleType role,
+            String group) {
+        return strategyFor(context, role).selectForQueue(
+                context, role, group);
+    }
+
+    private LoadBalanceStrategy strategyFor(
+            BalanceContext context, RoleType role) {
         FlexlbConfig config = context.getConfig();
         RoleType exactRole = role;
         RoutingConfig.EndpointSelectorConfig configured =
@@ -53,6 +66,6 @@ public final class ConfiguredLoadBalanceSelector {
                             + ", selector="
                             + configured.getClass().getName());
         }
-        return match.select(context, exactRole, group);
+        return match;
     }
 }

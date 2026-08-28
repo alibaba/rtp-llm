@@ -22,4 +22,13 @@ public sealed interface QueueRoutingResult {
             }
         }
     }
+
+    /** No endpoint is owned; retry after this exact capacity domain changes. */
+    record Blocked(
+            PlacementKey blocker,
+            boolean poolUnavailable) implements QueueRoutingResult {
+        public Blocked {
+            java.util.Objects.requireNonNull(blocker, "blocker");
+        }
+    }
 }

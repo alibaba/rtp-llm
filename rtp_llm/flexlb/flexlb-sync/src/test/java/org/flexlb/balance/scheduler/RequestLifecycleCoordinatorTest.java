@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -95,20 +96,21 @@ class RequestLifecycleCoordinatorTest {
 
     @Test
     void decodeAcceptanceLimitIsAtomicAndReusableAfterLocalTerminal() {
-        CompletableFuture<Response> first = lifecycle.register(context(211L), 4);
-        CompletableFuture<Response> second = lifecycle.register(context(212L), 4);
+        Registered first = registerItem(211L);
+        Registered second = registerItem(212L);
 
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                211L, first, 1, 30_000L));
-        assertFalse(lifecycle.tryInstallDecodeAcceptanceGuard(
-                212L, second, 1, 30_000L));
+        assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                commitRoute(first, 1));
+        assertEquals(
+                InflightCommitPort.RouteCommitResult.ACCEPTANCE_LIMIT_REACHED,
+                commitRoute(second, 1));
         assertEquals(1, lifecycle.decodeAcceptanceCount());
 
         lifecycle.cancelRequest(211L, 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(0, lifecycle.decodeAcceptanceCount());
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                212L, second, 1, 30_000L));
+        assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                commitRoute(second, 1));
         assertEquals(1, lifecycle.decodeAcceptanceCount());
 
         lifecycle.cancelRequest(212L, 0L, CancelReason.CLIENT_CANCELLED);
@@ -117,13 +119,13 @@ class RequestLifecycleCoordinatorTest {
 
     @Test
     void zeroDecodeAcceptanceLimitKeepsTheGuardUnbounded() {
-        CompletableFuture<Response> first = lifecycle.register(context(221L), 4);
-        CompletableFuture<Response> second = lifecycle.register(context(222L), 4);
+        Registered first = registerItem(221L);
+        Registered second = registerItem(222L);
 
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                221L, first, 0, 30_000L));
-        assertTrue(lifecycle.tryInstallDecodeAcceptanceGuard(
-                222L, second, 0, 30_000L));
+        assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                commitRoute(first, 0));
+        assertEquals(InflightCommitPort.RouteCommitResult.PUBLISHED,
+                commitRoute(second, 0));
         assertEquals(2, lifecycle.decodeAcceptanceCount());
 
         lifecycle.cancelRequest(221L, 0L, CancelReason.CLIENT_CANCELLED);
@@ -215,6 +217,39 @@ class RequestLifecycleCoordinatorTest {
         return context;
     }
 
+    private Registered registerItem(long requestId) {
+        BalanceContext context = context(requestId);
+        CompletableFuture<Response> future = lifecycle.register(context, 4);
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+        return new Registered(
+                new BatchItem(
+                        context,
+                        future,
+                        new Response(),
+                        null,
+                        null,
+                        null,
+                        decode,
+                        reservation,
+                        System.currentTimeMillis()),
+                future);
+    }
+
+    private InflightCommitPort.RouteCommitResult commitRoute(
+            Registered registered, int limit) {
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            return lifecycle.commitRoute(
+                    registered.item(), false, limit, 30_000L,
+                    () -> true);
+        }
+    }
+
     private static void awaitCondition(java.util.function.BooleanSupplier condition)
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -222,5 +257,10 @@ class RequestLifecycleCoordinatorTest {
             Thread.sleep(1L);
         }
         assertTrue(condition.getAsBoolean(), "condition did not become true");
+    }
+
+    private record Registered(
+            BatchItem item,
+            CompletableFuture<Response> future) {
     }
 }

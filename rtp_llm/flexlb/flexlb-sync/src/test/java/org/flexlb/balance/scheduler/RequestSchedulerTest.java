@@ -10,78 +10,88 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
-import org.mockito.InOrder;
+import org.flexlb.dao.route.RoleType;
 
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.when;
 
 class RequestSchedulerTest {
 
     @Test
-    void priorityBindsDecodeAcceptanceBeforeRouting() {
+    void terminalRouteRejectionDoesNotAcquireDecodeAcceptance() {
         Fixture fixture = new Fixture(true);
-        when(fixture.lifecycle.tryInstallDecodeAcceptanceGuard(
-                anyLong(), any(), anyInt(), anyLong())).thenReturn(true);
-
-        fixture.scheduler.submit(fixture.context);
-
-        InOrder order = inOrder(fixture.lifecycle, fixture.router);
-        order.verify(fixture.lifecycle).beginAdmission(
-                fixture.requestId, fixture.future);
-        order.verify(fixture.lifecycle).tryInstallDecodeAcceptanceGuard(
-                fixture.requestId,
-                fixture.future,
-                fixture.acceptanceLimit,
-                fixture.acceptanceTimeoutMs);
-        order.verify(fixture.router).routeForQueue(fixture.context);
-    }
-
-    @Test
-    void priorityCapacityRejectionDoesNotPublishAQueueRoute() {
-        Fixture fixture = new Fixture(true);
-        when(fixture.lifecycle.tryInstallDecodeAcceptanceGuard(
-                anyLong(), any(), anyInt(), anyLong())).thenReturn(false);
-        when(fixture.lifecycle.decodeAcceptanceCount())
-                .thenReturn(fixture.acceptanceLimit);
 
         Response response = fixture.scheduler.submit(fixture.context).join();
 
-        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                 response.getCode());
-        verify(fixture.router, never()).routeForQueue(any());
+        verify(fixture.router, timeout(1_000))
+                .routeForQueue(fixture.context);
+        verify(fixture.lifecycle, never())
+                .commitRoute(
+                        any(), anyBoolean(), anyInt(), anyLong(), any());
+        fixture.scheduler.closePlacement();
     }
 
     @Test
-    void fifoAlsoInstallsDecodeAcceptanceGuardBeforeRouting() {
+    void priorityTemporaryMissInvokesFallbackAndKeepsOriginalFuture() {
+        Fixture fixture = new Fixture(true);
+        when(fixture.router.routeForQueue(fixture.context)).thenReturn(
+                new QueueRoutingResult.Blocked(
+                        PlacementKey.anyGroup(RoleType.PREFILL), true));
+        when(fixture.lifecycle.isAdmissionOpen(
+                fixture.requestId, fixture.future)).thenReturn(true);
+        when(fixture.fallback.tryAdmit(
+                fixture.context, fixture.future)).thenReturn(false);
+
+        CompletableFuture<Response> waiting =
+                fixture.scheduler.submit(fixture.context);
+
+        verify(fixture.fallback, timeout(1_000))
+                .tryAdmit(fixture.context, fixture.future);
+        assertFalse(waiting.isDone());
+        verify(fixture.lifecycle, never())
+                .commitRoute(
+                        any(), anyBoolean(), anyInt(), anyLong(), any());
+        fixture.scheduler.closePlacement();
+    }
+
+    @Test
+    void fifoTemporaryMissWaitsWithoutFallbackOrAcceptanceGuard() {
         Fixture fixture = new Fixture(false);
-        when(fixture.lifecycle.tryInstallDecodeAcceptanceGuard(
-                anyLong(), any(), anyInt(), anyLong())).thenReturn(true);
+        when(fixture.router.routeForQueue(fixture.context)).thenReturn(
+                new QueueRoutingResult.Blocked(
+                        PlacementKey.anyGroup(RoleType.DECODE), true));
+        when(fixture.lifecycle.isAdmissionOpen(
+                fixture.requestId, fixture.future)).thenReturn(true);
 
-        fixture.scheduler.submit(fixture.context);
+        CompletableFuture<Response> waiting =
+                fixture.scheduler.submit(fixture.context);
 
-        InOrder order = inOrder(fixture.lifecycle, fixture.router);
-        order.verify(fixture.lifecycle).tryInstallDecodeAcceptanceGuard(
-                fixture.requestId,
-                fixture.future,
-                fixture.acceptanceLimit,
-                fixture.acceptanceTimeoutMs);
-        order.verify(fixture.router).routeForQueue(fixture.context);
+        verify(fixture.router, timeout(1_000))
+                .routeForQueue(fixture.context);
+        assertFalse(waiting.isDone());
+        verify(fixture.fallback, never()).tryAdmit(any(), any());
+        verify(fixture.lifecycle, never())
+                .commitRoute(
+                        any(), anyBoolean(), anyInt(), anyLong(), any());
+        fixture.scheduler.closePlacement();
     }
 
     private static final class Fixture {
         private final long requestId = 701L;
         private final FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        private final int acceptanceLimit;
-        private final long acceptanceTimeoutMs;
         private final ConfigService configService = mock(ConfigService.class);
         private final Router router = mock(Router.class);
         private final AdmissionFallback fallback = mock(AdmissionFallback.class);
@@ -98,10 +108,6 @@ class RequestSchedulerTest {
             } else {
                 SchedulingTestConfig.useFifoQueue(config);
             }
-            acceptanceLimit = config.queueScheduler().getLifecycle()
-                    .getMaxDeliveredNotAcceptedRequestsGlobal();
-            acceptanceTimeoutMs = config.queueScheduler().getLifecycle()
-                    .getDeliveredNotAcceptedTimeoutMs();
             when(configService.loadBalanceConfig()).thenReturn(config);
             when(context.getRequest()).thenReturn(new Request());
             when(context.getRequestId()).thenReturn(requestId);

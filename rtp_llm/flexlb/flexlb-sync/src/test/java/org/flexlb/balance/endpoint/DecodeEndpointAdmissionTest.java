@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -34,6 +35,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 /**
  * Phase 4 tests for the decode admission state of {@link DecodeEndpoint}:
@@ -87,6 +91,35 @@ class DecodeEndpointAdmissionTest {
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(0, endpoint.inflightHardKvReserved());
         assertEquals(0, endpoint.routingView().inflightExpectedKv());
+    }
+
+    @Test
+    void onlyPublishedPlacementReleaseSignalsPlacementCapacity() {
+        PlacementAvailability availability =
+                mock(PlacementAvailability.class);
+        DecodeEndpoint exactEndpoint = new DecodeEndpoint(
+                status, event -> { }, availability);
+
+        DecodeEndpoint.ReservationHandle speculative;
+        try (WorkerEndpoint.GenerationPin pin =
+                     exactEndpoint.tryPinGeneration()) {
+            assertNotNull(pin);
+            speculative = exactEndpoint.reserveQueuedPinned(
+                    pin, 11L, 100L, 110L, 10);
+        }
+        exactEndpoint.rollbackExact(speculative);
+        verify(availability, never()).capacityChanged(
+                RoleType.DECODE, null);
+
+        DecodeEndpoint.ReservationHandle published;
+        try (WorkerEndpoint.GenerationPin pin =
+                     exactEndpoint.tryPinGeneration()) {
+            assertNotNull(pin);
+            published = exactEndpoint.reserveQueuedPinned(
+                    pin, 12L, 100L, 110L, 10);
+        }
+        exactEndpoint.releasePlacementExact(published);
+        verify(availability).capacityChanged(RoleType.DECODE, null);
     }
 
     @Test

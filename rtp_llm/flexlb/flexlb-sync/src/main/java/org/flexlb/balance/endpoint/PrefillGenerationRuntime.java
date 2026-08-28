@@ -83,6 +83,11 @@ public interface PrefillGenerationRuntime {
     /** Publish one exact item after the endpoint facade validates its pin. */
     boolean offer(DeliveryItem exactItem);
 
+    /** Atomic admission check used by fresh queue placement. */
+    default boolean offerForPlacement(DeliveryItem exactItem) {
+        return offer(exactItem);
+    }
+
     /** Remove only the supplied canonical ACTIVE identity. */
     boolean removeQueued(DeliveryItem exactItem, String reason);
 
