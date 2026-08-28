@@ -440,6 +440,11 @@ message TaskInfoPB {
     int64 execution_time_ms = 13;
     PriorityPreemptionProgressPB priority_preemption_progress = 14;
     int32 priority = 15;
+    // Current actual KV cache tokens occupied by this request (block-aligned:
+    // allocated KV blocks * tokens-per-block). 0 means "not reported" (legacy
+    // engine or KV not yet allocated). Observational only for now: FlexLB must
+    // not depend on it for correctness; absence falls back to default 0.
+    int64 kv_tokens = 16;
 }
 
 message UpdateWeightsRequestPB {
@@ -476,6 +481,12 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    // Set to true when running_task_info was truncated by the Engine because
+    // the running list exceeded the reporting cap. When true, the absence of a
+    // request from running_task_info is NOT evidence of completion (it may
+    // have been cut off). Carried for observation only in this phase; legacy
+    // engines never set it (default false, behavior unchanged).
+    bool running_detail_truncated = 23;
 }
 
 message EmbeddingInputPB {
