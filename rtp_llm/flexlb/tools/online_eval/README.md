@@ -132,9 +132,10 @@ run now writes a ~65MB `mock_per_engine_timeseries.json.gz`). `MOCK_PER_ENGINE_P
 (default 1) scales the per-engine timeline volume without touching the other
 collectors; `SECONDARY_POLL_INTERVAL_S` (default 1) retunes all of them. Set
 `FLEXLB_SECONDARY_POLLERS_ENABLED=0` to disable all four pollers entirely —
-zero observation overhead for A/B comparisons; `run_stability_test.sh` and
-`run_burst_test.sh` pin this to 0 so their historical baselines stay
-comparable (their observation channel is `stability_monitor.py`).
+zero observation overhead for A/B comparisons. (The retired Mac-local
+`run_stability_test.sh` / `run_burst_test.sh` lines used to pin this to 0;
+their scenarios are now covered by the `flexlb_ft/` framework and the remote
+skill eval chain.)
 
 ### FLEXLB_MONITOR_MODE
 
@@ -185,8 +186,7 @@ applied to a legacy run directory to produce the same layout. Legacy fat
 A-split on the next consolidation that rewrites `mock.json`; the unified
 analyzer reads both layouts (`.json.gz` first, embedded key, then the raw
 `.prom`), so old runs stay fully analyzable. The
-consumers (`analyze_slo_batch.py`, `aggregate_canvas_run.py`,
-`analyze_burst_results.py`, `generate_stability_report.py`) read the
+consumers (`analyze_slo_batch.py`, `aggregate_canvas_run.py`) read the
 **legacy source files first** and fall back to the consolidated ones —
 a successful consolidation deletes the legacy files, so a legacy file that
 is present always means fresher data (RUN_DIR reuse), and **pre-consolidation

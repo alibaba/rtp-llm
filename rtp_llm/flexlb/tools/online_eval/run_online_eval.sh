@@ -825,8 +825,7 @@ append_process_poll_pid() {
 
 start_secondary_pollers() {
   # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips all four pollers — zero
-  # observation overhead for A/B comparisons and the pinned historical
-  # baselines (run_stability_test.sh / run_burst_test.sh export 0).
+  # observation overhead for A/B comparisons.
   if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
     echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED})"
     return 0

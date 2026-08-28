@@ -354,7 +354,7 @@ files: nine files in total. The `MOCK_ENGINE_IMPL` / `LOAD_CLIENT_IMPL`
 orchestration switches and their Python branches are gone as well, so the
 Java stack described in this README is the only implementation.
 
-All eight orchestration test scripts have been converted to the Java stack and
+All seven orchestration test scripts have been converted to the Java stack and
 now drive JavaMockEngineCluster / JavaLoadClient through the shared
 `tools/online_eval/lib_load_client.sh` helpers
 (`start_java_mock_cluster` / `wait_mock_cluster_ready` / `mock_http` /
@@ -367,11 +367,9 @@ now drive JavaMockEngineCluster / JavaLoadClient through the shared
 - `master_kill_restart_test.sh`
 - `master_recovery_ttft_test.sh`
 - `engine_disconnect_ttft_test.sh`
-- `run_inflight_experiment.py`
 
 The Python **smoke client family** is retained on purpose (it is tooling, not
 the mock engine): `flexlb_smoke_base.py`, `priority_preemption_smoke.py`,
-`scheduling_smoke.py`, `cancel_smoke.py`, `anomaly_smoke.py`,
 `stability_monitor.py` and the analysis tooling talk to the Java cluster over
 its gRPC + HTTP control plane. `encode_unique_key` now lives in
 `online_eval/proto_utils.py`, so the smoke base no longer depends on the
