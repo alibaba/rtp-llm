@@ -3,9 +3,12 @@ package org.flexlb.config;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InternalRuntimeSettingsTest {
 
@@ -74,5 +77,47 @@ class InternalRuntimeSettingsTest {
         InternalRuntimeSettings settings = new InternalRuntimeSettings(env);
 
         assertEquals(96, settings.getBatchDispatchThreads());
+    }
+
+    @Test
+    void should_keep_route_admission_block_projection_enabled_by_default() {
+        assertTrue(new InternalRuntimeSettings(Map.of())
+                .isRouteAdmissionBlockProjectionEnabled());
+    }
+
+    @Test
+    void should_disable_route_admission_block_projection_for_zero_or_false() {
+        for (String off : List.of("0", "false", "FALSE", " False ")) {
+            Map<String, String> env = new HashMap<>();
+            env.put(InternalRuntimeSettings.ROUTE_ADMISSION_BLOCK_PROJECTION_ENV, off);
+
+            assertFalse(new InternalRuntimeSettings(env)
+                            .isRouteAdmissionBlockProjectionEnabled(),
+                    "env value '" + off + "' must disable the projection");
+        }
+    }
+
+    @Test
+    void should_explicitly_enable_route_admission_block_projection_for_one_or_true() {
+        for (String on : List.of("1", "true", "TRUE")) {
+            Map<String, String> env = new HashMap<>();
+            env.put(InternalRuntimeSettings.ROUTE_ADMISSION_BLOCK_PROJECTION_ENV, on);
+
+            assertTrue(new InternalRuntimeSettings(env)
+                            .isRouteAdmissionBlockProjectionEnabled(),
+                    "env value '" + on + "' must enable the projection");
+        }
+    }
+
+    @Test
+    void should_fall_back_to_enabled_for_missing_blank_or_invalid_values() {
+        for (String invalid : List.of("", "   ", "yes-maybe")) {
+            Map<String, String> env = new HashMap<>();
+            env.put(InternalRuntimeSettings.ROUTE_ADMISSION_BLOCK_PROJECTION_ENV, invalid);
+
+            assertTrue(new InternalRuntimeSettings(env)
+                            .isRouteAdmissionBlockProjectionEnabled(),
+                    "env value '" + invalid + "' must fall back to the default");
+        }
     }
 }
