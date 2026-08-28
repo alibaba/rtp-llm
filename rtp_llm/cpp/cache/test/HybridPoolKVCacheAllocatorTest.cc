@@ -190,7 +190,7 @@ private:
 class PolicyMemoryStorageBackend: public StorageBackend {
 public:
     explicit PolicyMemoryStorageBackend(
-        std::shared_ptr<MemoryStorageState> state,
+        std::shared_ptr<MemoryStorageState>     state,
         std::shared_ptr<StorageBackendExecutor> executor = std::make_shared<InlineStorageBackendExecutor>()):
         StorageBackend(std::move(executor)), state_(std::move(state)) {}
     ~PolicyMemoryStorageBackend() override {
@@ -722,6 +722,58 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TotalAndFreeBlocksAggregateAcrossGroups) 
     const size_t expected_total = (6u - 1u) + (8u - 1u);
     EXPECT_EQ(allocator->totalBlocksNum(), expected_total);
     EXPECT_EQ(allocator->freeBlocksNum(), expected_total);
+    EXPECT_EQ(allocator->availableBlocksNum(), expected_total);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, AvailableCapacityAggregatesCanonicalPerPoolCounts) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const auto& pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    const DeviceBlockPoolPtr& full_pool = pools[1];
+    ASSERT_NE(full_pool, nullptr);
+
+    const size_t total_available             = allocator->availableBlocksNum();
+    const size_t tokens_before               = allocator->availableTokensNum();
+    const auto   capacity_before             = allocator->tokenCapacity(config.seq_size_per_block);
+    auto         expected_available_capacity = [&]() {
+        return std::min(pools[0]->availableBlocksNum() * config.seqSizePerBlockForGroup(0),
+                        pools[1]->availableBlocksNum() * config.seqSizePerBlockForGroup(1));
+    };
+
+    const std::optional<BlockIdxType> block = full_pool->malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_EQ(allocator->availableBlocksNum(), total_available - 1);
+    EXPECT_LT(allocator->availableTokensNum(), tokens_before);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, expected_available_capacity());
+
+    full_pool->incTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(allocator->availableBlocksNum(), total_available);
+    EXPECT_EQ(allocator->availableTokensNum(), tokens_before);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
+
+    full_pool->incRef(*block);
+    EXPECT_EQ(allocator->availableBlocksNum(), total_available - 1);
+    EXPECT_LT(allocator->availableTokensNum(), tokens_before);
+    full_pool->decRef(*block);
+    EXPECT_EQ(allocator->availableBlocksNum(), total_available);
+    EXPECT_EQ(allocator->availableTokensNum(), tokens_before);
+
+    full_pool->decTreeRef(*block, BlockTreeRefType::CACHE);
+
+    const DeviceBlockPoolPtr&         linear_pool  = pools[0];
+    const std::optional<BlockIdxType> linear_block = linear_pool->malloc();
+    ASSERT_TRUE(linear_block.has_value());
+    EXPECT_LT(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, expected_available_capacity());
+    linear_pool->incTreeRef(*linear_block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, capacity_before.available_tokens);
+    linear_pool->decTreeRef(*linear_block, BlockTreeRefType::CACHE);
+
+    EXPECT_EQ(allocator->freeBlocksNum(), allocator->totalBlocksNum());
+    EXPECT_EQ(allocator->availableBlocksNum(), total_available);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScopes) {
@@ -1109,22 +1161,23 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
 }
 
 // Distinct per-field values keep a wrong field source visible instead of coincidentally equal.
-static KVCachePoolMetricsSnapshot
-makeMergeAllocatorInput(const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks) {
+static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
+    const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks, size_t available_blocks) {
     KVCachePoolMetricsSnapshot snapshot;
-    snapshot.pool_index                = seed;
-    snapshot.pool_name                 = pool_name;
-    snapshot.block_size_bytes          = 1000 + seed;
-    snapshot.total_blocks              = total_blocks;
-    snapshot.free_blocks               = free_blocks;
-    snapshot.used_blocks               = total_blocks - free_blocks;
-    snapshot.active_blocks             = 7 + seed;
-    snapshot.reserve_blocks            = 5 + seed;
-    snapshot.request_ref_blocks        = 11 + seed;
-    snapshot.block_cache_ref_blocks    = 13 + seed;
-    snapshot.load_ref_blocks           = 14 + seed;
-    snapshot.eviction_ref_blocks       = 15 + seed;
-    snapshot.store_ref_blocks          = 16 + seed;
+    snapshot.pool_index             = seed;
+    snapshot.pool_name              = pool_name;
+    snapshot.block_size_bytes       = 1000 + seed;
+    snapshot.total_blocks           = total_blocks;
+    snapshot.free_blocks            = free_blocks;
+    snapshot.used_blocks            = total_blocks - free_blocks;
+    snapshot.active_blocks          = 7 + seed;
+    snapshot.available_blocks       = available_blocks;
+    snapshot.reserve_blocks         = 5 + seed;
+    snapshot.request_ref_blocks     = 11 + seed;
+    snapshot.block_cache_ref_blocks = 13 + seed;
+    snapshot.load_ref_blocks        = 14 + seed;
+    snapshot.eviction_ref_blocks    = 15 + seed;
+    snapshot.store_ref_blocks       = 16 + seed;
     snapshot.used_ratio = static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
     return snapshot;
 }
@@ -1136,19 +1189,19 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
                                                        size_t             free_blocks,
                                                        size_t             available_blocks) {
     BlockTreePoolMetricsSnapshot snapshot;
-    snapshot.tier                      = tier;
-    snapshot.pool_name                 = pool_name;
-    snapshot.block_size_bytes          = 2000 + seed;
-    snapshot.total_blocks              = total_blocks;
-    snapshot.free_blocks               = free_blocks;
-    snapshot.used_blocks               = total_blocks - free_blocks;
-    snapshot.available_blocks          = available_blocks;
-    snapshot.active_blocks             = total_blocks - available_blocks;
-    snapshot.request_ref_blocks        = 31 + seed;
-    snapshot.block_cache_ref_blocks    = 33 + seed;
-    snapshot.load_ref_blocks           = 34 + seed;
-    snapshot.eviction_ref_blocks       = 35 + seed;
-    snapshot.store_ref_blocks          = 36 + seed;
+    snapshot.tier                   = tier;
+    snapshot.pool_name              = pool_name;
+    snapshot.block_size_bytes       = 2000 + seed;
+    snapshot.total_blocks           = total_blocks;
+    snapshot.free_blocks            = free_blocks;
+    snapshot.used_blocks            = total_blocks - free_blocks;
+    snapshot.available_blocks       = available_blocks;
+    snapshot.active_blocks          = total_blocks - available_blocks;
+    snapshot.request_ref_blocks     = 31 + seed;
+    snapshot.block_cache_ref_blocks = 33 + seed;
+    snapshot.load_ref_blocks        = 34 + seed;
+    snapshot.eviction_ref_blocks    = 35 + seed;
+    snapshot.store_ref_blocks       = 36 + seed;
     return snapshot;
 }
 
@@ -1213,29 +1266,29 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeCachePoolMetricsSnapshotsPreservesRe
 
     const std::vector<MergeCase> cases = {
         {"allocator_then_tree_only_append",
-         {makeMergeAllocatorInput("linear", 1, /*total=*/100, /*free=*/40),
-          makeMergeAllocatorInput("full", 2, /*total=*/80, /*free=*/80)},
+         {makeMergeAllocatorInput("linear", 1, /*total=*/100, /*free=*/40, /*available=*/73),
+          makeMergeAllocatorInput("full", 2, /*total=*/80, /*free=*/80, /*available=*/80)},
          {makeMergeTreeInput(Tier::DEVICE, "linear", 3, /*total=*/111, /*free=*/44, /*available=*/70),
           makeMergeTreeInput(Tier::DEVICE, "tree_only_device", 4, /*total=*/50, /*free=*/20, /*available=*/35),
           makeMergeTreeInput(Tier::HOST, "host_pool", 5, /*total=*/200, /*free=*/150, /*available=*/180),
           makeMergeTreeInput(Tier::DISK, "disk_pool", 6, /*total=*/300, /*free=*/300, /*available=*/300)},
          {// Device rows come entirely from allocator snapshots.
-          {true, 0, 92},
-          {true, 1, 71},
+          {true, 0, 73},
+          {true, 1, 80},
           // Tree-only pools follow every allocator pool, in tree input order.
           {false, 1, 35},
           {false, 2, 180},
           {false, 3, 300}}},
         {"allocator_duplicate_keeps_first_and_skips_rest",
-         {makeMergeAllocatorInput("dup_pool", 1, /*total=*/100, /*free=*/40),
-          makeMergeAllocatorInput("dup_pool", 9, /*total=*/500, /*free=*/5)},
+         {makeMergeAllocatorInput("dup_pool", 1, /*total=*/100, /*free=*/40, /*available=*/73),
+          makeMergeAllocatorInput("dup_pool", 9, /*total=*/500, /*free=*/5, /*available=*/9)},
          {},
-         {{true, 0, 92}}},
+         {{true, 0, 73}}},
         {"same_named_tree_does_not_override_allocator",
-         {makeMergeAllocatorInput("dup_tree_pool", 1, /*total=*/100, /*free=*/40)},
+         {makeMergeAllocatorInput("dup_tree_pool", 1, /*total=*/100, /*free=*/40, /*available=*/73)},
          {makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 3, /*total=*/100, /*free=*/40, /*available=*/70),
           makeMergeTreeInput(Tier::DEVICE, "dup_tree_pool", 4, /*total=*/100, /*free=*/40, /*available=*/25)},
-         {{true, 0, 92}}},
+         {{true, 0, 73}}},
         // Asymmetry with the allocator loop: tree-only duplicates are all emitted.
         {"tree_only_duplicates_are_not_deduplicated",
          {},
@@ -1391,7 +1444,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadCountsHeldDeviceBlocksForP
     resource->mutableBlockIds(0, /*group_id=*/1).assign(*device_matches);
     resource->mutableBlockIds(0, /*group_id=*/1).add({NULL_BLOCK_IDX});
     const size_t remote_position = swa_total;
-    auto token_ids = makeCompleteTokenIds(
+    auto         token_ids       = makeCompleteTokenIds(
         /*batch_size=*/1, /*seq_length=*/static_cast<int>((swa_total + 1) * 4), /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = true;
@@ -1422,15 +1475,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedSWALoadIgnoresNonPhysicalDummyInH
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
     resource->mutableBlockIds(0, /*group_id=*/1).assign({*device_match, 0, NULL_BLOCK_IDX});
-    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = true;
     malloc_info.verbose     = false;
 
     // One held DEVICE block plus one remote target exactly fits this pool.
     // The dummy block 0 and the NULL target are not physical holds.
-    EXPECT_EQ(allocator->preparedReserveStatusForTest(
-                  malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{2}}),
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{2}}),
               MallocStatus::NONE);
 
     resource->mutableBlockIds(0, /*group_id=*/1).assign({*device_match});
@@ -1455,7 +1507,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseDoesNotDoubleCountPartialG
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
     resource->mutableBlockIds(0, /*group_id=*/0).assign({*partial_full});
-    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = false;
     malloc_info.verbose     = false;
@@ -1486,7 +1538,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseCountsRequiredSparseSWAHol
 
     auto resource = makeBatchResource(/*batch_size=*/1, config);
     resource->mutableBlockIds(0, /*group_id=*/1).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = false;
     malloc_info.verbose     = false;
@@ -1494,8 +1546,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PreparedNoReuseCountsRequiredSparseSWAHol
     // The no-reuse SWA policy normally materializes only the two active tail
     // blocks. Remote loading additionally requires sparse position 0, so the
     // two currently free blocks are insufficient for this prepared attempt.
-    EXPECT_EQ(allocator->preparedReserveStatusForTest(
-                  malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{0}}),
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, RequiredPositions{0}}),
               MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
 
     pools[1]->decRef(*swa_pin);

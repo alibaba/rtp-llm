@@ -70,9 +70,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
     std::vector<DeviceBlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int group_id = 0; group_id < group_nums; ++group_id) {
-        auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
+        auto pool_config  = DeviceBlockPoolConfigHelper::createConfigForGroup(config_, static_cast<size_t>(group_id));
         const auto policy = config_.policyForGroup(static_cast<size_t>(group_id));
-        pool_config.use_pinned_cpu_backing = policy.memory_placement == CacheMemoryPlacement::HOST_PINNED;
+        pool_config.use_pinned_cpu_backing  = policy.memory_placement == CacheMemoryPlacement::HOST_PINNED;
         pool_config.use_cuda_malloc_backing = use_cuda_malloc_block_pool_ && !pool_config.use_pinned_cpu_backing;
         const auto tag                      = config_.tagForGroup(static_cast<size_t>(group_id));
         const auto group_type               = config_.typeForGroup(static_cast<size_t>(group_id));
@@ -338,17 +338,17 @@ size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
     return total;
 }
 
-size_t HybridPoolKVCacheAllocator::activeTreeCachedBlocksNum() const {
+size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         if (pool) {
-            total += pool->activeTreeCachedBlocksNum();
+            total += pool->availableBlocksNum();
         }
     }
     return total;
 }
 
-size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_free_blocks, bool full_groups_only) const {
+size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, bool full_groups_only) const {
     if (group_block_pools_.empty()) {
         return 0;
     }
@@ -364,8 +364,8 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_free_blocks, bool f
                 continue;
             }
             saw_group        = true;
-            const auto block = use_free_blocks ? group_block_pools_[group_id]->freeBlocksNum() :
-                                                 group_block_pools_[group_id]->totalBlocksNum();
+            const auto block = use_available_blocks ? group_block_pools_[group_id]->availableBlocksNum() :
+                                                      group_block_pools_[group_id]->totalBlocksNum();
             min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(group_id));
         }
         return std::make_pair(saw_group, min_tokens);
@@ -383,11 +383,11 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_free_blocks, bool f
 }
 
 size_t HybridPoolKVCacheAllocator::availableTokensNum() const {
-    return minTokenCapacity(/*use_free_blocks=*/true, /*full_groups_only=*/true);
+    return minTokenCapacity(/*use_available_blocks=*/true, /*full_groups_only=*/true);
 }
 
 size_t HybridPoolKVCacheAllocator::totalTokensNum() const {
-    return minTokenCapacity(/*use_free_blocks=*/false, /*full_groups_only=*/true);
+    return minTokenCapacity(/*use_available_blocks=*/false, /*full_groups_only=*/true);
 }
 
 size_t HybridPoolKVCacheAllocator::totalBlocksNum() const {
@@ -399,7 +399,7 @@ size_t HybridPoolKVCacheAllocator::totalBlocksNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
-    return minTokenCapacity(/*use_free_blocks=*/false, /*full_groups_only=*/true);
+    return minTokenCapacity(/*use_available_blocks=*/false, /*full_groups_only=*/true);
 }
 
 KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
@@ -417,7 +417,7 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
         }
         const size_t seq_size = config_.seqSizePerBlockForGroup(group_id);
         total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-        available_tokens      = std::min(available_tokens, pool->freeBlocksNum() * seq_size);
+        available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
         has_pool              = true;
     }
     return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
@@ -458,9 +458,9 @@ size_t HybridPoolKVCacheAllocator::reservableFreeBlocksNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t group_id) const {
-    if (group_id >= group_block_pools_.size() || group_id >= kv_cache_groups_.size()
-        || !group_block_pools_[group_id] || !kv_cache_groups_[group_id]
-        || !kv_cache_groups_[group_id]->isReservable() || config_.usesExplicitIndependentBlocks(group_id)) {
+    if (group_id >= group_block_pools_.size() || group_id >= kv_cache_groups_.size() || !group_block_pools_[group_id]
+        || !kv_cache_groups_[group_id] || !kv_cache_groups_[group_id]->isReservable()
+        || config_.usesExplicitIndependentBlocks(group_id)) {
         return 0;
     }
 
@@ -484,11 +484,11 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     return evaluateInitCapacityImpl(malloc_info, reserve_blocks, mode, nullptr);
 }
 
-MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacityImpl(
-    const MallocInfo&                     malloc_info,
-    size_t                                reserve_blocks,
-    InitCapacityMode                      mode,
-    const std::vector<RequiredPositions>* required_positions) const {
+MallocStatus
+HybridPoolKVCacheAllocator::evaluateInitCapacityImpl(const MallocInfo&                     malloc_info,
+                                                     size_t                                reserve_blocks,
+                                                     InitCapacityMode                      mode,
+                                                     const std::vector<RequiredPositions>* required_positions) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
         return MallocStatus::NONE;
     }
@@ -516,26 +516,24 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacityImpl(
     MallocStatus            status = MallocStatus::NONE;
     const RequiredPositions no_required_positions;
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
-        const size_t group_index = static_cast<size_t>(group_id);
-        const int    group_common_seq =
-            cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
-        const int group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
-        const int group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, group_id);
+        const size_t group_index     = static_cast<size_t>(group_id);
+        const int   group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
+        const int   group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
+        const int   group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, group_id);
         const auto& group_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
-        const auto need = kv_cache_groups_[group_index]->getNeedBlocks(
-            group_common_seq,
-            group_seq_len,
-            reserve_step,
-            group_reuse_blocks_len,
-            reuse_enabled,
-            group_required_positions);
-        const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
+        const auto   need           = kv_cache_groups_[group_index]->getNeedBlocks(group_common_seq,
+                                                                       group_seq_len,
+                                                                       reserve_step,
+                                                                       group_reuse_blocks_len,
+                                                                       reuse_enabled,
+                                                                       group_required_positions);
+        const int    need_blocks    = need.common_blocks + batch_size * need.extra_blocks;
         const size_t planned_blocks = static_cast<size_t>(std::max(need_blocks, 0));
 
-        const auto&  pool            = group_block_pools_[group_index];
-        const size_t total_blocks    = pool->totalBlocksNum();
-        const auto   demand          = initBlockDemand(malloc_info, planned_blocks, group_id);
+        const auto&  pool         = group_block_pools_[group_index];
+        const size_t total_blocks = pool->totalBlocksNum();
+        const auto   demand       = initBlockDemand(malloc_info, planned_blocks, group_id);
         const size_t group_reserve_blocks =
             (!kv_cache_groups_[group_index]->isReservable() || config_.usesExplicitIndependentBlocks(group_index)
              || total_reservable_blocks == 0) ?
@@ -599,20 +597,18 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
            == MallocStatus::NONE;
 }
 
-MallocStatus HybridPoolKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
-                                                                      size_t                  reserve_blocks,
+MallocStatus HybridPoolKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
+                                                                      size_t                 reserve_blocks,
                                                                       const PreparedKVCache& prepared,
-                                                                      bool has_load_context) const {
+                                                                      bool                   has_load_context) const {
     if (reserve_blocks == 0 && !has_load_context) {
         return MallocStatus::NONE;
     }
     if (!has_load_context) {
         return evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_AND_AVAILABLE);
     }
-    return evaluateInitCapacityImpl(malloc_info,
-                                    reserve_blocks,
-                                    InitCapacityMode::TOTAL_AND_AVAILABLE,
-                                    &prepared.required_positions);
+    return evaluateInitCapacityImpl(
+        malloc_info, reserve_blocks, InitCapacityMode::TOTAL_AND_AVAILABLE, &prepared.required_positions);
 }
 
 // Per-pool KV-exhaustion record. This is the primary field-debug tool for
@@ -697,9 +693,9 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
             need_blocks = failed_need_blocks;
         }
 
-        const auto&  pool          = group_block_pools_[group_index];
-        const size_t free_blocks   = pool->freeBlocksNum();
-        const size_t group_reserve = reserve_admission ? reserveBlocksForPool(group_index) : 0;
+        const auto&     pool               = group_block_pools_[group_index];
+        const size_t    free_blocks        = pool->freeBlocksNum();
+        const size_t    group_reserve      = reserve_admission ? reserveBlocksForPool(group_index) : 0;
         const long long required_available = need_blocks < 0 ? -1 : static_cast<long long>(need_blocks + group_reserve);
         const long long shortfall =
             required_available < 0 ? -1 : std::max(required_available - static_cast<long long>(free_blocks), 0LL);

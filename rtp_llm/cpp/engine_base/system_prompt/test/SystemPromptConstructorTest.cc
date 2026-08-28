@@ -134,7 +134,8 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     auto engine  = createFocusedEngine<FailSecondPreRunEngine>(/*device_min_free_blocks=*/1);
     auto manager = engine->resourceContext().cache_manager;
     ASSERT_NE(manager->blockTreeCache(), nullptr);
-    const size_t free_before = manager->freeBlocksNum();
+    const size_t free_before      = manager->freeBlocksNum();
+    const size_t available_before = manager->availableBlocksNum();
 
     KVCacheConfig config;
     config.multi_task_prompt_tokens = {
@@ -152,7 +153,7 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     // remains; the partial tail and all request refs are released.
     EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
     ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
-    EXPECT_EQ(manager->blockTreeCache()->groupSets().front()->devicePools().front()->activeTreeCachedBlocksNum(), 0u);
+    EXPECT_EQ(manager->availableBlocksNum(), available_before);
     EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 1u);
 
     EXPECT_EQ(block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(

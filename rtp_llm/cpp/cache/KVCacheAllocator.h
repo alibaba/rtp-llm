@@ -26,20 +26,21 @@ struct KVCacheTokenCapacity {
 };
 
 struct KVCachePoolMetricsSnapshot {
-    size_t      pool_index                = 0;
-    std::string pool_name                 = "unnamed";
-    size_t      block_size_bytes          = 0;
-    size_t      free_blocks               = 0;
-    size_t      used_blocks               = 0;
-    size_t      active_blocks             = 0;
-    size_t      total_blocks              = 0;
-    size_t      reserve_blocks            = 0;
-    size_t      request_ref_blocks        = 0;
-    size_t      block_cache_ref_blocks    = 0;
-    size_t      load_ref_blocks           = 0;
-    size_t      eviction_ref_blocks       = 0;
-    size_t      store_ref_blocks          = 0;
-    float       used_ratio                = 0.0f;
+    size_t      pool_index             = 0;
+    std::string pool_name              = "unnamed";
+    size_t      block_size_bytes       = 0;
+    size_t      free_blocks            = 0;
+    size_t      used_blocks            = 0;
+    size_t      active_blocks          = 0;
+    size_t      available_blocks       = 0;
+    size_t      total_blocks           = 0;
+    size_t      reserve_blocks         = 0;
+    size_t      request_ref_blocks     = 0;
+    size_t      block_cache_ref_blocks = 0;
+    size_t      load_ref_blocks        = 0;
+    size_t      eviction_ref_blocks    = 0;
+    size_t      store_ref_blocks       = 0;
+    float       used_ratio             = 0.0f;
 };
 
 class KVCacheAllocator {
@@ -142,7 +143,6 @@ public:
     virtual void                 regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     virtual int64_t              getMrCostTimeMs() const;
     virtual size_t               freeBlocksNum() const;
-    virtual size_t               activeTreeCachedBlocksNum() const;
     virtual size_t               availableBlocksNum() const;
     virtual size_t               availableTokensNum() const;
     virtual size_t               totalTokensNum() const;
@@ -162,10 +162,10 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool         doInit() = 0;
-    virtual size_t       reserveBlocksForPoolMetrics(size_t pool_index) const;
-    virtual size_t       reservableFreeBlocksNum() const;
-    MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual bool   doInit() = 0;
+    virtual size_t reserveBlocksForPoolMetrics(size_t pool_index) const;
+    virtual size_t reservableFreeBlocksNum() const;
+    MallocResult   initMalloc(const MallocInfo& malloc_info);
     // Classifies an init-malloc shortfall: a total-capacity shortfall is
     // PERMANENT (the request can never fit), an available-capacity shortfall is
     // RETRYABLE (the pools are momentarily full) so the stream stays WAITING
@@ -187,9 +187,7 @@ protected:
     static size_t heldRequestBlocks(const MallocInfo& malloc_info, int group_id = -1);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info,
-                                           size_t            planned_blocks,
-                                           int               group_id = -1);
+    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, int group_id = -1);
     // Estimate peak additional blocks for one sequence resource.
     virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                          int                    seq_len,
