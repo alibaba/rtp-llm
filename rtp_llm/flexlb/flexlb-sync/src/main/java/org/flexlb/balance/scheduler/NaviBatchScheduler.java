@@ -265,6 +265,18 @@ public class NaviBatchScheduler {
             List<PrefillEndpoint> nodes = new ArrayList<>();
             List<double[]> nodeParams = new ArrayList<>();
             List<Double> nodeQueue = new ArrayList<>();
+            List<Long> nodeLedgerMs = new ArrayList<>();
+            List<Long> nodeEngineMs = new ArrayList<>();
+            List<Long> nodeWaiting = new ArrayList<>();
+            // Average request length of this window (tokens); the O(1)
+            // pricing basis for every node's engine queue estimate below.
+            long windowTotalTokens = 0L;
+            for (PendingRequest pending : batch) {
+                Request request = pending.ctx().getRequest();
+                windowTotalTokens += request == null
+                        ? 1L : Math.max(1L, request.getSeqLen());
+            }
+            long windowAvgTokens = Math.max(1L, windowTotalTokens / batch.size());
             for (PrefillEndpoint endpoint
                     : endpointRegistry.snapshotPrefillEndpoints().values()) {
                 if (endpoint.getStatus() == null
@@ -279,15 +291,34 @@ public class NaviBatchScheduler {
                 if (weights == null) {
                     continue;
                 }
-                // Navi batches bypass the per-endpoint work ledger, so the
-                // committed-snapshot metric reflects only concurrent non-navi
-                // ownership. An unobservable metric reads as zero wait, which
-                // matches the pre-rebase NAVI_BATCH behaviour: its wait
-                // estimate also stayed zero under a navi-only deployment.
-                long waitMs = endpoint.getLoadMetric().orElse(0L);
+                // Queue wait merges two independent measures of the work
+                // already sitting on this endpoint. ledgerMs is the
+                // per-endpoint work ledger: navi batches bypass
+                // reserveBatch/reserveRoute, so under a navi-only deployment
+                // the ledger's committed snapshot goes empty (unknown engine
+                // requests make totalRemainingWorkMs() absent) and reads as
+                // zero — the defect fixed here. engineMs is the engine's
+                // directly reported waiting count priced into milliseconds
+                // through the same navi latency model the optimizer uses
+                // (see #engineQueueWaitEstimateMs); it is ledger-independent,
+                // O(1) in queue depth, and stays observable under navi-only
+                // load. Both estimate the same backlog, so taking the max
+                // avoids double counting either measure while staying
+                // conservative; in a mixed deployment the larger of ledgered
+                // and engine-reported backlog wins.
+                long ledgerMs = endpoint.getLoadMetric().orElse(0L);
+                WorkerStatus.EngineObservation observation =
+                        endpoint.getStatus().committedEngineObservation();
+                long engineMs = engineQueueWaitEstimateMs(
+                        observation, weights, windowAvgTokens);
+                long waitMs = Math.max(ledgerMs, engineMs);
                 nodes.add(endpoint);
                 nodeParams.add(weights);
                 nodeQueue.add((double) Math.max(0L, waitMs));
+                nodeLedgerMs.add(Math.max(0L, ledgerMs));
+                nodeEngineMs.add(engineMs);
+                nodeWaiting.add(observation == null
+                        ? 0L : Math.max(0L, observation.waitingQueryLen()));
             }
 
             int nodeCount = nodes.size();
@@ -321,6 +352,42 @@ public class NaviBatchScheduler {
                             cacheHitOf(nodes.get(n), matches, request);
                 }
             }
+
+            // Formal observation of the optimizer's per-node queue-wait
+            // inputs — the designated observability channel for NAVI
+            // optimizer input (stress-test forensics depend on it).
+            // queue_wait_ms is what the optimizer consumes; engine_ms /
+            // ledger_ms expose the two components merged by the max() above;
+            // waiting is the engine-reported waitingQueryLen per node and
+            // avg_tokens the window-scalar pricing basis behind engine_ms.
+            // Rate note: one INFO line per optimize-and-dispatch call —
+            // ceiling ~33 lines/s at naviBatchWindowMs=30 under continuous
+            // full load, each line well under ~400 chars; logback's
+            // 50MB×5-day rolling with a 2GB total cap bounds the volume.
+            // Kept at INFO deliberately: this is an experimental scheduler
+            // and the line is its only optimizer-input observability; if it
+            // ever moves to production traffic, demote to debug or sample.
+            StringBuilder queueWaitDiag = new StringBuilder(nodeCount * 8);
+            StringBuilder engineMsDiag = new StringBuilder(nodeCount * 8);
+            StringBuilder ledgerMsDiag = new StringBuilder(nodeCount * 4);
+            StringBuilder waitingDiag = new StringBuilder(nodeCount * 4);
+            for (int n = 0; n < nodeCount; n++) {
+                if (n > 0) {
+                    queueWaitDiag.append(',');
+                    engineMsDiag.append(',');
+                    ledgerMsDiag.append(',');
+                    waitingDiag.append(',');
+                }
+                queueWaitDiag.append((long) queueWaitMs[n]);
+                engineMsDiag.append(nodeEngineMs.get(n));
+                ledgerMsDiag.append(nodeLedgerMs.get(n));
+                waitingDiag.append(nodeWaiting.get(n));
+            }
+            Logger.info("flexlb_navi_queue_wait nodes={} requests={} "
+                            + "avg_tokens={} queue_wait_ms={} engine_ms={} "
+                            + "ledger_ms={} waiting={}",
+                    nodeCount, requestCount, windowAvgTokens, queueWaitDiag,
+                    engineMsDiag, ledgerMsDiag, waitingDiag);
 
             // 3. Run the joint PGD assignment.
             optimizer.configure(
@@ -592,6 +659,75 @@ public class NaviBatchScheduler {
     }
 
     // ==================== Shared helpers ====================
+
+    /**
+     * Estimate one endpoint's queue wait in <b>milliseconds</b> from the
+     * engine's directly reported waiting count — O(1) in queue depth.
+     *
+     * <p>Source: {@code committedEngineObservation().waitingQueryLen()} — the
+     * engine's direct status report (≈20 ms polling freshness), which
+     * bypasses the per-endpoint work ledger and therefore still observes a
+     * queue under a navi-only deployment. Per-task queue detail (per-task
+     * inputLengths) is deliberately not traversed:
+     * the first implementation of this fix walked the task map on every
+     * flush window, and that O(backlog) cost on the single-threaded flush
+     * hot path collapsed flush throughput at high queue depths (measured:
+     * flush gap p50 32→223 ms, window throughput 780→141 req/s, 17.56% of
+     * requests never scheduled at the 600 QPS tier), so the aggregate form
+     * below replaced it.
+     *
+     * <p>Unit conversion (hard requirement: milliseconds, never a raw
+     * count): single-batch drain model. The {@code waitingQueryLen} queued
+     * requests are synthesised into one batch of average window requests —
+     * per-request linear cost is computed once from
+     * {@code windowAvgTokens} at cacheHit 0 (conservative: queued work is
+     * assumed fully un-cached), scaled by the waiting count, and mapped
+     * through {@link NaviPrefillModel#calculateLatencyAndDerivative} with
+     * this node's own learned weights — the same weights the optimizer
+     * uses for placement. Model constants (bias, non-linear baseline) are
+     * included exactly once (sum-then-latency, same shape the optimizer
+     * itself evaluates), so the result is the modelled drain time of the
+     * current queue: the FIFO wait a newly dispatched batch would sit
+     * behind. Running work is not counted — it is not observable from the
+     * status snapshot and is left for a later refinement; the avg-token
+     * approximation replaces per-task inputLength detail.
+     *
+     * <p>Limits: {@code waitingQueryLen <= 0}, a null observation, or a
+     * non-positive {@code windowAvgTokens} (cannot happen for a non-empty
+     * window, but guarded) all yield 0 — the queue is then unobservable from
+     * this endpoint and the ledger signal remains the only wait input.
+     *
+     * @param observation    the engine's committed observation; may be null
+     * @param params         this endpoint's learned 9-parameter weights
+     * @param windowAvgTokens average request length (tokens) of the current
+     *                        flush window; the O(1) pricing basis
+     */
+    static long engineQueueWaitEstimateMs(WorkerStatus.EngineObservation observation,
+                                          double[] params,
+                                          long windowAvgTokens) {
+        if (observation == null || params == null
+                || params.length < NaviPrefillModel.LINEAR_PARAMETER_COUNT + 3) {
+            return 0L;
+        }
+        long waitingCount = Math.max(0L, observation.waitingQueryLen());
+        if (waitingCount <= 0L || windowAvgTokens <= 0L) {
+            return 0L;
+        }
+        double perRequestCost = NaviPrefillModel.calculateRequestLinearCost(
+                params, windowAvgTokens, 0L);
+        double estimatedMs = NaviPrefillModel.calculateLatencyAndDerivative(
+                waitingCount * perRequestCost, params)[0];
+        return clampModelMs(estimatedMs);
+    }
+
+    /** Clamp a modelled latency to a finite, non-negative millisecond count. */
+    private static long clampModelMs(double latencyMs) {
+        if (!Double.isFinite(latencyMs) || latencyMs <= 0.0) {
+            return 0L;
+        }
+        return latencyMs >= Long.MAX_VALUE
+                ? Long.MAX_VALUE : Math.round(latencyMs);
+    }
 
     private ServerStatus buildServerStatus(PrefillEndpoint endpoint,
                                            long requestId,
