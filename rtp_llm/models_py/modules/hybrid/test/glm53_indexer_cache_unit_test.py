@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.models_py.model_desc.kimi_linear import _write_typed_aux_cache_regions
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _sparse_prefill_fast_path_limit,
 )
@@ -20,6 +21,32 @@ from rtp_llm.models_py.modules.indexer_grouping import (
     completed_group_lengths_i32,
     expand_indexer_group_indices,
 )
+from rtp_llm.ops.compute_ops import KVCacheRegionName
+
+
+class Glm53PdCacheStoreTest(unittest.TestCase):
+    def test_only_non_default_typed_regions_are_published(self) -> None:
+        default = SimpleNamespace(region_name=KVCacheRegionName.DEFAULT, group_id=0)
+        indexer_kv = SimpleNamespace(
+            region_name=KVCacheRegionName.INDEXER_KV, group_id=2
+        )
+        indexer_state = SimpleNamespace(
+            region_name=KVCacheRegionName.INDEXER_STATE, group_id=3
+        )
+        cache = SimpleNamespace(
+            get_layer_caches=lambda layer_idx: (
+                [default, indexer_kv, indexer_state] if layer_idx == 1 else [default]
+            )
+        )
+        published = []
+
+        _write_typed_aux_cache_regions(published.append, cache, 1)
+        _write_typed_aux_cache_regions(published.append, cache, 0)
+
+        self.assertEqual(published, [[indexer_kv, indexer_state]])
+
+    def test_missing_writer_or_cache_is_a_noop(self) -> None:
+        _write_typed_aux_cache_regions(None, None, 0)
 
 
 class Glm53IndexerGroupingTest(unittest.TestCase):

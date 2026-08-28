@@ -30,6 +30,9 @@ from rtp_llm.models_py.modules import (
     RMSResNorm,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+from rtp_llm.models_py.modules.factory.attention.common import (
+    create_write_cache_store_impl,
+)
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -55,6 +58,7 @@ from rtp_llm.ops import (
 )
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    KVCacheRegionName,
     LayerKVCache,
     PyAttentionInputs,
     PyModelInputs,
@@ -62,6 +66,29 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+
+
+def _write_typed_aux_cache_regions(
+    write_cache_store_impl: Optional[nn.Module],
+    kv_cache: Optional[KVCache],
+    layer_idx: int,
+) -> None:
+    """Publish non-default typed regions after a layer finishes prefill.
+
+    The attention implementations already publish their DEFAULT MLA/KDA region.
+    GLM-5.3-Flash additionally owns INDEXER_KV and INDEXER_STATE regions on MLA
+    layers; those regions are populated by the KPool compressor and must be
+    transferred as well for PD separation.
+    """
+    if write_cache_store_impl is None or kv_cache is None:
+        return
+    aux_regions = [
+        layer_cache
+        for layer_cache in kv_cache.get_layer_caches(layer_idx)
+        if layer_cache.region_name != KVCacheRegionName.DEFAULT
+    ]
+    if aux_regions:
+        write_cache_store_impl(aux_regions)
 
 
 class KimiLinearMetadata(object):
@@ -943,6 +970,10 @@ class KimiLinearModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        typed_aux_cache_store = create_write_cache_store_impl(
+            attention_inputs, self.kv_cache
+        )
+
         if self.hc_enabled:
             hidden_states = (
                 hidden_states.unsqueeze(1)
@@ -966,6 +997,7 @@ class KimiLinearModel(GptModelBase):
             )
             hidden_states = output.hidden_states
             residual = output.residual
+            _write_typed_aux_cache_regions(typed_aux_cache_store, self.kv_cache, i)
 
         if self.hc_enabled:
             hidden_states = hidden_states.mean(dim=-2)
