@@ -13,9 +13,16 @@ from torch import nn
 
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models.kimi_k3.kimi_k3_weight import shared_expert_weight_shard_enabled
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    all_to_all_single,
+)
 from rtp_llm.models_py.modules.base import GroupTopK, RMSNorm
-from rtp_llm.models_py.triton_kernels.common.activation import situ_and_mul
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    situ_and_mul,
+    situ_mul_fp8_quant_packed_masked,
+)
 from rtp_llm.ops import ParallelismConfig
 
 if TYPE_CHECKING:
@@ -23,6 +30,22 @@ if TYPE_CHECKING:
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+
+
+def _requires_nccl_ep(world_size: int, local_world_size: int) -> bool:
+    """MegaMoE symmetric memory is CUDA-IPC-only and cannot span hosts."""
+
+    if world_size <= 0 or local_world_size <= 0:
+        raise ValueError(
+            "world_size and local_world_size must both be positive: "
+            f"world={world_size}, local_world={local_world_size}"
+        )
+    if world_size % local_world_size:
+        raise ValueError(
+            "world_size must be divisible by local_world_size: "
+            f"world={world_size}, local_world={local_world_size}"
+        )
+    return world_size > local_world_size
 
 
 def _transient_full_native_column_weight(
@@ -72,6 +95,7 @@ class KimiK3LatentMoE(nn.Module):
         self.num_expert_group = int(config.moe_n_group)
         self.topk_group = int(config.moe_topk_group)
         self.ep_size = int(parallelism_config.ep_size)
+        self.ep_rank = int(parallelism_config.ep_rank)
         if self.expert_num % self.ep_size:
             raise ValueError(
                 f"expert count {self.expert_num} must divide EP size {self.ep_size}"
@@ -238,7 +262,7 @@ class KimiK3LatentMoE(nn.Module):
         )
 
     def _setup_deep_gemm_mega(self) -> None:
-        """Transform K3's EP-local MXFP4 weights for SiTU MegaMoE."""
+        """Prepare single-host MegaMoE or the multi-host NCCL EP fallback."""
 
         max_tokens_per_rank = int(
             os.environ.get("MEGA_MOE_MAX_TOKENS_PER_RANK", "65536")
@@ -263,19 +287,25 @@ class KimiK3LatentMoE(nn.Module):
 
         self._validate_mega_preconditions("K3 DeepGEMM MegaMoE")
 
-        mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
-        required_parameters = {
-            "activation_beta",
-            "activation_linear_beta",
-            "fast_math",
-        }
-        missing_parameters = required_parameters.difference(mega_signature.parameters)
-        if missing_parameters:
-            raise RuntimeError(
-                "Kimi K3 DeepGEMM mega resolved an old DeepGEMM "
-                "without K3 SiTU support; missing parameters: "
-                + ", ".join(sorted(missing_parameters))
+        world_size = int(dist.get_world_size())
+        local_world_size = int(self.parallelism_config.local_world_size)
+        self._use_nccl_ep = _requires_nccl_ep(world_size, local_world_size)
+        if not self._use_nccl_ep:
+            mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
+            required_parameters = {
+                "activation_beta",
+                "activation_linear_beta",
+                "fast_math",
+            }
+            missing_parameters = required_parameters.difference(
+                mega_signature.parameters
             )
+            if missing_parameters:
+                raise RuntimeError(
+                    "Kimi K3 DeepGEMM mega resolved an old DeepGEMM "
+                    "without K3 SiTU support; missing parameters: "
+                    + ", ".join(sorted(missing_parameters))
+                )
         deep_gemm_path = getattr(deep_gemm, "__file__", "")
 
         st_w1_w = self.weights.pop(K3W.MOE_W1_PACKED)
@@ -351,6 +381,31 @@ class KimiK3LatentMoE(nn.Module):
         )
         del s2_raw
 
+        if self._use_nccl_ep:
+            # DeepGEMM MegaMoE registers a symmetric CUDA-IPC buffer. CUDA file
+            # descriptors cannot cross hosts, so a multi-host EP group uses
+            # fixed-shape NCCL A2A dispatch/combine plus local masked grouped
+            # MXFP4 GEMMs instead. Keep the checkpoint-native expert order;
+            # each rank owns one contiguous EP slice.
+            self._ep_w13 = w13
+            self._ep_s13 = s13
+            self._ep_w2 = w2
+            self._ep_s2 = s2
+            self._ep_intermediate = intermediate
+            logging.info(
+                "[KimiK3 NCCL EP] enabled multi-host fallback: world=%d "
+                "local_world=%d EP=%d rank=%d local_experts=%d latent=%d "
+                "intermediate=%d",
+                world_size,
+                local_world_size,
+                self.ep_size,
+                self.ep_rank,
+                self.local_expert_count,
+                self.latent_size,
+                intermediate,
+            )
+            return
+
         # Each layer's MegaMoE layout transform uses large temporary tensors.
         # Release inactive blocks from the previous layer and the raw staging
         # tensors above before asking DeepGEMM for another contiguous buffer.
@@ -414,6 +469,195 @@ class KimiK3LatentMoE(nn.Module):
                 self._mega_input_packer.name,
             )
             _DEEPGEMM_MEGA_LOGGED_DEVICES.add(device_index)
+
+    def _nccl_ep_expert_sum(
+        self,
+        routed_input: torch.Tensor,
+        expert_ids: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run graph-safe multi-host EP with fixed-shape NCCL A2A.
+
+        Every owner sends its physical batch to every expert rank. Each expert
+        rank filters the global top-k IDs to its contiguous local expert range,
+        runs masked grouped MXFP4 GEMMs, and sends one partial output chunk back
+        to every owner. Owners sum the received EP contributions locally. This
+        deliberately trades some dispatch bandwidth for static graph shapes and
+        avoids both variable-split host syncs and Tensor AllReduce.
+        """
+
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            m_grouped_fp8_fp4_gemm_nt_masked,
+        )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.dsv4.quant_layouts import (
+            FP4_BLOCK,
+            FP8_BLOCK,
+        )
+        from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+            ep_gather,
+            ep_scatter_v2,
+            recompute_topk_ids_sum_expert_count,
+        )
+        from rtp_llm.models_py.utils.math import align, ceil_div
+
+        if routed_input.ndim != 2:
+            raise ValueError(
+                f"K3 NCCL EP expects a 2-D routed input, got {routed_input.shape}"
+            )
+        physical_batch, hidden = routed_input.shape
+        if physical_batch == 0:
+            return routed_input.new_empty((0, hidden))
+        if hidden != self.latent_size:
+            raise ValueError(
+                f"K3 NCCL EP latent width {hidden} != {self.latent_size}"
+            )
+        if expert_ids.shape != routing_weights.shape or expert_ids.shape[0] != physical_batch:
+            raise ValueError(
+                "K3 NCCL EP routing tensors must be [physical_batch, topk]: "
+                f"ids={tuple(expert_ids.shape)}, weights={tuple(routing_weights.shape)}, "
+                f"batch={physical_batch}"
+            )
+
+        # Fixed equal-size chunks keep all collectives graph-capturable. The
+        # A2A result is source-major: [source_owner, physical_batch, payload].
+        repeat_shape = (self.ep_size,) + (-1,) * routed_input.ndim
+        dispatched_input = all_to_all_single(
+            routed_input.unsqueeze(0)
+            .expand(repeat_shape)
+            .reshape(self.ep_size * physical_batch, hidden)
+            .contiguous(),
+            group=Group.DP_AND_TP,
+        )
+        dispatched_ids = all_to_all_single(
+            expert_ids.unsqueeze(0)
+            .expand((self.ep_size, -1, -1))
+            .reshape(self.ep_size * physical_batch, self.top_k)
+            .contiguous(),
+            group=Group.DP_AND_TP,
+        )
+        dispatched_weights = all_to_all_single(
+            routing_weights.unsqueeze(0)
+            .expand((self.ep_size, -1, -1))
+            .reshape(self.ep_size * physical_batch, self.top_k)
+            .contiguous(),
+            group=Group.DP_AND_TP,
+        )
+
+        expert_start = self.ep_rank * self.local_expert_count
+        adjusted_ids, tokens_per_expert = (
+            recompute_topk_ids_sum_expert_count(
+                dispatched_ids,
+                expert_start,
+                self.local_expert_count,
+            )
+        )
+        token_count = int(dispatched_input.shape[0])
+        capacity = align(token_count, 128)
+        expected_m = min(
+            capacity,
+            ceil_div(token_count * self.top_k, self.local_expert_count),
+        )
+
+        input_fp8, input_scale = sgl_per_token_group_quant_fp8(
+            dispatched_input.contiguous(),
+            group_size=FP8_BLOCK,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        packed_groups = ceil_div(hidden // FP8_BLOCK, 4)
+        scattered_input = torch.empty(
+            (self.local_expert_count, capacity, hidden),
+            dtype=input_fp8.dtype,
+            device=input_fp8.device,
+        )
+        scattered_scale = torch.empty(
+            (self.local_expert_count, packed_groups, capacity),
+            dtype=torch.int32,
+            device=input_fp8.device,
+        ).transpose(1, 2)
+        output_index = torch.empty_like(adjusted_ids)
+        expert_start_loc = torch.empty_like(tokens_per_expert)
+        ep_scatter_v2(
+            input_fp8,
+            input_scale,
+            adjusted_ids,
+            capacity,
+            expert_start_loc,
+            scattered_input.view(self.local_expert_count * capacity, hidden),
+            scattered_scale,
+            output_index,
+            scale_ue8m0=True,
+        )
+
+        gate_up = torch.empty(
+            (
+                self.local_expert_count,
+                capacity,
+                2 * self._ep_intermediate,
+            ),
+            dtype=torch.bfloat16,
+            device=routed_input.device,
+        )
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (scattered_input, scattered_scale),
+            (self._ep_w13, self._ep_s13),
+            gate_up,
+            tokens_per_expert,
+            expected_m,
+            recipe_a=(1, FP8_BLOCK),
+            recipe_b=(1, FP4_BLOCK),
+        )
+        down_input, down_scale = situ_mul_fp8_quant_packed_masked(
+            gate_up,
+            tokens_per_expert,
+            self.beta,
+            self.linear_beta,
+            group_size=FP8_BLOCK,
+        )
+        local_expert_output = torch.empty(
+            (self.local_expert_count, capacity, hidden),
+            dtype=torch.bfloat16,
+            device=routed_input.device,
+        )
+        m_grouped_fp8_fp4_gemm_nt_masked(
+            (down_input, down_scale),
+            (self._ep_w2, self._ep_s2),
+            local_expert_output,
+            tokens_per_expert,
+            expected_m,
+            recipe_a=(1, FP8_BLOCK),
+            recipe_b=(1, FP4_BLOCK),
+        )
+        local_contribution = torch.empty(
+            (token_count, hidden),
+            dtype=torch.bfloat16,
+            device=routed_input.device,
+        )
+        ep_gather(
+            local_expert_output.view(
+                self.local_expert_count * capacity,
+                hidden,
+            ),
+            adjusted_ids,
+            dispatched_weights,
+            output_index,
+            local_contribution,
+        )
+
+        returned = all_to_all_single(
+            local_contribution,
+            group=Group.DP_AND_TP,
+        )
+        return returned.reshape(
+            self.ep_size,
+            physical_batch,
+            hidden,
+        ).sum(dim=0)
 
     def _deep_gemm_mega_expert_sum(
         self,
@@ -615,6 +859,16 @@ class KimiK3LatentMoE(nn.Module):
         *,
         sequence_parallel: bool = False,
     ) -> torch.Tensor:
+        if self._use_nccl_ep:
+            if sequence_parallel:
+                raise RuntimeError(
+                    "multi-host K3 NCCL EP requires DP-local Decode tokens"
+                )
+            return self._nccl_ep_expert_sum(
+                routed_input,
+                expert_ids,
+                routing_weights,
+            )
         if sequence_parallel:
             return self._deep_gemm_mega_expert_sum(
                 routed_input,
