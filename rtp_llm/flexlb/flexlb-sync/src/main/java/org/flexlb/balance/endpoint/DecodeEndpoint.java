@@ -62,6 +62,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * monitor while holding the admissionLock.
      */
     private final DecodePlacementAuthorityPort authorityPort;
+    /**
+     * Layer-1 admission registry: requestId → the admission-domain
+     * resource row. Stage-2 T7 S4 (ruling 4 scope-out, M2 final): the
+     * entry is the authoritative per-request transaction backend of the
+     * admissionLock domain — the eviction/preemption victim checks, the
+     * permit acquire/transfer idempotence branches and the queued flip
+     * read and write the entry sub-state inside admission transactions,
+     * and the one-way lock order (slot monitor → admissionLock) makes the
+     * slot-side SlotDecodeAdmission a wrapper projection of the entry,
+     * never the reverse. The aggregate placement row and the routing
+     * views carry the numerics outward; physical layer retirement (TTL
+     * takeover + admission-transaction rework) is the M3/M4 agenda.
+     */
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
     /**
      * Engine-facing confirmed-slot projection (stage-2 L3 retirement): a
@@ -1943,6 +1956,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 permitProjection.add(requestId);
             }
         });
+        // Stage-2 T7 S4 (ruling 4 scope-out): freeze each entry's
+        // admission facts through the exact reader path the wrapper
+        // refresh uses (readAdmissionEntry → entryFacts) in the same
+        // Phase-2 pass as the three sub-state projections above — the
+        // R7/R8 mirror rules compare the slot authority against this
+        // frozen snapshot instead of live-re-reading the mutable entry
+        // bits (the soak round-3 capture-frozen lesson applied to the
+        // mirror direction; the post-capture bit drift it used to
+        // fabricate is exactly what this freeze removes).
+        Map<Long, DecodePlacementAuthorityPort.DecodeAdmissionEntry>
+                inflightEntryFacts = new HashMap<>();
+        inflightSnapshot.forEach((requestId, entry) ->
+                inflightEntryFacts.put(requestId, entryFacts(entry)));
         captured = new DecodeLedgerAuditView(
                 version,
                 inflightSnapshot,
@@ -1979,6 +2005,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 confirmedProjectionVersionValue,
                 Set.copyOf(lifecycleProjection),
                 placementProjectionRowValue,
+                Map.copyOf(inflightEntryFacts),
                 false);
         // Phase 3 — admission lock: version revalidation.  Acquiring the
         // lock proves any prior writer finished its full critical section
@@ -2076,6 +2103,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * are valid on certified captures only.  Request-level consumers keep
      * relying on the confirm-window tear absorption regardless of the
      * flag.</p>
+     *
+     * <p><b>Stage-2 T7 S4 (ruling 4 scope-out):</b>
+     * {@code inflightEntryFacts} freezes each entry's admission facts
+     * (token + sub-state bits + numerics) through the wrapper
+     * entryReader's exact fact shape in the same Phase-2 pass — the
+     * R7/R8 mirror rules read this frozen snapshot, never a live re-read
+     * of the mutable entry bits.</p>
      */
     public record DecodeLedgerAuditView(
             long admissionVersion,
@@ -2113,6 +2147,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long confirmedProjectionVersion,
             Set<Long> engineLifecycleRequestIds,
             DecodePlacementProjectionRow placementProjectionRow,
+            Map<Long, DecodePlacementAuthorityPort.DecodeAdmissionEntry>
+                    inflightEntryFacts,
             boolean certified) {
 
         /**
@@ -2156,6 +2192,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     confirmedProjectionVersion,
                     engineLifecycleRequestIds,
                     placementProjectionRow,
+                    inflightEntryFacts,
                     true);
         }
     }
@@ -3459,7 +3496,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     public int getInflightCount() {
-        return inflightRequests.size();
+        // Stage-2 T7 S4: reads the aggregate placement row — one volatile
+        // snapshot maintained in-transaction, aligning the metric with the
+        // routing-view construction and retiring the hot-path inflight-map
+        // read (the map stays as the admission-domain registry, ruling 4
+        // scope-out).
+        return placementProjectionRow.inflightCount();
     }
 
     /** Evict only endpoint orphans which have no live scheduler generation. */
@@ -3516,8 +3558,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return evicted;
     }
 
+    /**
+     * Full shadow load (observability / eviction planning): confirmed
+     * running plus every local inflight reservation. Stage-2 T7 S4: the
+     * inflight component reads the aggregate placement row — same
+     * in-transaction source as {@link #getEngineLoad()} and the routing
+     * view, retiring the hot-path inflight-map read.
+     */
     public int getTotalLoad() {
-        return confirmedRunningCount + inflightRequests.size();
+        return confirmedRunningCount + placementProjectionRow.inflightCount();
     }
 
     /**

@@ -28,6 +28,22 @@ import org.flexlb.enums.DecodeTaskPhase;
  * their record-style accessor names; no code relied on the generated
  * value equals/hashCode.
  *
+ * <p><b>Stage-2 T7 S4 (ruling 4 scope-out, M2 final):</b> this entry is
+ * the <i>admission-domain resource row</i> — the authoritative
+ * per-request transaction backend of the endpoint's admissionLock
+ * domain. The eviction/preemption victim checks, the permit
+ * acquire/transfer idempotence branches and the queued flip read and
+ * write these sub-state bits inside admission transactions, and the
+ * one-way lock order (slot monitor → admissionLock) means the
+ * slot-side SlotDecodeAdmission is a wrapper projection of this entry —
+ * never the reverse (the reconciliation harness calls the slot side
+ * "authority" for the wrapper protocol it audits; that naming covers
+ * the projection endpoint, not ownership of the admission transaction
+ * itself). The aggregate placement row and the routing views carry the
+ * numerics outward. Physical layer retirement (TTL takeover by the M3
+ * ExpirationTimer, admission-transaction rework under the M4 RLC
+ * budget) is the follow-up agenda, not M2.
+ *
  * <p>Immutable fields carry the frozen reservation numerics:
  * {@code kvTokens} hard KV demand — the prompt's seqLen, used for
  * hard-capacity filtering (ensures the prompt itself fits);

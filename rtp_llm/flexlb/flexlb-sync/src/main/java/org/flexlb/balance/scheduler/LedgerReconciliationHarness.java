@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeLedgerAuditView;
+import org.flexlb.balance.endpoint.DecodePlacementAuthorityPort;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillWorkLedger;
@@ -764,6 +765,13 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                 // slot-direction KV_MIRROR_MISMATCH rule, and a
                 // protocol-committed incoming shadow keeps its short
                 // attempt-removal exemption.
+                //
+                // Stage-2 T7 S4 ruling (ruling 4 scope-out): layer-1
+                // stays as the admission-domain resource row, so this
+                // rule continues as the writer-protocol regression guard
+                // for the pRow numeric-mirror installation — it retires
+                // together with the L1 numeric read source in the M3/M4
+                // layer-retirement agenda, not in M2.
                 if (!incomingShadow && audit.prefillRow == null) {
                     diffs.add(new LedgerDiff(
                             Rule.INFLIGHT_PROW_CROSSCHECK,
@@ -789,6 +797,16 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
      * mirror), and both directions run on the same pass, so a
      * single-interleave tear is a one-pass diff the confirm window
      * absorbs.
+     *
+     * <p>Stage-2 T7 S4 (ruling 4 scope-out): the layer-1 comparison
+     * baseline is the capture-frozen {@code inflightEntryFacts} snapshot
+     * — the exact fact shape the wrapper entryReader reads at refresh
+     * time (readAdmissionEntry → entryFacts), frozen in the same Phase-2
+     * pass as the sub-state projections.  The rules never live-re-read
+     * the mutable entry bits (the soak round-3 capture-frozen lesson
+     * applied to the mirror direction); the rule semantics stay the
+     * wrapper-protocol regression audit — the slot projection must match
+     * what the entryReader observed at capture time.</p>
      */
     private void compareDecodeAdmissionMirror(
             List<SlotAudit> slots,
@@ -809,8 +827,8 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                 // ENDPOINT_LEFT_RECONCILIATION_SURFACE rule classifies.
                 continue;
             }
-            RequestInflight mirror = view.inflight().get(audit.requestId);
-            if (mirror == null) {
+            RequestInflight mirrorEntry = view.inflight().get(audit.requestId);
+            if (mirrorEntry == null) {
                 if (view.confirmedReservationTokens()
                         .containsKey(audit.requestId)) {
                     // KV_ALLOCATED handover in flight: the calibrate
@@ -830,6 +848,10 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                 + " wrapper delivery if it recurs)"));
                 continue;
             }
+            // Stage-2 T7 S4: the comparison baseline is the frozen
+            // entryReader facts, not a live re-read of the entry bits.
+            DecodePlacementAuthorityPort.DecodeAdmissionEntry mirror =
+                    view.inflightEntryFacts().get(audit.requestId);
             if (mirror.reservationToken()
                     != authority.reservationToken()) {
                 diffs.add(new LedgerDiff(
@@ -846,7 +868,7 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
             if (mirror.masterQueued() != authority.masterQueued()
                     || mirror.dispatchPermitToken()
                             != authority.dispatchPermitToken()
-                    || mirror.isEngineLifecycleOwned()
+                    || mirror.engineLifecycleOwned()
                             != authority.engineLifecycleOwned()) {
                 diffs.add(new LedgerDiff(
                         Rule.DECODE_ADMISSION_MIRROR_MISMATCH,
@@ -862,7 +884,7 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                 + ", permit="
                                 + mirror.dispatchPermitToken()
                                 + ", lifecycle="
-                                + mirror.isEngineLifecycleOwned()
+                                + mirror.engineLifecycleOwned()
                                 + ") — two-phase flip / post-commit"
                                 + " delivery tear if single-pass"));
             }
@@ -906,15 +928,21 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                     // regression, not a mirror split.
                     continue;
                 }
-                RequestInflight mirror = view.inflight().get(requestId);
-                if (mirror.reservationToken()
-                        != audit.placement.decodeReservationToken()) {
-                    // Request-id reuse window: the placement still hosts
-                    // the previous fence — RESERVATION_TOKEN_MISMATCH
-                    // already reports it on the placement direction.
+                RequestInflight mirrorEntry = view.inflight().get(requestId);
+                if (mirrorEntry == null
+                        || mirrorEntry.reservationToken()
+                                != audit.placement.decodeReservationToken()) {
+                    // Missing entry or request-id reuse window: the
+                    // placement still hosts the previous fence — the
+                    // placement-direction rules already report those
+                    // splits.
                     continue;
                 }
-                if (audit.decodeAdmission == null) {
+                // Stage-2 T7 S4: fence-matched mirror presence check
+                // against the frozen entryReader facts (same baseline as
+                // the slot→layer-1 direction).
+                if (view.inflightEntryFacts().get(requestId) != null
+                        && audit.decodeAdmission == null) {
                     diffs.add(new LedgerDiff(
                             Rule.DECODE_ADMISSION_MIRROR_MISMATCH,
                             requestId,

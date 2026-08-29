@@ -1833,6 +1833,9 @@ class LedgerReconciliationHarnessTest {
                 // expected side (a real endpoint maintains this row
                 // in-transaction at the retired native counters' sites).
                 entryDerivedPlacementRow(inflight),
+                // Stage-2 T7 S4: the frozen entryReader facts derive from
+                // the same entries (the R7/R8 baseline).
+                entryFactsSnapshot(inflight),
                 certified);
     }
 
@@ -1891,6 +1894,9 @@ class LedgerReconciliationHarnessTest {
                 // Stage-2 T7 S2c: the placement row derives from the
                 // (empty) inflight entry facts.
                 entryDerivedPlacementRow(Map.of()),
+                // Stage-2 T7 S4: the frozen entryReader facts derive from
+                // the same (empty) inflight fixture.
+                entryFactsSnapshot(Map.of()),
                 certified);
     }
 
@@ -1923,6 +1929,28 @@ class LedgerReconciliationHarnessTest {
                 observedConfirmed,
                 fenceHeldKv, fenceHeldExpectedKv,
                 fenceProjectionVersion, certified);
+    }
+
+    /**
+     * Stage-2 T7 S4 (ruling 4 scope-out): the frozen per-entry admission
+     * facts a real endpoint's Phase-2 capture would hold — derived from
+     * the same inflight fixture entries through the wrapper entryReader's
+     * exact fact shape (token + sub-state bits + numerics), so the R7/R8
+     * mirror rules observe the same baseline the production freeze
+     * provides (drift is injected through the slot-side authority
+     * fixtures, as before).
+     */
+    private static Map<Long, DecodePlacementAuthorityPort.DecodeAdmissionEntry>
+            entryFactsSnapshot(Map<Long, RequestInflight> inflight) {
+        Map<Long, DecodePlacementAuthorityPort.DecodeAdmissionEntry> facts =
+                new HashMap<>();
+        inflight.forEach((requestId, entry) -> facts.put(requestId,
+                new DecodePlacementAuthorityPort.DecodeAdmissionEntry(
+                        entry.reservationToken(), entry.masterQueued(),
+                        entry.dispatchPermitToken(),
+                        entry.isEngineLifecycleOwned(),
+                        entry.kvTokens(), entry.expectedKvTokens())));
+        return facts;
     }
 
     /**
@@ -2056,6 +2084,9 @@ class LedgerReconciliationHarnessTest {
                 // Stage-2 T7 S2c: the placement row derives from the
                 // (empty) inflight entry facts.
                 entryDerivedPlacementRow(Map.of()),
+                // Stage-2 T7 S4: the frozen entryReader facts (empty
+                // inflight fixture).
+                entryFactsSnapshot(Map.of()),
                 certified);
     }
 
@@ -2098,6 +2129,9 @@ class LedgerReconciliationHarnessTest {
                 // Stage-2 T7 S2c: the placement row derives from the
                 // inflight entry facts (the mirror rule's expected side).
                 entryDerivedPlacementRow(inflight),
+                // Stage-2 T7 S4: the frozen entryReader facts derive from
+                // the same entries (the R7/R8 baseline).
+                entryFactsSnapshot(inflight),
                 certified);
     }
 
