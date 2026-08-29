@@ -4,6 +4,7 @@ load("//bazel:py_proto.bzl", "generate_grpc_proto")
 tf_proto_library_cc(
     name = "model_rpc_service",
     srcs = ["model_rpc_service.proto"],
+    protodeps = ["//rtp_llm/cpp/rdma_transport/proto:tensor_rdma"],
     has_services = True,
     cc_grpc_version = True,
     default_header = True,
@@ -24,7 +25,8 @@ py_binary(
 generate_grpc_proto(
     name = "model_rpc_service_py",
     proto = "model_rpc_service.proto",
-    create_grpc_proto = ":create_grpc_proto"
+    create_grpc_proto = ":create_grpc_proto",
+    proto_deps = ["//rtp_llm/cpp/rdma_transport/proto:tensor_rdma.proto"],
 )
 
 cc_library(
@@ -51,6 +53,7 @@ cc_library(
 py_library(
     name = "model_rpc_service_py_proto",
     srcs = [":model_rpc_service_py"],
+    deps = ["//rtp_llm/cpp/rdma_transport/proto:tensor_rdma_py_proto"],
     visibility = ["//visibility:public"],
 )
 

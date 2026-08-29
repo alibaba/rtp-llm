@@ -55,6 +55,14 @@ def cache_store_deps():
         actual = "@rtp_llm//rtp_llm/cpp/disaggregate/cache_store:cache_store_base_impl"
     )
 
+def rdma_transport_deps():
+    # Open-source builds expose the same factory API but have no RDMA provider.
+    native.alias(
+        name = "rdma_transport_arch_select_impl",
+        actual = "@rtp_llm//rtp_llm/cpp/rdma_transport:rdma_transport_no_impl",
+        visibility = ["//visibility:public"],
+    )
+
 def transfer_rdma_deps():
     native.alias(
         name = "transfer_rdma_impl",

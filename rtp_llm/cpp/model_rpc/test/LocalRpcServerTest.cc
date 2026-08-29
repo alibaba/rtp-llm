@@ -234,4 +234,19 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_FALSE(normal_stream->hasOutput());
 }
 
+TEST(RpcErrorStatusTest, MakeGrpcErrorStatusPreservesErrorCodeInDetails) {
+    const auto status = makeGrpcErrorStatus(ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "no processor"));
+
+    // The status code drives gateway retry/circuit decisions; a config/routing error must not
+    // look retryable-INTERNAL.
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+
+    // The original ErrorCode survives only in the serialized ErrorDetailsPB, which is what
+    // model_rpc_client.py parses out of grpc-status-details-bin to rebuild the ExceptionType.
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::MM_NOT_SUPPORTED_ERROR));
+    EXPECT_EQ(details.error_code(), 905);
+}
+
 }  // namespace rtp_llm

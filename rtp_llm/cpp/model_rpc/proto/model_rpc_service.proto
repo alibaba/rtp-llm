@@ -1,5 +1,7 @@
 // message.proto
 syntax = "proto3";
+
+import "rtp_llm/cpp/rdma_transport/proto/tensor_rdma.proto";
 import "google/protobuf/wrappers.proto";
 
 message TensorPB {
@@ -176,6 +178,20 @@ message MultimodalInputPB {
 
 message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
+    // LLM can receive the output through GPUDirect RDMA.
+    bool support_rdma = 2;
+}
+
+// Multimodal role annotation for tensors in a generic RDMA descriptor.
+message MMRdmaSlotPB {
+    enum Role {
+        ROLE_UNSPECIFIED = 0;   // invalid on the wire
+        EMBEDDING   = 1;        // ordered embedding row chunk
+        POS_ID      = 2;        // concatenated position ids
+        EXTRA_INPUT = 3;        // one tensor per image
+    }
+    rdma_transport.RdmaDescriptorPB rdma_descriptor = 1;
+    repeated Role roles = 2;
 }
 
 message MultimodalOutputPB {
@@ -183,6 +199,12 @@ message MultimodalOutputPB {
     TensorPB multimodal_pos_id = 2;
     repeated TensorPB multimodal_extra_input = 3;
     repeated int32 split_size = 4;
+    // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
+    repeated MMRdmaSlotPB output_rdma_slots = 5;
+}
+
+message ReleaseLeasePB {
+    repeated string lease_id = 1;
 }
 
 message RequestInfoPB {
@@ -305,6 +327,7 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    MM_NOT_SUPPORTED_ERROR = 26;
 }
 
 // transfer between prefill and decode
@@ -858,4 +881,6 @@ service MultimodalRpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
+    // Best-effort release after the LLM finishes reading remote slots.
+    rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
 }

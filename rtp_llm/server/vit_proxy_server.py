@@ -7,18 +7,21 @@ import logging
 import queue
 import threading
 import time
+import numbers
 from collections import defaultdict
 from concurrent import futures
 from typing import NamedTuple, Optional
 
 import grpc
 
-from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.config.py_config_modules import DEFAULT_MM_TIMEOUT_MS
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    EmptyPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseLeasePB,
     StatusVersionPB,
     WorkerStatusPB,
 )
@@ -30,6 +33,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 
 # Proxy forwarding includes transport and serialization after the worker's
 # preprocessing budget. The margin lets the worker return its own timeout error;
@@ -37,7 +41,7 @@ from rtp_llm.multimodal.mm_profiler import MMProfiler
 # one deadline, so a slow worker cannot restart this budget for every candidate.
 VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS = 5.0
 DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = (
-    VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0 + VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS
+    DEFAULT_MM_TIMEOUT_MS / 1000.0 + VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS
 )
 # The proxy owns fast health decisions for its concrete child workers. FlexLB
 # tracks this proxy as one aggregate VIT endpoint and intentionally tolerates a
@@ -110,14 +114,20 @@ def _resolve_forwarding_timeout_seconds(
     return remaining_seconds
 
 
-def _resolve_status_check_deadline_seconds(context) -> Optional[float]:
+def _resolve_context_deadline_seconds(context, max_timeout_seconds: float) -> Optional[float]:
     context_remaining_s = _get_context_time_remaining_seconds(context)
+    if not isinstance(context_remaining_s, numbers.Real):
+        context_remaining_s = None
     if context_remaining_s is not None and context_remaining_s <= 0:
         return None
-    timeout_s = STATUS_CHECK_TIMEOUT_SEC
+    timeout_s = max_timeout_seconds
     if context_remaining_s is not None:
         timeout_s = min(timeout_s, context_remaining_s)
     return time.monotonic() + timeout_s
+
+
+def _resolve_status_check_deadline_seconds(context) -> Optional[float]:
+    return _resolve_context_deadline_seconds(context, STATUS_CHECK_TIMEOUT_SEC)
 
 
 def _resolve_status_check_timeout_seconds(deadline_s: float) -> Optional[float]:
@@ -354,11 +364,15 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         load_balancer: LoadBalancer,
         connection_pool: WorkerConnectionPool,
         default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
+        transport_config=None,
     ):
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.profiler = MMProfiler()
+        self._transport_router = MMOutputProxyRouter(
+            connection_pool, transport_config
+        )
         kmonitor.init()
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
@@ -488,6 +502,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                         request, timeout=attempt_timeout_s
                     )
                     self.load_balancer.set_worker_alive(worker_address, True)
+                    self._transport_router.record_receipt(worker_address, response)
                     kmonitor.report(
                         GaugeMetrics.VIT_RPC_PROXY_TO_WORKER_RT_US_METRIC,
                         _now_us() - worker_rpc_start_us,
@@ -707,6 +722,12 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         for probe in probes:
             probe.cancel()
 
+    def ReleaseRdmaLease(
+        self, request: ReleaseLeasePB, context
+    ) -> EmptyPB:
+        self._transport_router.release(request, context)
+        return EmptyPB()
+
     def _get_alive_worker_status(
         self, request: StatusVersionPB, context=None
     ) -> tuple[Optional[WorkerStatusPB], bool]:
@@ -806,6 +827,7 @@ class VitProxyServer:
         external_grpc_port: int,
         load_balance_strategy: str = "round_robin",
         default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
+        transport_config=None,
     ):
         """
         Args:
@@ -813,12 +835,14 @@ class VitProxyServer:
             external_grpc_port: 外部 gRPC 端口，代理服务器监听此端口
             load_balance_strategy: 负载均衡策略，'round_robin' 或 'least_connections'
             default_rpc_timeout_seconds: 请求未指定超时时间时的默认值
+            transport_config: ViT 输出通信配置
         """
         self.worker_addresses = worker_addresses
         self.external_grpc_port = external_grpc_port
         self.load_balancer = LoadBalancer(worker_addresses, load_balance_strategy)
         self.connection_pool = WorkerConnectionPool(worker_addresses)
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
+        self.transport_config = transport_config
         self.rpc_server = None
         self.proxy_servicer: Optional[VitProxyRpcServer] = None
 
@@ -839,6 +863,7 @@ class VitProxyServer:
             self.load_balancer,
             self.connection_pool,
             self.default_rpc_timeout_seconds,
+            self.transport_config,
         )
         add_MultimodalRpcServiceServicer_to_server(self.proxy_servicer, self.rpc_server)
 

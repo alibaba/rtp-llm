@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/model_rpc/EmbeddingRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 namespace py = pybind11;
 namespace th = torch;
@@ -24,24 +26,8 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
         input_lengths  = std::vector<int32_t>(request->input_lengths().begin(), request->input_lengths().end());
 
         for (const auto& pb_feature : request->multimodal_features()) {
-            auto               mm_preprocess_config = &pb_feature.mm_preprocess_config();
-            std::vector<float> crop_positions;
-            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
-                crop_positions.push_back(crop_position);
-            }
-            MultimodalInput feature(pb_feature.multimodal_url(),
-                                    QueryConverter::transTensor(pb_feature.multimodal_tensor()),
-                                    pb_feature.multimodal_type(),
-                                    mm_preprocess_config->width(),
-                                    mm_preprocess_config->height(),
-                                    mm_preprocess_config->min_pixels(),
-                                    mm_preprocess_config->max_pixels(),
-                                    mm_preprocess_config->fps(),
-                                    mm_preprocess_config->min_frames(),
-                                    mm_preprocess_config->max_frames(),
-                                    crop_positions,
-                                    mm_preprocess_config->mm_timeout_ms());
-            multimodal_inputs.emplace_back(std::move(feature));
+            multimodal_inputs.emplace_back(MultimodalPbConverter::inputFromPb(
+                pb_feature, QueryConverter::transTensor(pb_feature.multimodal_tensor())));
         }
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("[Request Parsing] Failed for request_id %ld: %s", request_id, e.what());
@@ -59,7 +45,12 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
             auto mm_res =
                 mm_processor_->updateMultimodalFeatures(embedding_input, multimodal_inputs, request->vit_role_addr());
             if (!mm_res.ok()) {
-                throw std::runtime_error(mm_res.ToString());
+                RTP_LLM_LOG_WARNING("[Multimodal] updateMultimodalFeatures failed for request_id %ld, "
+                                    "error code [%s], error message [%s]",
+                                    request_id,
+                                    ErrorCodeToString(mm_res.code()).c_str(),
+                                    mm_res.ToString().c_str());
+                return makeGrpcErrorStatus(mm_res);
             }
         }
 

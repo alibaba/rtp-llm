@@ -531,27 +531,12 @@ def setup_cuda_device_and_accl_env(local_rank: int) -> None:
         os.environ["ACCL_SELECT_PORT"] = select_port
         logging.info(f"local rank {local_rank} set accl select port to {select_port} ")
 
-    if (
-        os.environ.get("ACCL_USE_NICS") is None
-        and os.environ.get("ACCL_NIC_GPU_AFFINITY") is not None
+    if os.environ.get("ACCL_USE_NICS") or os.environ.get(
+        "ACCL_NIC_GPU_AFFINITY"
     ):
-        content = os.environ.get("ACCL_NIC_GPU_AFFINITY")
-        try:
-            gpu_nic_affinity = json.loads(content)
-            if str(local_rank) in gpu_nic_affinity:
-                affinity_nic = gpu_nic_affinity[str(local_rank)]
-                os.environ["ACCL_USE_NICS"] = affinity_nic
-                logging.info(
-                    f"local rank {local_rank} use cuda device {local_rank} set ACCL_USE_NICS to {affinity_nic}"
-                )
-            else:
-                logging.info(
-                    f"local rank {local_rank} use cuda device {local_rank} get affinity nic failed, content is {content}"
-                )
-        except json.JSONDecodeError:
-            logging.info(
-                f"try decode ACCL_NIC_GPU_AFFINITY failed, content is {content}"
-            )
+        from rtp_llm.utils.gpu_nic_affinity import configure_gpu_nic_affinity
+
+        configure_gpu_nic_affinity(local_rank)
 
 
 def setup_and_configure_server(py_env_configs: PyEnvConfigs):

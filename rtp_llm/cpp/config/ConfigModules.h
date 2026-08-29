@@ -333,9 +333,42 @@ struct SpeculativeExecutionConfig {
     static std::string     to_string(SpeculativeType type);
 };
 
+struct RdmaConfig {
+    // Empty bind IP enables automatic detection.
+    std::string bind_ip;
+    int         port               = 0;
+    int         connect_timeout_ms = 250;
+    // Per-read limit, capped by the remaining request deadline.
+    int64_t read_timeout_ms = 3000;
+    // Parallel RC QPs used to stripe one descriptor read.
+    uint32_t qp_count = 8;
+    // Reclaim exported slots that were not released.
+    int64_t slot_gc_timeout_ms = 60 * 1000;
+    // Larger outputs are split across slots.
+    int64_t max_slot_bytes = 1024L * 1024 * 1024;
+};
+
+struct MMControlConfig {
+    // Best-effort release RPC deadline.
+    int64_t release_timeout_ms = 1000;
+};
+
+struct MMTransportConfig {
+    // Open-source builds fall back to inline gRPC bytes.
+    std::string     mode = "auto";
+    MMControlConfig control;
+    RdmaConfig      rdma;
+    // LLM-to-ViT RPC budget when no request input sets mm_timeout_ms.
+    int64_t default_rpc_timeout_ms = 125 * 1000;
+    // Let the ViT worker return its structured timeout before the client deadline.
+    int64_t rpc_timeout_margin_ms = 5 * 1000;
+};
+
 struct VitConfig {
-    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+    VitSeparation     vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
+    MMTransportConfig output_transport;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {

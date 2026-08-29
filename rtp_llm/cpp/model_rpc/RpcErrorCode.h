@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
@@ -29,6 +30,8 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
+        // Keep aligned with UNSUPPORTED in vit_rpc_server.py.
+        {ErrorCode::MM_NOT_SUPPORTED_ERROR, grpc::StatusCode::FAILED_PRECONDITION},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -36,6 +39,22 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     } else {
         return grpc::StatusCode::INTERNAL;
     }
+}
+
+// Preserve the internal ErrorCode in gRPC error details.
+inline grpc::Status makeGrpcErrorStatus(const ErrorInfo& error_info) {
+    const auto     error_msg       = error_info.ToString();
+    const auto     grpc_error_code = transErrorCodeToGrpc(error_info.code());
+    ErrorDetailsPB error_details;
+    error_details.set_error_code(static_cast<int>(error_info.code()));
+    error_details.set_error_message(error_msg);
+    std::string error_details_serialized;
+    if (error_details.SerializeToString(&error_details_serialized)) {
+        return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
+    }
+    RTP_LLM_LOG_WARNING("error details serialize to string failed, code [%s]",
+                        ErrorCodeToString(error_info.code()).c_str());
+    return grpc::Status(grpc_error_code, error_msg);
 }
 
 inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
@@ -74,6 +93,7 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
         {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TIMEOUT, ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT},
         {ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
          ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
+        {ErrorCodePB::MM_NOT_SUPPORTED_ERROR, ErrorCode::MM_NOT_SUPPORTED_ERROR},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -119,6 +139,7 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
         {ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT, ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TIMEOUT},
         {ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
          ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
+        {ErrorCode::MM_NOT_SUPPORTED_ERROR, ErrorCodePB::MM_NOT_SUPPORTED_ERROR},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {

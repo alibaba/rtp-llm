@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
@@ -59,22 +60,35 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
+    const auto mm_decision = resolveAndLogMMProcessorKind(
+        maga_init_params.model_config_.mm_model_config.is_multimodal,
+        maga_init_params.vit_config.vit_separation,
+        !mm_process_engine.is_none(),
+        maga_init_params.pd_sep_config.role_type,
+        maga_init_params.parallelism_config.tp_rank,
+        maga_init_params.model_config_.model_type,
+        "LocalRpcServer");
+    const auto mm_kind = mm_decision.kind;
+    if (!mm_decision.ok()) {
+        RTP_LLM_LOG_ERROR("%s", mm_decision.error.c_str());
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, mm_decision.error);
+    }
+
     {
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
-    if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
-        if (mm_process_engine.is_none()) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
-                                                              maga_init_params.model_config_.max_seq_len,
-                                                              metrics_reporter_));
-        } else {
-            mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
-                                                             maga_init_params.model_config_.mm_model_config,
-                                                             maga_init_params.model_config_.max_seq_len));
-        }
+    if (mm_kind == MMProcessorKind::LOCAL) {
+        mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
+                                                         maga_init_params.model_config_.mm_model_config,
+                                                         maga_init_params.model_config_.max_seq_len));
+    } else if (mm_kind == MMProcessorKind::REMOTE) {
+        mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
+                                                          maga_init_params.model_config_.max_seq_len,
+                                                          maga_init_params.vit_config.output_transport,
+                                                          metrics_reporter_));
     }
 
     return grpc::Status::OK;
@@ -92,17 +106,7 @@ LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& 
                         request_log_tag.c_str(),
                         ErrorCodeToString(error_info.code()).c_str(),
                         error_msg.c_str());
-    auto           grpc_error_code = transErrorCodeToGrpc(error_info.code());
-    ErrorDetailsPB error_details;
-    error_details.set_error_code(static_cast<int>(error_info.code()));
-    error_details.set_error_message(error_msg);
-    std::string error_details_serialized;
-    if (error_details.SerializeToString(&error_details_serialized)) {
-        return grpc::Status(grpc_error_code, error_msg, error_details_serialized);
-    } else {
-        RTP_LLM_LOG_WARNING("%s error details serialize to string failed", request_log_tag.c_str());
-        return grpc::Status(grpc_error_code, error_msg);
-    }
+    return makeGrpcErrorStatus(error_info);
 }
 
 grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             context,

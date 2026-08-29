@@ -17,7 +17,7 @@ def _generate_grpc_proto_impl(ctx):
     # use create_grpc_proto generate proto py files
     ctx.actions.run(
         outputs = [pb2_file, pb2_grpc_file],
-        inputs = [proto_file],
+        inputs = [proto_file] + ctx.files.proto_deps,
         executable = ctx.executable.create_grpc_proto,
         arguments = [proto_file.path, output_dir],
         tools = [ctx.executable.create_grpc_proto]
@@ -42,6 +42,9 @@ generate_grpc_proto = rule(
             executable = True,
             cfg = "exec",
             mandatory = True,
+        ),
+        "proto_deps": attr.label_list(
+            allow_files = [".proto"],
         ),
     },
 )

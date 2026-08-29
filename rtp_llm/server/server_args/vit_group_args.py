@@ -1,7 +1,12 @@
+import argparse
 import logging
 import os
 
-from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.config.py_config_modules import (
+    MM_TRANSPORT_MODE_AUTO,
+    MM_TRANSPORT_MODES,
+    VitConfig,
+)
 from rtp_llm.ops import VitSeparation
 from rtp_llm.server.server_args.util import str2bool
 
@@ -41,6 +46,57 @@ def _convert_vit_separation(value):
         f"  'VitSeparation.VIT_SEPARATION_ROLE'\n"
         f"  'VitSeparation.VIT_SEPARATION_REMOTE'"
     )
+
+
+def _convert_mm_transport_mode(value):
+    value = str(value).strip().lower()
+    if value not in MM_TRANSPORT_MODES:
+        raise argparse.ArgumentTypeError(
+            f"invalid mm_transport_mode '{value}'; expected one of "
+            f"{', '.join(repr(mode) for mode in MM_TRANSPORT_MODES)}"
+        )
+    return value
+
+
+# Reject invalid RDMA limits and timeouts during argument parsing.
+def _positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value!r}")
+    return parsed
+
+
+def _non_negative_int(value):
+    """For the caps where 0 is meaningful ("unlimited"), unlike the timeouts."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative integer, got {value!r}"
+        )
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a non-negative integer, got {value!r}"
+        )
+    return parsed
+
+
+def _rdma_port(value):
+    """0 means "let the RDMA server pick a free port"; anything else must be a real port."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"must be 0 (auto) or a port in [1, 65535], got {value!r}"
+        )
+    if parsed != 0 and not 1 <= parsed <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"must be 0 (auto) or a port in [1, 65535], got {value!r}"
+        )
+    return parsed
 
 
 def init_vit_group_args(parser, vit_config):
@@ -231,6 +287,83 @@ def init_vit_group_args(parser, vit_config):
         type=str,
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
+    )
+    transport_config = vit_config.output_transport
+    control_config = transport_config.control
+    rdma_config = transport_config.rdma
+    vit_group.add_argument(
+        "--mm_transport_mode",
+        env_name="MM_TRANSPORT_MODE",
+        bind_to=(transport_config, "mode"),
+        type=_convert_mm_transport_mode,
+        choices=list(MM_TRANSPORT_MODES),
+        default=MM_TRANSPORT_MODE_AUTO,
+        help="多模态输出传输模式：auto 优先 RDMA 并自动回退 gRPC，grpc 强制使用 gRPC",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_bind_ip",
+        env_name="MM_RDMA_BIND_IP",
+        bind_to=(rdma_config, "bind_ip"),
+        type=str,
+        default="",
+        help="encoder 侧 RDMA server 的 OOB 监听 IP，空表示自动探测（getBindIp）；多网卡机器可显式指定。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_port",
+        env_name="MM_RDMA_PORT",
+        bind_to=(rdma_config, "port"),
+        type=_rdma_port,
+        default=0,
+        help="encoder 侧 RDMA server 监听端口，0 表示随机端口。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_connect_timeout_ms",
+        env_name="MM_RDMA_CONNECT_TIMEOUT_MS",
+        bind_to=(rdma_config, "connect_timeout_ms"),
+        type=_positive_int,
+        default=250,
+        help="RDMA 连接超时（毫秒）。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_read_timeout_ms",
+        env_name="MM_RDMA_READ_TIMEOUT_MS",
+        bind_to=(rdma_config, "read_timeout_ms"),
+        type=_positive_int,
+        default=3000,
+        help="LLM 侧单次 RDMA READ 的上限（毫秒），实际预算取 min(请求剩余时间, 该值)。仅在链接了真实 RDMA transport 的构建中生效",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_qp_count",
+        env_name="MM_RDMA_QP_COUNT",
+        bind_to=(rdma_config, "qp_count"),
+        type=_positive_int,
+        default=8,
+        help="LLM 侧每个 ViT endpoint 的并行 RDMA QP 数，必须为正整数",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_release_timeout_ms",
+        env_name="MM_RDMA_RELEASE_TIMEOUT_MS",
+        bind_to=(control_config, "release_timeout_ms"),
+        type=_positive_int,
+        default=1000,
+        help="读取侧 ReleaseRdmaLease RPC 的 deadline（毫秒），位于推理路径上需保持较短，超时由导出侧 slot GC 兜底",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_slot_gc_timeout_ms",
+        env_name="MM_RDMA_SLOT_GC_TIMEOUT_MS",
+        bind_to=(rdma_config, "slot_gc_timeout_ms"),
+        type=_positive_int,
+        default=60 * 1000,
+        help="encoder 侧 slot 在无 Release 时强制回收的超时（毫秒）",
+    )
+    vit_group.add_argument(
+        "--mm_rdma_max_slot_bytes",
+        env_name="MM_RDMA_MAX_SLOT_BYTES",
+        bind_to=(rdma_config, "max_slot_bytes"),
+        type=_non_negative_int,
+        default=1024 * 1024 * 1024,
+        help="encoder 侧单个 RDMA slot 的字节上限，默认 1GiB；更大的输出自动分块；0 表示不限制。"
+        "分块时按 256B 对齐向下取整后计算，因此实际生效上限是不超过该值的最大 256 倍数",
     )
     vit_group.add_argument(
         "--gpu_batch_wait_ms",

@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package rdma_transport;
+
+enum TensorDataTypePB {
+    RDMA_TENSOR_FLOAT32 = 0;
+    RDMA_TENSOR_INT32 = 1;
+    RDMA_TENSOR_FLOAT16 = 2;
+    RDMA_TENSOR_BFLOAT16 = 3;
+}
+
+message RdmaNicKeyPB {
+    uint32 nic_id = 1;
+    uint32 rkey = 2;
+}
+
+message TensorMetaPB {
+    repeated int64 shape = 1;
+    TensorDataTypePB data_type = 2;
+    uint64 offset = 3;
+    uint64 nbytes = 4;
+}
+
+message RdmaDescriptorPB {
+    uint64 remote_addr = 1;
+    repeated RdmaNicKeyPB nic_keys = 2;
+    string lease_id = 3;
+    string host = 4;
+    uint32 port = 5;
+    uint64 payload_bytes = 6;
+    repeated TensorMetaPB tensors = 7;
+}
