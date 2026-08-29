@@ -90,6 +90,18 @@ class GridRunner:
         metrics_list: List[MetricState] = []
 
         grid_cases = self._iter_cases()
+        raw_profile_cases = os.environ.get("PERF_PROFILE_CASES", "").strip()
+        profile_cases = {
+            case.strip() for case in raw_profile_cases.split(",") if case.strip()
+        }
+        invalid_profile_cases = profile_cases.difference(
+            {f"{batch_size}:{input_len}" for batch_size, input_len in grid_cases}
+        )
+        if invalid_profile_cases:
+            raise ValueError(
+                "PERF_PROFILE_CASES contains cases outside the grid: "
+                + ", ".join(sorted(invalid_profile_cases))
+            )
 
         with tqdm(
             total=len(grid_cases), desc=f"Running {self._title}", unit="test"
@@ -115,6 +127,10 @@ class GridRunner:
                 target_reuse_len = (
                     reuse_cache_query.target_reuse_len if reuse_cache_query else 0
                 )
+                profile_this_case = (
+                    not profile_cases
+                    or f"{batch_size}:{input_len}" in profile_cases
+                )
                 metric = BatchPerfImpl(
                     self._port,
                     self._dp_size,
@@ -123,9 +139,10 @@ class GridRunner:
                     self._is_decode,
                     500,
                     self._decode_test_length,
-                    True,
+                    profile_this_case,
                     self._generate_config,
                     trace_name,
+                    profile_runs=None if profile_this_case else 0,
                     reuse_cache_seed_query=seed_query,
                     query_variants=query_variants,
                     target_reuse_len=target_reuse_len,

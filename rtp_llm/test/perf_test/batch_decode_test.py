@@ -173,6 +173,17 @@ def resolve_perf_engine_paths(remaining: List[str]) -> List[str]:
     return out
 
 
+def _timeline_has_gpu_kernels(path: str) -> bool:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.error("Invalid timeline %s: %s", path, e)
+        return False
+    events = data if isinstance(data, list) else data.get("traceEvents", [])
+    return any(event.get("cat") == "kernel" for event in events)
+
+
 def _collect_timeline_files(result_dir: str) -> None:
     """Wait for async profiler saves and collect timeline JSON files into a timelines/ subdirectory."""
     # C++ engine's ProfilerSaveWorker writes timeline JSONs asynchronously in a
@@ -186,14 +197,29 @@ def _collect_timeline_files(result_dir: str) -> None:
         if os.path.basename(f).startswith(("profiler_ts", "profiler_"))
         or "_wr" in os.path.basename(f)
     ]
+    collected_files: List[str] = []
     if timeline_files:
         os.makedirs(timeline_dir, exist_ok=True)
         for f in timeline_files:
             dst = os.path.join(timeline_dir, os.path.basename(f))
             shutil.move(f, dst)
+            collected_files.append(dst)
             logging.info(f"Collected timeline: {dst}")
     else:
         logging.info("No timeline files found in %s", result_dir)
+
+    if os.environ.get("PERF_REQUIRE_TIMELINE", "0") != "1":
+        return
+    if not collected_files:
+        raise RuntimeError(f"required timeline was not generated in {result_dir}")
+    invalid_files = [
+        path for path in collected_files if not _timeline_has_gpu_kernels(path)
+    ]
+    if invalid_files:
+        raise RuntimeError(
+            "timeline files do not contain GPU kernel events: "
+            + ", ".join(os.path.basename(path) for path in invalid_files)
+        )
 
 
 def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None:
