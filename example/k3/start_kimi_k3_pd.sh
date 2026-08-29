@@ -103,6 +103,10 @@ Runtime, build and diagnostics:
   OPS_OVERLAY                           optional prebuilt operator overlay
   RTP_LLM_DRY_RUN=1                     print configuration and exit
 
+The launcher reserves nine consecutive TCP ports per local worker rank. The
+complete local block, START_PORT through START_PORT + LOCAL_WORLD_SIZE * 9 - 1,
+must be free before model startup.
+
 The operator implementations and versions are Bazel/runtime dependencies, not
 launcher knobs. cuLA KDA, FlashMLA Prefill, fused AG-GEMM and fused router are
 selected by K3 source code. Legacy KIMI_K3_* backend toggles are not used.
@@ -376,6 +380,42 @@ else
         || die "${role} ${decode_topology} requires WORLD_RANK=0, got ${world_rank}"
 fi
 
+# ServerConfig allocates offsets 0..8 below each local rank's base and advances
+# the next rank by nine ports. Checking only START_PORT misses failures such as
+# an occupied cache_store_rdma_listen_port (rank * 9 + 4), after weights and
+# CUDA graphs have already spent minutes initializing.
+worker_info_port_num=9
+worker_port_block_end="$((start_port + local_world_size * worker_info_port_num - 1))"
+((worker_port_block_end <= 65535)) \
+    || die "worker port block ${start_port}-${worker_port_block_end} exceeds 65535"
+
+preflight_worker_port_block() {
+    python3 - "${start_port}" "${worker_port_block_end}" <<'PY'
+import socket
+import sys
+
+start = int(sys.argv[1])
+end = int(sys.argv[2])
+held = []
+try:
+    for port in range(start, end + 1):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError as exc:
+            sock.close()
+            raise SystemExit(
+                f"worker port block {start}-{end} is unavailable: "
+                f"port {port} cannot bind: {exc}"
+            )
+        held.append(sock)
+finally:
+    for sock in held:
+        sock.close()
+print(f"worker port block preflight passed: {start}-{end}")
+PY
+}
+
 model_service_config="$(
     printf '{"service_id":"%s","role_endpoints":[{"group":"default",' \
         "${service_id}"
@@ -567,11 +607,14 @@ if [[ -n "${prefill_capture_config}" ]]; then
 fi
 
 if [[ "${RTP_LLM_DRY_RUN:-0}" == "1" ]]; then
+    printf 'worker_port_block: %s-%s\n' "${start_port}" "${worker_port_block_end}"
     printf 'command:'
     printf ' %q' "${server_binary}" "${server_args[@]}"
     printf '\n'
     exit 0
 fi
+
+preflight_worker_port_block
 
 if [[ "${skip_build}" == "0" ]]; then
     bazel_startup_args=()
@@ -584,6 +627,9 @@ if [[ "${skip_build}" == "0" ]]; then
         bazelisk "${bazel_startup_args[@]}" \
             build --config=cuda13 --config=sm10x --jobs=64 "${server_target}"
     ) || die "failed to build ${server_target}"
+    # A local build may be long; repeat the check immediately before exec so a
+    # port claimed while compiling fails cleanly instead of aborting a worker.
+    preflight_worker_port_block
 fi
 [[ -x "${server_binary}" ]] || die "missing Bazel launcher ${server_binary}"
 
