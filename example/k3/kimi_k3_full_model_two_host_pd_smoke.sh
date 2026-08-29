@@ -240,7 +240,10 @@ done
 smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
 smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
-smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
+# A 93-layer Projection-KTP Decode block is about 578 MiB.  The formal
+# two-request >64K case needs at least 46 blocks on one DP owner, so keep
+# enough room for 48 blocks while staying below the measured B300 headroom.
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-26000}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"

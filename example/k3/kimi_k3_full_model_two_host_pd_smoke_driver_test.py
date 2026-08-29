@@ -107,6 +107,33 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             _, _, _, command = driver.role_launch_parts(args, "prefill")
         self.assertIn("FT_CORE_DUMP_ON_EXCEPTION=0", command)
 
+    def test_role_command_forwards_decode_cache_and_prewarm_timeout(self):
+        args = argparse.Namespace(
+            prefill_repo_root="/prefill/repo",
+            decode_repo_root="/decode/repo",
+            prefill_checkpoint_path="/prefill/checkpoint",
+            decode_checkpoint_path="/decode/checkpoint",
+            prefill_endpoint="10.0.0.1:27188",
+            decode_endpoint="10.0.0.2:28188",
+            run_id="projection-ktp",
+            suite="all",
+            result_endpoint=None,
+            container="lhc_GPU",
+            prefill_container_runtime="docker",
+            decode_container_runtime="docker",
+        )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SMOKE_DECODE_KV_CACHE_MEM_MB": "26000",
+                "SMOKE_RDMA_PREWARM_TIMEOUT_S": "300",
+            },
+            clear=True,
+        ):
+            _, _, _, command = driver.role_launch_parts(args, "decode")
+        self.assertIn("SMOKE_DECODE_KV_CACHE_MEM_MB=26000", command)
+        self.assertIn("SMOKE_RDMA_PREWARM_TIMEOUT_S=300", command)
+
     def test_start_remote_roles_launches_prefill_without_decode_health_gate(self):
         events = []
 
