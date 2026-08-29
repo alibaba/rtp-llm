@@ -104,7 +104,7 @@ std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const C
 
     if (load_context != nullptr) {
         for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-            const auto& desc   = load_context->loadDescs()[desc_index];
+            const auto& desc = load_context->loadDescs()[desc_index];
             if (desc.source_tier == Tier::DEVICE) {
                 set_group_set_blocks(desc.group_set_id, desc.path_index, desc.source_blocks);
             } else if (load_context->joinedLoads()[desc_index]) {
@@ -166,9 +166,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         auto deferred_prepared = std::make_shared<PreparedKVCache>(std::move(prepared));
         load_context->setMatchCallback([self = std::move(self), malloc_info, deferred_prepared](
                                            LoadAsyncContext& context, size_t matched_blocks) mutable {
-            auto invocation_prepared = std::move(deferred_prepared);
-            const bool success =
-                self->finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
+            auto       invocation_prepared = std::move(deferred_prepared);
+            const bool success = self->finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
             return LoadMatchResult{success, invocation_prepared->materialize_status};
         });
         MallocResult result{true,
@@ -314,11 +313,11 @@ bool HybridKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
 }
 
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
-    auto&             kv_resource  = malloc_info.batch_kv_cache_resource;
-    const auto&       cp_mapper    = cp_slot_mapper_;
-    const int         batch_size   = kv_resource->batchSize();
-    const int         raw_seq_len  = malloc_info.incrSeqLen();
-    const int         reserve_step = malloc_info.complete_token_ids->getReserveStep();
+    auto&       kv_resource  = malloc_info.batch_kv_cache_resource;
+    const auto& cp_mapper    = cp_slot_mapper_;
+    const int   batch_size   = kv_resource->batchSize();
+    const int   raw_seq_len  = malloc_info.incrSeqLen();
+    const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
     std::vector<std::vector<std::vector<size_t>>> backfilled_positions(static_cast<size_t>(batch_size));
@@ -508,7 +507,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+        block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, insert_info.write_remote);
     }
 }
 
@@ -826,8 +825,8 @@ void HybridKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                         reserveBlocksNum());
 }
 
-MallocStatus HybridKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
-                                                                  size_t                  reserve_blocks,
+MallocStatus HybridKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
+                                                                  size_t                 reserve_blocks,
                                                                   const PreparedKVCache& prepared,
                                                                   bool                   has_load_context) const {
     if (reserve_blocks == 0 && !has_load_context) {
@@ -845,17 +844,16 @@ MallocStatus HybridKVCacheAllocator::evaluatePreparedInitCapacity(const MallocIn
     RTP_LLM_CHECK_WITH_INFO(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids
                                 && prepared.required_positions.size() == kv_cache_groups_.size(),
                             "prepared shared-pool capacity input mismatch");
-    const int    batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
-    const int    total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
-    const int    raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
-    const int    raw_seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int    reserve_step       = malloc_info.complete_token_ids->getReserveStep();
-    size_t       planned_blocks     = 0;
+    const int batch_size         = malloc_info.batch_kv_cache_resource->batchSize();
+    const int total_seq_len      = malloc_info.complete_token_ids->totalSeqLength();
+    const int raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
+    const int raw_seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int reserve_step       = malloc_info.complete_token_ids->getReserveStep();
+    size_t    planned_blocks     = 0;
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
-        const int group_common_seq =
-            cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, raw_common_seq_len);
-        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, raw_seq_len);
-        const auto need = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
+        const int  group_common_seq = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, raw_common_seq_len);
+        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, group_id, raw_seq_len);
+        const auto need             = kv_cache_groups_[static_cast<size_t>(group_id)]->getNeedBlocks(
             group_common_seq,
             group_seq_len,
             reserve_step,
@@ -883,8 +881,7 @@ MallocStatus HybridKVCacheAllocator::evaluatePreparedInitCapacity(const MallocIn
             }
         }
     }
-    return free_blocks >= required_free_blocks ? MallocStatus::NONE :
-                                                 MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+    return free_blocks >= required_free_blocks ? MallocStatus::NONE : MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
 }
 
 void HybridKVCacheAllocator::rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size) {

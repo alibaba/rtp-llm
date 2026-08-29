@@ -20,8 +20,8 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
 
 struct StorageTaskState {
     struct Pin {
-        DeviceBlockPoolPtr          pool;
-        BlockIdxType                block;
+        DeviceBlockPoolPtr pool;
+        BlockIdxType       block;
     };
 
     StorageRequest   request;
@@ -49,8 +49,8 @@ namespace {
 
 struct BlockKey {
     DeviceBlockPool* pool;
-    BlockIdxType block;
-    bool         operator==(const BlockKey& other) const {
+    BlockIdxType     block;
+    bool             operator==(const BlockKey& other) const {
         return pool == other.pool && block == other.block;
     }
 };
@@ -66,8 +66,7 @@ struct BlockKeyHash {
 StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::StorageTaskState> state):
     state_(std::move(state)) {}
 
-StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor):
-    executor_(std::move(executor)) {}
+StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor): executor_(std::move(executor)) {}
 
 StorageBackend::~StorageBackend() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -83,9 +82,9 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     for (const auto& pool : device_pools) {
         RTP_LLM_CHECK(pool != nullptr);
     }
-    topology_               = std::move(topology);
-    device_pools_           = std::move(device_pools);
-    buffer_resolver_        = std::move(buffer_resolver);
+    topology_        = std::move(topology);
+    device_pools_    = std::move(device_pools);
+    buffer_resolver_ = std::move(buffer_resolver);
     if (!initImpl()) {
         return false;
     }
@@ -175,6 +174,7 @@ void StorageBackend::shutdown() {
         lifecycle_cv_.wait(lock, [this] { return in_flight_ == 0; });
         lifecycle_ = Lifecycle::FINALIZING;
     }
+    shutdownImpl();
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         lifecycle_ = Lifecycle::STOPPED;
@@ -205,6 +205,11 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
 const CacheTopology& StorageBackend::topology() const {
     RTP_LLM_CHECK(topology_ != nullptr);
     return *topology_;
+}
+
+const std::vector<DeviceBlockPoolPtr>& StorageBackend::devicePools() const {
+    RTP_LLM_CHECK(topology_ != nullptr && device_pools_.size() == topology_->groups().size());
+    return device_pools_;
 }
 
 std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {

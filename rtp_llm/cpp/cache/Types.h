@@ -115,19 +115,19 @@ struct MallocResult {
         host_reuse_len(host_reuse_len),
         disk_reuse_len(disk_reuse_len) {}
 
-    bool         success   = false;
-    int          reuse_len = 0;
+    bool         success            = false;
+    int          reuse_len          = 0;
     int64_t      match_cost_time_us = 0;
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 
-    std::shared_ptr<AsyncContext> async_context      = nullptr;
+    std::shared_ptr<AsyncContext> async_context = nullptr;
 
     int host_reuse_len = 0;
-    int disk_reuse_len   = 0;
+    int disk_reuse_len = 0;
 
     int64_t match_end_time_us          = 0;
-    int64_t malloc_begin_time_us        = 0;
-    int64_t load_prepare_latency_us     = 0;
+    int64_t malloc_begin_time_us       = 0;
+    int64_t load_prepare_latency_us    = 0;
     int64_t block_aligned_input_length = 0;
     bool    load_attempted             = false;
 };
@@ -144,6 +144,7 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    bool                    write_remote{true};
 };
 
 }  // namespace rtp_llm

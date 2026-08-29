@@ -19,6 +19,59 @@
 namespace rtp_llm {
 namespace {
 
+TEST(StorageBackendExecutorTest, RejectsZeroDimensions) {
+    EXPECT_THROW((void)makeStorageBackendExecutor(/*thread_count=*/0, /*queue_size=*/1), std::invalid_argument);
+    EXPECT_THROW((void)makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/0), std::invalid_argument);
+}
+
+TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
+    auto executor = makeStorageBackendExecutor(/*thread_count=*/2, /*queue_size=*/1);
+    ASSERT_TRUE(executor->start());
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    size_t                  started = 0;
+    bool                    release = false;
+    std::atomic<size_t>     completed{0};
+    auto                    blocking_task = [&] {
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            ++started;
+            cv.notify_all();
+            cv.wait(lock, [&] { return release; });
+        }
+        completed.fetch_add(1);
+    };
+
+    const bool first_submitted = executor->submit(blocking_task);
+    bool       first_started   = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        first_started = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started >= 1; });
+    }
+    const bool second_submitted = first_started && executor->submit(blocking_task);
+    bool       both_started     = false;
+    if (second_submitted) {
+        std::unique_lock<std::mutex> lock(mutex);
+        both_started = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started == 2; });
+    }
+    const bool queued_submitted  = both_started && executor->submit([&] { completed.fetch_add(1); });
+    const bool overflow_rejected = both_started && !executor->submit([] {});
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release = true;
+    }
+    cv.notify_all();
+    executor->shutdown();
+    EXPECT_TRUE(first_submitted);
+    EXPECT_TRUE(first_started);
+    EXPECT_TRUE(second_submitted);
+    EXPECT_TRUE(both_started);
+    EXPECT_TRUE(queued_submitted);
+    EXPECT_TRUE(overflow_rejected);
+    EXPECT_EQ(completed.load(), 3u);
+}
+
 class CoreDumpGuard {
 public:
     CoreDumpGuard(): old_(StaticConfig::user_ft_core_dump_on_exception) {
@@ -193,6 +246,10 @@ public:
         return init_resolved_address_;
     }
 
+    bool shutdownCalled() const {
+        return shutdown_called_.load();
+    }
+
 protected:
     bool initImpl() override {
         ++init_calls_;
@@ -231,6 +288,10 @@ protected:
         }
     }
 
+    void shutdownImpl() noexcept override {
+        shutdown_called_.store(true);
+    }
+
 private:
     mutable std::mutex      mutex_;
     std::condition_variable cv_;
@@ -243,6 +304,7 @@ private:
     bool                    init_result_{true};
     size_t                  init_calls_{0};
     void*                   init_resolved_address_{nullptr};
+    std::atomic<bool>       shutdown_called_{false};
 };
 
 std::shared_ptr<const CacheTopology> makeTopology() {
@@ -276,13 +338,10 @@ std::shared_ptr<const CacheTopology> makeSharedPoolTopology() {
 }
 
 bool initBackend(TestBackend& backend, const DeviceBlockPoolPtr& pool) {
-    return backend.init(
-        makeTopology(),
-        {pool},
-        [](int layer_id, int group_id, int block_id) {
-            auto address = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
-            return std::vector<BlockInfo>{{false, layer_id, group_id, address, 16}};
-        });
+    return backend.init(makeTopology(), {pool}, [](int layer_id, int group_id, int block_id) {
+        auto address = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
+        return std::vector<BlockInfo>{{false, layer_id, group_id, address, 16}};
+    });
 }
 
 StorageRequest makeRequest(BlockIdxType block, size_t key_count = 1) {
@@ -444,6 +503,7 @@ TEST(StorageBackendTest, ShutdownDrainsAcceptedTasksAndRejectsNewOnes) {
 
     auto shutdown = std::async(std::launch::async, [&] { backend.shutdown(); });
     EXPECT_EQ(shutdown.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_FALSE(backend.shutdownCalled());
 
     std::promise<void> rejection_entered;
     auto               rejection_entered_future = rejection_entered.get_future();
@@ -463,6 +523,7 @@ TEST(StorageBackendTest, ShutdownDrainsAcceptedTasksAndRejectsNewOnes) {
     rejection.get();
     EXPECT_EQ(shutdown.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(completed.load());
+    EXPECT_TRUE(backend.shutdownCalled());
 
     size_t rejected = 0;
     backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) {
@@ -498,10 +559,9 @@ TEST(StorageBackendTest, ReadAfterShutdownReleasesPin) {
     auto block = pool->malloc().value();
     pool->incRef(block);
     TestBackend backend;
-    ASSERT_TRUE(backend.init(
-        makeTopology(),
-        {pool},
-        [](int, int, int) { return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}}; }));
+    ASSERT_TRUE(backend.init(makeTopology(), {pool}, [](int, int, int) {
+        return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+    }));
     backend.shutdown();
 
     bool success = true;
@@ -516,10 +576,9 @@ TEST(StorageBackendTest, UnsubmittedWriteTasksReleasePinsAcrossShutdown) {
     auto block = pool->malloc().value();
     pool->incRef(block);
     TestBackend backend;
-    ASSERT_TRUE(backend.init(
-        makeTopology(),
-        {pool},
-        [](int, int, int) { return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}}; }));
+    ASSERT_TRUE(backend.init(makeTopology(), {pool}, [](int, int, int) {
+        return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+    }));
 
     auto prepared_before_shutdown = backend.prepareWrite(makeRequest(block));
     EXPECT_EQ(pool->refCount(block), 2u);
@@ -587,10 +646,9 @@ TEST(StorageBackendTest, SharedPoolPinsAndReleasesPhysicalBlockOnce) {
     pool->incRef(block);
     auto        executor = std::make_shared<HoldingExecutor>();
     TestBackend backend(/*init_result=*/true, executor);
-    ASSERT_TRUE(backend.init(
-        makeSharedPoolTopology(),
-        {pool, pool},
-        [](int, int, int) { return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}}; }));
+    ASSERT_TRUE(backend.init(makeSharedPoolTopology(), {pool, pool}, [](int, int, int) {
+        return std::vector<BlockInfo>{{false, 0, 0, reinterpret_cast<void*>(1), 16}};
+    }));
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{0, block}, {1, block}}}};
     backend.write(backend.prepareWrite(std::move(request)));

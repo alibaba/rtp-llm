@@ -150,11 +150,12 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
-                            Tier                                              target_tier) {
+                            Tier                                              target_tier,
+                            bool                                              write_remote) {
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier);
+        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, write_remote);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));

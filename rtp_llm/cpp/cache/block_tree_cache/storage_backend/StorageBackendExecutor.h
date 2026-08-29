@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 namespace rtp_llm {
@@ -14,6 +15,7 @@ public:
     virtual bool submit(Task task)    = 0;
     virtual void shutdown() noexcept  = 0;
 };
+std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size);
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor();
 
 }  // namespace rtp_llm

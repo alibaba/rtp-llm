@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -45,6 +46,19 @@ struct StoreEnvironment {
 };
 
 constexpr size_t kStoreDeviceBlocks = 4;
+
+class CoreDumpGuard {
+public:
+    CoreDumpGuard(): old_(StaticConfig::user_ft_core_dump_on_exception) {
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+    ~CoreDumpGuard() {
+        StaticConfig::user_ft_core_dump_on_exception = old_;
+    }
+
+private:
+    bool old_;
+};
 
 StoreEnvironment makeStoreEnvironment(const std::string&              name,
                                       bool                            device_cache_on,
@@ -280,6 +294,91 @@ TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUnti
 
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
+}
+
+TEST(BlockTreeStorerTest, RemoteOnlyInsertWritesWithoutPublishingDeviceResidency) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto             backend = std::make_shared<PendingWriteBackend>();
+    StoreEnvironment env     = makeStoreEnvironment("storage_remote_only",
+                                                /*device_cache_on=*/false,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{2},
+                                                /*task_pool_size=*/4,
+                                                backend);
+    backend->setCache(env.cache.get());
+    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env.groups[0], 2);
+    ASSERT_EQ(holder.size(), 2u);
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = holder[0];
+    resources[1][0].device_blocks = holder[1];
+
+    env.cache->insert({100, 101}, resources, Tier::REMOTE, /*write_remote=*/true);
+    EXPECT_TRUE(env.cache->tree()->findNode({100, 101}).empty());
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 2u);
+
+    backend->finishWrite();
+    EXPECT_TRUE(backend->submittedOutsideTreeLock());
+    EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{1, 1}));
+    EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 1u);
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[1][0]), 1u);
+
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[1]);
+}
+
+TEST(BlockTreeStorerTest, DeviceInsertSkipsRemoteWriteWhenRequestDisablesIt) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto             backend = std::make_shared<PendingWriteBackend>();
+    StoreEnvironment env     = makeStoreEnvironment("storage_remote_disabled",
+                                                /*device_cache_on=*/true,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{2},
+                                                /*task_pool_size=*/4,
+                                                backend);
+    backend->setCache(env.cache.get());
+    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(holder.size(), 1u);
+
+    env.cache->insert({100}, deviceSourceResources({holder[0]}), Tier::DEVICE, /*write_remote=*/false);
+
+    EXPECT_TRUE(backend->blocks().empty());
+    EXPECT_FALSE(backend->submittedOutsideTreeLock());
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), 2u) << "only request and tree references remain";
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
+}
+
+TEST(BlockTreeStorerTest, RemoteOnlyInsertRejectsDisabledRemoteWriteWithoutPinning) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto             backend = std::make_shared<PendingWriteBackend>();
+    StoreEnvironment env     = makeStoreEnvironment("storage_invalid_remote_only",
+                                                /*device_cache_on=*/false,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{2},
+                                                /*task_pool_size=*/4,
+                                                backend);
+    MultiNodeBlocks  holder  = allocateDeviceBlocksForTest(*env.groups[0], 1);
+    ASSERT_EQ(holder.size(), 1u);
+    const size_t ref_count_before = env.device_pools[0]->refCount(holder[0][0]);
+
+    CoreDumpGuard guard;
+    EXPECT_ANY_THROW(
+        env.cache->insert({100}, deviceSourceResources({holder[0]}), Tier::REMOTE, /*write_remote=*/false));
+    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(env.device_pools[0]->refCount(holder[0][0]), ref_count_before);
+    EXPECT_TRUE(backend->blocks().empty());
+
+    releaseDeviceBlocks(*env.cache, env.device_pools[0], holder[0]);
 }
 
 TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {

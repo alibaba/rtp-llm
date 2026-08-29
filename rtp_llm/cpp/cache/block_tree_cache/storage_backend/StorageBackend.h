@@ -73,10 +73,10 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    using MatchDone       = std::function<void(
+    using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
-    using Done            = std::function<void(bool success)>;
-    using BufferResolver  = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
+    using Done           = std::function<void(bool success)>;
+    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
 
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
     virtual ~StorageBackend();
@@ -92,8 +92,9 @@ public:
     void shutdown();
 
 protected:
-    const CacheTopology&   topology() const;
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
+    const CacheTopology&                   topology() const;
+    const std::vector<DeviceBlockPoolPtr>& devicePools() const;
+    std::vector<BlockInfo>                 convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     // Match queries contain every possible group handle. Derived matchers use
     // this predicate for each candidate prefix; the core applies the same rule
     // before allocating read targets.
@@ -104,6 +105,7 @@ protected:
     virtual void               readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
+    virtual void               shutdownImpl() noexcept {}
 
 private:
     enum class Lifecycle {

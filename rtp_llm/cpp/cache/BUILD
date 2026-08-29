@@ -372,7 +372,10 @@ cc_library(
         "KVCacheManager.h",
         "KVCacheMetrics.h",
     ],
-    copts = copts(),
+    copts = copts() + select({
+        "//:using_remote_kv_cache": ["-DRTP_LLM_USE_REMOTE_KV_CACHE=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":cache_async_context",
@@ -384,5 +387,10 @@ cc_library(
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "//:using_remote_kv_cache": [
+            "//rtp_llm/cpp/cache/connector/remote_connector:kvc_m_storage_backend",
+        ],
+        "//conditions:default": [],
+    }),
 )

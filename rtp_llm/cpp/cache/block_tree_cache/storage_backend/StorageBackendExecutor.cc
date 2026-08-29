@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 
+#include <stdexcept>
 #include <utility>
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
@@ -8,6 +9,9 @@ namespace {
 
 class DefaultStorageBackendExecutor final: public StorageBackendExecutor {
 public:
+    DefaultStorageBackendExecutor(size_t thread_count, size_t queue_size):
+        pool_(thread_count, queue_size, "StorageBackendExecutor") {}
+
     bool start() override {
         return pool_.start();
     }
@@ -19,13 +23,20 @@ public:
     }
 
 private:
-    BlockTreeTaskPool pool_{4, 1024, "StorageBackendExecutor"};
+    BlockTreeTaskPool pool_;
 };
 
 }  // namespace
 
+std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size) {
+    if (thread_count == 0 || queue_size == 0) {
+        throw std::invalid_argument("StorageBackendExecutor thread count and queue size must be positive");
+    }
+    return std::make_shared<DefaultStorageBackendExecutor>(thread_count, queue_size);
+}
+
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor() {
-    return std::make_shared<DefaultStorageBackendExecutor>();
+    return makeStorageBackendExecutor(/*thread_count=*/4, /*queue_size=*/1024);
 }
 
 }  // namespace rtp_llm
