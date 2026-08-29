@@ -17,11 +17,11 @@ import org.flexlb.enums.DecodeTaskPhase;
  * WorkerStatus report cannot reliably distinguish them. The three-phase enum
  * is kept for the Phase 5 accepted/running preemption interface.
  *
- * <p><b>Stage-2 L7 retirement (plan section 6):</b> this type was a record;
- * it is now a plain class so the queued-ownership sub-state — previously the
- * endpoint's separate layer-7 set — can live on the entry itself as the
- * mutable {@code masterQueued} flag flipped in place (the "L1 sub-state
- * projection" landing). In-place mutation (instead of record-instance
+ * <p><b>Stage-2 L7 retirement complete (plan section 6):</b> this type
+ * was a record; it is now a plain class so the queued-ownership sub-state
+ * — previously the endpoint's separate layer-7 set (storage now deleted) —
+ * can live on the entry itself as the mutable {@code masterQueued} flag
+ * flipped in place (the "L1 sub-state projection" landing). In-place mutation (instead of record-instance
  * replacement) preserves instance identity for the identity-based
  * engine-lifecycle reservation set (L2) and for the dispatch-permit
  * reservation reference, and keeps the queued transition off the inflight
@@ -50,11 +50,11 @@ public final class RequestInflight implements TtlEvictor.TtlTracked {
     private final long reservationToken;
 
     /**
-     * Stage-2 L7 retirement: queued-ownership sub-state — the request sits
-     * in a prefill queue, committed by the scheduler but not yet dispatched
-     * to the engine. The entry flag is the incoming authority over the old
-     * layer-7 set (which remains as the transitional dual-write mirror until
-     * the harness retargets and the set storage is deleted).
+     * Stage-2 L7 retirement complete: queued-ownership sub-state — the
+     * request sits in a prefill queue, committed by the scheduler but not
+     * yet dispatched to the engine. This flag is the sole queued authority
+     * (the old layer-7 set storage is deleted); the endpoint's queued
+     * counters mirror it O(1) for the hot gate path.
      *
      * <p>Mutated only inside the endpoint admission lock; read lock-free by
      * the audit capture (weakly consistent — confirm-window territory).
