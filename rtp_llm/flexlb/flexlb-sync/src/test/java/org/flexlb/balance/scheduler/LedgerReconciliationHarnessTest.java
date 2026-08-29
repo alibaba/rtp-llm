@@ -266,16 +266,37 @@ class LedgerReconciliationHarnessTest {
     }
 
     @Test
-    void engineSettledAheadOfSlotIsTransient() {
+    void terminalTrackSlotWithEmptyEngineViewIsSkipped() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         ReservationHandle reservation =
                 new ReservationHandle(5L, REQUEST_ID, 77L);
         Registered registered = registerItem(
                 REQUEST_ID, 16L, 24L, 3, reservation, decode);
         assertTrue(bind(registered));
+        // Stage-2 L6: with the settled-tombstone layer retired as a rule
+        // input, the two-stage death window is a structural skip.  Freeze
+        // the slot in TERMINALIZING with the projection row still installed
+        // and every engine-side layer empty: the worker terminal is claimed
+        // through the exact static helper the worker-status reduction
+        // itself uses, and the one-shot action is dropped unconsumed so no
+        // publication ever completes the tombstone.  The slot audit
+        // carries no active item outside the ACTIVE phase, so no
+        // slot→engine rule can fire at all.
+        RequestSlot slot = lifecycle.requestSlot(REQUEST_ID);
+        synchronized (slot) {
+            assertTrue(slot.markDecodeAccepted().acceptedBeforeCancel());
+            assertNotNull(RequestLifecycleCoordinator
+                    .beginWorkerStatusTerminalLocked(
+                            slot, null,
+                            s -> s.complete("decode completed"),
+                            null));
+            assertTrue(slot.isTerminalizingOrLater(),
+                    "the terminal claim must flip the slot onto the"
+                            + " terminal track synchronously");
+        }
 
         stubDecodeView(decode,
-                auditView(Map.of(), Map.of(), Set.of(REQUEST_ID)));
+                auditView(Map.of(), Map.of(), Set.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -284,10 +305,42 @@ class LedgerReconciliationHarnessTest {
 
         assertTrue(report.realDiffs().isEmpty(),
                 () -> "real diffs: " + report.realDiffs());
-        assertEquals(1, report.transientDiffs().size());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                () -> "pending diffs: " + report.pendingRealDiffs());
+        assertTrue(report.transientDiffs().isEmpty(),
+                () -> "transient diffs: " + report.transientDiffs());
+        assertEquals(1, report.slotCount());
+        harness.close();
+    }
+
+    @Test
+    void settledLayerNoLongerExemptsAnActiveSlot() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+
+        // Stage-2 L6 source switch: the settled-tombstone layer signal is
+        // retired as a rule input — an ACTIVE slot whose engine layers are
+        // all empty is a structural double miss even when the endpoint's
+        // settled layer still holds the id.  The real pipeline's
+        // settle→terminalize handoff is synchronous inside one status pump
+        // (onEndpointEvent), so the µs-scale window this stub freezes never
+        // climbs the confirm window in the soak / E2E gates.
+        stubDecodeView(decode,
+                auditView(Map.of(), Map.of(), Set.of(REQUEST_ID)));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
         assertEquals(
-                LedgerReconciliationHarness.Rule.DECODE_SETTLED_AHEAD_OF_SLOT,
-                report.transientDiffs().get(0).rule());
+                LedgerReconciliationHarness.Rule.SLOT_RESERVATION_UNBACKED,
+                real.get(0).rule());
         harness.close();
     }
 

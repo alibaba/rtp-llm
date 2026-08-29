@@ -470,28 +470,28 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                     view.inflight().containsKey(audit.requestId);
             boolean confirmedPresent = view.confirmedReservationTokens()
                     .containsKey(audit.requestId);
-            boolean settledPresent = view.settledTombstoneRequestIds()
-                    .contains(audit.requestId);
 
             if (audit.decodeRow != null) {
                 // B-road: the slot claims the engine confirmed.  Reverse
-                // projection (slot ahead of the engine ledger) is REAL,
-                // unless the engine already settled the projection and
-                // only the slot-side terminal projection lags behind.
+                // projection (slot ahead of the engine ledger) is REAL.
+                // Stage-2 L6 source switch: the settled-tombstone layer
+                // signal is retired as a rule input — an ACTIVE slot whose
+                // engine layers are all empty is structurally unconfirmed,
+                // and the engine's settle→terminalize handoff runs
+                // synchronously inside one status pump (onEndpointEvent,
+                // µs-scale), so single-snapshot tears of that window never
+                // climb the confirm window.  A terminal-track slot never
+                // reaches this road at all: its audit carries no active
+                // item (activeItem() is empty outside the ACTIVE phase),
+                // which is the structural two-stage-death skip, so the
+                // former settled-ahead transient rule retired together
+                // with the settled-layer signal it consumed.
                 if (!confirmedPresent) {
-                    if (settledPresent || audit.terminalTrack()) {
-                        diffs.add(new LedgerDiff(
-                                Rule.DECODE_SETTLED_AHEAD_OF_SLOT,
-                                audit.requestId,
-                                "endpoint settled the projection; slot terminal"
-                                        + " projection still in flight"));
-                    } else {
-                        diffs.add(new LedgerDiff(
-                                Rule.SLOT_PROJECTION_UNCONFIRMED,
-                                audit.requestId,
-                                "slot dRow is installed but the decode layer 3"
-                                        + " holds no confirmed projection"));
-                    }
+                    diffs.add(new LedgerDiff(
+                            Rule.SLOT_PROJECTION_UNCONFIRMED,
+                            audit.requestId,
+                            "slot dRow is installed but the decode layer 3"
+                                    + " holds no confirmed projection"));
                     continue;
                 }
                 compareConfirmedToken(audit, view, diffs);
@@ -524,19 +524,17 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                     // state, not an unbacked reservation.
                     continue;
                 }
-                if (settledPresent) {
-                    diffs.add(new LedgerDiff(
-                            Rule.DECODE_SETTLED_AHEAD_OF_SLOT,
-                            audit.requestId,
-                            "endpoint settled the request; slot terminal"
-                                    + " projection still in flight"));
-                } else {
-                    diffs.add(new LedgerDiff(
-                            Rule.SLOT_RESERVATION_UNBACKED,
-                            audit.requestId,
-                            "slot pRow holds a reservation the decode"
-                                    + " ledger does not back (double miss)"));
-                }
+                // Stage-2 L6 source switch: the settled-layer exemption is
+                // retired — an ACTIVE slot with neither inflight nor
+                // confirmed backing is a structural double miss.  The real
+                // pipeline's settle→terminalize handoff is synchronous
+                // inside one status pump, so its single-snapshot tears stay
+                // below the confirm window.
+                diffs.add(new LedgerDiff(
+                        Rule.SLOT_RESERVATION_UNBACKED,
+                        audit.requestId,
+                        "slot pRow holds a reservation the decode"
+                                + " ledger does not back (double miss)"));
                 continue;
             }
             compareInflightMirror(audit, view, diffs);
@@ -1024,8 +1022,6 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
         DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE(true),
         /** Engine confirmed before the slot applied the handover. */
         DECODE_CONFIRMED_AHEAD_OF_SLOT(false),
-        /** Engine settled before the slot reached its terminal track. */
-        DECODE_SETTLED_AHEAD_OF_SLOT(false),
         /** Decode reservation inside the admission bind window. */
         DECODE_INFLIGHT_AHEAD_OF_SLOT(false);
 
