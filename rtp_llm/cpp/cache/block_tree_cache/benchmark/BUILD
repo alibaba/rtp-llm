@@ -48,10 +48,10 @@ cc_library(
         "TransferBenchmarkOptions.h",
     ],
     copts = copts(),
-    linkopts = ["-lcrypto"],
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        "@boringssl//:crypto",
         "@rapidjson//:rapidjson",
     ],
 )
