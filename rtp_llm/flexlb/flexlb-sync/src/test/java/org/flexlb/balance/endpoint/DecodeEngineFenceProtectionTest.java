@@ -143,7 +143,7 @@ class DecodeEngineFenceProtectionTest {
     }
 
     @Test
-    void missingConfirmedRequestTransfersToOneSyntheticSlotAndKvOwner() {
+    void missingConfirmedRequestHoldsOneSlotAndKvThroughFenceProjection() {
         moveProtectedRequestToMissingConfirmed(1L, 500, 700);
 
         assertEquals(1, confirmedCount());
@@ -152,7 +152,8 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(9_500, endpoint.realKvAvailable());
         assertEquals(700, endpoint.realKvUsed());
 
-        // Repeated absence must not add another synthetic slot or KV hold.
+        // Repeated absence must not add another fence-held slot or KV
+        // charge — the absent-pass projection re-derives it fresh each pass.
         updateStatus(Map.of(), Map.of(), 10_000);
         assertEquals(1, confirmedCount());
         assertEquals(9_500, endpoint.realKvAvailable());
@@ -183,14 +184,14 @@ class DecodeEngineFenceProtectionTest {
     }
 
     @Test
-    void freshActiveObservationReturnsSyntheticOwnershipToEngine() {
+    void freshActiveObservationReturnsOwnershipToEngine() {
         moveProtectedRequestToMissingConfirmed(1L, 500, 700);
 
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(1, confirmedCount());
         assertEquals(1, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable(),
-                "reported engine KV replaces, rather than stacks with, the synthetic hold");
+                "reported engine KV replaces, rather than stacks with, the fence-held projection");
 
         assertTrue(closeFence(1L));
         assertEquals(1, endpoint.getTotalLoad(),
@@ -202,7 +203,7 @@ class DecodeEngineFenceProtectionTest {
     }
 
     @Test
-    void authoritativeTerminalReleasesSyntheticOwnerAndProtection() {
+    void authoritativeTerminalReleasesFenceHeldOwnerAndProtection() {
         moveProtectedRequestToMissingConfirmed(1L, 500, 700);
 
         updateStatus(Map.of(), Map.of("1", task(1L, TaskPhase.RUNNING, 500)), 10_000);
@@ -212,7 +213,7 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.realKvUsed());
         assertFalse(isConfirmed(1L));
-        // The authoritative terminal already released the synthetic owner and
+        // The authoritative terminal already released the fence-held owner and
         // removed the exact protection. The lease handle is still held by the
         // test, so closing it is an idempotent no-op that only reports that the
         // handle itself was live.
@@ -274,7 +275,7 @@ class DecodeEngineFenceProtectionTest {
     }
 
     @Test
-    void tombstonedSyntheticOwnerReleasesSlotAndKvExactlyOnce() {
+    void tombstonedFenceHeldOwnerReleasesSlotAndKvExactlyOnce() {
         moveProtectedRequestToMissingConfirmed(1L, 500, 700);
         assertEquals(1, confirmedCount());
         assertEquals(9_500, endpoint.realKvAvailable());
@@ -327,12 +328,13 @@ class DecodeEngineFenceProtectionTest {
                 101L, reservations.get(1L)));
         // Settling the priority token owner is the authoritative terminal: it
         // releases the confirmed slot and its held KV. The overlapping generic
-        // fence created just above never installed an independent synthetic
-        // slot (the priority claim already owned the accounting), so there is no
-        // union hold left for it to inherit; the load and KV return to idle.
+        // fence created just above never contributed an independent
+        // fence-held charge (the priority claim already owned the accounting),
+        // so there is no union hold left for it to inherit; the load and KV
+        // return to idle.
         assertEquals(0, endpoint.getTotalLoad(),
                 "priority settlement releases the confirmed slot; the overlapping "
-                        + "generic fence held no independent synthetic slot");
+                        + "generic fence added no independent fence-held charge");
         assertEquals(10_000, endpoint.realKvAvailable());
 
         assertTrue(settleTombstoned(1L));
