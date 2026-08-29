@@ -25,6 +25,7 @@ class Case:
     require_chunk: bool = False
     require_mtp: bool = False
     max_tokens: int | None = None
+    timeout_s: int | None = None
 
 
 class SmokeFailure(RuntimeError):
@@ -65,6 +66,12 @@ def parse_args() -> argparse.Namespace:
             "formal all-suite cases; zero disables prewarm"
         ),
     )
+    parser.add_argument(
+        "--rdma-prewarm-timeout",
+        type=int,
+        default=300,
+        help="per-request timeout for each bounded RDMA prewarm attempt",
+    )
     parser.add_argument("--rdma-prewarm-backoff-s", type=float, default=5.0)
     parser.add_argument("--rdma-prewarm-settle-s", type=float, default=2.0)
     parser.add_argument("--timeout", type=int, default=900)
@@ -79,6 +86,7 @@ def parse_args() -> argparse.Namespace:
         "single_exact_max_tokens",
         "mtp_chunk_max_tokens",
         "timeout",
+        "rdma_prewarm_timeout",
     ):
         if getattr(args, key) <= 0:
             parser.error(f"--{key.replace('_', '-')} must be positive")
@@ -161,6 +169,7 @@ class Runner:
             "rdma_prewarm": {
                 "enabled": self.args.rdma_prewarm_attempts > 0,
                 "target_logical_connections_per_rank": self.args.batch_size,
+                "request_timeout_s": self.args.rdma_prewarm_timeout,
                 "attempts": self.rdma_prewarm_attempts,
             },
             "elapsed_s": round(time.time() - self.started_at, 3),
@@ -225,8 +234,9 @@ class Runner:
             method="POST",
         )
         started = time.time()
+        request_timeout = case.timeout_s or self.args.timeout
         try:
-            with self.opener.open(request, timeout=self.args.timeout) as response:
+            with self.opener.open(request, timeout=request_timeout) as response:
                 body = response.read()
                 status = response.status
         except urllib.error.HTTPError as exc:
@@ -373,6 +383,9 @@ class Runner:
                     numbered_answer_pattern((80 + idx) ** 2),
                     "miss",
                     max_tokens=max(self.args.max_tokens, 128),
+                    timeout_s=min(
+                        self.args.timeout, self.args.rdma_prewarm_timeout
+                    ),
                 )
                 for idx in range(self.args.batch_size)
             ]

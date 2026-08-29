@@ -30,6 +30,7 @@ def make_args() -> argparse.Namespace:
         rdma_prewarm_attempts=0,
         rdma_prewarm_backoff_s=0,
         rdma_prewarm_settle_s=0,
+        rdma_prewarm_timeout=300,
         timeout=900,
     )
 
@@ -65,6 +66,10 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         )
         successful = runner.rdma_prewarm_attempts[-1]
         self.assertEqual(len(successful["case_names"]), args.batch_size)
+        for call in request_cases.call_args_list:
+            cases = call.args[0]
+            self.assertEqual(len(cases), args.batch_size)
+            self.assertTrue(all(case.timeout_s == 300 for case in cases))
 
     def test_rdma_prewarm_exhaustion_is_a_smoke_failure(self) -> None:
         args = make_args()

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
+#include "rtp_llm/cpp/model_rpc/CacheStoreRetryPolicy.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -619,18 +620,31 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
                                     decode_context.prefill_cp_size,
                                     generate_stream->forceDisableSpRun()};
 
-    // Prefill: TP = 1 && Decode: TP = 1
-    if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
-        for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
-            auto error_info = loadCache(load_context);
-            if (error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
-                && error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
-                return error_info;
-            }
+    // Connection establishment can race with the first PD wave for both the
+    // single-rank path and multi-rank Projection-KTP fan-in.  Apply the same
+    // configured retry policy to the complete distributed load plan.  A
+    // failed async attempt has already collected every Decode worker response
+    // before returning, so replaying the idempotent load into the same blocks
+    // cannot overlap an earlier attempt.
+    const auto retry_times = std::max<int64_t>(0, maga_init_params_.pd_sep_config.rdma_connect_retry_times);
+    ErrorInfo  error_info  = ErrorInfo::OkStatus();
+    for (int64_t attempt = 0; attempt <= retry_times; ++attempt) {
+        if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
+            error_info = loadCache(load_context);
+        } else {
+            error_info = loadCacheAsyncForTp(decode_context, load_context);
         }
+        if (!isRetryableCacheStoreConnectError(error_info.code())) {
+            return error_info;
+        }
+        RTP_LLM_LOG_WARNING("[CACHE_STORE_CONNECT_RETRY] request=%s attempt=%ld/%ld error=%s",
+                            decode_context.request_key.c_str(),
+                            attempt + 1,
+                            retry_times + 1,
+                            ErrorCodeToString(error_info.code()).c_str());
     }
 
-    return loadCacheAsyncForTp(decode_context, load_context);
+    return error_info;
 }
 
 ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,

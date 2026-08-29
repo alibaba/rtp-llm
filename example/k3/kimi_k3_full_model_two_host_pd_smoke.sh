@@ -97,6 +97,8 @@ Important optional variables:
                             defaults to 128 for exact-cache seed/hit answers
   SMOKE_RDMA_PREWARM_ATTEMPTS
                             defaults to 3 bounded batch-sized prewarm attempts
+  SMOKE_RDMA_PREWARM_TIMEOUT_S
+                            defaults to 300 seconds per prewarm request
   SMOKE_RDMA_PREWARM_BACKOFF_S
                             defaults to 5 seconds between failed attempts
   SMOKE_RDMA_PREWARM_SETTLE_S
@@ -242,6 +244,7 @@ smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
+smoke_rdma_prewarm_timeout_s="${SMOKE_RDMA_PREWARM_TIMEOUT_S:-300}"
 smoke_rdma_prewarm_backoff_s="${SMOKE_RDMA_PREWARM_BACKOFF_S:-5}"
 smoke_rdma_prewarm_settle_s="${SMOKE_RDMA_PREWARM_SETTLE_S:-2}"
 for size_value in \
@@ -259,6 +262,8 @@ done
     || die "SMOKE_CHUNKWISE_RDMA must be 0 or 1"
 [[ "${smoke_rdma_prewarm_attempts}" =~ ^[0-9]+$ ]] \
     || die "SMOKE_RDMA_PREWARM_ATTEMPTS must be a non-negative integer"
+[[ "${smoke_rdma_prewarm_timeout_s}" =~ ^[1-9][0-9]*$ ]] \
+    || die "SMOKE_RDMA_PREWARM_TIMEOUT_S must be a positive integer"
 for seconds_value in \
     "${smoke_rdma_prewarm_backoff_s}" \
     "${smoke_rdma_prewarm_settle_s}"; do
@@ -448,6 +453,7 @@ expected = {
     "LINEAR_STEP": linear_step,
     "CACHE_STORE_RDMA_MODE": "1",
     "CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS": "30000",
+    "RDMA_CONNECT_RETRY_TIMES": "3",
     "KIMI_K3_CHUNKWISE_RDMA": chunkwise_rdma,
     "DSV4_MEGA_MOE_INPUT_PACKER": "fused",
     "DSV4_MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
@@ -539,6 +545,7 @@ apply_validated_common_profile() {
     export LINEAR_STEP="${smoke_linear_step}"
     export CACHE_STORE_RDMA_MODE=1
     export CACHE_STORE_RDMA_CONNECT_TIMEOUT_MS=30000
+    export RDMA_CONNECT_RETRY_TIMES=3
     export KIMI_K3_CHUNKWISE_RDMA="${smoke_chunkwise_rdma}"
     export DSV4_MEGA_MOE_INPUT_PACKER=fused
     export DSV4_MEGA_MOE_INPUT_PACKER_IMPL=optimized
@@ -724,6 +731,7 @@ python3 "${case_runner}" \
     --identity-max-tokens "${identity_max_tokens}" \
     --single-exact-max-tokens "${single_exact_max_tokens}" \
     --rdma-prewarm-attempts "${smoke_rdma_prewarm_attempts}" \
+    --rdma-prewarm-timeout "${smoke_rdma_prewarm_timeout_s}" \
     --rdma-prewarm-backoff-s "${smoke_rdma_prewarm_backoff_s}" \
     --rdma-prewarm-settle-s "${smoke_rdma_prewarm_settle_s}" \
     --timeout "${request_timeout}"
