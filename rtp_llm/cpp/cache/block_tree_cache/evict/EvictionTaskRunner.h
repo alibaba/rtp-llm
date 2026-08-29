@@ -13,24 +13,21 @@ class BlockTransferDispatcher;
 class BlockTreeCacheMetricsReporter;
 class EvictionTaskRunner {
 public:
-    using EvictionDoneCallback = std::function<void(EvictionTaskResult)>;
+    using EvictionDoneCallback = std::function<void(bool success)>;
 
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
                        const BlockTransferDispatcher*  transfer_dispatcher,
                        int                             memory_timeout_ms,
                        int                             disk_timeout_ms);
 
-    void runTransfer(std::shared_ptr<const EvictionTask> task,
-                     BlockTreeCacheMetricsReporter&     metrics_reporter,
-                     EvictionDoneCallback               on_done) const;
+    void runTransfer(std::shared_ptr<const EvictionTransferTask> task,
+                     BlockTreeCacheMetricsReporter&              metrics_reporter,
+                     EvictionDoneCallback                        on_done) const;
 
 private:
-    static bool validateTransferDescriptors(const EvictionTask& task);
-    static int selectTransferTimeoutMs(const EvictionTask& task, int memory_timeout_ms, int disk_timeout_ms);
-
     const std::vector<GroupSetPtr>& group_sets_;
     const BlockTransferDispatcher*  transfer_dispatcher_{nullptr};
-    int                            memory_timeout_ms_{0};
+    int                             memory_timeout_ms_{0};
     int                             disk_timeout_ms_{0};
 };
 

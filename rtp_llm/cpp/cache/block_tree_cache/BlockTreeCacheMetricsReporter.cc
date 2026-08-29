@@ -258,29 +258,34 @@ void BlockTreeCacheMetricsReporter::reportCacheReuseTimeMetrics(
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTask&             task,
-                                                           const EvictionTaskResult&       task_result,
+void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransferTask&     task,
+                                                           Tier                            settled_target_tier,
                                                            const std::vector<GroupSetPtr>& group_sets) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
+    TransferDescriptor settled_desc = task.desc;
+    settled_desc.target_tier        = settled_target_tier;
+    reportEvictionTransfer(settled_desc, task.timing, group_sets, currentTimeUs(), true);
+}
 
+void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTask&         task,
+                                                           const std::vector<GroupSetPtr>& group_sets) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
     const int64_t finish_time_us = currentTimeUs();
-    if (task_result.primary_success) {
-        reportEvictionTransfer(task.primary_desc, task.primary_timing, group_sets, finish_time_us, true);
-        for (size_t desc_index = 0; desc_index < task.dependent_prune_descs.size(); ++desc_index) {
-            reportEvictionTransfer(task.dependent_prune_descs[desc_index],
-                                   task.dependent_prune_timings[desc_index],
-                                   group_sets,
-                                   finish_time_us,
-                                   false);
-        }
+    reportEvictionTransfer(task.primary_desc, task.primary_timing, group_sets, finish_time_us, true);
+    for (size_t desc_index = 0; desc_index < task.dependent_prune_descs.size(); ++desc_index) {
+        reportEvictionTransfer(task.dependent_prune_descs[desc_index],
+                               task.dependent_prune_timings[desc_index],
+                               group_sets,
+                               finish_time_us,
+                               false);
     }
     for (size_t desc_index = 0; desc_index < task.cascade_descs.size(); ++desc_index) {
-        if (desc_index < task_result.cascade_success.size() && task_result.cascade_success[desc_index]) {
-            reportEvictionTransfer(
-                task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, finish_time_us, false);
-        }
+        reportEvictionTransfer(
+            task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, finish_time_us, false);
     }
 }
 
