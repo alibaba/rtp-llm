@@ -27,6 +27,9 @@ using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
 
 struct BlockDependency {
+    // Dependency metadata belongs to the request's global cache-key timeline. Filtered resource views preserve the
+    // original ordinal and may retain a parent_key that is absent from the view so prefix-tree caches can attach it
+    // when the parent becomes available.
     bool         has_parent{false};
     CacheKeyType parent_key{0};
     uint32_t     ordinal{0};
@@ -119,19 +122,16 @@ public:
     const LayerAttnBlockIds& layerGroupBlocks() const;
     int                      groupId(int layer_id, int group_id) const;
 
-    CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
-    void                 setCacheKeys(const CacheKeysType& keys);
-    void                 setCacheKeys(CacheKeysType&& keys);
+    void                 setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies);
+    void                 setCacheKeys(CacheKeysType keys);
     bool                 cacheKeysAreCpCanonical() const;
     void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+    void                 appendCacheKey(CacheKeyType key);
+    void                 popBackCacheKey();
+    void                 clearCacheKeys();
 
-    BlockDependenciesType&       blockDependencies();
     const BlockDependenciesType& blockDependencies() const;
-    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
-    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
-    void                         rebuildLinearBlockDependencies();
-    void                         ensureLinearBlockDependencies();
 
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]

@@ -771,14 +771,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     ASSERT_EQ(swa_gid, config.groupIdForTag("swa_kv"));
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
+    resource.setCacheKeys({901, 902});
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
 
     resource.mutableBlockIds(hca_layer, hca_kv_gid).assign({11, 12});
     resource.mutableBlockIds(hca_layer, hca_state_gid).assign({51, 52});
     resource.mutableBlockIds(hca_layer, swa_gid).assign({61, NULL_BLOCK_IDX});
-    resource.ensureLinearBlockDependencies();
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     bool       no_need_write     = true;
@@ -844,12 +843,11 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     const int       hca_kv_gid = config.groupIdForLayerTag(hca_layer, "hca_kv");
     const int       swa_gid    = config.groupIdForLayerTag(hca_layer, "swa_kv");
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
+    resource.setCacheKeys({901, 902});
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
     resource.mutableBlockIds(hca_layer, hca_kv_gid).assign({11, 12});
     resource.mutableBlockIds(hca_layer, swa_gid).assign({61, 62});
-    resource.ensureLinearBlockDependencies();
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     const auto compressed_mask =
@@ -902,12 +900,11 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     const int       hca_kv_gid = config.groupIdForLayerTag(hca_layer, "hca_kv");
     const int       swa_gid    = config.groupIdForLayerTag(hca_layer, "swa_kv");
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
+    resource.setCacheKeys({901, 902});
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
     resource.mutableBlockIds(hca_layer, hca_kv_gid).assign({0, NULL_BLOCK_IDX});
     resource.mutableBlockIds(hca_layer, swa_gid).assign({61, 62});
-    resource.ensureLinearBlockDependencies();
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     const auto compressed_mask =
@@ -1450,7 +1447,6 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     initResourceGroupsForConfig(resource, config);
     resource.resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
     resource.setCacheKeys(cache_keys);
-    resource.ensureLinearBlockDependencies();
 
     const auto layer_group_ids = config.layerGroupIdsSnapshot();
     for (size_t layer = 0; layer < layer_group_ids.size(); ++layer) {

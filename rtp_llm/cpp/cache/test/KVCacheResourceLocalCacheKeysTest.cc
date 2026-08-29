@@ -9,7 +9,7 @@ class LocalCacheKeysTest: public ::testing::Test {
 protected:
     KVCacheResource make(const CacheKeysType& keys) {
         KVCacheResource r;
-        r.cacheKeys() = keys;
+        r.setCacheKeys(keys);
         return r;
     }
 };

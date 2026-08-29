@@ -8,12 +8,15 @@
 #include <utility>
 #include "kvcm_client/common.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 
 namespace rtp_llm {
 
 class KVCacheAllocator;
 
 namespace remote_connector {
+
+void validateRemoteCacheTopology(const CacheConfig& cache_config);
 
 struct LocationSpecUnitView {
     LocationSpecUnitView(const kv_cache_manager::LocationSpecUnit& unit): spec_name(unit.spec_name), uri(unit.uri) {}

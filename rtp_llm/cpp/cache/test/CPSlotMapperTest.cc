@@ -179,5 +179,49 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
 }
 
+TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDummyTail) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+    config.layer_all_num      = 1;
+
+    auto full_spec = std::make_shared<MHAKVCacheSpec>();
+    full_spec->tag = "full";
+    GroupBase full_group;
+    full_group.tag               = full_spec->tag;
+    full_group.spec              = full_spec;
+    full_group.layer_ids         = {0};
+    full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    config.setTopology({std::move(full_group)}, {{0, {"full"}}});
+
+    const CacheKeysType         full_keys{10, 11, 12, 13, 14};
+    const BlockDependenciesType full_dependencies{
+        BlockDependency{true, 900, 7},
+        BlockDependency{true, 901, 13},
+        BlockDependency{true, 11, 21},
+        BlockDependency{true, 777, 34},
+        BlockDependency{true, 13, 55},
+    };
+    KVCacheResource source;
+    source.initGroups(config.topologyPtr());
+    source.setCacheKeysAndBlockDependencies(full_keys, full_dependencies);
+    source.setLastBlockAligned(false);
+    source.mutableBlockIds(0).assign(BlockIndicesType{100, 101, 102, 103, 104});
+
+    CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*block_size=*/8);
+    auto         projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(full_keys));
+
+    EXPECT_EQ(projected.cacheKeys(), (CacheKeysType{11, 13, 14}));
+    ASSERT_EQ(projected.blockDependencies().size(), 3u);
+    EXPECT_EQ(projected.blockDependencies()[0].parent_key, 901);
+    EXPECT_EQ(projected.blockDependencies()[0].ordinal, 13u);
+    EXPECT_EQ(projected.blockDependencies()[1].parent_key, 777);
+    EXPECT_EQ(projected.blockDependencies()[1].ordinal, 34u);
+    EXPECT_EQ(projected.blockDependencies()[2].parent_key, 13);
+    EXPECT_EQ(projected.blockDependencies()[2].ordinal, 55u);
+    EXPECT_FALSE(projected.lastBlockAligned());
+}
+
 }  // namespace test
 }  // namespace rtp_llm

@@ -178,9 +178,44 @@ TEST(PrefillCPConfigTest, ToStringIncludesShardingFields) {
     EXPECT_NE(text.find("prefill_cp_size: 2"), std::string::npos);
 }
 
-TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
+TEST(KVCacheResourceTest, ExplicitTimelineRejectsMismatchedLengthsWithoutChangingState) {
     KVCacheResource resource;
-    resource.setCacheKeys(CacheKeysType{10, 20, 30});
+    resource.setCacheKeys(CacheKeysType{10});
+
+    const BlockDependenciesType dependencies = {
+        BlockDependency{false, 0, 7},
+    };
+    EXPECT_THROW(resource.setCacheKeysAndBlockDependencies(CacheKeysType{20, 30}, dependencies), std::exception);
+
+    EXPECT_EQ(resource.cacheKeys(), (CacheKeysType{10}));
+    ASSERT_EQ(resource.blockDependencies().size(), 1u);
+    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
+    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
+}
+
+TEST(KVCacheResourceTest, ExplicitTimelinePreservesDependencyOrdinalAndParent) {
+    KVCacheResource             resource;
+    const BlockDependenciesType dependencies = {
+        BlockDependency{true, 17, 7},
+        BlockDependency{true, 29, 11},
+    };
+
+    resource.setCacheKeysAndBlockDependencies(CacheKeysType{100, 200}, dependencies);
+
+    EXPECT_EQ(resource.cacheKeys(), (CacheKeysType{100, 200}));
+    ASSERT_EQ(resource.blockDependencies().size(), 2u);
+    EXPECT_TRUE(resource.blockDependencies()[0].has_parent);
+    EXPECT_EQ(resource.blockDependencies()[0].parent_key, 17);
+    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 7u);
+    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
+    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 29);
+    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 11u);
+}
+
+TEST(KVCacheResourceTest, AppendPopAndClearKeepTimelineAligned) {
+    KVCacheResource resource;
+    resource.setCacheKeys(CacheKeysType{10, 20});
+    resource.appendCacheKey(30);
 
     ASSERT_EQ(resource.blockDependencies().size(), 3u);
     EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
@@ -192,25 +227,13 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     EXPECT_EQ(resource.blockDependencies()[2].parent_key, 20);
     EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
 
-    BlockDependenciesType custom = {
-        BlockDependency{false, 0, 7},
-        BlockDependency{true, 100, 8},
-    };
-    resource.setCacheKeys(CacheKeysType{100, 200});
-    resource.setBlockDependencies(custom);
-    resource.ensureLinearBlockDependencies();
+    resource.popBackCacheKey();
+    EXPECT_EQ(resource.cacheKeys(), (CacheKeysType{10, 20}));
     ASSERT_EQ(resource.blockDependencies().size(), 2u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 100);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
 
-    resource.cacheKeys().push_back(300);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 200);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
+    resource.clearCacheKeys();
+    EXPECT_TRUE(resource.cacheKeys().empty());
+    EXPECT_TRUE(resource.blockDependencies().empty());
 }
 
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {

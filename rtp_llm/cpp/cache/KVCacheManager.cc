@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -35,6 +36,29 @@ struct GlobalCacheMetricsSnapshot {
     size_t                      request_ref_blocks   = 0;
     size_t                      connector_ref_blocks = 0;
 };
+
+void validateRemoteCacheTopologyBeforeAllocation(const CacheConfig& cache_config) {
+    const auto group_num = static_cast<size_t>(cache_config.groupNums());
+    const auto full_group_num =
+        std::count_if(cache_config.topology().groups().begin(),
+                      cache_config.topology().groups().end(),
+                      [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::FULL; });
+    const bool remote_topology_supported = group_num == 1 && full_group_num == 1
+                                           && cache_config.typeForGroup(0) == CacheGroupType::FULL;
+    if (!remote_topology_supported) {
+        RTP_LLM_LOG_ERROR("remote cache initialization rejected: remote cache now supports exactly one FULL cache "
+                          "group; multi-group remote cache support has been removed. Disable remote cache or configure "
+                          "a single FULL group. groups=%zu full_groups=%zu",
+                          group_num,
+                          static_cast<size_t>(full_group_num));
+    }
+    RTP_LLM_CHECK_WITH_INFO(remote_topology_supported,
+                            "remote cache now supports exactly one FULL cache group; multi-group remote cache support "
+                            "has been removed. Disable remote cache or configure a single FULL group. groups=%zu "
+                            "full_groups=%zu",
+                            group_num,
+                            static_cast<size_t>(full_group_num));
+}
 
 GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
     GlobalCacheMetricsSnapshot snapshot;
@@ -228,6 +252,9 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+        validateRemoteCacheTopologyBeforeAllocation(config_);
+    }
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);

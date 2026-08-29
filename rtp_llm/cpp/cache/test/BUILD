@@ -73,6 +73,17 @@ cc_test(
 )
 
 cc_test(
+    name = "cache_semantic_snapshot_test",
+    srcs = ["CacheSemanticSnapshotTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "cache_layer_layout_test",
     srcs = ["CacheLayerLayoutTest.cc"],
     copts = test_copts,

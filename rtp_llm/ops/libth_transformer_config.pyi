@@ -690,7 +690,6 @@ class KVCacheConfig:
     enable_remote_cache: bool
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
-    dsv4_fixed_pool_use_memory: bool
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
@@ -945,11 +944,6 @@ class CacheEvictPolicy:
     INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
     NONE: typing.ClassVar[CacheEvictPolicy]
 
-class CacheMemoryPlacement:
-    DEVICE: typing.ClassVar[CacheMemoryPlacement]
-    HOST: typing.ClassVar[CacheMemoryPlacement]
-    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
-
 class CpBlockMappingMode:
     NONE: typing.ClassVar[CpBlockMappingMode]
     BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
@@ -978,11 +972,6 @@ class CacheReusePolicyDesc:
 class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
-    charge_to_paged_budget: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheMemoryPolicyDesc:
-    placement: typing.Any
     def __init__(self) -> None: ...
 
 class CacheTailPolicyDesc:
@@ -1016,7 +1005,6 @@ class KVCacheSpecDesc:
     group_type: typing.Any
     reuse: typing.Any
     capacity: typing.Any
-    memory: typing.Any
     tail: typing.Any
     cp: typing.Any
     def __init__(self) -> None: ...

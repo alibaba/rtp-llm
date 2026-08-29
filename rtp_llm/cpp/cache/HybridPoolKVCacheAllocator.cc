@@ -46,17 +46,6 @@ void appendPoolSummary(std::ostringstream&    os,
        << ", blocks=" << pool_config.block_num;
 }
 
-AllocationType allocationTypeForPlacement(CacheMemoryPlacement placement, AllocationType fallback) {
-    if (placement == CacheMemoryPlacement::HOST) {
-        return AllocationType::HOST;
-    }
-    return fallback;
-}
-
-bool pinnedCpuBackingForPlacement(CacheMemoryPlacement placement) {
-    return placement == CacheMemoryPlacement::HOST_PINNED;
-}
-
 }  // namespace
 
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
@@ -65,6 +54,13 @@ HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&       
                                                        int64_t                            reserve_block_ratio,
                                                        RoleType                           role_type):
     HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
+
+BlockPoolPtr HybridPoolKVCacheAllocator::soleGroupBlockPool() const {
+    RTP_LLM_CHECK_WITH_INFO(group_block_pools_.size() == 1,
+                            "sole group block pool requires exactly one initialized group pool, got %zu",
+                            group_block_pools_.size());
+    return group_block_pools_[0];
+}
 
 bool HybridPoolKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
@@ -105,17 +101,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
     for (int gid = 0; gid < group_nums; ++gid) {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
-        const auto  policy      = config_.policyForGroup(static_cast<size_t>(gid));
-
-        // BlockPool::validateConfig() rejects pinned-CPU and cudaMalloc backing
-        // together, so a HOST_PINNED pool must opt out of cudaMalloc backing even
-        // when the allocator-wide flag is on.
-        const bool use_pinned_cpu_backing = pinnedCpuBackingForPlacement(policy.memory_placement);
-        auto       group_pool =
-            std::make_shared<BlockPool>(pool_config,
-                                        allocationTypeForPlacement(policy.memory_placement, allocation_type_),
-                                        use_pinned_cpu_backing,
-                                        use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+        auto        group_pool =
+            std::make_shared<BlockPool>(pool_config, allocation_type_, false, use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
@@ -440,8 +427,8 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
             }
         }
     }
-    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
-    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
+    batch_resource->cacheResource(0).setCacheKeysAndBlockDependencies(std::move(evicted_keys),
+                                                                      std::move(evicted_dependencies));
     // Evicted keys already come from the GPU cache's actual key namespace.
     // Under CP this can be a mixed batch of canonical paged keys and logical
     // state/SWA keys, so coordinator must not remap the whole batch again.
@@ -672,10 +659,9 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
 
     MallocStatus status = MallocStatus::NONE;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const size_t group_index = static_cast<size_t>(gid);
-        const int    group_common_seq =
-            cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
-        const int  group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
+        const size_t group_index    = static_cast<size_t>(gid);
+        const int  group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
+        const int  group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[group_index]->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
@@ -828,9 +814,8 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
         const auto&  pool      = group_block_pools_[group_index];
         const size_t available = pool->availableBlocksNum();
         const size_t group_reserve =
-            reserve_admission ?
-                reserveBlocksForPool(group_index, reserve_blocks, total_reservable_available_blocks) :
-                0;
+            reserve_admission ? reserveBlocksForPool(group_index, reserve_blocks, total_reservable_available_blocks) :
+                                0;
         const long long required_available = need_blocks < 0 ? -1 : static_cast<long long>(need_blocks + group_reserve);
         const long long shortfall =
             required_available < 0 ? -1 : std::max(required_available - static_cast<long long>(available), 0LL);

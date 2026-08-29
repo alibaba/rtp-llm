@@ -38,8 +38,6 @@ from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
     CacheEvictPolicy,
-    CacheMemoryPlacement,
-    CacheMemoryPolicyDesc,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     CpBlockSliceMode,
@@ -79,15 +77,6 @@ SWA_KV_TAG = "swa_kv"
 _COMPRESSED_KV_KIND = "compressed_kv"
 _FIXED_STATE_KIND = "fixed_state"
 _SLIDING_WINDOW_KV_KIND = "sliding_window_kv"
-
-# The four "fixed" pools that ``--dsv4_fixed_pool_use_memory`` may move to
-# pinned host memory.
-DSV4_FIXED_POOL_TAGS: tuple[str, ...] = (
-    INDEXER_STATE_TAG,
-    CSA_STATE_TAG,
-    HCA_STATE_TAG,
-    SWA_KV_TAG,
-)
 
 
 def _make_dsv4_desc(
@@ -138,7 +127,6 @@ def _make_dsv4_desc(
         cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
         capacity = CacheCapacityPolicyDesc()
         capacity.explicit_block_num = DSV4_HCA_STATE_POOL_BLOCKS
-        capacity.charge_to_paged_budget = True
         desc.capacity = capacity
         reuse.enable_prefix_reuse = False
         tail = CacheTailPolicyDesc()
@@ -161,33 +149,6 @@ def _make_dsv4_desc(
     return desc
 
 
-def _is_host_resident(desc: KVCacheSpecDesc) -> bool:
-    memory = desc.memory
-    return (
-        memory is not None
-        and memory.placement is not None
-        and memory.placement != CacheMemoryPlacement.DEVICE
-    )
-
-
-def _use_host_pinned_memory(desc: KVCacheSpecDesc) -> None:
-    """Move a pool to pinned host memory.
-
-    ``memory.placement`` and ``capacity.charge_to_paged_budget`` must move
-    together: a host-resident pool that still charges the paged HBM budget
-    trips ``checkGroupResidencyBudget`` in ``rtp_llm/cpp/cache/CacheConfig.h``.
-    """
-    memory = CacheMemoryPolicyDesc()
-    memory.placement = CacheMemoryPlacement.HOST_PINNED
-    desc.memory = memory
-
-    capacity = desc.capacity
-    if capacity is None:
-        capacity = CacheCapacityPolicyDesc()
-    capacity.charge_to_paged_budget = False
-    desc.capacity = capacity
-
-
 def apply_dsv4_explicit_pool_blocks(
     layer_descs: Sequence[Sequence[KVCacheSpecDesc]],
     tag: str,
@@ -199,8 +160,6 @@ def apply_dsv4_explicit_pool_blocks(
     before ``layer_descs`` is assigned to ``model_config.kv_cache_spec_descs``:
     the pybind getter returns a copy, so mutating a read-back list is a no-op.
 
-    Unlike the C++ test helper this never re-enables ``charge_to_paged_budget``
-    on a host-resident pool, so the residency/budget pair stays consistent.
     """
     for descs in layer_descs:
         for desc in descs:
@@ -210,9 +169,6 @@ def apply_dsv4_explicit_pool_blocks(
             if capacity is None:
                 capacity = CacheCapacityPolicyDesc()
             capacity.explicit_block_num = block_num
-            capacity.charge_to_paged_budget = block_num > 0 and not _is_host_resident(
-                desc
-            )
             desc.capacity = capacity
 
 
@@ -222,7 +178,6 @@ def build_dsv4_kv_cache_spec_descs(
     fp8_kv: bool,
     head_dim: int,
     indexer_head_dim: int,
-    fixed_pool_use_host_memory: bool = False,
 ) -> list[list[KVCacheSpecDesc]]:
     """Build the per-layer DSv4 desc lists.
 
@@ -240,9 +195,6 @@ def build_dsv4_kv_cache_spec_descs(
         fp8_kv: ``attn_config.kv_cache_dtype == KvCacheDataType.FP8``.
         head_dim: ``attn_config.size_per_head``.
         indexer_head_dim: ``attn_config.indexer_head_dim``.
-        fixed_pool_use_host_memory: place the four fixed pools
-            (``indexer_state`` / ``csa_state`` / ``hca_state`` / ``swa_kv``) in
-            pinned host memory and take them off the paged HBM budget.
     """
     if layer_num <= 0:
         raise ValueError(f"dsv4 kv cache descs require layer_num > 0, got {layer_num}")
@@ -297,10 +249,6 @@ def build_dsv4_kv_cache_spec_descs(
         kv_entry_elems,
         DataType.TYPE_UINT8,
     )
-
-    if fixed_pool_use_host_memory:
-        for desc in (indexer_state, csa_state, hca_state, swa_kv):
-            _use_host_pinned_memory(desc)
 
     ratios = list(layer_compress_ratios)
     layer_descs: list[list[KVCacheSpecDesc]] = []
