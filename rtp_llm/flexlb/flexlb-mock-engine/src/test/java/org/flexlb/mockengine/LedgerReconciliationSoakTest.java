@@ -117,22 +117,57 @@ class LedgerReconciliationSoakTest {
                 batches++;
             }
 
-            // 静默收敛：pump 尾部 settle + 事件投影排空。
-            Thread.sleep(500);
+            // 静默收敛：pump 尾部 settle + 事件投影排空 + fence 兕底尾波排空。
+            // m1race 修复（test-only）：固定静默窗 + 单轮快照断言在该拓扑下
+            // 结构性误报——mock 引擎请求在一个 pump 采样间隔内完成，
+            // acceptance fact 从不被观察，全部请求走 30s
+            // delivered-not-accepted 兕底；停流后 fence 兕底回调队列排空
+            // 时刻有抖动（实测 35s 静默后仍可能瞬间非空），固定窗不可靠。
+            // 正确语义是有界收敛等待：连续 3 轮 reconcileOnce（间隔 500ms）
+            // 全干净（REAL/pending/TRANSIENT 全空）才算收敛；真冻结的 rid
+            // 每轮都在（pending/transient），收敛永不达成，120s 上限处失败。
+            long quiesceMs = Long.getLong("flexlb.soak.quiesce.ms", 500L);
+            Thread.sleep(quiesceMs);
+            List<LedgerReconciliationHarness.ReconciliationReport>
+                    tailReports = new ArrayList<>();
+            long convergeDeadlineNs = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(120);
+            int cleanStreak = 0;
+            while (cleanStreak < 3) {
+                tailReports.add(reconciler.reconcileOnce());
+                LedgerReconciliationHarness.ReconciliationReport latest =
+                        tailReports.get(tailReports.size() - 1);
+                cleanStreak = latest.realDiffs().isEmpty()
+                        && latest.pendingRealDiffs().isEmpty()
+                        && latest.transientDiffs().isEmpty()
+                                ? cleanStreak + 1 : 0;
+                if (System.nanoTime() >= convergeDeadlineNs) {
+                    break;
+                }
+                Thread.sleep(500);
+            }
             LedgerReconciliationHarness.ReconciliationReport finalReport =
-                    reconciler.reconcileOnce();
+                    tailReports.get(tailReports.size() - 1);
 
             assertTrue(realDiffs.isEmpty(),
                     () -> "confirmed REAL diffs during soak ("
                             + realDiffs.size() + "): " + realDiffs);
-            assertTrue(finalReport.realDiffs().isEmpty(),
-                    () -> "quiesced REAL diffs: " + finalReport.realDiffs());
-            assertTrue(finalReport.pendingRealDiffs().isEmpty(),
-                    () -> "quiesced pending REAL candidates: "
-                            + finalReport.pendingRealDiffs());
-            assertTrue(finalReport.transientDiffs().isEmpty(),
-                    () -> "quiesced TRANSIENT diffs: "
-                            + finalReport.transientDiffs());
+            for (int round = 0; round < tailReports.size(); round++) {
+                final int r = round;
+                LedgerReconciliationHarness.ReconciliationReport tail =
+                        tailReports.get(round);
+                assertTrue(tail.realDiffs().isEmpty(),
+                        () -> "quiesced confirmed REAL diffs (tail round "
+                                + r + "): " + tail.realDiffs());
+            }
+            assertTrue(cleanStreak >= 3,
+                    () -> "tail did not converge to a clean report within"
+                            + " 120s; last report: real="
+                            + finalReport.realDiffs().size()
+                            + " pending="
+                            + finalReport.pendingRealDiffs().size()
+                            + " transient="
+                            + finalReport.transientDiffs().size());
 
             System.out.printf(
                     "[m1-soak] %d minutes, %d batches / %d requests,"
