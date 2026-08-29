@@ -26,6 +26,7 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     KTP = "KTP"
+    EP = "EP"
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -219,6 +220,36 @@ def init_distributed_environment(
     init_user_buffers_environment(parallelism_config)
 
 
+def _requires_dedicated_ep_group(
+    *, world_size: int, local_world_size: int, ep_size: int
+) -> bool:
+    """Return whether full-world EP needs its own multi-host communicator.
+
+    Single-host K3 uses symmetric-memory MegaMoE and does not execute the NCCL
+    EP fallback. The fallback is only valid when EP spans the full world, so
+    creating a communicator for any other layout would hide a topology error.
+    """
+
+    if world_size <= 0 or ep_size <= 0:
+        raise ValueError(
+            "world_size and ep_size must be positive: "
+            f"world={world_size}, EP={ep_size}"
+        )
+    if ep_size <= 1:
+        return False
+    if local_world_size <= 0:
+        raise ValueError(
+            "local_world_size must be positive when EP is enabled: "
+            f"local_world={local_world_size}"
+        )
+    if world_size % local_world_size:
+        raise ValueError(
+            "world_size must be divisible by local_world_size: "
+            f"world={world_size}, local_world={local_world_size}"
+        )
+    return ep_size == world_size and world_size > local_world_size
+
+
 def _create_process_groups(
     parallelism_config: ParallelismConfig,
     backend: str,
@@ -238,6 +269,15 @@ def _create_process_groups(
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
     ktp_size = int(getattr(parallelism_config, "ktp_size", 1))
+    ep_size = int(getattr(parallelism_config, "ep_size", 1))
+    local_world_size = int(
+        getattr(parallelism_config, "local_world_size", world_size)
+    )
+    use_dedicated_ep = _requires_dedicated_ep_group(
+        world_size=world_size,
+        local_world_size=local_world_size,
+        ep_size=ep_size,
+    )
 
     if ktp_size > 1:
         if ktp_size != world_size:
@@ -259,6 +299,24 @@ def _create_process_groups(
             "[rank: %s] Created dedicated KTP group with ranks: %s",
             world_rank,
             ktp_ranks,
+        )
+        torch.distributed.barrier()
+
+    if use_dedicated_ep:
+        # Multi-host K3 EP uses graph-captured NCCL A2A. Do not alias WORLD:
+        # WORLD also carries graph-external lifecycle/control traffic, and
+        # mixing those launch streams can deadlock replay of a large graph.
+        ep_ranks = list(range(world_size))
+        ep_group = torch.distributed.new_group(
+            ranks=ep_ranks,
+            backend=backend,
+            timeout=timedelta(days=36500),
+        )
+        _group_map[Group.EP] = ep_group
+        logging.info(
+            "[rank: %s] Created dedicated multi-host EP group with ranks: %s",
+            world_rank,
+            ep_ranks,
         )
         torch.distributed.barrier()
 
@@ -655,8 +713,8 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
     world_size = _parallelism_config.world_size
-    if group == Group.KTP:
-        group_key = Group.KTP
+    if group in (Group.KTP, Group.EP):
+        group_key = group
     elif group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
         group_key = Group.DP.name + str(tp_rank)

@@ -529,21 +529,21 @@ class KimiK3LatentMoE(nn.Module):
             .expand(repeat_shape)
             .reshape(self.ep_size * physical_batch, hidden)
             .contiguous(),
-            group=Group.DP_AND_TP,
+            group=Group.EP,
         )
         dispatched_ids = all_to_all_single(
             expert_ids.unsqueeze(0)
             .expand((self.ep_size, -1, -1))
             .reshape(self.ep_size * physical_batch, self.top_k)
             .contiguous(),
-            group=Group.DP_AND_TP,
+            group=Group.EP,
         )
         dispatched_weights = all_to_all_single(
             routing_weights.unsqueeze(0)
             .expand((self.ep_size, -1, -1))
             .reshape(self.ep_size * physical_batch, self.top_k)
             .contiguous(),
-            group=Group.DP_AND_TP,
+            group=Group.EP,
         )
 
         expert_start = self.ep_rank * self.local_expert_count
@@ -651,7 +651,7 @@ class KimiK3LatentMoE(nn.Module):
 
         returned = all_to_all_single(
             local_contribution,
-            group=Group.DP_AND_TP,
+            group=Group.EP,
         )
         return returned.reshape(
             self.ep_size,

@@ -2,6 +2,9 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import (
+    _requires_dedicated_ep_group,
+)
 from rtp_llm.models_py.modules.kimi_k3.moe import _requires_nccl_ep
 from rtp_llm.models_py.triton_kernels.common.activation import (
     situ_and_mul,
@@ -26,6 +29,56 @@ class KimiK3NcclEpTopologyTest(unittest.TestCase):
             ):
                 with self.assertRaises(ValueError):
                     _requires_nccl_ep(world_size, local_world_size)
+
+    def test_multi_host_full_world_ep_gets_dedicated_group(self) -> None:
+        self.assertTrue(
+            _requires_dedicated_ep_group(
+                world_size=16,
+                local_world_size=8,
+                ep_size=16,
+            )
+        )
+        self.assertTrue(
+            _requires_dedicated_ep_group(
+                world_size=32,
+                local_world_size=8,
+                ep_size=32,
+            )
+        )
+
+    def test_single_host_or_partial_ep_does_not_get_dedicated_group(self) -> None:
+        self.assertFalse(
+            _requires_dedicated_ep_group(
+                world_size=8,
+                local_world_size=8,
+                ep_size=8,
+            )
+        )
+        self.assertFalse(
+            _requires_dedicated_ep_group(
+                world_size=16,
+                local_world_size=8,
+                ep_size=8,
+            )
+        )
+
+    def test_invalid_ep_group_topology_is_rejected(self) -> None:
+        for world_size, local_world_size, ep_size in (
+            (0, 8, 16),
+            (16, 0, 16),
+            (10, 8, 10),
+        ):
+            with self.subTest(
+                world_size=world_size,
+                local_world_size=local_world_size,
+                ep_size=ep_size,
+            ):
+                with self.assertRaises(ValueError):
+                    _requires_dedicated_ep_group(
+                        world_size=world_size,
+                        local_world_size=local_world_size,
+                        ep_size=ep_size,
+                    )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_masked_situ_packed_quant_matches_reference(self) -> None:
