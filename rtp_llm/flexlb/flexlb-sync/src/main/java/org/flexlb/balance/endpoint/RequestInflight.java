@@ -62,13 +62,12 @@ public final class RequestInflight implements TtlEvictor.TtlTracked {
     private volatile boolean masterQueued;
 
     /**
-     * Stage-2 L8 retirement: pre-delivery dispatch-permit sub-state — the
-     * request holds one token-fenced Decode concurrency slot between queue
-     * publication and the engine handover. The entry token is the incoming
-     * authority over the old layer-8 map (which remains as the transitional
-     * dual-write mirror until the harness retargets and the map storage is
-     * deleted); the permit identity semantics (monotonic issuance,
-     * retirement fencing) stay with the endpoint.
+     * Stage-2 L8 retirement complete: pre-delivery dispatch-permit sub-state
+     * — the request holds one token-fenced Decode concurrency slot between
+     * queue publication and the engine handover. The entry token is the
+     * sole permit authority (the old layer-8 map storage is deleted — the
+     * "permit resource row"); the permit identity semantics (monotonic
+     * issuance, retirement fencing) stay with the endpoint.
      *
      * <p>Mutated only inside the endpoint admission lock; read lock-free by
      * the audit capture (weakly consistent — confirm-window territory).

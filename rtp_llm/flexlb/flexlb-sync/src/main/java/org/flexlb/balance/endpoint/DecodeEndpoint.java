@@ -161,16 +161,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * reserved. A successful commit removes the lease permanently: committed
      * Decode ownership is never rolled back by a delivery token.
      *
-     * <p><b>Stage-2 L8 dual-write transition (plan section 6):</b> the permit
-     * sub-state now also lives on each {@link RequestInflight} entry
-     * ({@code dispatchPermitToken}) — the entry token is the incoming
-     * authority (L8 → "permit resource row"); this map remains as the
-     * transitional mirror holding the token-identity checks until the
-     * reconciliation harness retargets onto the entry-derived projection
-     * and the map storage is deleted.</p>
+     * <p><b>Stage-2 L8 retirement complete (plan section 6):</b> the permit
+     * sub-state lives on each {@link RequestInflight} entry as the mutable
+     * {@code dispatchPermitToken} — L8 is now a "permit resource row" on
+     * the L1 entries and the former layer-8 map storage is deleted. The
+     * token identity checks ({@code isCurrentEngineDispatchPermitLocked})
+     * read the entry token directly: a permit is current exactly while its
+     * captured reservation still carries its token. The three counters
+     * below remain as the O(1) aggregate mirrors.</p>
      */
-    private final Map<Long, EngineDispatchPermitLease> engineDispatchPermits =
-            new ConcurrentHashMap<>();
     /** Hard prompt KV already committed to acquired pre-delivery permits. */
     private final AtomicLong engineDispatchPermitHardKvReservedTotal = new AtomicLong();
     /** Expected KV already committed to acquired pre-delivery permits. */
@@ -235,6 +234,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 inflightRequests, (requestId, req) -> {
                     engineLifecycleReservations.remove(req);
                     removeQueuedPhaseLocked(requestId, req);
+                    // Stage-2 L8: the evicted entry may still hold a dispatch
+                    // permit token (permit holders are not exempt from the
+                    // endpoint TTL — the 30s timeout reclaim path); retire the
+                    // permit accounting under the same callback so the token
+                    // never outlives its entry.
+                    removeEngineDispatchPermitLocked(req);
                     inflightKvReservedTotal.addAndGet(-req.kvTokens());
                     inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
                 });
@@ -383,9 +388,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             Set<Long> plannedRetiredPermitTokens = new HashSet<>(
                     retiredEngineDispatchPermitTokens);
-            for (EngineDispatchPermitLease lease : engineDispatchPermits.values()) {
-                plannedRetiredPermitTokens.add(lease.token());
-            }
+            // Stage-2 L8: the live permit tokens live on the L1 entries
+            // (permit resource row); collect them from the entry sub-state.
+            inflightRequests.forEach((requestId, reservation) -> {
+                long permitToken = reservation.dispatchPermitToken();
+                if (permitToken != 0L) {
+                    plannedRetiredPermitTokens.add(permitToken);
+                }
+            });
             retirementEvent = retireGenerationOwnershipLocked(
                     plannedRetiredPermitTokens);
             admissionVersion.incrementAndGet();
@@ -414,10 +424,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 addRetiredOwner(
                         owners, generationId, requestId,
                         confirmed.reservationToken()));
-        engineDispatchPermits.forEach((requestId, permit) ->
-                addRetiredOwner(
-                        owners, generationId, requestId,
-                        permit.reservation().reservationToken()));
+        // Stage-2 L8: permit holders are always L1 inflight entries (the
+        // permit token lives on the entry), so the inflight traversal above
+        // already collected every permit-holding owner.
         engineFenceProtections.forEach((requestId, protection) ->
                 addRetiredOwner(
                         owners, generationId, requestId,
@@ -463,7 +472,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Canonical retirement commit. The immutable event and every exact
         // ReservationHandle have been validated above this line.
         retiredEngineDispatchPermitTokens = plannedRetiredPermitTokens;
-        engineDispatchPermits.clear();
         activeEngineDispatchPermitCount = 0;
         engineDispatchPermitHardKvReservedTotal.set(0L);
         engineDispatchPermitExpectedKvReservedTotal.set(0L);
@@ -574,9 +582,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Remove every local owner for one request. Caller holds admissionLock. */
     private boolean releaseLocked(long requestId) {
-        boolean changed = removeEngineDispatchPermitLocked(requestId);
-        changed = clearEngineFenceProtectionLocked(requestId) || changed;
         RequestInflight removed = inflightRequests.remove(requestId);
+        // Stage-2 L8: clear the entry permit token (if held) before the
+        // queued-phase teardown below — all under this one critical section.
+        boolean changed = removeEngineDispatchPermitLocked(removed);
+        changed = clearEngineFenceProtectionLocked(requestId) || changed;
         engineLifecycleReservations.remove(removed);
         changed = removeQueuedPhaseLocked(requestId, removed) || changed;
         if (removed != null) {
@@ -641,8 +651,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ConfirmedTask confirmed = trackedConfirmed.get(requestId);
             EngineFenceProtection protection = engineFenceProtections.get(requestId);
             PreemptionClaim claim = preemptionClaims.get(requestId);
-            EngineDispatchPermitLease dispatchPermit =
-                    engineDispatchPermits.get(requestId);
 
             boolean exactConfirmed = confirmed != null
                     && confirmed.reservationToken()
@@ -654,16 +662,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     && claim.reservationToken
                             == reservation.reservationToken();
             boolean exactAttempt = hasExactIncomingAttemptLocked(reservation);
-            boolean exactDispatchPermit = dispatchPermit != null
-                    && isExactReservation(
-                            dispatchPermit.reservation(), reservation);
             boolean exactEngineLifecycle =
                     hasEngineLifecycleReservationExactLocked(reservation);
 
             if (!exactShadow) {
                 if (exactConfirmed || exactProtection || exactClaim
-                        || exactAttempt || exactDispatchPermit
-                        || exactEngineLifecycle) {
+                        || exactAttempt || exactEngineLifecycle) {
                     throw rollbackInvariant(reservation,
                             "exact ownership already crossed local shadow rollback");
                 }
@@ -676,12 +680,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         "exact ownership is held by Engine/protocol lifecycle");
             }
 
-            if (exactDispatchPermit) {
-                removeEngineDispatchPermitLocked(requestId);
-            } else if (dispatchPermit != null) {
-                throw rollbackInvariant(reservation,
-                        "request id has a dispatch permit for another reservation");
-            }
+            // Stage-2 L8: the exact shadow carries the permit token when a
+            // pre-delivery permit is still held (permit resource row); clear
+            // it under the same critical section as the shadow removal.
+            removeEngineDispatchPermitLocked(current);
             if (!inflightRequests.remove(requestId, current)) {
                 throw rollbackInvariant(reservation,
                         "exact shadow changed while admissionLock was held");
@@ -736,16 +738,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || hasExactIncomingAttemptLocked(reservation)) {
                 return false;
             }
-            EngineDispatchPermitLease dispatchPermit =
-                    engineDispatchPermits.get(requestId);
-            if (dispatchPermit != null
-                    && !isExactReservation(
-                            dispatchPermit.reservation(), reservation)) {
-                return false;
-            }
-            if (dispatchPermit != null) {
-                removeEngineDispatchPermitLocked(requestId);
-            }
+            // Stage-2 L8: the exact shadow carries the permit token when a
+            // pre-delivery permit is still held; clear it under the same
+            // critical section as the shadow removal.
+            removeEngineDispatchPermitLocked(shadow);
             if (!inflightRequests.remove(requestId, shadow)) {
                 return false;
             }
@@ -1025,16 +1021,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
 
                 RequestInflight shadow = inflightRequests.get(requestId);
-                EngineDispatchPermitLease dispatchPermit =
-                        engineDispatchPermits.get(requestId);
                 boolean exactShadow = isExactReservation(shadow, reservation);
-                boolean exactDispatchPermit = dispatchPermit != null
-                        && isExactReservation(
-                                dispatchPermit.reservation(), reservation);
                 boolean exactEngineLifecycle =
                         hasEngineLifecycleReservationExactLocked(reservation);
-                if (!exactShadow && !exactDispatchPermit
-                        && !exactEngineLifecycle && !exactProtection) {
+                if (!exactShadow && !exactEngineLifecycle && !exactProtection) {
                     return DispatchRejectionSettlement.STALE;
                 }
 
@@ -1100,12 +1090,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             changed = true;
         }
 
-        EngineDispatchPermitLease dispatchPermit =
-                engineDispatchPermits.get(requestId);
-        if (dispatchPermit != null
-                && isExactReservation(
-                        dispatchPermit.reservation(), reservation)) {
-            changed = removeEngineDispatchPermitLocked(requestId) || changed;
+        // Stage-2 L8: the exact shadow carries the permit token when a
+        // pre-delivery permit is still held (permit resource row); clear it
+        // under the same critical section as the rest of the teardown.
+        RequestInflight permitHolder = inflightRequests.get(requestId);
+        if (isExactReservation(permitHolder, reservation)) {
+            changed = removeEngineDispatchPermitLocked(permitHolder) || changed;
         }
 
         ConfirmedTask confirmed = trackedConfirmed.get(requestId);
@@ -1202,9 +1192,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private boolean hasAnyRequestOwnerLocked(long requestId) {
+        // Stage-2 L8: a live dispatch permit always sits on an L1 inflight
+        // entry (the permit token is entry sub-state), so the inflight
+        // membership check already covers permit ownership.
         return inflightRequests.containsKey(requestId)
                 || trackedConfirmed.containsKey(requestId)
-                || engineDispatchPermits.containsKey(requestId)
                 || engineFenceProtections.containsKey(requestId)
                 || preemptionClaims.containsKey(requestId);
     }
@@ -1233,16 +1225,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long token = reservation.reservationToken();
         RequestInflight shadow = inflightRequests.get(requestId);
         ConfirmedTask confirmed = trackedConfirmed.get(requestId);
-        EngineDispatchPermitLease dispatchPermit =
-                engineDispatchPermits.get(requestId);
         EngineFenceProtection protection =
                 engineFenceProtections.get(requestId);
         PreemptionClaim claim = preemptionClaims.get(requestId);
+        // Stage-2 L8: a live dispatch permit always sits on the L1 inflight
+        // entry, so an exact permit is covered by the exact shadow check
+        // below (the entry carries the token).
         if (isExactReservation(shadow, reservation)
                 || (confirmed != null && confirmed.reservationToken() == token)
-                || (dispatchPermit != null
-                    && isExactReservation(
-                            dispatchPermit.reservation(), reservation))
                 || (protection != null && protection.reservationToken == token)
                 || (claim != null && claim.reservationToken == token)
                 || hasExactIncomingAttemptLocked(reservation)) {
@@ -1326,15 +1316,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     return LocalEvictionResult.CONFLICT;
                 }
                 RequestInflight held = inflightRequests.get(victim.requestId());
-                EngineDispatchPermitLease permit =
-                        engineDispatchPermits.get(victim.requestId());
                 if (!isExactReservation(held, victim)
                         || !held.masterQueued()
+                        // Stage-2 L8: a dispatch permit on the entry is a
+                        // stronger owner than a local eviction.
+                        || held.dispatchPermitToken() != 0L
                         || hasEngineLifecycleReservationExactLocked(victim)
                         || preemptionClaims.containsKey(victim.requestId())
                         || engineFenceProtections.containsKey(victim.requestId())
-                        || hasExactIncomingAttemptLocked(victim)
-                        || permit != null) {
+                        || hasExactIncomingAttemptLocked(victim)) {
                     return LocalEvictionResult.CONFLICT;
                 }
                 freedHardKv = saturatedAddNonNegative(
@@ -1433,9 +1423,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * rebase-round hardening):</b> the five HashMap-backed layers (L2 count,
      * L4 claims, L4b attempt incoming, L5 protections, L6 tombstones) are
      * copied inside one short admission-lock critical section —
-     * O(|claims|+|protections|+|tombstones|), never O(|L1|) — while the four
-     * concurrent-container layers (L1 inflight, L3 confirmed, L7 queued
-     * phase, L8 dispatch permits) are copied lock-free right after it.
+     * O(|claims|+|protections|+|tombstones|), never O(|L1|) — while the
+     * concurrent-container layers (L1 inflight, L3 confirmed) are copied
+     * lock-free right after it, and the L7 queued / L8 permit projections
+     * derive from the entry sub-state on that same inflight snapshot
+     * (stage-2 retirements: both former set/map storages are deleted).
      * A third lock-guarded version recheck then certifies the capture:
      * every writer mutates these layers and bumps {@code admissionVersion}
      * inside one admission-lock critical section, so acquiring the lock
@@ -1528,10 +1520,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 queuedProjection.add(requestId);
             }
         });
-        // Stage-2 L8 retarget: the permit projection derives from the entry
-        // tokens on the same inflight snapshot (the incoming authority);
-        // the layer-8 map is only the transitional dual-write mirror and is
-        // no longer read here.
+        // Stage-2 L8 retirement complete: the permit projection derives
+        // from the entry tokens on the same inflight snapshot (the permit
+        // resource row — the sole permit authority; the former layer-8 map
+        // storage is deleted).
         Set<Long> permitProjection = new HashSet<>();
         inflightSnapshot.forEach((requestId, entry) -> {
             if (entry.dispatchPermitToken() != 0L) {
@@ -1610,10 +1602,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       {@code queuedExpectedKvReservedTotal} carry the O(1) aggregate
      *       mirrors of the entry sub-state for the harness cross-check.</li>
      *   <li>L8 dispatch-permit sub-state — the entry-level
-     *       {@code dispatchPermitToken} on each L1 entry (stage-2
-     *       retirement: this view's {@code engineDispatchPermitRequestIds}
-     *       derives from the entry tokens; the layer-8 map remains the
-     *       transitional dual-write mirror for the token-identity checks);
+     *       {@code dispatchPermitToken} on each L1 entry (stage-2 retirement
+     *       complete: the separate layer-8 map storage is deleted; this
+     *       view's {@code engineDispatchPermitRequestIds} derives from the
+     *       entry tokens — the "permit resource row");
      *       {@code engineDispatchPermitCount} and the two permit KV totals
      *       carry the O(1) aggregate mirrors for the harness cross-check.</li>
      * </ol>
@@ -1887,9 +1879,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (exactShadow && exactConfirmed) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
-                EngineDispatchPermitLease dispatchPermit =
-                        engineDispatchPermits.get(victimId);
-                if (dispatchPermit != null) {
+                // Stage-2 L8: a dispatch permit on the victim's inflight
+                // entry is a stronger owner than any priority attempt.
+                if (shadow != null && shadow.dispatchPermitToken() != 0L) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
                 if (exactShadow && !shadow.masterQueued()) {
@@ -2174,16 +2166,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         RequestInflight shadow = inflightRequests.get(requestId);
         ConfirmedTask confirmed = trackedConfirmed.get(requestId);
-        EngineDispatchPermitLease dispatchPermit =
-                engineDispatchPermits.get(requestId);
         EngineFenceProtection protection =
                 engineFenceProtections.get(requestId);
+        // Stage-2 L8: a live dispatch permit always sits on the L1 inflight
+        // entry; a non-exact shadow therefore already rejects the settlement
+        // below, and an exact shadow's permit clears with the shadow.
         if ((shadow != null && !isExactReservation(shadow, reservation))
                 || (confirmed != null
                     && confirmed.reservationToken() != reservationToken)
-                || (dispatchPermit != null
-                    && !isExactReservation(
-                            dispatchPermit.reservation(), reservation))
                 || (protection != null
                     && protection.reservationToken != reservationToken)
                 || hasExactIncomingAttemptLocked(reservation)) {
@@ -2203,9 +2193,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 && engineFenceProtections.remove(requestId, protection)) {
             releaseEngineFenceSyntheticHoldLocked(protection);
         }
-        if (dispatchPermit != null) {
-            removeEngineDispatchPermitLocked(requestId);
-        }
+        // Stage-2 L8: the exact shadow carries the permit token when a
+        // pre-delivery permit is still held; clear it under the same
+        // critical section as the rest of the claim teardown.
+        removeEngineDispatchPermitLocked(shadow);
         if (confirmed != null) {
             trackedConfirmed.remove(requestId, confirmed);
         }
@@ -2502,7 +2493,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 actualConfirmed++;
                 RequestInflight removed = inflightRequests.remove(requestId);
                 engineLifecycleReservations.remove(removed);
-                removeEngineDispatchPermitLocked(requestId);
+                // Stage-2 L8: clear the entry permit token (if held) under
+                // the same critical section as the inflight removal.
+                removeEngineDispatchPermitLocked(removed);
                 if (removed != null) {
                     removeQueuedPhaseLocked(requestId, removed);
                     inflightKvReservedTotal.addAndGet(-removed.kvTokens());
@@ -3007,21 +3000,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // A priority claim or generic EngineFence is a stronger accounting
             // owner than age-only cleanup. In particular, an ambiguous
             // ENGINE_MAY_HAVE_SEEN shadow remains charged until reconciliation.
+            // Stage-2 L8: the TtlEvictor callback retires the entry permit
+            // token (if held) in the same eviction sweep, so the permit
+            // counter delta below observes exactly those reclaimed permits.
+            int permitCountBefore = activeEngineDispatchPermitCount;
             evicted = requestEvictor.evictExpired(
                     ttlMs, requestId -> !schedulerOwnsRequest.test(requestId)
                             && !preemptionClaims.containsKey(requestId)
                             && !engineFenceProtections.containsKey(requestId));
-            int permitsRemoved = 0;
-            // TtlEvictor owns only the reservation map/counters. Reconcile
-            // its token-fenced pre-delivery owners under the same admission lock.
-            for (Long requestId : List.copyOf(engineDispatchPermits.keySet())) {
-                EngineDispatchPermitLease permit = engineDispatchPermits.get(requestId);
-                if (permit != null
-                        && inflightRequests.get(requestId) != permit.reservation()
-                        && removeEngineDispatchPermitLocked(requestId)) {
-                    permitsRemoved++;
-                }
-            }
+            int permitsRemoved = permitCountBefore
+                    - activeEngineDispatchPermitCount;
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
             java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedEvictIt =
@@ -3132,8 +3120,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             addQueuedPhaseLocked(requestId, current);
             // Re-queueing begins a new dispatch round. Invalidate any
-            // pre-delivery lease before publishing that transition.
-            removeEngineDispatchPermitLocked(requestId);
+            // pre-delivery permit on the entry before publishing that
+            // transition (Stage-2 L8: the entry token is the authority).
+            removeEngineDispatchPermitLocked(current);
             admissionVersion.incrementAndGet();
             capacityChanged = true;
             result = MarkQueuedResult.MARKED;
@@ -3300,12 +3289,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     }
 
-    /** Immutable endpoint-side fence for one active public permit object. */
-    private record EngineDispatchPermitLease(
-            long token,
-            RequestInflight reservation) {
-    }
-
     /**
      * Acquire one pre-delivery Decode slot while the reservation remains queued.
      * Decode concurrency and KV are validated and occupied under the same
@@ -3346,7 +3329,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.NOT_QUEUED);
             }
-            if (engineDispatchPermits.containsKey(requestId)) {
+            if (reservation.dispatchPermitToken() != 0L) {
                 return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED);
             }
@@ -3359,16 +3342,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long token = nextEngineDispatchPermitTokenLocked();
             EngineDispatchPermit permit = new EngineDispatchPermit(
                     this, requestId, token, reservation);
-            engineDispatchPermits.put(
-                    requestId, new EngineDispatchPermitLease(token, reservation));
-            // Stage-2 L8 dual-write: the entry token is the incoming
-            // authority; the map stays as the transitional mirror. Both
-            // change under one admission tick, so a certified capture never
-            // observes the split.
+            // Stage-2 L8: the entry token is the sole permit authority
+            // (permit resource row). Install is infallible here — the token
+            // was observed clear under this lock — but the check stays as an
+            // invariant tripwire against future writer regressions.
             if (!reservation.installDispatchPermitToken(token)) {
                 throw new IllegalStateException(
-                        "Decode dispatch permit mirror diverged: entry already"
-                                + " holds a permit token for request "
+                        "Decode dispatch permit install failed on a token-free"
+                                + " entry for request "
                                 + requestId);
             }
             activeEngineDispatchPermitCount++;
@@ -3417,11 +3398,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (inflightRequests.get(permit.requestId) != permit.reservation
                     || !permit.reservation.masterQueued()
                     || preemptionClaims.containsKey(permit.requestId)) {
-                removeEngineDispatchPermitLocked(permit.requestId);
+                removeEngineDispatchPermitLocked(permit.reservation);
                 admissionVersion.incrementAndGet();
                 transferStatus = EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
             } else {
-                removeEngineDispatchPermitLocked(permit.requestId);
+                removeEngineDispatchPermitLocked(permit.reservation);
                 // The identity and queued membership were checked while holding the
                 // same lock. Transfer only changes ownership; it never re-reads the cap.
                 removeQueuedPhaseLocked(permit.requestId, permit.reservation);
@@ -3451,7 +3432,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (!isCurrentEngineDispatchPermitLocked(permit)) {
                 return false;
             }
-            removeEngineDispatchPermitLocked(permit.requestId);
+            removeEngineDispatchPermitLocked(permit.reservation);
             admissionVersion.incrementAndGet();
             released = true;
         } finally {
@@ -3463,32 +3444,30 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return true;
     }
 
+    /**
+     * Caller holds admissionLock. A permit is current exactly while its
+     * captured reservation still carries its token: tokens are monotonic
+     * per endpoint generation and cleared on removal, so a cleared or
+     * superseded permit never matches (Stage-2 L8 permit resource row).
+     */
     private boolean isCurrentEngineDispatchPermitLocked(EngineDispatchPermit permit) {
-        EngineDispatchPermitLease lease = engineDispatchPermits.get(permit.requestId);
-        return lease != null
-                && lease.token() == permit.token
-                && lease.reservation() == permit.reservation;
+        return permit.reservation.dispatchPermitToken() == permit.token;
     }
 
-    private boolean removeEngineDispatchPermitLocked(long requestId) {
-        EngineDispatchPermitLease removed = engineDispatchPermits.remove(requestId);
-        if (removed == null) {
+    /**
+     * Caller holds admissionLock. Retire the permit accounting for one
+     * reservation: clear the entry token (the permit resource row), release
+     * the two permit KV mirrors, and decrement the active-permit counter.
+     * Idempotent — a token-free entry means no live permit.
+     */
+    private boolean removeEngineDispatchPermitLocked(RequestInflight reservation) {
+        if (reservation == null || !reservation.clearDispatchPermitToken()) {
             return false;
         }
-        // Stage-2 L8 dual-write: clear the entry token through the lease's
-        // exact reservation — the map entry and the entry token change under
-        // one admission tick, so a certified capture never observes the
-        // split.
-        if (!removed.reservation().clearDispatchPermitToken()) {
-            throw new IllegalStateException(
-                    "Decode dispatch permit mirror diverged: map held a permit"
-                    + " whose entry token was already clear for request "
-                    + requestId);
-        }
         engineDispatchPermitHardKvReservedTotal.addAndGet(
-                -removed.reservation().kvTokens());
+                -reservation.kvTokens());
         engineDispatchPermitExpectedKvReservedTotal.addAndGet(
-                -removed.reservation().expectedKvTokens());
+                -reservation.expectedKvTokens());
         decrementActiveEngineDispatchPermitCountLocked();
         return true;
     }
@@ -3670,7 +3649,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         RequestInflight candidate = inflightRequests.get(requestId);
         if (candidate == null
                 || !candidate.masterQueued()
-                || engineDispatchPermits.containsKey(requestId)) {
+                // Stage-2 L8: the entry token is the permit authority; the
+                // volatile read keeps this predicate lock-free and weakly
+                // consistent, exactly like the former map lookup.
+                || candidate.dispatchPermitToken() != 0L) {
             return true;
         }
         WorkerStatus.CommittedWorkerStatus committed =
