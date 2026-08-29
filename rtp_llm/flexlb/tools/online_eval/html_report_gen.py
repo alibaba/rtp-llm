@@ -34,8 +34,11 @@ agg 字段探测（aggregate_canvas_run.py 输出；缺失即降级）：
 
 生成后内置自检：HTML 标签闭合（剥离 script/style 的栈配对）、
 panel id 唯一且 canvas 创建与 Chart 初始化同循环（运行时防御）、
-注入数据串无 NaN/Infinity/undefined 字面量；本机有 node 时对主
-script 做 --check 语法冒烟。
+注入数据串无 NaN/Infinity/undefined 字面量；折线类 panel 的 series
+数据必须是 [数字, 数字] 数组对且 HTML 中每个 parsing:false 声明都有
+xyPairs() 转换配对（Chart.js 跳过解析时 [x,y] 数组对会静默空图，
+此防线让该不兼容在生成期报出）；本机有 node 时对主 script 做
+--check 语法冒烟。
 """
 
 from __future__ import annotations
@@ -709,6 +712,11 @@ function fmtNum(v) {
     { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
+// ---- [x,y] 数组对 → {x,y} 对象：parsing:false 要求数据为预解析对象，
+// SPEC 为省体积用数组对紧凑序列化（数百点 × 多图），折线 dataset
+// 构造时经此统一转换；已是 {x,y} 形态的元素透传（防御）。 ----
+const xyPairs = (arr) => arr.map(d => Array.isArray(d) ? { x: d[0], y: d[1] } : d);
+
 // ---- 「恒 0」标注插件：对数轴下全 0 组无柱，图内补文字 ----
 const zeroMarkPlugin = {
   id: 'zeroMark',
@@ -797,7 +805,7 @@ function renderXY(p, host) {
   const cv = makeCanvas(sec, 'c-' + p.id);
   host.appendChild(sec);
   const datasets = p.series.map(s => ({
-    label: s.name, data: s.data, borderColor: s.color,
+    label: s.name, data: xyPairs(s.data), borderColor: s.color,
     backgroundColor: s.color, borderWidth: 2, pointRadius: 0,
     tension: 0.3, fill: false,
   }));
@@ -845,7 +853,7 @@ function renderPerAgg(p, host) {
     grid.appendChild(item);
     const hasAxis2 = sub.series.some(s => s.axis === 2);
     const datasets = sub.series.map(s => ({
-      label: s.name, data: s.data, borderColor: s.color,
+      label: s.name, data: xyPairs(s.data), borderColor: s.color,
       backgroundColor: s.color, borderWidth: 2, pointRadius: 0,
       tension: 0.3, fill: false, yAxisID: s.axis === 2 ? 'y2' : 'y',
       borderDash: s.dashed ? [6, 4] : undefined,
@@ -1075,6 +1083,43 @@ def self_check(html_text, spec, spec_json_text):
                         "panel %s 子图 %s 系列 %s 数据非数组"
                         % (p["id"], sub.get("label"), s.get("name"))
                     )
+    # ---- 防线：parsing:false 与数据形态兼容性（浏览器静默空图教训） ----
+    # Chart.js parsing:false 要求数据为预解析 {x,y} 对象；SPEC 序列化为
+    # [x,y] 数组对（省体积），折线渲染器经模板内 xyPairs() 统一转换。
+    # ① 折线类 panel 的 series 数据必须是 [数字, 数字] 数组对（无 null
+    #    分量）——形态漂移在生成期报出，而非浏览器端空图；
+    # ② HTML 中 parsing:false 声明数不得超过 xyPairs() 转换调用数
+    #    ——新增跳过解析的 dataset 忘记转换时在此拦截。
+    for p in spec.get("panels", []):
+        if p.get("kind") not in ("xy", "per-agg"):
+            continue
+        line_series = list(p.get("series", []) or [])
+        for sub in p.get("subs", []) or []:
+            line_series.extend(sub.get("series", []) or [])
+        for s in line_series:
+            for i, pt in enumerate(s.get("data", []) or []):
+                ok_pt = (
+                    isinstance(pt, (list, tuple))
+                    and len(pt) == 2
+                    and all(
+                        isinstance(v, (int, float)) and not isinstance(v, bool)
+                        for v in pt
+                    )
+                )
+                if not ok_pt:
+                    problems.append(
+                        "panel %s 系列 %s 第 %d 个点非 [数字, 数字] 数组对"
+                        "（parsing:false 渲染器要求可经 xyPairs 转换的形态）"
+                        % (p["id"], s.get("name"), i)
+                    )
+                    break
+    n_parse = len(re.findall(r"parsing:\s*false\s*[,\n]", html_text))
+    n_conv = len(re.findall(r"xyPairs\(", html_text))
+    if "xyPairs" not in html_text or n_conv < n_parse:
+        problems.append(
+            "parsing:false 声明 %d 处但 xyPairs() 转换仅 %d 处"
+            "（跳过解析的 dataset 数据未转换会静默空图）" % (n_parse, n_conv)
+        )
     syntax_problem = _check_main_script_syntax(html_text)
     if syntax_problem:
         problems.append(syntax_problem)
@@ -1254,7 +1299,8 @@ def main():
         print(TAG + " warning: " + w)
     print(
         TAG + " self-check: OK (tags balanced, panel ids unique, "
-        "no NaN/Infinity/undefined%s)"
+        "no NaN/Infinity/undefined, xy series are [x,y] number pairs, "
+        "parsing:false datasets pass xyPairs()%s)"
         % (", node --check passed" if shutil.which("node") else "")
     )
     print(TAG + " written=%s (%.1f KB)" % (args.out, len(html_text) / 1024.0))
