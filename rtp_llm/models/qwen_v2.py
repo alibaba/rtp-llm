@@ -16,8 +16,8 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.models.base_model import build_default_kv_cache_spec_descs
 from rtp_llm.models.qwen import QWen
-from rtp_llm.ops import KVCacheSpecDesc, KVCacheSpecType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -518,12 +518,9 @@ class QwenV2MTP(QWenV2):
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
-        desc = KVCacheSpecDesc()
-        desc.cache_type = KVCacheSpecType.MHA
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
+        model_config.kv_cache_spec_descs = build_default_kv_cache_spec_descs(
+            model_config
+        )
 
     def _create_python_model(self):
         model_config = self.model_config

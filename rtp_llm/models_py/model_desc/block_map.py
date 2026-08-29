@@ -57,7 +57,74 @@ def get_layer_tags(kv_cache: LayeredKVCache | None, local_layer_idx: int) -> lis
     tags = [str(cache.tag) for cache in layer_caches]
     if not tags or any(not tag for tag in tags):
         raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")
+    if len(tags) != len(set(tags)):
+        raise RuntimeError(
+            f"local layer {local_layer_idx} has duplicate KV cache tag; tags={tags}"
+        )
     return tags
+
+
+def get_layer_cache_for_tag(
+    kv_cache: LayeredKVCache | None, local_layer_idx: int, tag: str
+) -> LayerKVCache:
+    if kv_cache is None:
+        raise RuntimeError(
+            f"KV cache tag {tag!r} is missing for local layer {local_layer_idx}: "
+            "KV cache is not initialized"
+        )
+    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
+    matches = [cache for cache in layer_caches if str(cache.tag) == tag]
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"local layer {local_layer_idx} has duplicate KV cache tag {tag!r}"
+        )
+    if not matches:
+        available_tags = [str(cache.tag) for cache in layer_caches]
+        raise RuntimeError(
+            f"KV cache tag {tag!r} is missing for local layer {local_layer_idx}; "
+            f"available tags={available_tags}"
+        )
+    return matches[0]
+
+
+def get_layer_caches_for_tags(
+    kv_cache: LayeredKVCache | None,
+    local_layer_idx: int,
+    tags: Sequence[str],
+) -> dict[str, LayerKVCache]:
+    required_tags = list(tags)
+    if (
+        not required_tags
+        or any(not tag for tag in required_tags)
+        or len(required_tags) != len(set(required_tags))
+    ):
+        raise RuntimeError(
+            f"required KV cache tags must be unique and non-empty: {tags}"
+        )
+    if kv_cache is None:
+        raise RuntimeError(
+            f"KV cache is not initialized for local layer {local_layer_idx}; "
+            f"required tags={required_tags}"
+        )
+
+    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
+    by_tag: dict[str, LayerKVCache] = {}
+    for cache in layer_caches:
+        cache_tag = str(cache.tag)
+        if not cache_tag:
+            raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")
+        if cache_tag in by_tag:
+            raise RuntimeError(
+                f"local layer {local_layer_idx} has duplicate KV cache tag {cache_tag!r}"
+            )
+        by_tag[cache_tag] = cache
+
+    if set(by_tag) != set(required_tags):
+        raise RuntimeError(
+            f"local layer {local_layer_idx} requires exactly KV cache tags "
+            f"{required_tags}; available tags={list(by_tag)}"
+        )
+    return {tag: by_tag[tag] for tag in required_tags}
 
 
 def get_group_tags_for_layers(
@@ -105,3 +172,16 @@ def select_fmha_impl_for_layer(
             )
         selected.append(fmha_impl[tag])
     return selected[0] if len(selected) == 1 else selected
+
+
+def select_fmha_impl_for_tag(fmha_impl: Mapping[str, T], tag: str) -> T:
+    if not isinstance(fmha_impl, Mapping):
+        raise RuntimeError(
+            f"sparse MLA requires tagged FMHA implementations, got {type(fmha_impl)!r}"
+        )
+    try:
+        return fmha_impl[tag]
+    except KeyError as error:
+        raise RuntimeError(
+            f"FMHA tag {tag!r} is missing; available tags={list(fmha_impl)}"
+        ) from error

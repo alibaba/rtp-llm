@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -7,14 +8,18 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_caches_for_tags,
+    select_fmha_impl_for_layer,
+    select_fmha_impl_for_tag,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
     DenseMLP,
     Embedding,
     FakeBalanceExpert,
-    FMHAImplBase,
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
@@ -342,8 +347,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        fmha_impl: FMHAImplBase,
-        kv_cache: Optional[LayerKVCache] = None,
+        fmha_impl: Any,
+        kv_cache: Optional[LayerKVCache] | Mapping[str, LayerKVCache] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -413,6 +418,32 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
+    def _uses_sparse_mla(self) -> bool:
+        return bool(
+            self.config.attn_config.use_mla and self.config.attn_config.is_sparse
+        )
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self._uses_sparse_mla():
+            return ["default", "indexer_kv"]
+        return None
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        if self._uses_sparse_mla():
+            attention_inputs = get_attention_inputs_value(inputs)
+            raw_tags = (
+                list(attention_inputs) if isinstance(attention_inputs, Mapping) else []
+            )
+            required_tags = {"default", "indexer_kv"}
+            if len(raw_tags) != len(required_tags) or set(raw_tags) != required_tags:
+                raise RuntimeError(
+                    "sparse MLA requires exactly attention input tags "
+                    f"{sorted(required_tags)}; available tags={raw_tags}"
+                )
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         hidden_states = self.embed_tokens(input_ids)
@@ -421,13 +452,39 @@ class GenericMoeModel(GptModelBase):
                 inputs
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
+        is_sparse_mla = self._uses_sparse_mla()
+        if is_sparse_mla:
+            required_tags = {"default", "indexer_kv"}
+            if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
+                available_tags = (
+                    list(fmha_impl) if isinstance(fmha_impl, Mapping) else []
+                )
+                raise RuntimeError(
+                    "sparse MLA requires exactly FMHA tags "
+                    f"{sorted(required_tags)}; available tags={available_tags}"
+                )
+            sparse_fmha_impl = {
+                tag: select_fmha_impl_for_tag(fmha_impl, tag)
+                for tag in ("default", "indexer_kv")
+            }
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            if is_sparse_mla:
+                layer_fmha_impl = sparse_fmha_impl
+                layer_kv_cache = get_layer_caches_for_tags(
+                    self.kv_cache, i, ("default", "indexer_kv")
+                )
+            else:
+                layer_fmha_impl = select_fmha_impl_for_layer(
+                    fmha_impl, self.kv_cache, i
+                )
+                layer_kv_cache = (
+                    self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+                )
             output = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=layer_kv_cache,
             )
             hidden_states = output.hidden_states
             residual = output.residual

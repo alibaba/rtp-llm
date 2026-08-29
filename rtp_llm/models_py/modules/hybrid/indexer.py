@@ -6,7 +6,7 @@ from torch import nn
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache
+from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
 
@@ -126,7 +126,9 @@ class Indexer(nn.Module):
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
-                q, k, cp_params.full_rope_pos_ids,
+                q,
+                k,
+                cp_params.full_rope_pos_ids,
             )
         else:
             positions = flashmla_params.positions_d
@@ -147,7 +149,7 @@ class Indexer(nn.Module):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
@@ -167,7 +169,7 @@ class Indexer(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
         cp_params: Optional[Any],
@@ -200,7 +202,7 @@ class Indexer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         q_lora: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
         use_fast_path: bool,

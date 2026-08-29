@@ -90,16 +90,17 @@ class GetTopkRaggedCPTest(TestCase):
         )
 
         num_blocks = 1
+        page_size = 64
         cache_stride = index_head_dim + (index_head_dim // block_size) * 4
-        kv_scale_base = torch.empty(
-            num_blocks,
-            block_size,
-            cache_stride,
-            dtype=torch.uint8,
-            device=device,
+        kv_cache = LayerKVCache(
+            torch.empty(
+                num_blocks,
+                page_size * cache_stride,
+                dtype=torch.uint8,
+                device=device,
+            ),
+            page_size,
         )
-        kv_cache = LayerKVCache()
-        kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
         attn_inputs.kv_cache_kernel_block_id = torch.tensor(
@@ -228,15 +229,15 @@ class GetTopkRaggedCPTest(TestCase):
         page_size = 64
         num_blocks = math.ceil(total_kv_tokens / page_size)
         cache_stride = index_head_dim + (index_head_dim // block_size) * 4
-        kv_scale_base = torch.empty(
-            num_blocks,
-            block_size,
-            cache_stride,
-            dtype=torch.uint8,
-            device=device,
+        kv_cache = LayerKVCache(
+            torch.empty(
+                num_blocks,
+                page_size * cache_stride,
+                dtype=torch.uint8,
+                device=device,
+            ),
+            page_size,
         )
-        kv_cache = LayerKVCache()
-        kv_cache.kv_scale_base = kv_scale_base
 
         attn_inputs = PyAttentionInputs()
         attn_inputs.kv_cache_kernel_block_id_device = torch.arange(

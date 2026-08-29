@@ -31,6 +31,7 @@ from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelW
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
+    DataType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
@@ -38,6 +39,7 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
+    OpaqueBlockEntryCountMode,
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
@@ -62,6 +64,47 @@ class _MultiModalModel(Protocol):
         tp_rank: int,
         device: str,
     ) -> None: ...
+
+
+def build_default_kv_cache_spec_descs(
+    model_config: ModelConfig,
+) -> list[list[KVCacheSpecDesc]]:
+    default_desc = KVCacheSpecDesc()
+    if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        default_desc.cache_type = KVCacheSpecType.MLA
+    else:
+        default_desc.cache_type = KVCacheSpecType.MHA
+    default_desc.tag = "default"
+
+    layer_descs = [default_desc]
+    if model_config.attn_config.is_sparse and model_config.attn_config.use_mla:
+        indexer_head_dim = int(model_config.attn_config.indexer_head_dim)
+        if indexer_head_dim <= 0 or indexer_head_dim % 128 != 0:
+            raise ValueError(
+                "sparse MLA indexer_head_dim must be positive and divisible by 128, "
+                f"got {indexer_head_dim}"
+            )
+
+        physical_tokens_per_block = int(model_config.attn_config.tokens_per_block)
+        if physical_tokens_per_block <= 0:
+            raise ValueError(
+                "sparse MLA tokens_per_block must be positive, "
+                f"got {physical_tokens_per_block}"
+            )
+
+        indexer_desc = KVCacheSpecDesc()
+        indexer_desc.tag = "indexer_kv"
+        indexer_desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        indexer_desc.entry_dtype = DataType.TYPE_UINT8
+        indexer_desc.entry_elems = indexer_head_dim + indexer_head_dim // 128 * 4
+        indexer_desc.entry_count_mode = (
+            OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
+        )
+        indexer_desc.compression_ratio = 1
+        layer_descs.append(indexer_desc)
+        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+
+    return [list(layer_descs) for _ in range(model_config.num_layers)]
 
 
 class BaseModel(object):
@@ -257,20 +300,9 @@ class BaseModel(object):
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         if model_config.kv_cache_spec_descs:
             return
-
-        desc = KVCacheSpecDesc()
-        if (
-            model_config.attn_config.use_mla
-            and model_config.mla_ops_type != MlaOpsType.MHA
-        ):
-            desc.cache_type = KVCacheSpecType.MLA
-        else:
-            desc.cache_type = KVCacheSpecType.MHA
-
-        desc.tag = "default"
-        model_config.kv_cache_spec_descs = [
-            [desc] for _ in range(model_config.num_layers)
-        ]
+        model_config.kv_cache_spec_descs = build_default_kv_cache_spec_descs(
+            model_config
+        )
 
     @classmethod
     def speculative_weight_alias_names(

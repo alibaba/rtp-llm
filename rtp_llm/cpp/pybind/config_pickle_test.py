@@ -141,6 +141,7 @@ class CacheConfigPickleTest(unittest.TestCase):
         desc = KVCacheSpecDesc()
         desc.tag = "pickle-policy"
         desc.cache_type = KVCacheSpecType.OPAQUE_STATE
+        desc.kernel_tokens_per_block_alignment = 128
         desc.capacity = capacity
         desc.tail = tail
         desc.cp = cp
@@ -150,6 +151,7 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertIs(type(restored), KVCacheSpecDesc)
         self.assertEqual(restored.tag, "pickle-policy")
         self.assertEqual(restored.cache_type, KVCacheSpecType.OPAQUE_STATE)
+        self.assertEqual(restored.kernel_tokens_per_block_alignment, 128)
         self.assertIs(type(restored.capacity), CacheCapacityPolicyDesc)
         self.assertIs(restored.capacity.reservable, True)
         self.assertEqual(restored.capacity.explicit_block_num, 409)

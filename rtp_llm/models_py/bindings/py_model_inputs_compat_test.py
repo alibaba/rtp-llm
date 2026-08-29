@@ -4,7 +4,12 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_layer_cache_for_tag,
+    get_layer_caches_for_tags,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_tag,
+)
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
 from rtp_llm.ops.compute_ops import (
@@ -28,6 +33,16 @@ class _RoutingCache:
         ]
 
 
+class _ConcreteRoutingCache:
+    def __init__(self, caches: list[LayerKVCache]) -> None:
+        self._caches = caches
+
+    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
+        if layer_id != 0:
+            raise RuntimeError(f"invalid layer {layer_id}")
+        return self._caches
+
+
 class PyModelInputsCompatTest(unittest.TestCase):
     def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
         default_config = HybridAttentionConfig()
@@ -43,6 +58,48 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             HybridAttentionConfig(True, True)
+
+    def test_sparse_routes_select_exact_tags_independent_of_topology_order(
+        self,
+    ) -> None:
+        default_cache = LayerKVCache(
+            torch.ones(1), 64, layer_id=0, group_id=7, tag="default"
+        )
+        indexer_cache = LayerKVCache(
+            torch.ones(1) * 2, 64, layer_id=0, group_id=3, tag="indexer_kv"
+        )
+        cache = _ConcreteRoutingCache([indexer_cache, default_cache])
+
+        self.assertIs(get_layer_cache_for_tag(cache, 0, "default"), default_cache)
+        self.assertIs(get_layer_cache_for_tag(cache, 0, "indexer_kv"), indexer_cache)
+        self.assertEqual(
+            get_layer_caches_for_tags(cache, 0, ("default", "indexer_kv")),
+            {"default": default_cache, "indexer_kv": indexer_cache},
+        )
+        routes = {"indexer_kv": object(), "default": object()}
+        self.assertIs(select_fmha_impl_for_tag(routes, "default"), routes["default"])
+        self.assertIs(
+            select_fmha_impl_for_tag(routes, "indexer_kv"), routes["indexer_kv"]
+        )
+
+    def test_sparse_routes_reject_absent_duplicate_and_wrong_tags(self) -> None:
+        absent = _ConcreteRoutingCache(
+            [LayerKVCache(torch.ones(1), 64, 0, 0, "default")]
+        )
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+            get_layer_cache_for_tag(absent, 0, "indexer_kv")
+
+        duplicate = _ConcreteRoutingCache(
+            [
+                LayerKVCache(torch.ones(1), 64, 0, 0, "indexer_kv"),
+                LayerKVCache(torch.ones(1), 64, 0, 1, "indexer_kv"),
+            ]
+        )
+        with self.assertRaisesRegex(RuntimeError, "duplicate KV cache tag"):
+            get_layer_cache_for_tag(duplicate, 0, "indexer_kv")
+
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+            select_fmha_impl_for_tag({"wrong": object()}, "indexer_kv")
 
     def test_cache_binding_stubs_match_runtime_members(self) -> None:
         stub_path = (
