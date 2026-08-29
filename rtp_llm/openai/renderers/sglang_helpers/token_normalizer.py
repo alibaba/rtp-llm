@@ -54,8 +54,15 @@ def expand_prev_window(tokenizer, output_ids: List[int], last_token_length: int)
     Returns the (possibly increased) last_token_length.
     """
     if last_token_length <= 0 or not output_ids:
-        return last_token_length
-    max_expand = min(len(output_ids), last_token_length + _MAX_UTF8_WINDOW)
+        return 0
+
+    # The previous implementation added _MAX_UTF8_WINDOW to the incoming
+    # length.  When the renderer failed to advance its consumed-token cursor,
+    # that incoming length was the whole response and this window became
+    # unbounded.  Only a short suffix can participate in one UTF-8 code point,
+    # so enforce the limit as an absolute bound.
+    last_token_length = min(last_token_length, len(output_ids), _MAX_UTF8_WINDOW)
+    max_expand = min(len(output_ids), _MAX_UTF8_WINDOW)
     while last_token_length < max_expand:
         window = output_ids[-last_token_length:]
         if "\uFFFD" not in tokenizer.decode(window):
@@ -210,7 +217,14 @@ class TokenNormalizer:
         current_absolute_index = len(prev_token_ids) + current_index
 
         # How many future tokens we can see (for MTP)
-        max_lookahead = len(new_token_ids) - current_index - 1
+        # Looking farther than the UTF-8 context window cannot improve any of
+        # the window checks below.  Keeping this bounded also prevents a single
+        # unresolved replacement character from repeatedly decoding the whole
+        # remaining response.
+        max_lookahead = min(
+            len(new_token_ids) - current_index - 1,
+            max_window_size - 1,
+        )
 
         # First, check if new tokens alone decode cleanly (no prev context needed)
         # This handles cases where prev has incomplete UTF-8 but new tokens are complete

@@ -2,13 +2,15 @@ from unittest import IsolatedAsyncioTestCase, main
 
 import torch
 
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, RoleEnum
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import _MAX_UTF8_WINDOW
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
 class Utf8BoundaryTokenizer:
@@ -28,9 +30,14 @@ class Utf8BoundaryTokenizer:
         1465: b"ek",
         303: "，".encode("utf-8"),
         1057: "一个".encode("utf-8"),
+        9999: b"\xff",  # Permanently invalid UTF-8 byte.
     }
 
+    def __init__(self):
+        self.decode_calls = []
+
     def decode(self, token_ids):
+        self.decode_calls.append(list(token_ids))
         token_bytes = b"".join(self._TOKEN_BYTES[token_id] for token_id in token_ids)
         return token_bytes.decode("utf-8", errors="replace")
 
@@ -161,6 +168,115 @@ class FrontendStreamingUtf8ReplayTest(IsolatedAsyncioTestCase):
             ],
             "X😊\n\n你DeepSeek，一个",
         )
+
+    async def test_unresolved_replacement_character_keeps_decode_window_bounded(self):
+        """An unresolved token is consumed instead of replayed forever."""
+        status = (await self.renderer._create_status_list(1, self.request))[0]
+        self.tokenizer.decode_calls.clear()
+
+        for step in range(1, 129):
+            aux_info = AuxInfo(input_len=5, output_len=step, reuse_len=0)
+            output = GenerateOutput(
+                output_ids=torch.tensor([[9999]], dtype=torch.int64),
+                finished=False,
+                aux_info=aux_info,
+            )
+            delta = await self.renderer._update_single_status(
+                status,
+                output,
+                max_new_tokens=256,
+                stop_words_str=[],
+                stop_word_slice_list=[],
+                is_streaming=True,
+            )
+
+            self.assertEqual(delta.output_str, "")
+            self.assertEqual(len(status.last_output_ids), step)
+            self.assertLessEqual(status.last_token_length, _MAX_UTF8_WINDOW)
+
+        self.assertLessEqual(
+            max(len(token_ids) for token_ids in self.tokenizer.decode_calls),
+            _MAX_UTF8_WINDOW + 1,
+        )
+
+    async def test_non_streaming_decodes_only_completed_response(self):
+        """stream=false must not decode every incremental backend callback."""
+        token_ids = [9001, 53091, 4374, 1465]
+
+        async def output_generator():
+            for index, token_id in enumerate(token_ids):
+                aux_info = AuxInfo(
+                    input_len=5,
+                    output_len=index + 1,
+                    reuse_len=0,
+                )
+                yield GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([[token_id]], dtype=torch.int64),
+                            finished=index == len(token_ids) - 1,
+                            aux_info=aux_info,
+                        )
+                    ]
+                )
+
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="你好")],
+            stream=False,
+        )
+        generate_config = GenerateConfig(is_streaming=False, max_new_tokens=100)
+        self.tokenizer.decode_calls.clear()
+
+        responses = [
+            response
+            async for response in self.renderer.render_response_stream(
+                output_generator(), request, generate_config
+            )
+        ]
+        content = "".join(
+            choice.delta.content or ""
+            for response in responses
+            for choice in response.choices
+        )
+
+        self.assertEqual(content, "XDeepSeek")
+        self.assertEqual(self.tokenizer.decode_calls, [token_ids])
+
+    async def test_non_streaming_final_decode_keeps_literal_replacement_character(self):
+        """A final U+FFFD is output data, not a renderer stop condition."""
+
+        async def output_generator():
+            yield GenerateOutputs(
+                generate_outputs=[
+                    GenerateOutput(
+                        output_ids=torch.tensor([[9999]], dtype=torch.int64),
+                        finished=True,
+                        aux_info=AuxInfo(input_len=5, output_len=1, reuse_len=0),
+                    )
+                ]
+            )
+
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="你好")],
+            stream=False,
+        )
+        self.tokenizer.decode_calls.clear()
+        responses = [
+            response
+            async for response in self.renderer.render_response_stream(
+                output_generator(),
+                request,
+                GenerateConfig(is_streaming=False, max_new_tokens=100),
+            )
+        ]
+        content = "".join(
+            choice.delta.content or ""
+            for response in responses
+            for choice in response.choices
+        )
+
+        self.assertEqual(content, "\uFFFD")
+        self.assertEqual(self.tokenizer.decode_calls, [[9999]])
 
 
 if __name__ == "__main__":

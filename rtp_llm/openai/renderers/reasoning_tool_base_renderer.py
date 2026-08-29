@@ -24,6 +24,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RendererParams,
     StreamResponseObject,
     StreamStatus,
+    ThinkStatus,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
     rtp_tools_to_sglang_tools,
@@ -368,6 +369,109 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
         return False
 
+    @staticmethod
+    def _is_generation_finished(output: GenerateOutput) -> bool:
+        """Return a scalar completion flag for bool and tensor-backed outputs."""
+        return bool(output.finished)
+
+    async def _process_complete_non_streaming_output(
+        self,
+        status: StreamStatus,
+        output: GenerateOutput,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+    ) -> OutputDelta:
+        """Decode and parse a completed non-streaming response exactly once."""
+        complete_text = self.tokenizer.decode(status.output_ids)
+
+        # Mark every token as consumed even when decode returns an empty string or
+        # U+FFFD.  A final tokenizer decode is authoritative; unlike an
+        # intermediate streaming decode, it must not be retried with an ever
+        # growing token prefix.
+        status.last_output_ids = status.output_ids
+        status.last_token_length = 0
+
+        complete_delta = await self._process_single_token_delta(
+            status,
+            complete_text,
+            output,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming=False,
+        )
+        if complete_delta is None:
+            return await self._create_empty_delta(output.aux_info)
+        complete_delta.multimodal_lengths = output.aux_info.multimodal_lengths
+        complete_delta.output_ids = status.output_ids
+        return complete_delta
+
+    @override
+    async def _flush_buffer(
+        self,
+        buffer_list: List[StreamStatus],
+        stop_words_str: List[str],
+        is_streaming: bool,
+        think_status_list: List[ThinkStatus],
+    ):
+        # Logprobs are assembled incrementally, so retain the legacy path for
+        # those requests.  Ordinary non-streaming responses are decoded once on
+        # the final backend output; this branch is also the safety net if a
+        # backend iterator ends without setting GenerateOutput.finished.
+        if is_streaming or any(buffer.request.logprobs for buffer in buffer_list):
+            return await super()._flush_buffer(
+                buffer_list,
+                stop_words_str,
+                is_streaming,
+                think_status_list,
+            )
+
+        output_items: List[OutputDelta] = []
+        for buffer, think_status in zip(buffer_list, think_status_list):
+            if buffer.output is None:
+                raise Exception("last output should not be None")
+
+            aux_info = buffer.output.aux_info
+            needs_final_decode = buffer.last_output_ids != buffer.output_ids
+            if needs_final_decode:
+                item = await self._process_complete_non_streaming_output(
+                    buffer,
+                    buffer.output,
+                    stop_words_str,
+                    [],
+                )
+            else:
+                item = await self._create_empty_delta(aux_info)
+
+            pending_output = buffer.delta_output_string
+            if not needs_final_decode and not think_status.decision_made:
+                # The completed delta has already passed through
+                # _generate_stream_response and is waiting in ThinkStatus.
+                pending_output = think_status.think_buffer + pending_output
+                think_status.decision_made = True
+                think_status.in_think_mode = False
+                think_status.think_buffer = ""
+                think_status.decision_token_ids = []
+
+            pending_output, _ = self._process_stop_words(
+                pending_output,
+                stop_words_str,
+                [],
+                False,
+                buffer,
+            )
+            if pending_output:
+                if isinstance(item.output_str, DeltaMessage):
+                    item.output_str.content = (
+                        item.output_str.content or ""
+                    ) + pending_output
+                else:
+                    item.output_str += pending_output
+            buffer.delta_output_string = ""
+            item.multimodal_lengths = aux_info.multimodal_lengths
+            output_items.append(item)
+
+        return await self._generate_stream_response(output_items, think_status_list)
+
     @override
     async def _update_single_status(
         self,
@@ -385,6 +489,24 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
+
+        # HTTP stream=false still receives incremental backend callbacks.  Do
+        # not run a cumulative tokenizer decode and parser pass for every token;
+        # wait for the final callback and process the complete response once.
+        # Logprob responses keep their incremental path because each callback's
+        # probability tensor is needed.
+        if not is_streaming and not status.request.logprobs:
+            if (
+                not self._is_generation_finished(output)
+                and status.finish_reason is None
+            ):
+                return await self._create_empty_delta(output.aux_info)
+            return await self._process_complete_non_streaming_output(
+                status,
+                output,
+                stop_words_str,
+                stop_word_slice_list,
+            )
 
         # NOTE: With multi-token stop words (e.g., tokenized from extra_stop_words),
         # `_remove_stop_word_ids()` may truncate `status.output_ids` to an earlier position
@@ -427,7 +549,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         new_token_ids = status.output_ids[len(status.last_output_ids) :]
         normalizer = TokenNormalizer(self.tokenizer)
 
-        collected_deltas, normalizer_yielded = await self._process_normalized_tokens(
+        collected_deltas, _ = await self._process_normalized_tokens(
             normalizer,
             status,
             new_token_ids,
@@ -437,12 +559,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             is_streaming,
         )
 
-        # Update last_output_ids based on what the NORMALIZER yielded, not what we emitted.
-        # If normalizer yielded content but detector buffered it (collected_deltas empty),
-        # we still consumed the tokens and should update.
-        # If normalizer didn't yield anything (buffered for \uFFFD resolution),
-        # don't update so next iteration has full context for sliding window.
-        if normalizer_yielded and new_token_ids:
+        # Token consumption and text emission are independent.  In particular,
+        # an incomplete UTF-8 decode may emit nothing, but these token IDs have
+        # still been consumed.  Retain only a bounded suffix as context for the
+        # next callback instead of replaying the entire response.
+        if new_token_ids:
             status.last_token_length = len(new_token_ids)
             status.last_output_ids = status.output_ids
             status.last_token_length = expand_prev_window(

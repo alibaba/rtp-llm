@@ -12,7 +12,11 @@ import os
 import unittest
 from unittest.mock import Mock
 
-from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import TokenNormalizer
+from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
+    _MAX_UTF8_WINDOW,
+    TokenNormalizer,
+    expand_prev_window,
+)
 
 
 class MockTokenizer:
@@ -195,6 +199,36 @@ class TestTokenNormalizer(unittest.TestCase):
         # (exact number of calls depends on implementation details)
         self.assertTrue(
             len(decode_calls) > 3, "Expected multiple decode calls for sliding window"
+        )
+
+    def test_previous_context_window_has_an_absolute_bound(self):
+        """A large incoming batch cannot turn the context suffix into full history."""
+        self.assertEqual(
+            expand_prev_window(self.tokenizer, [2] * 100, 100),
+            _MAX_UTF8_WINDOW,
+        )
+
+    def test_replacement_character_lookahead_is_bounded(self):
+        """Future-token probing must not scan an arbitrarily long response."""
+        original_decode = self.tokenizer.decode
+        decode_calls = []
+
+        def tracking_decode(token_ids):
+            decode_calls.append(list(token_ids))
+            return original_decode(token_ids)
+
+        self.tokenizer.decode = tracking_decode
+        resolved = self.normalizer._try_resolve_with_future_tokens(
+            prev_token_ids=[],
+            new_token_ids=[2] * 100,
+            current_index=0,
+            yielded_length=0,
+        )
+
+        self.assertEqual(resolved, "")
+        self.assertLessEqual(
+            len(decode_calls),
+            _MAX_UTF8_WINDOW + _MAX_UTF8_WINDOW * (_MAX_UTF8_WINDOW - 1),
         )
 
 
