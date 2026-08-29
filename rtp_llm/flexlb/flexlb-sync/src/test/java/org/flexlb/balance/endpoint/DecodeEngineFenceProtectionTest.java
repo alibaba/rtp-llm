@@ -159,17 +159,26 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(700, endpoint.realKvUsed());
 
         assertTrue(closeFence(1L));
-        // Closing the fence releases the synthetic slot and its KV hold, so the
-        // engine-facing load and KV accounting drop back to idle. The confirmed
-        // tombstone metadata for the missing request is not part of the fence,
-        // so it survives here and is only pruned by TTL eviction below.
+        // Stage-2 L5 retirement: closing the fence removes the registry
+        // entry only; the fence-held slot and KV are a projection recomputed
+        // from registry facts on the next calibration pass, so the window in
+        // between stays conservatively high (availability under-reported,
+        // never over-reported). The confirmed entry itself survives here —
+        // it is not part of the fence registration.
         assertEquals(1, confirmedCount());
+        assertEquals(1, endpoint.getTotalLoad());
+        assertEquals(9_500, endpoint.realKvAvailable());
+        assertEquals(700, endpoint.realKvUsed());
+        assertFalse(closeFence(1L));
+
+        // The next pass re-derives the projection from registry facts: no
+        // registration backs the absent confirmed entry anymore, so the
+        // absent pruning removes it and the accounting drops back to idle.
+        updateStatus(Map.of(), Map.of(), 10_000);
+        assertEquals(0, confirmedCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.realKvUsed());
-        assertFalse(closeFence(1L));
-
-        endpoint.evictExpiredRequests(-1, requestId -> false);
         assertFalse(isConfirmed(1L));
     }
 
@@ -275,9 +284,20 @@ class DecodeEngineFenceProtectionTest {
         assertFalse(isConfirmed(1L));
         assertEquals(0, confirmedCount());
         assertEquals(0, endpoint.getTotalLoad());
+        // Stage-2 L5 retirement: the settlement clears the registry entry and
+        // the confirmed slot immediately, while the fence-held KV projection
+        // drains on the next calibration pass (conservatively high window —
+        // availability is under-reported, never over-reported).
+        assertEquals(9_500, endpoint.realKvAvailable());
+        assertEquals(700, endpoint.realKvUsed());
+        assertFalse(settleTombstoned(1L),
+                "the lease handle is one-shot and must not mutate twice");
+
+        updateStatus(Map.of(), Map.of(), 10_000);
+        assertEquals(0, confirmedCount());
+        assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.realKvUsed());
-        assertFalse(settleTombstoned(1L));
     }
 
     @Test

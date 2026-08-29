@@ -89,16 +89,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *
      * <p>All map and entry mutations are serialized by {@link #admissionLock}.
      * A protection initially pins an existing shadow or confirmed owner. If a
-     * confirmed request temporarily disappears from WorkerStatus, ownership is
-     * transferred to a synthetic slot plus local KV hold until the exact fence
-     * clears or an ordinary authoritative terminal arrives. The two atomic KV
-     * totals are read lock-free by routing; they do not own entry lifecycle.
+     * confirmed request temporarily disappears from WorkerStatus, its slot
+     * and KV stay charged until the exact fence clears or an ordinary
+     * authoritative terminal arrives. Stage-2 L5 retirement: this map is a
+     * registration table; the two atomic KV totals below are a projection
+     * recomputed from registry facts on every calibration pass (absent
+     * confirmed entry + exact-match registration + no exact priority owner),
+     * never an incrementally maintained state machine. They are read
+     * lock-free by routing; they do not own entry lifecycle.
      */
     private final Map<Long, EngineFenceProtection> engineFenceProtections = new HashMap<>();
     private final AtomicLong engineFenceHeldKv = new AtomicLong();
     private final AtomicLong engineFenceHeldExpectedKv = new AtomicLong();
-    /** Number of generic synthetic slots; guarded by {@link #admissionLock}. */
-    private int engineFenceHeldSlotCount;
 
     /**
      * Reserved entries whose request is still sitting in a prefill queue —
@@ -481,7 +483,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         engineFenceProtections.clear();
         engineFenceHeldKv.set(0L);
         engineFenceHeldExpectedKv.set(0L);
-        engineFenceHeldSlotCount = 0;
 
         return retirementEvent;
     }
@@ -899,7 +900,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             lease.reservation.requestId(), lease.protection)) {
                 return;
             }
-            releaseEngineFenceSyntheticHoldLocked(lease.protection);
+            // Stage-2 L5 retirement: registry removal only — the fence-held
+            // projection is recomputed from registry facts on the next
+            // calibration pass (conservatively high in between).
             admissionVersion.incrementAndGet();
             capacityChanged = true;
         } finally {
@@ -1055,12 +1058,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     "another Engine fence owns the same reservation generation");
         }
 
-        boolean syntheticSlotRemoved = exactProtection
-                && currentProtection.syntheticHeld;
+        // Stage-2 L5 retirement: registry removal only — the fence-held
+        // projection drains with the next calibration pass (conservatively
+        // high in between).
         if (exactProtection
                 && engineFenceProtections.remove(
                         requestId, currentProtection)) {
-            releaseEngineFenceSyntheticHoldLocked(currentProtection);
             changed = true;
         }
 
@@ -1076,10 +1079,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (confirmed != null
                 && confirmed.reservationToken() == reservationToken
                 && trackedConfirmed.remove(requestId, confirmed)) {
-            if (!syntheticSlotRemoved) {
-                confirmedRunningCount = Math.max(
-                        0, confirmedRunningCount - 1);
-            }
+            confirmedRunningCount = Math.max(
+                    0, confirmedRunningCount - 1);
             changed = true;
         }
 
@@ -2157,11 +2158,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
 
-        boolean syntheticSlotRemoved = protection != null
-                && protection.syntheticHeld;
-        if (protection != null
-                && engineFenceProtections.remove(requestId, protection)) {
-            releaseEngineFenceSyntheticHoldLocked(protection);
+        // Stage-2 L5 retirement: registry removal only — the fence-held
+        // projection drains with the next calibration pass.
+        if (protection != null) {
+            engineFenceProtections.remove(requestId, protection);
         }
         // Stage-2 L8: the exact shadow carries the permit token when a
         // pre-delivery permit is still held; clear it under the same
@@ -2170,8 +2170,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (confirmed != null) {
             trackedConfirmed.remove(requestId, confirmed);
         }
-        if (claim.owner == ClaimOwner.ENGINE_CONFIRMED
-                && !syntheticSlotRemoved) {
+        if (claim.owner == ClaimOwner.ENGINE_CONFIRMED) {
             confirmedRunningCount = Math.max(0, confirmedRunningCount - 1);
         }
         if (shadow != null
@@ -2554,8 +2553,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Preserve one union accounting owner for a confirmed request that
         // temporarily vanished. Priority claims take precedence while live;
         // the generic fence takes over only when no priority owner exists.
-        // This replaces the prior removeIf traversal, so the generic protection
-        // adds no extra per-status collection or wrapper allocation.
+        // Stage-2 L5 retirement: this pass is the single projection authority
+        // for the fence-held aggregates — a vanished confirmed entry keeps
+        // its slot and KV charged only while an exact-match registry entry
+        // (and no exact priority owner) backs it. The aggregates are
+        // recomputed from those registry facts on every pass; the incremental
+        // synthetic-hold state machine is deleted.
+        long fenceHeldKv = 0L;
+        long fenceHeldExpectedKv = 0L;
+        int fenceHeldSlots = 0;
         java.util.Iterator<Map.Entry<Long, ConfirmedTask>> confirmedIt =
                 trackedConfirmed.entrySet().iterator();
         while (confirmedIt.hasNext()) {
@@ -2574,20 +2580,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
             boolean exactPriorityOwner = isPriorityAccountingOwner(priorityClaim)
                     && priorityClaim.reservationToken == confirmedReservationToken;
             if (exactPriorityOwner) {
-                if (protection != null) {
-                    releaseEngineFenceSyntheticHoldLocked(protection, true);
-                }
                 continue;
             }
             if (protection != null) {
                 protection.confirmedOwner = true;
-                ensureEngineFenceSyntheticHoldLocked(protection, true);
+                fenceHeldKv = saturatedAddNonNegative(
+                        fenceHeldKv, protection.hardKvTokens);
+                fenceHeldExpectedKv = saturatedAddNonNegative(
+                        fenceHeldExpectedKv, protection.expectedKvTokens);
+                fenceHeldSlots++;
                 continue;
             }
             confirmedIt.remove();
         }
+        engineFenceHeldKv.set(fenceHeldKv);
+        engineFenceHeldExpectedKv.set(fenceHeldExpectedKv);
         this.confirmedRunningCount = actualConfirmed + syntheticallyHeldSlots
-                + engineFenceHeldSlotCount;
+                + fenceHeldSlots;
 
         return facts;
     }
@@ -2669,83 +2678,30 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     protection, confirmed.kvTokens(), confirmed.kvTokens());
         }
         protection.confirmedOwner = true;
-        // The fresh engine report owns both slot and KV again. Any prior
-        // generic synthetic owner must disappear before the aggregate count is
-        // recomputed for this status round.
-        releaseEngineFenceSyntheticHoldLocked(protection, true);
+        // Stage-2 L5 retirement: the fresh engine report owns slot and KV
+        // again — the absent-pass projection below simply stops counting
+        // this entry (the fresh observation keeps it in actualConfirmed).
     }
 
     /**
-     * Install the generic synthetic owner without replacing an existing slot
-     * count. When {@code slotAlreadyCounted} is false this is a shadow-to-
-     * synthetic transfer, so move the slot into confirmedRunningCount before
-     * the shadow map entry is removed.
+     * Grow a conservative demand estimate for the fence registry. Stage-2 L5
+     * retirement: demand growth is registry state — the absent-pass
+     * projection picks it up whenever the held charge re-forms.
      */
-    private void ensureEngineFenceSyntheticHoldLocked(
-            EngineFenceProtection protection,
-            boolean slotAlreadyCounted) {
-        if (protection.syntheticHeld) {
-            return;
-        }
-        engineFenceHeldKv.addAndGet(protection.hardKvTokens);
-        engineFenceHeldExpectedKv.addAndGet(protection.expectedKvTokens);
-        engineFenceHeldSlotCount++;
-        protection.syntheticHeld = true;
-        if (!slotAlreadyCounted) {
-            confirmedRunningCount++;
-        }
-    }
-
-    /** Grow a conservative demand estimate without corrupting a live hold. */
     private void retainEngineFenceDemandLocked(
             EngineFenceProtection protection,
             long hardKvTokens,
             long expectedKvTokens) {
-        long previousHardKv = protection.hardKvTokens;
-        long previousExpectedKv = protection.expectedKvTokens;
         protection.retainAtLeast(hardKvTokens, expectedKvTokens);
-        if (protection.syntheticHeld) {
-            engineFenceHeldKv.addAndGet(protection.hardKvTokens - previousHardKv);
-            engineFenceHeldExpectedKv.addAndGet(
-                    protection.expectedKvTokens - previousExpectedKv);
-        }
-    }
-
-    /** Called with {@link #admissionLock} held. */
-    private void releaseEngineFenceSyntheticHoldLocked(EngineFenceProtection protection) {
-        releaseEngineFenceSyntheticHoldLocked(protection, false);
     }
 
     /**
-     * Drop a synthetic hold. Calibration passes {@code preservePublishedSlot}
-     * when a fresh engine/priority owner replaces the slot later in the same
-     * critical section; keeping the old volatile count published until the
-     * final aggregate assignment prevents lock-free routing from observing a
-     * transient zero-load gap.
+     * Registry removal only. Stage-2 L5 retirement: the fence-held aggregate
+     * is a projection recomputed on every calibration pass, so removal needs
+     * no counter upkeep (conservatively high until the next pass).
      */
-    private void releaseEngineFenceSyntheticHoldLocked(
-            EngineFenceProtection protection,
-            boolean preservePublishedSlot) {
-        if (!protection.syntheticHeld) {
-            return;
-        }
-        engineFenceHeldKv.addAndGet(-protection.hardKvTokens);
-        engineFenceHeldExpectedKv.addAndGet(-protection.expectedKvTokens);
-        engineFenceHeldSlotCount--;
-        if (!preservePublishedSlot) {
-            confirmedRunningCount = Math.max(0, confirmedRunningCount - 1);
-        }
-        protection.syntheticHeld = false;
-    }
-
-    /** Called with {@link #admissionLock} held. */
     private boolean clearEngineFenceProtectionLocked(long requestId) {
-        EngineFenceProtection protection = engineFenceProtections.remove(requestId);
-        if (protection == null) {
-            return false;
-        }
-        releaseEngineFenceSyntheticHoldLocked(protection);
-        return true;
+        return engineFenceProtections.remove(requestId) != null;
     }
 
     private static boolean isPriorityAccountingOwner(PreemptionClaim claim) {
@@ -3680,7 +3636,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private long hardKvTokens;
         private long expectedKvTokens;
         private boolean confirmedOwner;
-        private boolean syntheticHeld;
 
         private EngineFenceProtection(long reservationToken,
                                       long hardKvTokens,
