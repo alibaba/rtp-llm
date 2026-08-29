@@ -742,6 +742,10 @@ public:
         return generate_input_->generate_config->enable_disk_cache;
     }
 
+    bool enableRemoteCache() const {
+        return generate_input_->generate_config->enable_remote_cache;
+    }
+
     int64_t deadlineMs() const {
         auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
         return deadline_ms;
