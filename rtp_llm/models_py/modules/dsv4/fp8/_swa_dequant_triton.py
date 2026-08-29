@@ -635,7 +635,10 @@ def _gather_k_cache_slots_packed_kernel(
     )
     tl.store(out_row + token_data_size + scale_off, scales, mask=scale_mask)
 def gather_k_cache_slots_packed(
-    k_cache: torch.Tensor, slot_indices: torch.Tensor
+    k_cache: torch.Tensor,
+    slot_indices: torch.Tensor,
+    *,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert k_cache.dim() == 3 and k_cache.shape[-1] == ENTRY_BYTES
     assert k_cache.dtype == torch.uint8
@@ -643,7 +646,14 @@ def gather_k_cache_slots_packed(
     slots = slot_indices.reshape(-1).to(
         device=k_cache.device, dtype=torch.int64
     ).contiguous()
-    out = torch.empty((slots.numel(), ENTRY_BYTES), dtype=torch.uint8, device=k_cache.device)
+    if out is None:
+        out = torch.empty(
+            (slots.numel(), ENTRY_BYTES), dtype=torch.uint8, device=k_cache.device
+        )
+    else:
+        assert out.shape == (slots.numel(), ENTRY_BYTES)
+        assert out.dtype == torch.uint8 and out.device == k_cache.device
+        assert out.is_contiguous()
     if slots.numel() == 0:
         return out
     _gather_k_cache_slots_packed_kernel[(slots.numel(),)](

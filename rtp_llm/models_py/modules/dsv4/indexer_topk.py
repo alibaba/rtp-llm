@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 
 import torch
+from rtp_llm.models_py.utils.arch import is_sm120
 
 _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
@@ -288,7 +289,7 @@ class AutoIndexerTopKBackend(IndexerTopKBackend):
         if (
             score.is_cuda
             and score.dtype == torch.float32
-            and torch.cuda.get_device_capability(score.device)[0] >= 12
+            and is_sm120(score.device)
             and int(topk) in _PERSISTENT_TOPK_VALUES
         ):
             try:

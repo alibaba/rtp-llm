@@ -503,6 +503,6 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&       D,
     TORCH_CHECK(false,
                 "cutlass_scaled_mm_blockwise_sm120_fp8 was not compiled with "
                 "CUTLASS_ARCH_MMA_SM120_SUPPORTED. Rebuild on x86 with "
-                "--config=cuda12_9; this backend is unavailable on arm/sm_10x.");
+                "--config=cuda13_sm120; this backend is unavailable on arm/sm_10x.");
 #endif
 }

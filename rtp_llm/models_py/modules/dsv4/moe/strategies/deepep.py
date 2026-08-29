@@ -13,7 +13,7 @@ import torch
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .local_loop import LocalLoopStrategy
-from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.models_py.utils.arch import is_sm12x
 
 
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
@@ -36,7 +36,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
     def can_handle(cls, cfg: MoeCfg) -> bool:
         # The installed DeepEP binary has no SM120 cubin. Exclude it during
         # selection so an explicit ``deepep`` request fails before model load.
-        return cfg.ep_size > 1 and not is_sm120()
+        return cfg.ep_size > 1 and not is_sm12x()
 
     def setup_weights(self, layer_weights: Dict) -> None:
         self._local.setup_weights(layer_weights)

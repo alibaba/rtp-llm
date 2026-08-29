@@ -142,19 +142,20 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
     total_tokens = B * T_per_req
     K_bf16 = torch.randn(total_tokens, D, dtype=torch.bfloat16, device=device) * 0.5
     fp8_bytes, scales = _ue8m0_quantize_k(K_bf16)
-    # Round up so total_slots % block_size == 0 (DeepGEMM requirement).
-    total_slots = (total_tokens + block_size - 1) // block_size * block_size
-    num_blocks = total_slots // block_size
+    # Each request points to a disjoint block range.  A context shorter than a
+    # physical block still consumes one block per request, so size the pool
+    # from the request block table rather than the globally packed token count.
+    blocks_per_req = (T_per_req + block_size - 1) // block_size
+    num_blocks = B * blocks_per_req
     pool = _pack_132B(
         fp8_bytes,
         scales,
         num_blocks=num_blocks,
         block_size=block_size,
     )
-    pool_flat = pool.view(total_slots, INDEXER_ENTRY_BYTES)
+    pool_flat = pool.view(num_blocks * block_size, INDEXER_ENTRY_BYTES)
 
     # ── block_table: each request points to its own contiguous chunk ──
-    blocks_per_req = (T_per_req + block_size - 1) // block_size
     max_blocks = blocks_per_req
     block_table = torch.zeros(B, max_blocks, dtype=torch.int32, device=device)
     for b in range(B):

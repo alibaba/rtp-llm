@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm import start_server
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
@@ -42,6 +42,31 @@ class StartupRealWarmupTest(unittest.TestCase):
             ),
             1048568,
         )
+
+    @staticmethod
+    def _warmup_config():
+        return SimpleNamespace(
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(world_rank=0, world_size=1, tp_size=1),
+            model_args=SimpleNamespace(model_type="deepseek_v4"),
+        )
+
+    def test_startup_real_warmup_bool_env_is_strict(self):
+        config = self._warmup_config()
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertTrue(start_server._should_run_startup_real_warmup(config))
+        with patch.dict("os.environ", {"DSV4_STARTUP_REAL_WARMUP": "0"}, clear=True):
+            self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        with patch.dict("os.environ", {"DSV4_STARTUP_REAL_WARMUP": "off"}, clear=True):
+            self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        with patch.dict("os.environ", {"DSV4_STARTUP_REAL_WARMUP": "on"}, clear=True):
+            self.assertTrue(start_server._should_run_startup_real_warmup(config))
+        with patch.dict(
+            "os.environ", {"DSV4_STARTUP_REAL_WARMUP": "maybe"}, clear=True
+        ):
+            with self.assertRaises(ValueError):
+                start_server._should_run_startup_real_warmup(config)
 
 
 if __name__ == "__main__":

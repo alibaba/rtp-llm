@@ -71,46 +71,7 @@ class CompressedKPoolReader:
     ) -> None:
         raise NotImplementedError
 
-    def gather_packed(
-        self,
-        *,
-        k_cache: torch.Tensor,
-        seq_lens: torch.Tensor,
-        gather_lens: Optional[torch.Tensor],
-        block_table: torch.Tensor,
-        block_size: int,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
 class LocalPoolReader(CompressedKPoolReader):
-    def gather_packed(
-        self,
-        *,
-        k_cache: torch.Tensor,
-        seq_lens: torch.Tensor,
-        gather_lens: Optional[torch.Tensor],
-        block_table: torch.Tensor,
-        block_size: int,
-    ) -> torch.Tensor:
-        effective_lens = seq_lens if gather_lens is None else gather_lens
-        total = int(effective_lens.to(torch.int64).sum().item())
-        max_len = int(effective_lens.max().item()) if effective_lens.numel() else 0
-        padded = torch.empty(
-            (int(effective_lens.shape[0]), max_len, ENTRY_BYTES),
-            dtype=torch.uint8,
-            device=k_cache.device,
-        )
-        if max_len:
-            gather_k_cache_packed(
-                out=padded,
-                k_cache=k_cache,
-                seq_lens=seq_lens,
-                gather_lens=gather_lens,
-                block_table=block_table,
-                block_size=block_size,
-                offset=0,
-            )
-        return _pack_padded_to_flat(padded, effective_lens, total, ENTRY_BYTES)
     def fill(
         self,
         *,
@@ -259,27 +220,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
 
         # Step 4: restore to request-concatenated logical order.
         self._restore_dequant_scatter(gathered, out, seq_lens, offset)
-    def gather_packed(
-        self,
-        *,
-        k_cache: torch.Tensor,
-        seq_lens: torch.Tensor,
-        gather_lens: Optional[torch.Tensor],
-        block_table: torch.Tensor,
-        block_size: int,
-    ) -> torch.Tensor:
-        self._validate_call(block_size=block_size, gather_lens=gather_lens)
-        local_flat = self._build_local_flat(
-            k_cache=k_cache,
-            block_table=block_table,
-            block_size=block_size,
-            device=k_cache.device,
-        )
-        with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.launch"):
-            gathered = all_gather(local_flat, group=Group.TP)
-        with record_function_range("dsv4.cp.all_gather.pool_reader.gather_cmp.restore"):
-            return gathered[self.cfg.restore_indices].contiguous()
-
     def start_fill_async(
         self,
         *,

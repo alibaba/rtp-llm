@@ -43,6 +43,7 @@ class _FakeAttn:
         self._prefill_meta_shared = None
         self._kv_cache = "original_kv"
         self._block_tables_by_type = "original_bt"
+        self._cp_ctx = None
         self.freqs_bound = False
 
     def _build_shared_prefill_meta(self, x, start_pos, **kwargs):
@@ -123,6 +124,7 @@ class _FakeV4:
         self._kv_cache_sharded = False
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids = []
         # ``forward_layers`` builds the per-forward ``PrefillWorkspace`` from
         # these bind-time dims (transformer.py resolves them on the real model).
         # Tiny values keep the CPU allocation trivial; the test patches
@@ -140,6 +142,9 @@ class _FakeV4:
     def embed(self, input_ids):
         base = input_ids.to(torch.float32).unsqueeze(-1)
         return base.repeat(1, 4)
+
+    def embed_full(self, input_ids):
+        return self.embed(input_ids)
 
     def _hc_head_reduce(self, h):
         return h.mean(dim=1)

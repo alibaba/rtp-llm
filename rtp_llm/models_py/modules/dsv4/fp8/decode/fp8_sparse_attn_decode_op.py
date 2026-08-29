@@ -25,6 +25,8 @@ from typing import Any, Optional
 
 import torch
 
+from rtp_llm.models_py.utils.arch import is_sm120
+
 _FLASH_MLA_AVAILABLE = False
 try:
     if torch.version.cuda:
@@ -73,6 +75,22 @@ class SparseAttnV4DecodeFp8Op:
         self.n_heads = n_heads
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
+        self._attn_sink_fp32: Optional[torch.Tensor] = None
+        self._attn_sink_source_ptr = 0
+
+    def _cached_attn_sink(self, attn_sink: torch.Tensor) -> torch.Tensor:
+        if attn_sink.dtype == torch.float32 and attn_sink.is_contiguous():
+            return attn_sink
+        ptr = int(attn_sink.data_ptr())
+        if (
+            self._attn_sink_fp32 is not None
+            and self._attn_sink_source_ptr == ptr
+            and self._attn_sink_fp32.device == attn_sink.device
+        ):
+            return self._attn_sink_fp32
+        self._attn_sink_fp32 = attn_sink.float().contiguous()
+        self._attn_sink_source_ptr = ptr
+        return self._attn_sink_fp32
 
     def forward(
         self,
@@ -103,7 +121,7 @@ class SparseAttnV4DecodeFp8Op:
         over a second FP8 KV pool in a single FlashMLA invocation. The
         kernel merges softmax across both pools natively.
         """
-        if q.is_cuda and torch.cuda.get_device_capability(q.device)[0] == 12:
+        if q.is_cuda and is_sm120(q.device):
             return self._forward_sm120_flashinfer(
                 q,
                 kv_cache,
@@ -146,7 +164,7 @@ class SparseAttnV4DecodeFp8Op:
             canonical_topk,
             pack_logical_workspace,
             run,
-            token_lens,
+            warmup,
         )
         batch, q_len, heads, dim = q.shape
         rows = batch * q_len
@@ -160,7 +178,17 @@ class SparseAttnV4DecodeFp8Op:
         if extra_indices is not None and extra_indices.dim() == 4:
             extra_indices = extra_indices.squeeze(2)
         if extra_indices is not None:
-            extra_indices = extra_indices.reshape(rows, -1).to(torch.int32).contiguous()
+            extra_indices, extra_topk_lens = canonical_topk(
+                extra_indices.reshape(rows, -1),
+                extra_topk_length,
+                (2, 128, 512, 1024, 2048),
+            )
+        else:
+            extra_topk_lens = None
+        # CUDA graph replay cannot allocate a 128 MiB workspace.  It must be
+        # touched during eager warmup; workspace() raises if a new allocation
+        # is attempted while capture is active.
+        warmup(q.device)
         swa_decode_cache, swa_indices = pack_logical_workspace(
             kv_cache, swa_indices, page_size=64
         )
@@ -180,14 +208,10 @@ class SparseAttnV4DecodeFp8Op:
             swa_lens=swa_topk_lens,
             extra_cache=extra_decode_cache,
             extra_indices=extra_indices,
-            extra_lens=(
-                token_lens(extra_topk_length, rows, extra_indices.shape[-1], q.device)
-                if extra_indices is not None
-                else None
-            ),
+            extra_lens=extra_topk_lens,
             out=flat_out,
             scale=self.softmax_scale,
-            sinks=attn_sink.float(),
+            sinks=self._cached_attn_sink(attn_sink),
         )
         return flat_out.view_as(q)
 

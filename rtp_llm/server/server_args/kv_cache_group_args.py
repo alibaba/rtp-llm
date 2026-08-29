@@ -455,8 +455,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
         type=int,
         default=0,
-        help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
-        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+        help="DSV4 固定池参数（已废弃，仅为兼容旧配置；实际 sizing 由 descriptor 决定）。",
     )
     kv_cache_group.add_argument(
         "--dsv4_hca_state_pool_blocks",

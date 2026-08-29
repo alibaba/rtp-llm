@@ -45,6 +45,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 
 try:
     import deep_gemm as _deep_gemm
@@ -69,6 +70,12 @@ def has_fp8_mqa_logits() -> bool:
 
 _sched_cache: Optional[torch.Tensor] = None
 _num_sms_cache: int = 0
+
+# The SM120 fallback is intentionally implemented with regular torch kernels
+# (DeepGEMM has no SM120 paged-MQA cubin).  Bound the temporary K/score
+# tensors: a fully vectorized [rows, heads, max_ctx] intermediate is several
+# gigabytes for the long-context decode grids.
+_SM120_SCORE_TOKEN_CHUNK = 1024
 
 
 def _get_num_sms(device: torch.device) -> int:
@@ -95,7 +102,7 @@ def fp8_paged_indexer_score(
     downstream topk needs ``-inf`` there; default False to save the
     extra mask).
     """
-    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+    if q_fp8.is_cuda and is_sm120(q_fp8.device):
         return _fp8_paged_indexer_score_sm120(
             q_fp8, w_fold, kv_pool_uint8, block_table, context_lens,
             block_size, max_ctx_len,
@@ -144,39 +151,83 @@ def _fp8_paged_indexer_score_sm120(
 ) -> torch.Tensor:
     B, next_n, H, D = q_fp8.shape
     rows = B * next_n
+    device = q_fp8.device
+    q = q_fp8.float().reshape(rows, H, D)
+    weights = w_fold.float().reshape(rows, H)
+    lengths = context_lens.to(device=device, dtype=torch.long).reshape(-1)
+    if lengths.numel() == 0:
+        raise ValueError(f"context_lens is empty; expected {rows} entries")
+    if rows % lengths.numel() == 0 and lengths.numel() != rows:
+        lengths = lengths.repeat_interleave(rows // lengths.numel())
+    if lengths.numel() != rows:
+        raise ValueError(
+            f"context_lens has {lengths.numel()} entries; expected {rows}"
+        )
+    lengths = lengths.clamp(min=0, max=max_ctx_len)
+
+    # The physical layout is block-major K bytes followed by block-major
+    # fp32 scales, not one self-contained 132-byte token.  Address the exact
+    # token bytes directly; this avoids copying every full block and avoids
+    # host ``.item()`` synchronization for long contexts.
+    num_blocks = kv_pool_uint8.numel() // (block_size * INDEXER_ENTRY_BYTES)
+    flat_pool = kv_pool_uint8.reshape(-1)
+    block_table_rows = block_table.to(device=device, dtype=torch.long)
+    if block_table_rows.shape[0] == B:
+        block_table_rows = block_table_rows.repeat_interleave(next_n, dim=0)
+    elif block_table_rows.shape[0] != rows:
+        raise ValueError(
+            f"block_table has {block_table_rows.shape[0]} rows; expected {B} or {rows}"
+        )
+    block_stride = block_size * INDEXER_ENTRY_BYTES
+    if max_ctx_len > block_table.shape[1] * block_size:
+        raise ValueError(
+            f"max_ctx_len={max_ctx_len} exceeds block-table capacity "
+            f"{block_table.shape[1] * block_size}"
+        )
+
+    # Process a bounded number of positions at a time.  All length/mask
+    # arithmetic stays on device, so this remains graph-capture friendly while
+    # keeping the temporary [rows, heads, tokens] score tensor small.
     out = torch.full(
-        (rows, max_ctx_len), float("-inf"), dtype=torch.float32,
-        device=q_fp8.device,
+        (rows, max_ctx_len), float("-inf"), dtype=torch.float32, device=device
     )
-    q = q_fp8.float().view(rows, H, D)
-    weights = w_fold.float().view(rows, H)
-    byte_pool = kv_pool_uint8.reshape(-1, block_size * INDEXER_ENTRY_BYTES)
-    capturing = torch.cuda.is_current_stream_capturing()
-    for b in range(B):
-        for n in range(next_n):
-            row = b * next_n + n
-            length = max_ctx_len if capturing else min(
-                int(context_lens[b, n].item()), max_ctx_len
-            )
-            if length <= 0:
-                continue
-            pos = torch.arange(length, device=q_fp8.device, dtype=torch.long)
-            block_ids = block_table[b].long().index_select(
-                0, pos // block_size
-            ).clamp_min_(0)
-            block_rows = byte_pool.index_select(0, block_ids)
-            offsets = pos.remainder(block_size)
-            k_cols = offsets[:, None] * D + torch.arange(D, device=q_fp8.device)
-            k_fp8 = block_rows.gather(1, k_cols).contiguous().view(torch.float8_e4m3fn).float()
-            s_cols = block_size * D + offsets[:, None] * 4 + torch.arange(4, device=q_fp8.device)
-            k_scale = block_rows.gather(1, s_cols).contiguous().view(torch.float32).view(-1)
-            k = k_fp8 * k_scale[:, None]
-            per_head = torch.einsum("hd,td->ht", q[row], k).relu_()
-            score = torch.einsum("h,ht->t", weights[row], per_head)
-            if capturing:
-                out[row] = torch.where(pos < context_lens[b, n], score, out[row])
-            else:
-                out[row, :length] = score
+    head_offsets = torch.arange(D, device=device).view(1, 1, D)
+    scale_offsets_4 = torch.arange(4, device=device).view(1, 1, 4)
+    for start in range(0, max_ctx_len, _SM120_SCORE_TOKEN_CHUNK):
+        end = min(start + _SM120_SCORE_TOKEN_CHUNK, max_ctx_len)
+        positions = torch.arange(start, end, device=device, dtype=torch.long)
+        logical_block = positions // block_size
+        block_ids = block_table_rows.gather(
+            1, logical_block.unsqueeze(0).expand(rows, -1)
+        )
+        # Padded positions may carry -1 in the table; route those accesses to
+        # a harmless slot and mask them out below.  Valid positions are still
+        # bounded by the caller's block table and physical pool dimensions.
+        block_ids = block_ids.clamp(min=0, max=max(0, num_blocks - 1))
+        block_stride_offsets = block_ids * block_stride
+        token_offset = positions.remainder(block_size)
+        block_base = block_stride_offsets
+        k_byte_offsets = (block_base + token_offset.unsqueeze(0) * D).unsqueeze(-1)
+        k_byte_offsets = k_byte_offsets + head_offsets
+        k_bytes = flat_pool.index_select(
+            0, k_byte_offsets.reshape(-1)
+        ).view(rows, end - start, D)
+        k_fp8 = k_bytes.contiguous().view(torch.float8_e4m3fn).float()
+        scale_offsets = block_base + block_size * D + token_offset.unsqueeze(0) * 4
+        scale_offsets = scale_offsets.unsqueeze(-1) + scale_offsets_4
+        scale_bytes = flat_pool.index_select(
+            0, scale_offsets.reshape(-1)
+        ).view(rows, end - start, 4)
+        k_scale = scale_bytes.contiguous().view(torch.float32).view(rows, end - start)
+
+        per_head = torch.einsum(
+            "rhd,rtd->rht", q, k_fp8 * k_scale.unsqueeze(-1)
+        ).relu_()
+        score = torch.einsum("rh,rht->rt", weights, per_head)
+        valid = positions.unsqueeze(0) < lengths.unsqueeze(1)
+        out[:, start:end].masked_fill_(~valid, float("-inf"))
+        out[:, start:end].copy_(score)
+        out[:, start:end].masked_fill_(~valid, float("-inf"))
     return out
 # ---------------------------------------------------------------------------
 # Prefill (non-paged) wrapper around ``deep_gemm.fp8_mqa_logits``.
@@ -216,7 +267,7 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
-    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+    if q_fp8.is_cuda and is_sm120(q_fp8.device):
         from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
             v4_indexer_score,
         )

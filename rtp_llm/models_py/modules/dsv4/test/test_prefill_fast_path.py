@@ -90,6 +90,7 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids = []
         self.norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):
@@ -97,6 +98,9 @@ class _FakeV4:
 
     def embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
+
+    def embed_full(self, input_ids):
+        return self.embed(input_ids)
 
     def _hc_head_reduce(self, h):
         self.calls.append(("head_reduce", h.clone()))

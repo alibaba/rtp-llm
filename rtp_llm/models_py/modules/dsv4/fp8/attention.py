@@ -29,6 +29,7 @@ import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from rtp_llm.models_py.utils.arch import is_sm120, is_sm12x
 from deep_gemm.utils.layout import (  # noqa: E402
     get_mn_major_tma_aligned_packed_ue8m0_tensor,
 )
@@ -1966,7 +1967,9 @@ class AttentionFP8(nn.Module):
         return layer(x, out=out) if out is not None else layer(x)
 
     def _can_reuse_qkv_input_quant(self) -> bool:
-        if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 12:
+        # The shared-quant path relies on the DeepGEMM recipe, which is not
+        # available on consumer SM12x devices (not just exact SM120).
+        if torch.cuda.is_available() and is_sm12x():
             return False
         return (
             hasattr(self.wq_a, "quantize_input")
@@ -2032,7 +2035,7 @@ class AttentionFP8(nn.Module):
         ``"bhr,hdr->bhd"`` + recipe ``(1, 1, 128)`` for SM100 UE8M0)."""
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
-        if torch.cuda.get_device_capability(o_fp8.device)[0] == 12:
+        if is_sm120(o_fp8.device):
             from flashinfer.gemm import gemm_fp8_nt_groupwise
             def _ue8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
                 scale_bytes = scale.contiguous().view(torch.uint8).reshape(
@@ -3477,7 +3480,7 @@ class AttentionFP8(nn.Module):
             sm120_swa_kv = sm120_extra_kv = sm120_swa_indices = None
             sm120_swa_lens = sm120_extra_indices = sm120_extra_lens = None
             sm120_extra_page_size = None
-            if torch.cuda.get_device_capability(qkv.q.device)[0] == 12:
+            if is_sm120(qkv.q.device):
                 gather_width = wm.M - wm.N
                 sm120_extra_kv = workspace[:, : wm.N, :].contiguous().view(-1, D)
                 sm120_swa_kv = workspace[:, wm.N :, :].contiguous().view(-1, D)
@@ -4653,7 +4656,7 @@ class AttentionFP8(nn.Module):
         swa_byte_sliced = self._swa_cp_byte_sliced()
         if (
             _use_cp_cache_hit_raw_q_merge()
-            and torch.cuda.get_device_capability()[0] != 12
+            and not is_sm12x()
             and not swa_byte_sliced
             and N > 0
             and cp_ctx_local is not None
@@ -5360,7 +5363,7 @@ class AttentionFP8(nn.Module):
         assert int(freqs_cis.shape[0]) == s_q, \
             f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        use_sm120 = torch.cuda.get_device_capability(q.device)[0] == 12
+        use_sm120 = is_sm120(q.device)
         sm120_cache = None
         sm120_extra_cache = None
         if use_sm120:

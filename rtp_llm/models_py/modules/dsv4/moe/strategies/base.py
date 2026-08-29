@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import ClassVar, Dict, Optional, Type
@@ -307,6 +308,12 @@ def select_strategy(
             return sm120_cls
         deepep_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "deepep"), None)
         if deepep_cls is not None and deepep_cls.can_handle(cfg):
+            logging.warning(
+                "[DSV4 MoE] Mega/SM120 fused path unavailable; falling back to "
+                "DeepEP (layer_id=%s, ep_size=%s)",
+                cfg.layer_id,
+                cfg.ep_size,
+            )
             return deepep_cls
 
         raise RuntimeError(
