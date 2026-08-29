@@ -68,8 +68,20 @@ def build_restore_indices(cp_chunk_lengths: List[int], cp_size: int) -> torch.Te
     return torch.tensor(restore, dtype=torch.int32)
 
 
-def build_padding_mask(cp_chunk_lengths: List[int], cp_size: int) -> torch.Tensor:
-    return torch.ones(sum(cp_chunk_lengths) * cp_size, dtype=torch.int32)
+def build_padding_mask(
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    actual_new_lengths: List[int] | None = None,
+) -> torch.Tensor:
+    padded_new_lengths = [chunk_len * cp_size for chunk_len in cp_chunk_lengths]
+    if actual_new_lengths is None:
+        actual_new_lengths = padded_new_lengths
+    masks = []
+    for actual_len, padded_len in zip(actual_new_lengths, padded_new_lengths):
+        assert 0 <= actual_len <= padded_len
+        masks.append(torch.ones(actual_len, dtype=torch.int32))
+        masks.append(torch.zeros(padded_len - actual_len, dtype=torch.int32))
+    return torch.cat(masks)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +175,7 @@ def build_cp_attn_inputs(
     cp_size: int,
     tokens_per_block: int,
     prefix_lengths: List[int] | None = None,
+    actual_new_lengths: List[int] | None = None,
     device: torch.device = torch.device("cuda"),
 ) -> PyAttentionInputs:
     """Build ``PyAttentionInputs`` with properly populated CP info.
@@ -201,20 +214,24 @@ def build_cp_attn_inputs(
     inp.kv_cache_block_id_device = block_ids.to(device)
     inp.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
 
-    # new_lengths = sequence_lengths - prefix_lengths (total new tokens per batch)
-    new_lengths = [sl - pl for sl, pl in zip(sequence_lengths, prefix_lengths)]
+    # ``input_lengths`` is rank-local and therefore includes CP padding.  The
+    # runtime keeps the unpadded lengths separately for KV-cache append.
+    if actual_new_lengths is None:
+        actual_new_lengths = [
+            sl - pl for sl, pl in zip(sequence_lengths, prefix_lengths)
+        ]
 
     cp_info = PyContextParallelParams()
     cp_info.prefill_cp_chunk_lengths = torch.tensor(cp_chunk_lengths, dtype=torch.int32)
     cp_info.prefill_cp_padding_lengths = torch.zeros(batch_size, dtype=torch.int32)
-    cp_info.prefill_qkv_padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(
-        device
-    )
+    cp_info.prefill_qkv_padding_mask = build_padding_mask(
+        cp_chunk_lengths, cp_size, actual_new_lengths
+    ).to(device)
     cp_info.prefill_qkv_restore_indice = build_restore_indices(
         cp_chunk_lengths, cp_size
     ).to(device)
     cp_info.prefill_actual_input_lengths_cpu = torch.tensor(
-        new_lengths, dtype=torch.int32
+        actual_new_lengths, dtype=torch.int32
     )
     cp_info.prefill_shuffle_indices = torch.tensor([], dtype=torch.int32)
     inp.context_parallel_info = cp_info
@@ -491,18 +508,28 @@ class CPAttnTestBase(unittest.TestCase):
         kv_head_num: int = 2,
         head_dim: int = 64,
         tokens_per_block: int = 16,
+        padded_new_lengths: List[int] | None = None,
         rtol: float = 1e-2,
         atol: float = 1e-2,
     ):
         """Test CP attention **with** prefix cache.
 
         Constraints:
-          - ``new_lengths[i] % cp_size == 0``
-          - ``(new_lengths[i] // cp_size) % 2 == 0``
+          - ``padded_new_lengths[i] % cp_size == 0``
+          - ``(padded_new_lengths[i] // cp_size) % 2 == 0``
           - ``prefix_lengths[i] % tokens_per_block == 0``
+
+        ``new_lengths`` contains real tokens.  ``padded_new_lengths`` models
+        the production CP planner, which rounds each request up to
+        ``cp_size * 2`` before the zigzag split.
         """
+        if padded_new_lengths is None:
+            padded_new_lengths = new_lengths
         sequence_lengths = [p + n for p, n in zip(prefix_lengths, new_lengths)]
-        cp_chunk_lengths = [n // cp_size for n in new_lengths]
+        assert len(padded_new_lengths) == len(new_lengths)
+        assert all(n <= pn for n, pn in zip(new_lengths, padded_new_lengths))
+        assert all(pn % cp_size == 0 for pn in padded_new_lengths)
+        cp_chunk_lengths = [n // cp_size for n in padded_new_lengths]
         assert all(cl % 2 == 0 for cl in cp_chunk_lengths)
         assert all(pl % tokens_per_block == 0 for pl in prefix_lengths)
 
@@ -517,6 +544,7 @@ class CPAttnTestBase(unittest.TestCase):
 
         total_prefix = sum(prefix_lengths)
         total_new = sum(new_lengths)
+        total_padded_new = sum(padded_new_lengths)
 
         prefix_k = torch.randn(
             total_prefix,
@@ -532,28 +560,60 @@ class CPAttnTestBase(unittest.TestCase):
             dtype=torch.bfloat16,
             device=self.device,
         )
-        new_q = torch.randn(
+        new_q_real = torch.randn(
             total_new, head_num, head_dim, dtype=torch.bfloat16, device=self.device
         )
-        new_k = torch.randn(
+        new_k_real = torch.randn(
             total_new, kv_head_num, head_dim, dtype=torch.bfloat16, device=self.device
         )
-        new_v = torch.randn(
+        new_v_real = torch.randn(
             total_new, kv_head_num, head_dim, dtype=torch.bfloat16, device=self.device
         )
 
+        new_q = torch.zeros(
+            total_padded_new,
+            head_num,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        new_k = torch.zeros(
+            total_padded_new,
+            kv_head_num,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        new_v = torch.zeros_like(new_k)
+        padded_to_real = [-1] * total_padded_new
+        real_off = padded_off = 0
+        for actual_len, padded_len in zip(new_lengths, padded_new_lengths):
+            new_q[padded_off : padded_off + actual_len] = new_q_real[
+                real_off : real_off + actual_len
+            ]
+            new_k[padded_off : padded_off + actual_len] = new_k_real[
+                real_off : real_off + actual_len
+            ]
+            new_v[padded_off : padded_off + actual_len] = new_v_real[
+                real_off : real_off + actual_len
+            ]
+            for i in range(actual_len):
+                padded_to_real[padded_off + i] = real_off + i
+            real_off += actual_len
+            padded_off += padded_len
+
         ref_output = reference_prefill_with_prefix(
-            new_q,
+            new_q_real,
             prefix_k,
             prefix_v,
-            new_k,
-            new_v,
+            new_k_real,
+            new_v_real,
             new_lengths,
             prefix_lengths,
         )
 
         # Zigzag split on NEW tokens only
-        all_rank_pos = compute_rank_positions(new_lengths, cp_size)
+        all_rank_pos = compute_rank_positions(padded_new_lengths, cp_size)
         all_local_k = [
             new_k[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
@@ -583,6 +643,7 @@ class CPAttnTestBase(unittest.TestCase):
             cp_size,
             tokens_per_block,
             prefix_lengths=prefix_lengths,
+            actual_new_lengths=new_lengths,
             device=self.device,
         )
         total_blocks = sum(math.ceil(s / tokens_per_block) for s in sequence_lengths)
@@ -615,7 +676,20 @@ class CPAttnTestBase(unittest.TestCase):
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 
-        self._assert_close(output, ref_output[rank_idx], rtol=rtol, atol=atol)
+        valid_local_slots = [
+            i
+            for i, padded_pos in enumerate(all_rank_pos[cp_rank])
+            if padded_to_real[padded_pos] >= 0
+        ]
+        expected_real_positions = [
+            padded_to_real[all_rank_pos[cp_rank][i]] for i in valid_local_slots
+        ]
+        self._assert_close(
+            output[torch.tensor(valid_local_slots, device=self.device)],
+            ref_output[torch.tensor(expected_real_positions, device=self.device)],
+            rtol=rtol,
+            atol=atol,
+        )
 
         cache_k, cache_v = extract_kv_from_paged_cache(
             kv_cache, sequence_lengths, tokens_per_block
@@ -625,9 +699,9 @@ class CPAttnTestBase(unittest.TestCase):
         pk_off, nk_off = 0, 0
         for pfx_len, new_len in zip(prefix_lengths, new_lengths):
             expected_k_parts.append(prefix_k[pk_off : pk_off + pfx_len])
-            expected_k_parts.append(new_k[nk_off : nk_off + new_len])
+            expected_k_parts.append(new_k_real[nk_off : nk_off + new_len])
             expected_v_parts.append(prefix_v[pk_off : pk_off + pfx_len])
-            expected_v_parts.append(new_v[nk_off : nk_off + new_len])
+            expected_v_parts.append(new_v_real[nk_off : nk_off + new_len])
             pk_off += pfx_len
             nk_off += new_len
         expected_cache_k = torch.cat(expected_k_parts, dim=0)

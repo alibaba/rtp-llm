@@ -95,6 +95,30 @@ class TestPCPAllGatherAttnOp(CPAttnTestBase):
             tokens_per_block=16,
         )
 
+    def test_prefix_cp_padding_rank0(self):
+        self.run_with_prefix(
+            batch_size=1,
+            new_lengths=[6],
+            padded_new_lengths=[8],
+            prefix_lengths=[8],
+            cp_size=2,
+            cp_rank=0,
+            head_num=14,
+            tokens_per_block=8,
+        )
+
+    def test_prefix_cp_padding_rank1(self):
+        self.run_with_prefix(
+            batch_size=1,
+            new_lengths=[6],
+            padded_new_lengths=[8],
+            prefix_lengths=[8],
+            cp_size=2,
+            cp_rank=1,
+            head_num=14,
+            tokens_per_block=8,
+        )
+
     def test_prefix_multi_batch(self):
         self.run_with_prefix(
             batch_size=2,

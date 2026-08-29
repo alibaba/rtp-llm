@@ -62,6 +62,19 @@ public:
                               RoleType           peer_role) {
         ParallelismConfig peer_pc                     = self.pc;
         peer_pc.tp_size                               = peer_tp_size;
+        // method 是角色相关配置，不能从本端直接复制。planner 只需要它所表达的
+        // attention TP 语义：Prefill 开启 CP 时 attention cache 不按 TP 切 head，
+        // Decode 则仍按自身 TP 切 head。双方用下列规范值即可镜像还原对端布局，
+        // 无需在 P2P 协议中新增 method 字段。
+        if (peer_role == RoleType::PREFILL) {
+            peer_pc.prefill_cp_config.method = self.pc.prefill_cp_config.is_prefill_enabled() ?
+                                                   CPRotateMethod::ALL_GATHER :
+                                                   CPRotateMethod::DISABLED;
+        } else {
+            peer_pc.prefill_cp_config.method = self.pc.prefill_cp_config.is_enabled() ?
+                                                   CPRotateMethod::PREFILL_CP :
+                                                   CPRotateMethod::DISABLED;
+        }
         peer_pc.prefill_cp_config.kv_cache_sharded    = peer_kv_cache_sharded;
         peer_pc.prefill_cp_config.prefill_cp_size     = peer_kv_cache_sharded ? peer_tp_size : 0;
         peer_pc.role_type                             = peer_role;

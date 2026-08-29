@@ -76,6 +76,28 @@ torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
     return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
+zigzagHandleInputsWrapper(const std::vector<int32_t>& input_tokens, int prefix_length, int cp_rank, int cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessorTestWrapper processor(parallelism_config);
+
+    const auto i32_options = torch::TensorOptions().dtype(torch::kInt32);
+    GptModelInputs inputs;
+    inputs.combo_tokens = torch::tensor(input_tokens, i32_options);
+    inputs.input_lengths = torch::tensor(std::vector<int32_t>{static_cast<int32_t>(input_tokens.size())}, i32_options);
+    inputs.sequence_lengths = torch::empty({0}, i32_options);
+    inputs.prefix_lengths = torch::tensor(std::vector<int32_t>{prefix_length}, i32_options);
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(inputs, cp_params);
+
+    return std::make_tuple(inputs.combo_tokens.cpu().clone(),
+                           inputs.input_lengths.cpu().clone(),
+                           cp_params.prefill_shuffle_indices.cpu().clone());
+}
+
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
@@ -110,6 +132,14 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           "Compute this rank's contribution to the CP gather-last-hidden result");
+
+    m.def("handle_inputs",
+          &zigzagHandleInputsWrapper,
+          py::arg("input_tokens"),
+          py::arg("prefix_length"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run the production CP input path and return tokens, lengths, and absolute positions");
 }
 
 }  // namespace unittest

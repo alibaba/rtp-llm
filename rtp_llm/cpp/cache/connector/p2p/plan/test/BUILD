@@ -15,6 +15,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "@com_google_googletest//:gtest",
     ],
 )
