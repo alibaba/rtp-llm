@@ -342,6 +342,7 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model(
         "starcoder2", "rtp_llm.models.starcoder2", ["Starcoder2ForCausalLM"]
     )
+    register_lazy_model("mimo_v25", "rtp_llm.models.mimo_v25", ["MiMoV2ForCausalLM"])
 
 
 _register_builtin_lazy_models()

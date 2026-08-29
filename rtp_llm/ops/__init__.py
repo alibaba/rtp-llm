@@ -181,6 +181,7 @@ try:
         HybridAttentionConfig,
         HybridAttentionType,
         LinearAttentionConfig,
+        SwaAttentionConfig,
     )
     # Alias for backward compatibility
     EplbConfig = EPLBConfig

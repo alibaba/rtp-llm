@@ -14,7 +14,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
-from rtp_llm.ops import DataType, KvCacheDataType
+from rtp_llm.ops import DataType, HybridAttentionType, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
 from rtp_llm.ops import TaskType
 from rtp_llm.utils.base_model_datatypes import VitParameters
@@ -78,6 +78,7 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "attention_value_scale",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -251,6 +252,9 @@ class ModelConfig(CppModelConfig):
         # Get kv_cache_dtype from attn_config
         kv_cache_dtype_enum = self.attn_config.kv_cache_dtype
         kv_cache_bytes = 1 if kv_cache_dtype_enum == KvCacheDataType.FP8 else 2
+        hybrid_config = self.hybrid_attention_config
+        if hybrid_config.enable_hybrid_attention:
+            return self._eval_hybrid_kv_cache_mem_size(kv_cache_bytes)
         kv_cache_size = (
             2
             * self.num_layers
@@ -260,6 +264,43 @@ class ModelConfig(CppModelConfig):
             * self.max_seq_len
         )
         return kv_cache_size
+
+    def _eval_hybrid_kv_cache_mem_size(self, kv_cache_bytes: int) -> float:
+        """KV cache size for a model whose layers do not share one attention shape.
+
+        Global and sliding-window layers differ in KV head count, K and V may differ in
+        head dimension, and a windowed layer never holds more than its window, so the
+        homogeneous ``2 * num_layers * kv_head_num * size_per_head`` estimate is wrong on
+        all three counts.
+        """
+        swa_config = self.hybrid_attention_config.swa_attention_config
+        pattern = self.hybrid_attention_config.hybrid_attention_types
+        ga_layers = sum(1 for t in pattern if t != HybridAttentionType.SLIDING_WINDOW)
+        swa_layers = len(pattern) - ga_layers
+
+        k_head_size = self.attn_config.size_per_head
+        v_head_size = self.attn_config.v_size_per_head or k_head_size
+        kv_head_size = k_head_size + v_head_size
+
+        swa_kv_head_num = swa_config.swa_kv_head_num or self.attn_config.kv_head_num
+        # A windowed layer only ever keeps the last window_size tokens resident.
+        swa_tokens = (
+            min(swa_config.window_size, self.max_seq_len)
+            if swa_config.window_size > 0
+            else self.max_seq_len
+        )
+
+        ga_bytes = (
+            ga_layers
+            * self.attn_config.kv_head_num
+            * kv_head_size
+            * kv_cache_bytes
+            * self.max_seq_len
+        )
+        swa_bytes = (
+            swa_layers * swa_kv_head_num * kv_head_size * kv_cache_bytes * swa_tokens
+        )
+        return ga_bytes + swa_bytes
 
     def _eval_runtime_buffer_mem_size(self) -> float:
         """Evaluate runtime buffer memory size."""
@@ -565,6 +606,10 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+
+        # Checkpoint-provided scale applied to V before attention. None means the
+        # checkpoint does not scale V, which is the case for every model but MiMo V2.5.
+        self.attention_value_scale: Optional[float] = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.

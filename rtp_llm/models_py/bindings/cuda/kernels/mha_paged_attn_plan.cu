@@ -13,6 +13,12 @@ constexpr int kMaxBatchPerCta = 1024;
 // One CTA, batch_size threads. Per-batch metadata is staged in shared memory;
 // thread 0 does the sequential prefix-sum (batch_size <= 1024 keeps this fast
 // and graph-capture-stable); each thread then writes its own token + page slice.
+//
+// kSanitizeNullPages compiles the sliding-window variant, launched through
+// invokeSwaMhaPagedAttnPlan. Its block table is full-length but only the active tail is
+// materialized, so the older slots hold NULL_BLOCK_IDX (-1); see that entry point.
+// Two specializations rather than a runtime flag keeps the general path branch-free.
+template<bool kSanitizeNullPages>
 __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths,
                                        const int32_t* __restrict__ sequence_lengths,
                                        const int32_t* __restrict__ prefix_lengths,
@@ -88,15 +94,15 @@ __global__ void mhaPagedAttnPlanKernel(const int32_t* __restrict__ input_lengths
         if (kv_cache_block_id) {
             const int32_t* row = kv_cache_block_id + tid * max_blocks_per_bs;
             for (int j = 0; j < pages_self; ++j) {
-                page_indice[p_start + j] = row[j];
+                const int32_t page       = row[j];
+                page_indice[p_start + j] = kSanitizeNullPages && page < 0 ? 0 : page;
             }
         }
     }
 }
 
-}  // namespace
-
-void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
+template<bool kSanitizeNullPages>
+void launchMhaPagedAttnPlan(const at::Tensor& input_lengths,
                             const at::Tensor& sequence_lengths,
                             const at::Tensor& prefix_lengths,
                             const at::Tensor& kv_cache_block_id,
@@ -162,20 +168,70 @@ void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
                 "positions buffer too small");
 
     const int threads = ((batch_size + 31) / 32) * 32;  // round up to warp
-    mhaPagedAttnPlanKernel<<<1, threads, 0, stream>>>(input_lengths.data_ptr<int32_t>(),
-                                                      seq_ptr,
-                                                      prefix_ptr,
-                                                      kv_cache_block_id.data_ptr<int32_t>(),
-                                                      batch_size,
-                                                      max_blocks_per_bs,
-                                                      seq_size_per_block,
-                                                      paged_kv_last_page_len.data_ptr<int32_t>(),
-                                                      decode_page_indptr.data_ptr<int32_t>(),
-                                                      page_indice.data_ptr<int32_t>(),
-                                                      batch_indice.data_ptr<int32_t>(),
-                                                      positions.data_ptr<int32_t>());
+    mhaPagedAttnPlanKernel<kSanitizeNullPages><<<1, threads, 0, stream>>>(input_lengths.data_ptr<int32_t>(),
+                                                                          seq_ptr,
+                                                                          prefix_ptr,
+                                                                          kv_cache_block_id.data_ptr<int32_t>(),
+                                                                          batch_size,
+                                                                          max_blocks_per_bs,
+                                                                          seq_size_per_block,
+                                                                          paged_kv_last_page_len.data_ptr<int32_t>(),
+                                                                          decode_page_indptr.data_ptr<int32_t>(),
+                                                                          page_indice.data_ptr<int32_t>(),
+                                                                          batch_indice.data_ptr<int32_t>(),
+                                                                          positions.data_ptr<int32_t>());
     const auto err = cudaGetLastError();
     TORCH_CHECK(err == cudaSuccess, "mhaPagedAttnPlanKernel launch failed: ", cudaGetErrorString(err));
+}
+
+}  // namespace
+
+void invokeMhaPagedAttnPlan(const at::Tensor& input_lengths,
+                            const at::Tensor& sequence_lengths,
+                            const at::Tensor& prefix_lengths,
+                            const at::Tensor& kv_cache_block_id,
+                            int               seq_size_per_block,
+                            at::Tensor&       paged_kv_last_page_len,
+                            at::Tensor&       decode_page_indptr,
+                            at::Tensor&       page_indice,
+                            at::Tensor&       batch_indice,
+                            at::Tensor&       positions,
+                            cudaStream_t      stream) {
+    launchMhaPagedAttnPlan</*kSanitizeNullPages=*/false>(input_lengths,
+                                                         sequence_lengths,
+                                                         prefix_lengths,
+                                                         kv_cache_block_id,
+                                                         seq_size_per_block,
+                                                         paged_kv_last_page_len,
+                                                         decode_page_indptr,
+                                                         page_indice,
+                                                         batch_indice,
+                                                         positions,
+                                                         stream);
+}
+
+void invokeSwaMhaPagedAttnPlan(const at::Tensor& input_lengths,
+                               const at::Tensor& sequence_lengths,
+                               const at::Tensor& prefix_lengths,
+                               const at::Tensor& kv_cache_block_id,
+                               int               seq_size_per_block,
+                               at::Tensor&       paged_kv_last_page_len,
+                               at::Tensor&       decode_page_indptr,
+                               at::Tensor&       page_indice,
+                               at::Tensor&       batch_indice,
+                               at::Tensor&       positions,
+                               cudaStream_t      stream) {
+    launchMhaPagedAttnPlan</*kSanitizeNullPages=*/true>(input_lengths,
+                                                        sequence_lengths,
+                                                        prefix_lengths,
+                                                        kv_cache_block_id,
+                                                        seq_size_per_block,
+                                                        paged_kv_last_page_len,
+                                                        decode_page_indptr,
+                                                        page_indice,
+                                                        batch_indice,
+                                                        positions,
+                                                        stream);
 }
 
 }  // namespace rtp_llm

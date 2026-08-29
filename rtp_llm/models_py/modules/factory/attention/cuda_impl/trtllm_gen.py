@@ -6,6 +6,9 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    has_asymmetric_kv_head_dim,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.utils.arch import is_blackwell, is_sm12x
 from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
@@ -580,6 +583,8 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if has_asymmetric_kv_head_dim(attn_configs):
+            return False
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -644,7 +649,7 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        if attn_configs.use_mla:
+        if attn_configs.use_mla or has_asymmetric_kv_head_dim(attn_configs):
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -720,7 +725,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        if attn_configs.use_mla:
+        if attn_configs.use_mla or has_asymmetric_kv_head_dim(attn_configs):
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)

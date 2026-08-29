@@ -901,6 +901,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("LINEAR", HybridAttentionType::LINEAR)
         .value("SLIDING_WINDOW", HybridAttentionType::SLIDING_WINDOW);
 
+    // SwaAttentionConfig must be registered before HybridAttentionConfig, which exposes it by reference
+    pybind11::class_<SwaAttentionConfig>(m, "SwaAttentionConfig")
+        .def(pybind11::init<>())
+        .def(pybind11::init<int, int, int, double, bool>(),
+             pybind11::arg("window_size")     = 0,
+             pybind11::arg("swa_kv_head_num") = 0,
+             pybind11::arg("ga_kv_head_num")  = 0,
+             pybind11::arg("swa_rope_theta")  = 0.0,
+             pybind11::arg("add_sink_bias")   = false)
+        .def("to_string", &SwaAttentionConfig::to_string)
+        .def_readwrite("window_size", &SwaAttentionConfig::window_size)
+        .def_readwrite("swa_kv_head_num", &SwaAttentionConfig::swa_kv_head_num)
+        .def_readwrite("ga_kv_head_num", &SwaAttentionConfig::ga_kv_head_num)
+        .def_readwrite("swa_rope_theta", &SwaAttentionConfig::swa_rope_theta)
+        .def_readwrite("add_sink_bias", &SwaAttentionConfig::add_sink_bias);
+
     pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
         .def(pybind11::init<>())
         .def(pybind11::init<bool, bool, std::vector<HybridAttentionType>>(),
@@ -910,7 +926,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
         .def_readwrite("enable_independent_kv_cache_pools", &HybridAttentionConfig::enable_independent_kv_cache_pools)
-        .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
+        .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types)
+        .def_readwrite("swa_attention_config", &HybridAttentionConfig::swa_attention_config);
 
     // Register SpeculativeType enum
     py::enum_<SpeculativeType>(m, "SpeculativeType")
@@ -1665,7 +1682,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("o_groups", &AttentionConfigs::o_groups)
         .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
         .def_readwrite("sliding_window", &AttentionConfigs::sliding_window)
-        .def_readwrite("compress_rope_theta", &AttentionConfigs::compress_rope_theta);
+        .def_readwrite("compress_rope_theta", &AttentionConfigs::compress_rope_theta)
+        // MiMo fields
+        .def_readwrite("v_size_per_head", &AttentionConfigs::v_size_per_head)
+        .def_readwrite("add_sink_bias", &AttentionConfigs::add_sink_bias);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())
@@ -1787,16 +1807,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("active_tail_blocks", &CacheTailPolicyDesc::active_tail_blocks)
         .def_readwrite("validate_tail_blocks", &CacheTailPolicyDesc::validate_tail_blocks)
+        .def_readwrite("prefix_reuse_window_tokens", &CacheTailPolicyDesc::prefix_reuse_window_tokens)
         .def(py::pickle(
             [](const CacheTailPolicyDesc& self) {
-                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks);
+                return py::make_tuple(
+                    self.active_tail_blocks, self.validate_tail_blocks, self.prefix_reuse_window_tokens);
             },
             [](py::tuple t) {
                 CacheTailPolicyDesc c;
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid CacheTailPolicyDesc state!");
-                c.active_tail_blocks   = t[0].cast<std::optional<uint32_t>>();
-                c.validate_tail_blocks = t[1].cast<std::optional<bool>>();
+                c.active_tail_blocks = t[0].cast<std::optional<uint32_t>>();
+                if (t.size() == 3) {
+                    c.validate_tail_blocks       = t[1].cast<std::optional<bool>>();
+                    c.prefix_reuse_window_tokens = t[2].cast<std::optional<uint32_t>>();
+                } else {
+                    c.validate_tail_blocks = t[1].cast<std::optional<bool>>();
+                }
                 return c;
             }));
 
@@ -1840,6 +1867,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_stride_bytes_override", &KVCacheSpecDesc::block_stride_bytes_override)
         .def_readwrite("block_stride_bytes_alignment", &KVCacheSpecDesc::block_stride_bytes_alignment)
         .def_readwrite("block_stride_alignment_min_entries", &KVCacheSpecDesc::block_stride_alignment_min_entries)
+        .def_readwrite("kv_head_num_override", &KVCacheSpecDesc::kv_head_num_override)
+        .def_readwrite("v_size_per_head_override", &KVCacheSpecDesc::v_size_per_head_override)
         .def_readwrite("group_type", &KVCacheSpecDesc::group_type)
         .def_readwrite("reuse", &KVCacheSpecDesc::reuse)
         .def_readwrite("capacity", &KVCacheSpecDesc::capacity)
@@ -1862,6 +1891,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_stride_bytes_override,
                                       self.block_stride_bytes_alignment,
                                       self.block_stride_alignment_min_entries,
+                                      self.kv_head_num_override,
+                                      self.v_size_per_head_override,
                                       self.group_type,
                                       self.reuse,
                                       self.capacity,
@@ -1871,7 +1902,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1887,12 +1918,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.block_stride_bytes_override          = t[11].cast<size_t>();
                 c.block_stride_bytes_alignment         = t[12].cast<size_t>();
                 c.block_stride_alignment_min_entries   = t[13].cast<uint32_t>();
-                c.group_type                           = t[14].cast<std::optional<CacheGroupType>>();
-                c.reuse                                = t[15].cast<std::optional<CacheReusePolicyDesc>>();
-                c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
-                c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                c.kv_head_num_override                 = t[14].cast<uint32_t>();
+                c.v_size_per_head_override             = t[15].cast<uint32_t>();
+                c.group_type                           = t[16].cast<std::optional<CacheGroupType>>();
+                c.reuse                                = t[17].cast<std::optional<CacheReusePolicyDesc>>();
+                c.capacity                             = t[18].cast<std::optional<CacheCapacityPolicyDesc>>();
+                c.memory                               = t[19].cast<std::optional<CacheMemoryPolicyDesc>>();
+                c.tail                                 = t[20].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp                                   = t[21].cast<std::optional<CacheCpPolicyDesc>>();
                 return c;
             }));
 

@@ -138,7 +138,7 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
     EXPECT_EQ(layer.kv_scale_base.data_ptr(), scale.data_ptr());
 }
 
-TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
+TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearAndStateStayPhysical) {
     const auto opaque       = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 64});
     auto       opaque_group = makeGroup("opaque", KVCacheSpecType::OpaqueKV, CacheGroupType::FULL, 512, 128, 64, 0);
     torch_ext::KVCache opaque_cache(makeLayout({std::move(opaque_group)}, {"opaque"}, {{opaque, {}}}));
@@ -149,7 +149,6 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
     const auto physical = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kFloat16)).reshape({3, 64});
     for (const auto& [tag, spec_type, policy] : std::vector<std::tuple<std::string, KVCacheSpecType, CacheGroupType>>{
              {"linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR},
-             {"swa", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA},
              {"state", KVCacheSpecType::OpaqueState, CacheGroupType::FULL}}) {
         auto               group = makeGroup(tag, spec_type, policy, 8, 2, 32, 32);
         torch_ext::KVCache cache(makeLayout({std::move(group)}, {tag}, {{physical, {}}}));
@@ -158,6 +157,46 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
         EXPECT_EQ(layer.kv_cache_base.sizes().vec(), physical.sizes().vec()) << tag;
         EXPECT_EQ(layer.kv_cache_base.data_ptr(), physical.data_ptr()) << tag;
     }
+}
+
+TEST(KVCacheLayoutViewTest, SwaMhaUsesKernelView) {
+    const auto         base  = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kFloat16)).reshape({3, 64});
+    auto               group = makeGroup("swa",
+                           KVCacheSpecType::MultiHeadAttention,
+                           CacheGroupType::SWA,
+                           /*physical_seq_size=*/8,
+                           /*kernel_seq_size=*/2,
+                           /*k_elems=*/32,
+                           /*v_elems=*/32);
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"swa"}, {{base, {}}}));
+
+    const auto layer = cache.getLayerCache(0);
+    EXPECT_EQ(layer.seq_size_per_block, 2);
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 1, 2, 4}));
+    EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
+}
+
+TEST(KVCacheLayoutViewTest, SwaMhaBuildsAsymmetricKvViews) {
+    const auto         base  = torch::arange(3 * 96, torch::TensorOptions().dtype(torch::kFloat16)).reshape({3, 96});
+    auto               group = makeGroup("swa",
+                           KVCacheSpecType::MultiHeadAttention,
+                           CacheGroupType::SWA,
+                           /*physical_seq_size=*/8,
+                           /*kernel_seq_size=*/8,
+                           /*k_elems=*/64,
+                           /*v_elems=*/32,
+                           /*local_kv_heads=*/2);
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"swa"}, {{base, {}}}));
+
+    const auto layer = cache.getLayerCache(0);
+    EXPECT_EQ(layer.seq_size_per_block, 8);
+    EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{3, 2, 8, 6}));
+    EXPECT_EQ(layer.k_cache.sizes().vec(), (std::vector<int64_t>{3, 2, 8, 4}));
+    EXPECT_EQ(layer.v_cache.sizes().vec(), (std::vector<int64_t>{3, 2, 8, 2}));
+    EXPECT_EQ(layer.k_cache.strides().vec(), (std::vector<int64_t>{96, 48, 6, 1}));
+    EXPECT_EQ(layer.v_cache.strides().vec(), layer.k_cache.strides().vec());
+    EXPECT_EQ(layer.k_cache.storage_offset(), 0);
+    EXPECT_EQ(layer.v_cache.storage_offset(), 4);
 }
 
 TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder) {

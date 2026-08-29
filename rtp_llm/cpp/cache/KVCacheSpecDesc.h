@@ -43,6 +43,7 @@ struct CacheMemoryPolicyDesc {
 struct CacheTailPolicyDesc {
     std::optional<uint32_t> active_tail_blocks;
     std::optional<bool>     validate_tail_blocks;
+    std::optional<uint32_t> prefix_reuse_window_tokens;
 };
 
 struct CacheCpPolicyDesc {
@@ -71,6 +72,14 @@ struct KVCacheSpecDesc {
     size_t   block_stride_bytes_override        = 0;
     size_t   block_stride_bytes_alignment       = 0;
     uint32_t block_stride_alignment_min_entries = 0;
+
+    // MHA geometry overrides; 0 means "take it from SpecBuildContext.attn_config".
+    // attn_config carries one global head count and one head dimension, which is not
+    // enough for models whose layer kinds disagree. MiMo V2.5 needs both: 4 KV heads on
+    // its global-attention layers versus 8 on its sliding-window layers, and V head dim
+    // 128 against QK 192.
+    uint32_t kv_head_num_override     = 0;
+    uint32_t v_size_per_head_override = 0;
 
     std::optional<CacheGroupType>          group_type;
     std::optional<CacheReusePolicyDesc>    reuse;

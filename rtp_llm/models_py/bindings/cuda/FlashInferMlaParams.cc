@@ -622,7 +622,8 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                                                   torch::Tensor t_input_lengths,
                                                   torch::Tensor t_kv_cache_block_id_device,
                                                   int           seq_size_per_block,
-                                                  bool          forbid_realloc) {
+                                                  bool          forbid_realloc,
+                                                  bool          is_sliding_window) {
     RTP_LLM_CHECK_WITH_INFO(t_input_lengths.defined() && t_input_lengths.dim() == 1,
                             "fillParamsMhaDevice: input_lengths must be a 1-D tensor");
     const int batch_size = t_input_lengths.size(0);
@@ -662,17 +663,18 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                      forbid_realloc);
 
     cudaStream_t stream = GET_CURRENT_STREAM();
-    invokeMhaPagedAttnPlan(t_input_lengths_dev,
-                           t_sequence_lengths_dev,
-                           t_prefix_lengths_dev,
-                           t_block_id_dev,
-                           seq_size_per_block,
-                           paged_kv_last_page_len_d,
-                           decode_page_indptr_d,
-                           page_indice_d,
-                           batch_indice_d,
-                           positions_d,
-                           stream);
+    const auto   plan   = is_sliding_window ? invokeSwaMhaPagedAttnPlan : invokeMhaPagedAttnPlan;
+    plan(t_input_lengths_dev,
+         t_sequence_lengths_dev,
+         t_prefix_lengths_dev,
+         t_block_id_dev,
+         seq_size_per_block,
+         paged_kv_last_page_len_d,
+         decode_page_indptr_d,
+         page_indice_d,
+         batch_indice_d,
+         positions_d,
+         stream);
 
     // FlashInfer uses paged_kv_last_page_len/decode_page_indptr sizes;
     // page_indice may stay oversized. Consumers narrow batch_indice/positions
@@ -729,21 +731,24 @@ void registerPyFlashInferMlaParams(pybind11::module& m) {
                torch::Tensor                     input_lengths,
                torch::Tensor                     kv_cache_block_id_device,
                int                               seq_size_per_block,
-               bool                              forbid_realloc) {
+               bool                              forbid_realloc,
+               bool                              is_sliding_window) {
                 self.fillParamsMhaDevice(prefix_lengths,
                                          sequence_lengths,
                                          input_lengths,
                                          kv_cache_block_id_device,
                                          seq_size_per_block,
-                                         forbid_realloc);
+                                         forbid_realloc,
+                                         is_sliding_window);
             },
             pybind11::arg("prefix_lengths"),
             pybind11::arg("sequence_lengths"),
             pybind11::arg("input_lengths"),
             pybind11::arg("kv_cache_block_id_device"),
             pybind11::arg("seq_size_per_block"),
-            pybind11::arg("forbid_realloc") = false,
-            "MHA-only device-resident planner — fills decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a single CUDA kernel, leaving MLA-only fields untouched")
+            pybind11::arg("forbid_realloc")    = false,
+            pybind11::arg("is_sliding_window") = false,
+            "MHA-only device-resident planner — fills decode_page_indptr_d / paged_kv_last_page_len_d / page_indice_d via a single CUDA kernel, leaving MLA-only fields untouched. Set is_sliding_window for a windowed cache group, whose block table carries NULL slots outside the active tail")
         // HOST tensors (_h suffix)
         .def_readonly("batch_indice_h", &FlashInferMlaAttnParams::batch_indice_h, "Batch indices on HOST")
         .def_readonly("page_indice_h", &FlashInferMlaAttnParams::page_indice_h, "Page indices on HOST")
