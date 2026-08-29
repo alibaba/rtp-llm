@@ -37,6 +37,34 @@ class LinearCacheConverter:
         self.conv_state_size_bytes = self.conv_state_size * self.conv_state_item_size
         self.block_size_bytes = self.ssm_state_size_bytes + self.conv_state_size_bytes
 
+    def cache_store_segment_sizes(self) -> tuple[int, ...]:
+        """Return contiguous [SSM, history*(Q, K, V)] source segments."""
+
+        value_size = self.local_num_v_heads * self.head_v_dim
+        qk_size = self.qkv_size - value_size
+        if qk_size <= 0 or qk_size % 2:
+            raise ValueError(
+                f"linear Q/K width cannot be derived from qkv_size={self.qkv_size} "
+                f"and value_size={value_size}"
+            )
+        q_size = qk_size // 2
+        conv_item_size = self.conv_state_item_size
+        history_segments = (
+            q_size * conv_item_size,
+            q_size * conv_item_size,
+            value_size * conv_item_size,
+        )
+        segments = (
+            self.ssm_state_size_bytes,
+            *(history_segments * (self.linear_conv_kernel_dim - 1)),
+        )
+        if sum(segments) != self.block_size_bytes:
+            raise ValueError(
+                "linear cache-store segments do not cover the physical block: "
+                f"segments={sum(segments)} block={self.block_size_bytes}"
+            )
+        return segments
+
     @staticmethod
     def dtype_size_bytes(dtype: torch.dtype) -> int:
         try:

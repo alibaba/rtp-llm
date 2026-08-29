@@ -181,6 +181,9 @@ struct KvCacheInfo {
     torch::Tensor kv_cache_buffer;
     // Optional scale buffer for kv cache quantization (int8/fp8). If set, it should match kv_cache_buffer layout.
     torch::Tensor kv_scale_buffer;
+    // Source segments are published under distinct keys and scattered into
+    // non-contiguous destination head slices.
+    std::vector<size_t> linear_cache_segment_sizes;
 };
 
 struct CacheStoreInputs {

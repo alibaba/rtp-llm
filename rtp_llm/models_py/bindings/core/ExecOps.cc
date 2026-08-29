@@ -22,6 +22,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
@@ -395,7 +396,37 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
             // its FP8 physical block is striped as DATA then SCALES, so CP
             // slices must store those two regions independently.
-            if (is_swa_cp_slice) {
+            if (!kv_cache.linear_cache_segment_sizes.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(!has_kv_scale, "segmented linear cache-store does not support a scale buffer");
+                size_t segment_offset = 0;
+                for (size_t segment_id = 0; segment_id < kv_cache.linear_cache_segment_sizes.size(); ++segment_id) {
+                    const size_t segment_size = kv_cache.linear_cache_segment_sizes[segment_id];
+                    RTP_LLM_CHECK_WITH_INFO(
+                        segment_size > 0, "linear cache-store segment %zu has zero size", segment_id);
+                    RTP_LLM_CHECK_WITH_INFO(segment_offset + segment_size <= param.kv_block_stride_bytes,
+                                            "linear cache-store segment %zu range [%zu, %zu) exceeds block size %zu",
+                                            segment_id,
+                                            segment_offset,
+                                            segment_offset + segment_size,
+                                            param.kv_block_stride_bytes);
+                    RTP_LLM_CHECK_WITH_INFO(segment_size <= std::numeric_limits<uint32_t>::max(),
+                                            "linear cache-store segment %zu is too large: %zu",
+                                            segment_id,
+                                            segment_size);
+                    void* segment_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + segment_offset);
+                    std::shared_ptr<void> segment_block_addr(kv_cache_owner, segment_addr);
+                    request_blocks->addBlock(makeLinearCacheSegmentKey(segment_id, cache_key),
+                                             segment_block_addr,
+                                             static_cast<uint32_t>(segment_size),
+                                             kv_gpu_mem,
+                                             true);
+                    segment_offset += segment_size;
+                }
+                RTP_LLM_CHECK_WITH_INFO(segment_offset <= param.kv_block_stride_bytes,
+                                        "linear cache-store segments cover %zu bytes, exceed block size %zu",
+                                        segment_offset,
+                                        param.kv_block_stride_bytes);
+            } else if (is_swa_cp_slice) {
                 constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
                 constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
                 const size_t          local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;

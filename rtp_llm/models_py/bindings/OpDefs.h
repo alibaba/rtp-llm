@@ -24,13 +24,19 @@ namespace torch_ext {
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
-    torch::Tensor              kv_cache_base;
-    torch::Tensor              kv_scale_base;
-    int                        seq_size_per_block = 0;
-    int                        layer_id           = -1;
-    int                        group_id           = -1;
-    int                        physical_group_id  = -1;
-    rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
+    torch::Tensor kv_cache_base;
+    torch::Tensor kv_scale_base;
+    // Contiguous source segments matching destination linear head slices.
+    // Empty selects the existing opaque/MHA cache-store path.
+    std::vector<size_t> cache_store_segment_sizes;
+    // True when dim(0) indexes kernel pages rather than physical cache
+    // blocks. CacheStore must only merge rows for this explicit layout.
+    bool                       cache_store_tensor_is_kernel_block_view = false;
+    int                        seq_size_per_block                      = 0;
+    int                        layer_id                                = -1;
+    int                        group_id                                = -1;
+    int                        physical_group_id                       = -1;
+    rtp_llm::KVCacheRegionName region_name                             = rtp_llm::KVCacheRegionName::DEFAULT;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -108,6 +114,7 @@ struct KVCache {
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)(kv_lora_rank + rope_head_dim)});
+                    layer_cache.cache_store_tensor_is_kernel_block_view = kernel_blocks_per_kv_block > 1;
                 } else if (num_kv_heads > 0 && head_dim > 0) {
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
                     layer_cache.kv_cache_base = base.reshape({kernel_block_num,
@@ -115,6 +122,7 @@ struct KVCache {
                                                               (int64_t)num_kv_heads,
                                                               (int64_t)kernel_seq_size_per_block,
                                                               (int64_t)head_dim});
+                    layer_cache.cache_store_tensor_is_kernel_block_view = kernel_blocks_per_kv_block > 1;
                 } else {
                     layer_cache.kv_cache_base = base;
                 }
@@ -123,6 +131,7 @@ struct KVCache {
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
                 layer_cache.kv_cache_base =
                     base.reshape({kernel_block_num, (int64_t)kernel_seq_size_per_block, base.size(2)});
+                layer_cache.cache_store_tensor_is_kernel_block_view = true;
             } else {
                 layer_cache.kv_cache_base = base;
             }

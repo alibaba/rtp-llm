@@ -176,6 +176,12 @@ class LayerKVCache:
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None: ...
     @property
+    def cache_store_segment_sizes(self) -> list[int]:
+        """Contiguous source segments for asymmetric-TP linear cache transfer."""
+
+    @cache_store_segment_sizes.setter
+    def cache_store_segment_sizes(self, arg0: list[int]) -> None: ...
+    @property
     def layer_id(self) -> int:
         """
         Global layer id

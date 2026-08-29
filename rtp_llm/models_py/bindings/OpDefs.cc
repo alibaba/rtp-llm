@@ -24,6 +24,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def(pybind11::init<>())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
+        .def_readwrite("cache_store_segment_sizes",
+                       &LayerKVCache::cache_store_segment_sizes,
+                       "Contiguous source segments for asymmetric-TP linear cache transfer")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
         .def_readonly("group_id", &LayerKVCache::group_id, "Model-local KV cache group id")

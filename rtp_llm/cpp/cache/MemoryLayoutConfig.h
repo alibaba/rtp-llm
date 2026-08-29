@@ -33,6 +33,17 @@ struct MemoryLayoutConfig {
 
     bool is_mla  = false;  // true for scale 3D layout (MLA or indexer)
     bool use_mla = false;  // true for KV 3D layout (concat_and_cache_mla path only)
+    // Linear-cache blocks use [SSM heads][history][Q | K | V heads].
+    // Asymmetric-TP PD transfer therefore needs one SSM segment plus three
+    // segments per convolution-history entry.
+    bool   is_linear_attention        = false;
+    bool   enable_linear_cache_partition = false;
+    size_t linear_num_k_heads         = 0;
+    size_t linear_num_v_heads         = 0;
+    size_t linear_conv_history        = 0;
+    size_t linear_q_bytes_per_history = 0;
+    size_t linear_k_bytes_per_history = 0;
+    size_t linear_v_bytes_per_history = 0;
     // TODO(xinfei.sxf) rm head info
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;

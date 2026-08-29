@@ -65,7 +65,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             const size_t store_tokens = captured_cache_store.tokens_per_block;
             RTP_LLM_CHECK_WITH_INFO(store_tokens > 0, "cache-store tokens_per_block must be positive");
 
-            if (store_tokens >= layer_tokens) {
+            if (captured_kv_cache.cache_store_tensor_is_kernel_block_view && store_tokens >= layer_tokens) {
                 RTP_LLM_CHECK_WITH_INFO(
                     store_tokens % layer_tokens == 0,
                     "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
@@ -74,6 +74,12 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                     layer_tokens,
                     name);
                 return row_stride_bytes * (store_tokens / layer_tokens);
+            }
+
+            if (store_tokens >= layer_tokens) {
+                // Raw Linear/KDA and independent-pool tensors already expose
+                // one physical cache block per row.
+                return row_stride_bytes;
             }
 
             // CP compact STATE/SWA rows can cover cp_size canonical cache-key
@@ -98,9 +104,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 resolve_store_stride(captured_kv_cache.kv_scale_base, kv_scale_stride_bytes, "scale");
         }
 
-        const size_t layer_tokens_per_block = static_cast<size_t>(captured_kv_cache.seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
-                                "LayerKVCache.seq_size_per_block must be positive for cache-store write");
+        const size_t store_tokens_per_block = captured_cache_store.tokens_per_block;
+        RTP_LLM_CHECK_WITH_INFO(store_tokens_per_block > 0, "cache-store physical tokens_per_block must be positive");
 
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
@@ -113,7 +118,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
-                                layer_tokens_per_block,
+                                store_tokens_per_block,
                                 kv_block_stride_bytes,
                                 kv_scale_stride_bytes,
                                 captured_cache_store.pd_separation,
@@ -133,6 +138,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.numel() > 0) ?
                 captured_kv_cache.kv_scale_base :
                 torch::Tensor();
+        kv_cache_info.linear_cache_segment_sizes = captured_kv_cache.cache_store_segment_sizes;
         execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store);
     };
 

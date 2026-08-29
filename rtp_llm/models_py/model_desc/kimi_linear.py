@@ -150,6 +150,9 @@ class KimiLinearKDABase(nn.Module):
             qkv_size=self.qkv_size,
             conv_state_dtype=self.conv_state_dtype,
         )
+        self.cache_store_segment_sizes = (
+            self.linear_cache_converter.cache_store_segment_sizes()
+        )
         # weights
         self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
         self.dt_bias = weights[W.linear_attn_dt_b_kda]
@@ -353,6 +356,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             attn_inputs,
         )
         if kv_cache is not None:
+            kv_cache.cache_store_segment_sizes = list(self.cache_store_segment_sizes)
             compute_ops.write_cache_store(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,

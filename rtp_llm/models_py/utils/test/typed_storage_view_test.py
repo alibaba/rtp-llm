@@ -100,6 +100,21 @@ class LinearCacheConverterTest(TestCase):
             converter.block_size_bytes, ssm_state_size_bytes + conv_state_size_bytes
         )
         self.assertEqual(converter.get_block_size_bytes(base), block_size_bytes)
+        conv_item_size = LinearCacheConverter.dtype_size_bytes(torch.bfloat16)
+        q_size = (qkv_size - local_num_v_heads * head_v_dim) // 2
+        expected_segments = (
+            ssm_state_size_bytes,
+            *(
+                (
+                    q_size * conv_item_size,
+                    q_size * conv_item_size,
+                    local_num_v_heads * head_v_dim * conv_item_size,
+                )
+                * (linear_conv_kernel_dim - 1)
+            ),
+        )
+        self.assertEqual(converter.cache_store_segment_sizes(), expected_segments)
+        self.assertEqual(sum(expected_segments), converter.block_size_bytes)
 
         ssm_view = converter.get_ssm_state_tensor(base)
         conv_view = converter.get_conv_state_tensor(base)
