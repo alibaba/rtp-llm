@@ -4031,12 +4031,41 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return true;
         }
         RequestInflight candidate = inflightRequests.get(requestId);
-        if (candidate == null
-                || !candidate.masterQueued()
-                // Stage-2 L8: the entry token is the permit authority; the
-                // volatile read keeps this predicate lock-free and weakly
-                // consistent, exactly like the former map lookup.
-                || candidate.dispatchPermitToken() != 0L) {
+        if (candidate == null) {
+            return true;
+        }
+        // Stage-2 T7 S2 (channel B): the queued / permit sub-state
+        // reads switch to the slot-side authority. A null view (no
+        // ACTIVE slot, no authority, or a fence mismatch from a
+        // projection-lag window) wakes the waiter for the typed
+        // authoritative result — the same "torn snapshot" tolerance
+        // the former entry-flag read had. The slot monitor taken
+        // inside never nests the admissionLock, and the queue-condition
+        // caller lock is not part of the admission lock order, so this
+        // stays lock-cycle free. The capacity formula keeps reading the
+        // entry's immutable identity numerics (kvTokens /
+        // expectedKvTokens) and the L1 aggregate counters until S2b.
+        boolean queued;
+        boolean permitHeld;
+        if (authorityPort == null) {
+            // No authority host wired (endpoint built without a port
+            // sink): the layer-1 entry mirror is the only fact source.
+            queued = candidate.masterQueued();
+            permitHeld = candidate.dispatchPermitToken() != 0L;
+        } else {
+            DecodePlacementAuthorityPort.DecodeAdmissionEntry authority =
+                    authorityPort.decodeAdmissionView(
+                            requestId,
+                            this,
+                            getStatus().getGenerationId(),
+                            candidate.reservationToken());
+            if (authority == null) {
+                return true;
+            }
+            queued = authority.masterQueued();
+            permitHeld = authority.dispatchPermitToken() != 0L;
+        }
+        if (!queued || permitHeld) {
             return true;
         }
         WorkerStatus.CommittedWorkerStatus committed =

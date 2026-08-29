@@ -114,6 +114,37 @@ public interface DecodePlacementAuthorityPort {
             long requestId,
             Projection projection);
 
+    /**
+     * Stage-2 T7 S2 read-source switch (channel B): query the slot-side
+     * decode-admission authority for one exact reservation fence.
+     *
+     * <p>Returns the authority's current sub-state snapshot (the three
+     * bits) when an ACTIVE slot hosts the exact fence, or {@code null}
+     * when no current ACTIVE slot hosts the request, the slot hosts no
+     * authority, or the fence does not match (a newer reservation or a
+     * projection-lag window). Callers treat {@code null} as "no
+     * authority fact for this fence" and fall back to their own
+     * tolerance policy; endpoints constructed without a port host keep
+     * reading the layer-1 entry mirror as the only fact source.
+     *
+     * <p>Lock discipline: the implementation takes only the slot
+     * monitor — never the endpoint admissionLock — so callers holding
+     * non-admission locks (e.g. a queue-condition lock) may call this
+     * without introducing a lock cycle.
+     *
+     * @param requestId          exact request identity
+     * @param endpoint           endpoint identity of the fence
+     * @param endpointGeneration endpoint generation of the fence
+     * @param reservationToken   reservation token of the fence
+     * @return the authority sub-state snapshot, or null when this exact
+     *         fence has no slot-side authority
+     */
+    DecodeAdmissionEntry decodeAdmissionView(
+            long requestId,
+            DecodeEndpoint endpoint,
+            long endpointGeneration,
+            long reservationToken);
+
     /** One admission transaction; runs inside the wrapper's slot tick. */
     @FunctionalInterface
     interface AdmissionFlipBody<T> {

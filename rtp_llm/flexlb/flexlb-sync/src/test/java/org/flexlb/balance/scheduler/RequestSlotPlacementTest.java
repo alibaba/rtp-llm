@@ -356,6 +356,134 @@ class RequestSlotPlacementTest {
         }
     }
 
+    // ==================== stage-2 T7 S2: channel-B authority view ====================
+
+    @Test
+    void channelBViewReturnsTheExactFenceSubState() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint other = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 341L, 15L);
+        Registered registered =
+                registerItem(341L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             341L, registered.future())) {
+            assertNotNull(admission);
+            lifecycle.executeUnderDecodeAdmission(
+                    341L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 15L, 16L, 24L, 50, true),
+                    () -> null,
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(15L, true, 0L, false));
+
+            // The exact fence resolves to the authority sub-state
+            // snapshot (the read-source switch's channel B).
+            DecodePlacementAuthorityPort.DecodeAdmissionEntry view =
+                    lifecycle.decodeAdmissionView(341L, decode, 7L, 15L);
+            assertNotNull(view);
+            assertEquals(15L, view.reservationToken());
+            assertTrue(view.masterQueued());
+            assertEquals(0L, view.dispatchPermitToken());
+            assertFalse(view.engineLifecycleOwned());
+
+            // Every fence mismatch — wrong token, wrong generation,
+            // wrong endpoint — is "no authority fact" (null).
+            assertNull(lifecycle.decodeAdmissionView(
+                    341L, decode, 7L, 999L));
+            assertNull(lifecycle.decodeAdmissionView(
+                    341L, decode, 8L, 15L));
+            assertNull(lifecycle.decodeAdmissionView(
+                    341L, other, 7L, 15L));
+            // A request without a slot is likewise no authority fact.
+            assertNull(lifecycle.decodeAdmissionView(
+                    999L, decode, 7L, 15L));
+        }
+    }
+
+    @Test
+    void channelBViewFollowsAuthorityFlips() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 351L, 16L);
+        Registered registered =
+                registerItem(351L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             351L, registered.future())) {
+            assertNotNull(admission);
+            lifecycle.executeUnderDecodeAdmission(
+                    351L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 16L, 16L, 24L, 50, true),
+                    () -> null,
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(16L, true, 0L, false));
+
+            // The permit flip: queued → permit held (the post-commit
+            // delivery class of the dispatch-permit acquisition).
+            lifecycle.deliverDecodeAdmissionAfterCommit(
+                    351L,
+                    DecodePlacementAuthorityPort.Projection.flip(
+                            decode, 7L, 16L, false, 5L, false));
+            DecodePlacementAuthorityPort.DecodeAdmissionEntry view =
+                    lifecycle.decodeAdmissionView(351L, decode, 7L, 16L);
+            assertNotNull(view);
+            assertFalse(view.masterQueued());
+            assertEquals(5L, view.dispatchPermitToken());
+
+            // The engine-lifecycle transfer: the queued bit stays off
+            // and the lifecycle-owned bit turns on.
+            lifecycle.deliverDecodeAdmissionAfterCommit(
+                    351L,
+                    DecodePlacementAuthorityPort.Projection.flip(
+                            decode, 7L, 16L, false, 0L, true));
+            view = lifecycle.decodeAdmissionView(351L, decode, 7L, 16L);
+            assertNotNull(view);
+            assertFalse(view.masterQueued());
+            assertTrue(view.engineLifecycleOwned());
+        }
+    }
+
+    @Test
+    void channelBViewEndsWithTheSlotLifecycle() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 361L, 17L);
+        Registered registered =
+                registerItem(361L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             361L, registered.future())) {
+            assertNotNull(admission);
+            lifecycle.executeUnderDecodeAdmission(
+                    361L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 17L, 16L, 24L, 50, true),
+                    () -> lifecycle.commitInflight(
+                            registered.item(), false, () -> true),
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(17L, true, 0L, false));
+            assertNotNull(lifecycle.decodeAdmissionView(
+                    361L, decode, 7L, 17L));
+
+            // The decode-accepted death path terminalizes the slot —
+            // the channel-B view ends with the slot lifecycle (an
+            // absent ACTIVE slot is "no authority fact").
+            RequestSlot slot = lifecycle.requestSlot(361L);
+            synchronized (slot) {
+                assertTrue(slot.markDecodeAccepted()
+                        .acceptedBeforeCancel());
+            }
+            assertNull(lifecycle.decodeAdmissionView(
+                    361L, decode, 7L, 17L));
+        }
+    }
+
     private boolean bind(Registered registered) {
         try (RequestLifecycleCoordinator.AdmissionScope admission =
                      lifecycle.beginAdmission(

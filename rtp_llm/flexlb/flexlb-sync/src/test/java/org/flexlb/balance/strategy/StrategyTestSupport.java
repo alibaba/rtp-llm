@@ -212,6 +212,19 @@ final class StrategyTestSupport {
                 DecodePlacementAuthorityPort.Projection projection) {
         }
 
+        // Stage-2 T7 S2: no slot-side authority is hosted here, so the
+        // channel-B view is consistently empty (callers fall back to
+        // their own tolerance policy).
+        @Override
+        public DecodePlacementAuthorityPort.DecodeAdmissionEntry
+        decodeAdmissionView(
+                long requestId,
+                DecodeEndpoint endpoint,
+                long endpointGeneration,
+                long reservationToken) {
+            return null;
+        }
+
         @Override
         public <T> Optional<T> prepareIfOwned(
                 DeliveryItem exactItem, Supplier<T> preparation) {

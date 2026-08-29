@@ -2251,6 +2251,47 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         }
     }
 
+    /**
+     * Stage-2 T7 S2 (channel B): slot-side authority query for the
+     * read-source switch. Takes only the slot monitor — never the
+     * endpoint admissionLock — so queue-condition callers introduce no
+     * lock cycle. A fence mismatch, a missing authority, or a
+     * non-ACTIVE slot all return null; the caller decides what "no
+     * authority fact" means for its predicate.
+     */
+    @Override
+    public DecodePlacementAuthorityPort.DecodeAdmissionEntry
+    decodeAdmissionView(
+            long requestId,
+            DecodeEndpoint endpoint,
+            long endpointGeneration,
+            long reservationToken) {
+        RequestSlot slot = requestSlot(requestId);
+        if (slot == null) {
+            return null;
+        }
+        synchronized (slot) {
+            if (!slot.ownsActiveGeneration()) {
+                return null;
+            }
+            RequestSlot.SlotDecodeAdmission authority =
+                    slot.decodeAdmissionAuthorityView();
+            if (authority == null
+                    || authority.endpoint() != endpoint
+                    || authority.endpointGeneration() != endpointGeneration
+                    || authority.reservationToken()
+                            != reservationToken) {
+                return null;
+            }
+            return new DecodePlacementAuthorityPort
+                    .DecodeAdmissionEntry(
+                    authority.reservationToken(),
+                    authority.masterQueued(),
+                    authority.dispatchPermitToken(),
+                    authority.engineLifecycleOwned());
+        }
+    }
+
     // ==================== Internal: resource rollback ====================
 
     /** Rollback using endpoint references already held by the item (no registry lookup). */
