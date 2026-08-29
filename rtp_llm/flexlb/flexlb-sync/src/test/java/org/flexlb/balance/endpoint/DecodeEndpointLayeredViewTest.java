@@ -150,10 +150,9 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void evictExpiredRequests_boundsPriorityCanceledTombstones() throws InterruptedException {
+    void lateObservationAfterPriorityCancelReinstallsAnOwnerlessShadow() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
-        long version = endpoint.admissionVersion();
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 128, 136, 70));
@@ -163,15 +162,19 @@ class DecodeEndpointLayeredViewTest {
                 101L, reservations.get(1L)));
         assertTrue(endpoint.commitPriorityPreemption(101L));
 
-        // A delayed Decode report cannot resurrect a recently canceled victim.
-        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
-        assertFalse(isConfirmed(1L));
-
-        Thread.sleep(5);
-        endpoint.evictExpiredRequests(1, requestId -> false);
+        // Stage-2 L6 retirement: there is no settled-tombstone layer to
+        // reject a delayed Decode report any more. The late running
+        // observation re-installs an ownerless confirmed shadow (reservation
+        // token 0 — the exact-handle reduction refuses it, so no
+        // worker-status fact reaches the scheduler) that the next
+        // absent-pruning pass removes once the observation disappears:
+        // engine fact, projected, then pruned.
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
         assertTrue(isConfirmed(1L),
-                "the cancel fence follows the configured terminal retention TTL");
+                "the late observation re-installs the ownerless shadow");
+        updateStatus(Map.of(), Map.of(), 10_000);
+        assertFalse(isConfirmed(1L),
+                "absent pruning removes the ownerless shadow");
     }
 
     @Test
@@ -191,10 +194,16 @@ class DecodeEndpointLayeredViewTest {
         assertFalse(isConfirmed(1L));
         assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
         assertEquals(1, endpoint.getTotalLoad());
-        // The same late Decode sample rejected by typed-CANCELED fencing must
-        // also be rejected after the stronger absent+tombstone proof.
+        // Stage-2 L6 retirement: the late Decode sample no longer meets a
+        // settled-tombstone layer. It re-installs an ownerless confirmed
+        // shadow (reservation token 0, refused by the exact-handle
+        // reduction) that the next absent-pruning pass removes.
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
-        assertFalse(isConfirmed(1L));
+        assertTrue(isConfirmed(1L),
+                "the late sample re-installs the ownerless shadow");
+        updateStatus(Map.of(), Map.of(), 10_000);
+        assertFalse(isConfirmed(1L),
+                "absent pruning removes the ownerless shadow");
     }
 
     // ==================== accounting invariants unchanged (iron rule 5) ====================

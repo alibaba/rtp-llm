@@ -101,21 +101,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private int engineFenceHeldSlotCount;
 
     /**
-     * Request-id fence against stale WorkerStatus resurrecting any
-     * authoritatively settled request: requestId -> settlement time.
-     *
-     * <p>Only generations settled through a priority/generic EngineFence or an
-     * explicit Engine TOMBSTONED proof publish into this registry. Ordinary
-     * WorkerStatus completion needs no retained fence: status calibration is
-     * serialized, and retaining every completion would make this map grow with
-     * request throughput rather than with the small number of ambiguous
-     * generations. The endpoint inflight TTL bounds retained fence lifetime;
-     * request ids must not be reused inside that reconciliation window because
-     * WorkerStatus does not carry a dispatch generation.
-     */
-    private final Map<Long, Long> settledTombstones = new HashMap<>();
-
-    /**
      * Reserved entries whose request is still sitting in a prefill queue —
      * committed by the scheduler but not yet dispatched to the engine (N2,
      * plan-commit redesign). These reservations keep protecting KV against
@@ -498,7 +483,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         engineFenceHeldExpectedKv.set(0L);
         engineFenceHeldSlotCount = 0;
 
-        settledTombstones.clear();
         return retirementEvent;
     }
 
@@ -750,9 +734,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
                     -shadow.expectedKvTokens());
-            if (!hasAnyRequestOwnerLocked(requestId)) {
-                rememberSettledLocked(requestId, System.currentTimeMillis());
-            }
             admissionVersion.incrementAndGet();
             released = true;
         } finally {
@@ -919,10 +900,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return;
             }
             releaseEngineFenceSyntheticHoldLocked(lease.protection);
-            if (!hasAnyRequestOwnerLocked(lease.reservation.requestId())) {
-                rememberSettledLocked(
-                        lease.reservation.requestId(), System.currentTimeMillis());
-            }
             admissionVersion.incrementAndGet();
             capacityChanged = true;
         } finally {
@@ -953,8 +930,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean capacityChanged = false;
         admissionLock.lock();
         try {
-            boolean changed = settleAuthoritativeTerminalLocked(
-                    proof, System.currentTimeMillis());
+            boolean changed = settleAuthoritativeTerminalLocked(proof);
             if (changed) {
                 admissionVersion.incrementAndGet();
             }
@@ -1034,8 +1010,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                 reservation,
                                 null,
                                 AuthoritativeTerminalOwner.DISPATCH_REJECTION);
-                capacityChanged = settleAuthoritativeTerminalLocked(
-                        proof, System.currentTimeMillis());
+                capacityChanged = settleAuthoritativeTerminalLocked(proof);
                 if (capacityChanged) {
                     admissionVersion.incrementAndGet();
                 }
@@ -1052,8 +1027,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private boolean settleAuthoritativeTerminalLocked(
-            AuthoritativeTerminalProof proof,
-            long settledAtMs) {
+            AuthoritativeTerminalProof proof) {
         ReservationHandle reservation = proof.reservation;
         long requestId = reservation.requestId();
         long reservationToken = reservation.reservationToken();
@@ -1122,13 +1096,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         changed = removeEngineLifecycleReservationExactLocked(
                 reservationToken) || changed;
 
-        if (!hasAnyRequestOwnerLocked(requestId)
-                && (proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
-                    || proof.owner
-                        == AuthoritativeTerminalOwner.DISPATCH_REJECTION
-                    || exactProtection)) {
-            changed = rememberSettledLocked(requestId, settledAtMs) || changed;
-        }
+        // Stage-2 L6 retirement: the settled-tombstone registry is deleted;
+        // nothing remains to remember here after the exact owners clear.
 
         if (hasExactOwnerLocked(reservation)) {
             throw terminalInvariant(reservation,
@@ -1203,12 +1172,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * WorkerStatus identifies work only by request id. Reuse is therefore
-     * forbidden while this endpoint generation still owns that id or retains
-     * an ambiguity tombstone for it.
+     * forbidden while this endpoint generation still owns that id.  Stage-2
+     * L6 retirement: the ambiguity-tombstone registry is deleted —
+     * cross-generation reuse fencing is the scheduler slot table's
+     * putIfAbsent (the unified tombstone, plan 3.2) plus the Engine fence
+     * protections; an untracked late WorkerStatus observation finds no exact
+     * owner and produces no fact.
      */
     private boolean requestIdAvailableForReservationLocked(long requestId) {
-        if (hasAnyRequestOwnerLocked(requestId)
-                || settledTombstones.containsKey(requestId)) {
+        if (hasAnyRequestOwnerLocked(requestId)) {
             return false;
         }
         for (EndpointPreemptionAttempt attempt : preemptionAttempts.values()) {
@@ -1420,10 +1392,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *
      * <p>Pure addition: this view changes no layer semantics and never
      * mutates state.  <b>Capture consistency contract (stage-1 fix D1,
-     * rebase-round hardening):</b> the five HashMap-backed layers (L2 count,
-     * L4 claims, L4b attempt incoming, L5 protections, L6 tombstones) are
+     * rebase-round hardening):</b> the four HashMap-backed layers (L2 count,
+     * L4 claims, L4b attempt incoming, L5 protections — the L6 tombstone
+     * registry is deleted by the stage-2 L6 retirement) are
      * copied inside one short admission-lock critical section —
-     * O(|claims|+|protections|+|tombstones|), never O(|L1|) — while the
+     * O(|claims|+|protections|), never O(|L1|) — while the
      * concurrent-container layers (L1 inflight, L3 confirmed) are copied
      * lock-free right after it, and the L7 queued / L8 permit projections
      * derive from the entry sub-state on that same inflight snapshot
@@ -1472,7 +1445,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         final Set<Long> claimRequestIds;
         final Set<Long> attemptIncomingRequestIds;
         final Set<Long> fenceProtectedRequestIds;
-        final Set<Long> settledRequestIds;
         admissionLock.lock();
         try {
             version = admissionVersion.get();
@@ -1501,7 +1473,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             attemptIncomingRequestIds = Set.copyOf(attemptIncoming);
             fenceProtectedRequestIds =
                     Set.copyOf(engineFenceProtections.keySet());
-            settledRequestIds = Set.copyOf(settledTombstones.keySet());
         } finally {
             admissionLock.unlock();
         }
@@ -1538,7 +1509,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 claimRequestIds,
                 attemptIncomingRequestIds,
                 fenceProtectedRequestIds,
-                settledRequestIds,
                 Set.copyOf(queuedProjection),
                 Set.copyOf(permitProjection),
                 inflightKvReservedTotal.get(),
@@ -1592,8 +1562,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       {@code preemptionAttemptIncomingRequestIds} — preemption
      *       protocol ownership (slot PreemptionRegistration domain).</li>
      *   <li>L5 {@code engineFenceProtections} — engine fence registrations.</li>
-     *   <li>L6 {@code settledTombstones} — settled request tombstones
-     *       (retention window).</li>
+     *   <li>L6 settled request tombstones — Stage-2 retirement complete: the
+     *       layer-6 registry is deleted; request-id reuse fencing is the
+     *       scheduler slot table's putIfAbsent (the unified tombstone,
+     *       plan 3.2) plus the Engine fence protections.</li>
      *   <li>L7 queued sub-state — the entry-level {@code masterQueued}
      *       flag on each L1 entry (stage-2 retirement complete: the
      *       separate layer-7 set storage is deleted; this view's
@@ -1612,7 +1584,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *
      * <p><b>Capture certification (stage-2 L7 fix):</b> the Phase-1
      * components (version, lifecycle count, the three queued counters, the
-     * three permit counters, the four HashMap-backed key sets) and the
+     * three permit counters, the three HashMap-backed key sets) and the
      * Phase-2 components (inflight map, confirmed tokens, entry-derived
      * queued projection, entry-derived permit projection, inflight KV
      * totals) are mutually consistent only when the seqlock version
@@ -1632,7 +1604,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             Set<Long> preemptionClaimRequestIds,
             Set<Long> preemptionAttemptIncomingRequestIds,
             Set<Long> engineFenceProtectedRequestIds,
-            Set<Long> settledTombstoneRequestIds,
             Set<Long> queuedPhaseRequestIds,
             Set<Long> engineDispatchPermitRequestIds,
             long inflightKvReservedTotal,
@@ -1658,7 +1629,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     preemptionClaimRequestIds,
                     preemptionAttemptIncomingRequestIds,
                     engineFenceProtectedRequestIds,
-                    settledTombstoneRequestIds,
                     queuedPhaseRequestIds,
                     engineDispatchPermitRequestIds,
                     inflightKvReservedTotal,
@@ -2218,7 +2188,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (attempt != null) {
             attempt.remainingVictims.remove(requestId, reservation);
         }
-        rememberSettledLocked(requestId, System.currentTimeMillis());
         admissionVersion.incrementAndGet();
         return true;
     }
@@ -2358,8 +2327,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                 this,
                                 reservation,
                                 null,
-                                AuthoritativeTerminalOwner.WORKER_STATUS),
-                        System.currentTimeMillis());
+                                AuthoritativeTerminalOwner.WORKER_STATUS));
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
             }
@@ -2487,9 +2455,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 : engine.runningTaskList().values()) {
             TaskPhase phase = task.phase();
             long requestId = task.requestId();
+            // Stage-2 L6 retirement: a late running observation of an
+            // already-settled generation re-installs an ownerless confirmed
+            // entry (token 0 — workerStatusHandleLocked refuses it, so no
+            // fact is emitted) that the next absent-pruning pass removes;
+            // confirmedRunningCount is recomputed from actualConfirmed every
+            // pass, so the counter cannot drift.
             if ((phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING)
-                    && !terminalNow.contains(requestId)
-                    && !settledTombstones.containsKey(requestId)) {
+                    && !terminalNow.contains(requestId)) {
                 actualConfirmed++;
                 RequestInflight removed = inflightRequests.remove(requestId);
                 engineLifecycleReservations.remove(removed);
@@ -2531,9 +2504,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         for (WorkerStatus.TaskObservation task
                 : finishedTasks.values()) {
             long requestId = task.requestId();
-            if (settledTombstones.containsKey(requestId)) {
-                continue;
-            }
             ReservationHandle terminal = workerStatusHandleLocked(requestId);
             confirmedNow.remove(requestId);
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -2565,7 +2535,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             null,
                             AuthoritativeTerminalOwner.WORKER_STATUS);
             if (proof != null) {
-                settleAuthoritativeTerminalLocked(proof, now);
+                settleAuthoritativeTerminalLocked(proof);
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
             }
@@ -2615,9 +2585,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 continue;
             }
             confirmedIt.remove();
-            if (!hasAnyRequestOwnerLocked(requestId)) {
-                rememberSettledLocked(requestId, now);
-            }
         }
         this.confirmedRunningCount = actualConfirmed + syntheticallyHeldSlots
                 + engineFenceHeldSlotCount;
@@ -2677,11 +2644,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } else {
             tracked.refresh(layer, now);
         }
-    }
-
-    /** Publish one non-refreshing terminal fence while admissionLock is held. */
-    private boolean rememberSettledLocked(long requestId, long settledAtMs) {
-        return settledTombstones.putIfAbsent(requestId, settledAtMs) == null;
     }
 
     /** Called with {@link #admissionLock} held after a fresh active observation. */
@@ -3028,10 +2990,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 confirmedRunningCount = Math.max(
                         0, confirmedRunningCount - trackedPurged);
             }
-            boolean settledTombstonesPurged = settledTombstones.entrySet()
-                    .removeIf(entry -> entry.getValue() < cutoff);
             if (evicted > 0 || permitsRemoved > 0
-                    || trackedPurged > 0 || settledTombstonesPurged) {
+                    || trackedPurged > 0) {
                 admissionVersion.incrementAndGet();
             }
             capacityChanged = evicted > 0 || permitsRemoved > 0 || trackedPurged > 0;

@@ -90,7 +90,7 @@ class LedgerReconciliationHarnessTest {
         enqueueActive(registered.item());
 
         stubDecodeView(decode, auditView(
-                cleanARoadway(reservation), Map.of(), Set.of()));
+                cleanARoadway(reservation), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -119,7 +119,7 @@ class LedgerReconciliationHarnessTest {
                 inflightEntry(16L, 24L, 3, 77L));
         Map<Long, Long> confirmed = new HashMap<>();
         confirmed.put(REQUEST_ID, 77L);
-        stubDecodeView(decode, auditView(inflight, confirmed, Set.of()));
+        stubDecodeView(decode, auditView(inflight, confirmed));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -143,7 +143,7 @@ class LedgerReconciliationHarnessTest {
         assertTrue(bind(registered));
 
         stubDecodeView(decode,
-                auditView(Map.of(), Map.of(), Set.of()));
+                auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -169,7 +169,7 @@ class LedgerReconciliationHarnessTest {
         Map<Long, RequestInflight> inflight = new HashMap<>();
         inflight.put(REQUEST_ID, inflightEntry(16L, 24L, 3, 999L));
         stubDecodeView(decode,
-                auditView(inflight, Map.of(), Set.of()));
+                auditView(inflight, Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -195,7 +195,7 @@ class LedgerReconciliationHarnessTest {
         Map<Long, RequestInflight> inflight = new HashMap<>();
         inflight.put(REQUEST_ID, inflightEntry(555L, 24L, 3, 77L));
         stubDecodeView(decode,
-                auditView(inflight, Map.of(), Set.of()));
+                auditView(inflight, Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -223,7 +223,7 @@ class LedgerReconciliationHarnessTest {
         }
 
         stubDecodeView(decode,
-                auditView(Map.of(), Map.of(), Set.of()));
+                auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -249,7 +249,7 @@ class LedgerReconciliationHarnessTest {
         Map<Long, Long> confirmed = new HashMap<>();
         confirmed.put(REQUEST_ID, 77L);
         stubDecodeView(decode,
-                auditView(Map.of(), confirmed, Set.of()));
+                auditView(Map.of(), confirmed));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -296,7 +296,7 @@ class LedgerReconciliationHarnessTest {
         }
 
         stubDecodeView(decode,
-                auditView(Map.of(), Map.of(), Set.of()));
+                auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -322,15 +322,14 @@ class LedgerReconciliationHarnessTest {
                 REQUEST_ID, 16L, 24L, 3, reservation, decode);
         assertTrue(bind(registered));
 
-        // Stage-2 L6 source switch: the settled-tombstone layer signal is
-        // retired as a rule input — an ACTIVE slot whose engine layers are
-        // all empty is a structural double miss even when the endpoint's
-        // settled layer still holds the id.  The real pipeline's
+        // Stage-2 L6 source switch and retirement: the settled-tombstone
+        // layer is deleted — an ACTIVE slot whose engine layers are all
+        // empty is a structural double miss.  The real pipeline's
         // settle→terminalize handoff is synchronous inside one status pump
         // (onEndpointEvent), so the µs-scale window this stub freezes never
         // climbs the confirm window in the soak / E2E gates.
         stubDecodeView(decode,
-                auditView(Map.of(), Map.of(), Set.of(REQUEST_ID)));
+                auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -353,7 +352,7 @@ class LedgerReconciliationHarnessTest {
                 context(601L, 8L, 0), 0L, null, decode);
         enqueueActive(orphan);
         // Empty decode ledger: the orphan lives only in the prefill queue.
-        stubDecodeView(decode, auditView(Map.of(), Map.of(), Set.of()));
+        stubDecodeView(decode, auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -371,7 +370,7 @@ class LedgerReconciliationHarnessTest {
     @Test
     void realDiffNeedsConsecutivePassesUnderAConfirmWindow() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        stubDecodeView(decode, auditView(Map.of(), Map.of(), Set.of()));
+        stubDecodeView(decode, auditView(Map.of(), Map.of()));
         BatchItem orphan = buildItem(context(602L, 8L, 0), 0L, null, decode);
         enqueueActive(orphan);
 
@@ -400,7 +399,7 @@ class LedgerReconciliationHarnessTest {
     @Test
     void confirmWindowResetsWhenTheCandidateDisappears() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        stubDecodeView(decode, auditView(Map.of(), Map.of(), Set.of()));
+        stubDecodeView(decode, auditView(Map.of(), Map.of()));
         BatchItem orphan = buildItem(context(603L, 8L, 0), 0L, null, decode);
         enqueueActive(orphan);
 
@@ -450,7 +449,7 @@ class LedgerReconciliationHarnessTest {
 
         Map<Long, RequestInflight> inflight = new HashMap<>();
         inflight.put(REQUEST_ID, inflightEntry(16L, 24L, 3, 77L));
-        stubDecodeView(decode, auditView(inflight, Map.of(), Set.of()));
+        stubDecodeView(decode, auditView(inflight, Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -483,7 +482,7 @@ class LedgerReconciliationHarnessTest {
         assertTrue(bind(registered));
 
         stubDecodeView(successor,
-                auditView(Map.of(), Map.of(), Set.of()));
+                auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(successor), List.of(registry), null);
@@ -526,7 +525,7 @@ class LedgerReconciliationHarnessTest {
         }
 
         stubDecodeView(successor,
-                auditView(Map.of(), Map.of(), Set.of()));
+                auditView(Map.of(), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(successor), List.of(registry), null);
@@ -559,7 +558,7 @@ class LedgerReconciliationHarnessTest {
                 REQUEST_ID, 77L, 9001L, "rule-test claim").isPresent());
 
         stubDecodeView(decode, auditView(
-                cleanARoadway(reservation), Map.of(), Set.of()));
+                cleanARoadway(reservation), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -592,7 +591,7 @@ class LedgerReconciliationHarnessTest {
         }
 
         stubDecodeView(decode, auditView(
-                cleanARoadway(reservation), Map.of(), Set.of()));
+                cleanARoadway(reservation), Map.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -618,7 +617,7 @@ class LedgerReconciliationHarnessTest {
         // Layer-4 holds a priority claim on a slot that carries no
         // preemption registration — no single-interleave legal window.
         stubDecodeView(decode, auditView(
-                cleanARoadway(reservation), Map.of(), Set.of(),
+                cleanARoadway(reservation), Map.of(),
                 Set.of(REQUEST_ID), Set.of(), Set.of(), Set.of(), Set.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
@@ -646,7 +645,7 @@ class LedgerReconciliationHarnessTest {
         // Layer-5 holds a fence protection on a slot with neither fence
         // nor preemption registration.
         stubDecodeView(decode, auditView(
-                cleanARoadway(reservation), Map.of(), Set.of(),
+                cleanARoadway(reservation), Map.of(),
                 Set.of(), Set.of(), Set.of(REQUEST_ID), Set.of(), Set.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
@@ -668,7 +667,7 @@ class LedgerReconciliationHarnessTest {
         // Engine-internal invariant, view-only construction: a layer-4b
         // attempt-incoming reservation with no layer-1 shadow backing.
         stubDecodeView(decode, auditView(
-                Map.of(), Map.of(), Set.of(),
+                Map.of(), Map.of(),
                 Set.of(), Set.of(701L), Set.of(), Set.of(), Set.of()));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
@@ -699,7 +698,7 @@ class LedgerReconciliationHarnessTest {
         assertTrue(queuedEntry.enterMasterQueued());
         inflight.put(702L, queuedEntry);
         stubDecodeView(decode, auditView(
-                inflight, Map.of(), Set.of(),
+                inflight, Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(702L), Set.of(),
                 2, 16L, 24L));
 
@@ -734,7 +733,7 @@ class LedgerReconciliationHarnessTest {
         assertTrue(queuedEntry.enterMasterQueued());
         inflight.put(704L, queuedEntry);
         stubDecodeView(decode, auditView(
-                inflight, Map.of(), Set.of(),
+                inflight, Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(704L), Set.of(),
                 2, 16L, 24L, false));
 
@@ -763,7 +762,7 @@ class LedgerReconciliationHarnessTest {
         // split (permit cleared later than the queued flag is legal, but
         // queued cleared while the permit lives is not).
         stubDecodeView(decode, auditView(
-                Map.of(), Map.of(), Set.of(),
+                Map.of(), Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(), Set.of(703L)));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
@@ -792,7 +791,7 @@ class LedgerReconciliationHarnessTest {
         assertTrue(permitHolder.installDispatchPermitToken(9L));
         inflight.put(705L, permitHolder);
         stubDecodeView(decode, auditView(
-                inflight, Map.of(), Set.of(),
+                inflight, Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(705L), Set.of(705L),
                 1, 16L, 24L,
                 2, 16L, 24L, true));
@@ -828,7 +827,7 @@ class LedgerReconciliationHarnessTest {
         assertTrue(permitHolder.installDispatchPermitToken(9L));
         inflight.put(706L, permitHolder);
         stubDecodeView(decode, auditView(
-                inflight, Map.of(), Set.of(),
+                inflight, Map.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(706L), Set.of(706L),
                 1, 16L, 24L,
                 2, 16L, 24L, false));
@@ -868,11 +867,13 @@ class LedgerReconciliationHarnessTest {
                 token);
     }
 
+    // Stage-2 L6 retirement: the settled-tombstone layer is deleted from
+    // the endpoint audit view; the factory chain no longer carries a
+    // settled-tombstones argument.
     private static DecodeLedgerAuditView auditView(
             Map<Long, RequestInflight> inflight,
-            Map<Long, Long> confirmed,
-            Set<Long> settledTombstones) {
-        return auditView(inflight, confirmed, settledTombstones,
+            Map<Long, Long> confirmed) {
+        return auditView(inflight, confirmed,
                 Set.of(), Set.of(), Set.of(), Set.of(), Set.of());
     }
 
@@ -880,7 +881,6 @@ class LedgerReconciliationHarnessTest {
     private static DecodeLedgerAuditView auditView(
             Map<Long, RequestInflight> inflight,
             Map<Long, Long> confirmed,
-            Set<Long> settledTombstones,
             Set<Long> preemptionClaims,
             Set<Long> preemptionAttemptIncoming,
             Set<Long> fenceProtected,
@@ -888,7 +888,7 @@ class LedgerReconciliationHarnessTest {
             Set<Long> dispatchPermits) {
         // Stage-2 L7: aggregate counters default to the empty projection;
         // queued-state tests pass the drift values explicitly.
-        return auditView(inflight, confirmed, settledTombstones,
+        return auditView(inflight, confirmed,
                 preemptionClaims, preemptionAttemptIncoming, fenceProtected,
                 queuedPhase, dispatchPermits, 0, 0L, 0L);
     }
@@ -897,7 +897,6 @@ class LedgerReconciliationHarnessTest {
     private static DecodeLedgerAuditView auditView(
             Map<Long, RequestInflight> inflight,
             Map<Long, Long> confirmed,
-            Set<Long> settledTombstones,
             Set<Long> preemptionClaims,
             Set<Long> preemptionAttemptIncoming,
             Set<Long> fenceProtected,
@@ -906,7 +905,7 @@ class LedgerReconciliationHarnessTest {
             int queuedPhaseCount,
             long queuedKvReservedTotal,
             long queuedExpectedKvReservedTotal) {
-        return auditView(inflight, confirmed, settledTombstones,
+        return auditView(inflight, confirmed,
                 preemptionClaims, preemptionAttemptIncoming, fenceProtected,
                 queuedPhase, dispatchPermits, queuedPhaseCount,
                 queuedKvReservedTotal, queuedExpectedKvReservedTotal, true);
@@ -920,7 +919,6 @@ class LedgerReconciliationHarnessTest {
     private static DecodeLedgerAuditView auditView(
             Map<Long, RequestInflight> inflight,
             Map<Long, Long> confirmed,
-            Set<Long> settledTombstones,
             Set<Long> preemptionClaims,
             Set<Long> preemptionAttemptIncoming,
             Set<Long> fenceProtected,
@@ -930,7 +928,7 @@ class LedgerReconciliationHarnessTest {
             long queuedKvReservedTotal,
             long queuedExpectedKvReservedTotal,
             boolean certified) {
-        return auditView(inflight, confirmed, settledTombstones,
+        return auditView(inflight, confirmed,
                 preemptionClaims, preemptionAttemptIncoming, fenceProtected,
                 queuedPhase, dispatchPermits, queuedPhaseCount,
                 queuedKvReservedTotal, queuedExpectedKvReservedTotal,
@@ -941,7 +939,6 @@ class LedgerReconciliationHarnessTest {
     private static DecodeLedgerAuditView auditView(
             Map<Long, RequestInflight> inflight,
             Map<Long, Long> confirmed,
-            Set<Long> settledTombstones,
             Set<Long> preemptionClaims,
             Set<Long> preemptionAttemptIncoming,
             Set<Long> fenceProtected,
@@ -962,7 +959,6 @@ class LedgerReconciliationHarnessTest {
                 Set.copyOf(preemptionClaims),
                 Set.copyOf(preemptionAttemptIncoming),
                 Set.copyOf(fenceProtected),
-                Set.copyOf(settledTombstones),
                 Set.copyOf(queuedPhase),
                 Set.copyOf(dispatchPermits),
                 0L,

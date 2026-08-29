@@ -200,11 +200,6 @@ class KvAllocatedSameTickAtomicityTest {
                     boolean inflight = view.inflight().containsKey(id);
                     boolean confirmed = view.confirmedReservationTokens()
                             .containsKey(id);
-                    boolean settledTombstone = view.settledTombstoneRequestIds()
-                            .contains(id);
-                    if (settledTombstone) {
-                        continue;
-                    }
                     if (inflight && confirmed) {
                         violation.compareAndSet(null,
                                 "reservation and engine projection coexist"

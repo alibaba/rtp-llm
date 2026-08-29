@@ -90,12 +90,20 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
+        // Stage-2 L6 retirement: the late RUNNING sample no longer meets a
+        // settled-tombstone layer. It re-installs an ownerless confirmed
+        // shadow (reservation token 0 — the exact-handle reduction refuses
+        // it, so no worker-status fact is emitted) that the next
+        // absent-pruning pass removes once the observation disappears.
         updateStatus(Map.of("2", task(2L, TaskPhase.RUNNING, 300)), Map.of(), 9_700);
+        assertTrue(isConfirmed(2L),
+                "the late sample re-installs the ownerless shadow");
+        assertEquals(1, confirmedCount());
+        assertEquals(0, endpoint.getInflightCount());
+        updateStatus(Map.of(), Map.of(), 9_700);
         assertFalse(isConfirmed(2L),
-                "ordinary finished uses the same stale-status fence");
-        endpoint.evictExpiredRequests(-1, requestId -> false);
-        updateStatus(Map.of("2", task(2L, TaskPhase.RUNNING, 300)), Map.of(), 9_700);
-        assertTrue(isConfirmed(2L));
+                "absent pruning removes the ownerless shadow");
+        assertEquals(0, confirmedCount());
     }
 
     @Test
@@ -218,15 +226,24 @@ class DecodeEngineFenceProtectionTest {
         assertTrue(endpoint.layeredAdmissionView().queued().isEmpty());
         assertFalse(closeFence(1L));
 
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertFalse(isConfirmed(1L),
-                "a delayed active sample cannot resurrect a tombstoned request");
-        assertEquals(0, confirmedCount());
-
-        endpoint.evictExpiredRequests(-1, requestId -> false);
+        // Stage-2 L6 retirement: a delayed active sample no longer meets a
+        // settled-tombstone layer. It re-installs an ownerless confirmed
+        // shadow (reservation token 0, refused by the exact-handle
+        // reduction, so no fact is emitted and no reservation accounting is
+        // mutated — the shadow carries no reservation) that the next
+        // absent-pruning pass removes; the running counter is recomputed
+        // from the fresh observation each pass, so it cannot drift.
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertTrue(isConfirmed(1L),
-                "the settled fence is bounded by the configured endpoint TTL");
+                "the delayed sample re-installs the ownerless shadow");
+        assertEquals(1, confirmedCount());
+        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(1, endpoint.getTotalLoad());
+        updateStatus(Map.of(), Map.of(), 9_500);
+        assertFalse(isConfirmed(1L),
+                "absent pruning removes the ownerless shadow");
+        assertEquals(0, confirmedCount());
+        assertEquals(0, endpoint.getTotalLoad());
     }
 
     @Test
