@@ -17,6 +17,10 @@ import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.utils.process_manager import (
+    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+)
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
 MODEL_TYPE = "MODEL_TYPE"
@@ -174,6 +178,12 @@ class MagaServerManager(object):
             if v is not None:
                 current_env[k] = v
 
+        # Test subprocesses have no service-discovery routes that need time to
+        # converge. Keep ordered parent-owned group shutdown, but skip production's
+        # pre-stop drain unless a test explicitly asks to exercise it.
+        current_env.setdefault(FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV, "0")
+        current_env.setdefault(DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV, "0")
+
         if model_type is not None:
             current_env[MODEL_TYPE] = model_type
         if model_path is not None:
@@ -312,7 +322,9 @@ class MagaServerManager(object):
         try:
             with open(self._log_file, "r", errors="replace") as log_file:
                 for line_number, line in enumerate(log_file, start=1):
-                    if any(pattern.search(line) for pattern in _FATAL_SHUTDOWN_PATTERNS):
+                    if any(
+                        pattern.search(line) for pattern in _FATAL_SHUTDOWN_PATTERNS
+                    ):
                         matches.append(f"{line_number}: {line.rstrip()}")
         except OSError as error:
             logging.warning("failed to scan process log %s: %s", self._log_file, error)

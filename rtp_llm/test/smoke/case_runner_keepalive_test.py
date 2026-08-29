@@ -9,7 +9,12 @@ from unittest.mock import Mock, patch
 
 from smoke.case_runner import CaseRunner
 from smoke.task_info import TaskStates
+
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+from rtp_llm.utils.process_manager import (
+    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+)
 
 
 class FakeServerManager:
@@ -126,9 +131,7 @@ class KeepaliveTest(unittest.TestCase):
                 clear=False,
             ):
                 with self.assertRaisesRegex(RuntimeError, "disappeared"):
-                    runner._keep_servers_alive(
-                        {"prefill": healthy, "decode": dead}
-                    )
+                    runner._keep_servers_alive({"prefill": healthy, "decode": dead})
 
         self.assertEqual(healthy.stop_count, 1)
         self.assertEqual(dead.stop_count, 1)
@@ -175,9 +178,7 @@ class KeepaliveTest(unittest.TestCase):
                 side_effect=OSError("injected live-info directory failure"),
             ):
                 with self.assertRaisesRegex(OSError, "directory failure"):
-                    runner._keep_servers_alive(
-                        {"prefill": prefill, "decode": decode}
-                    )
+                    runner._keep_servers_alive({"prefill": prefill, "decode": decode})
 
         self.assertEqual(prefill.stop_count, 1)
         self.assertEqual(decode.stop_count, 1)
@@ -251,6 +252,49 @@ class MagaServerManagerShutdownTest(unittest.TestCase):
         child.terminate.assert_not_called()
         child.kill.assert_not_called()
         self.assertEqual(manager.exit_code, 0)
+
+    def test_start_server_uses_test_drain_defaults_and_preserves_overrides(self):
+        cases = [
+            ({}, "0", "0"),
+            (
+                {
+                    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "3",
+                    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV: "4",
+                },
+                "3",
+                "4",
+            ),
+        ]
+
+        for env_args, expected_frontend, expected_dash_sc in cases:
+            with self.subTest(
+                env_args=env_args
+            ), tempfile.TemporaryDirectory() as temp_dir:
+                process = Mock(pid=123)
+                manager = MagaServerManager(env_args=env_args, port="12345")
+                with patch.dict(
+                    os.environ,
+                    {
+                        "HOME": temp_dir,
+                        "TEST_UNDECLARED_OUTPUTS_DIR": temp_dir,
+                    },
+                    clear=True,
+                ), patch(
+                    "rtp_llm.test.utils.maga_server_manager.subprocess.Popen",
+                    return_value=process,
+                ) as popen, patch.object(
+                    manager, "wait_sever_done", return_value=True
+                ):
+                    self.assertTrue(manager.start_server(log_to_file=False))
+
+                child_env = popen.call_args.kwargs["env"]
+                self.assertEqual(
+                    child_env[FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV], expected_frontend
+                )
+                self.assertEqual(
+                    child_env[DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV], expected_dash_sc
+                )
+                manager._server_process = None
 
     def test_fatal_shutdown_log_fails_smoke(self):
         process = Mock(pid=123)
