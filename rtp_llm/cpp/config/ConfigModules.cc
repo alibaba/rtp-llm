@@ -141,6 +141,7 @@ std::string KVCacheConfig::to_string() const {
         << "enable_host_cache_pinned: " << enable_host_cache_pinned << "\n"
         << "enable_disk_cache: " << enable_disk_cache << "\n"
         << "enable_remote_cache: " << enable_remote_cache << "\n"
+        << "write_cache_sync: " << write_cache_sync << "\n"
         << "device_eviction_policy: " << device_eviction_policy << "\n"
         << "host_eviction_policy: " << host_eviction_policy << "\n"
         << "disk_eviction_policy: " << disk_eviction_policy << "\n"

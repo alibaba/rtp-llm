@@ -83,7 +83,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     std::shared_ptr<LoadAsyncContext> load_context;
     bool                              load_attempted     = false;
     MallocStatus                      materialize_status = MallocStatus::NONE;
-    auto rollback = [&]() -> MallocResult {
+    auto                              rollback           = [&]() -> MallocResult {
         if (load_context != nullptr) {
             load_context->abortPending();
         }
@@ -111,8 +111,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         load_attempted                           = match_result.async_context != nullptr;
         load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
         match_result.async_context.reset();
-        matched_device_blocks               = match_result.matched_device_blocks;
-        total_logical_blocks                = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
+        matched_device_blocks = match_result.matched_device_blocks;
+        total_logical_blocks  = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
         BlockIndicesType ready_group_blocks =
             block_tree_cache_->matchedBlocksForGroup(0, match_result.matched_device_resources);
         block_ids_0.assign(BlockIndicesType(total_logical_blocks, NULL_BLOCK_IDX));
@@ -174,8 +174,8 @@ bool SingleTypeKVCacheAllocator::materializeInitialBlocks(const MallocInfo& mall
                                                           size_t            matched_blocks,
                                                           MallocStatus&     materialize_status) {
     materialize_status = MallocStatus::NONE;
-    auto& kv_resource = *malloc_info.batch_kv_cache_resource;
-    auto& block_ids   = kv_resource.mutableBlockIds(0, 0);
+    auto& kv_resource  = *malloc_info.batch_kv_cache_resource;
+    auto& block_ids    = kv_resource.mutableBlockIds(0, 0);
     block_ids.resize(matched_blocks, NULL_BLOCK_IDX);
 
     RequiredPositions positions;
@@ -262,8 +262,8 @@ LoadMatchResult SingleTypeKVCacheAllocator::finishDeferredMalloc(const MallocInf
         if (!success) {
             materialize_status = incr_result.status;
             if (materialize_status == MallocStatus::NONE) {
-                materialize_status = evaluateInitCapacity(
-                    malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
+                materialize_status =
+                    evaluateInitCapacity(malloc_info, reserveBlocksNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
             }
         }
     }
@@ -279,9 +279,9 @@ LoadMatchResult SingleTypeKVCacheAllocator::finishDeferredMalloc(const MallocInf
 }
 
 MallocStatus SingleTypeKVCacheAllocator::evaluatePreparedInitCapacity(const MallocInfo& malloc_info,
-                                                                       size_t missing_targets) const {
-    const size_t planned_blocks = static_cast<size_t>(std::max(getNeedBlocks(malloc_info), 0))
-                                  + (malloc_info.reuse_cache ? missing_targets : 0);
+                                                                      size_t            missing_targets) const {
+    const size_t planned_blocks =
+        static_cast<size_t>(std::max(getNeedBlocks(malloc_info), 0)) + (malloc_info.reuse_cache ? missing_targets : 0);
     const auto   demand         = initBlockDemand(malloc_info, planned_blocks, /*group_id=*/0);
     const size_t total_blocks   = totalBlocksNum();
     const size_t reserve_blocks = reserveBlocksNum();
@@ -293,8 +293,7 @@ MallocStatus SingleTypeKVCacheAllocator::evaluatePreparedInitCapacity(const Mall
     if (required_free_blocks <= static_cast<size_t>(std::numeric_limits<int>::max())) {
         (void)full_kv_cache_group_->ensureFreeBlocks(static_cast<int>(required_free_blocks));
     }
-    return freeBlocksNum() >= required_free_blocks ? MallocStatus::NONE :
-                                                     MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+    return freeBlocksNum() >= required_free_blocks ? MallocStatus::NONE : MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -398,7 +397,7 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         if (publish_prefix > 0) {
             insert_keys.resize(publish_prefix);
             resources.resize(publish_prefix);
-            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
+            block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier, insert_info.write_remote);
         }
     }
 }

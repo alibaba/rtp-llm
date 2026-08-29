@@ -82,6 +82,13 @@ test_suite(
 )
 
 cc_library(
+    name = "bounded_thread_test_utils",
+    testonly = True,
+    hdrs = ["BoundedThreadTestUtils.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+)
+
+cc_library(
     name = "block_tree_cache_test_utils",
     srcs = ["BlockTreeCacheTestUtils.cc"],
     hdrs = [

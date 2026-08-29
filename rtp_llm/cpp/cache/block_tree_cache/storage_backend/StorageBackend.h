@@ -73,10 +73,10 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    using MatchDone       = std::function<void(
+    using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
-    using Done            = std::function<void(bool success)>;
-    using BufferResolver  = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
+    using Done           = std::function<void(bool success)>;
+    using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, int group_id, int block_id)>;
 
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor> executor = nullptr);
     virtual ~StorageBackend();
@@ -87,13 +87,18 @@ public:
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
-    void             write(StorageWriteTask task);
+    // Async mode returns whether the task was admitted. Sync mode returns the
+    // exact write result after source pins have been released. Sync writes
+    // from this backend's own I/O/completion callback are rejected to avoid
+    // self-deadlock.
+    bool write(StorageWriteTask task, bool synchronous = false);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
 protected:
-    const CacheTopology&   topology() const;
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
+    const CacheTopology&                   topology() const;
+    const std::vector<DeviceBlockPoolPtr>& devicePools() const;
+    std::vector<BlockInfo>                 convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
     // Match queries contain every possible group handle. Derived matchers use
     // this predicate for each candidate prefix; the core applies the same rule
     // before allocating read targets.
@@ -104,6 +109,7 @@ protected:
     virtual void               readImpl(const StorageRequest&                           request,
                                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta) = 0;
     virtual void               writeImpl(const StorageRequest& request)                             = 0;
+    virtual void               shutdownImpl() noexcept {}
 
 private:
     enum class Lifecycle {
@@ -116,7 +122,7 @@ private:
     using Operation = std::function<void(Lifecycle outcome)>;
 
     std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
-    void                                                      dispatch(Operation operation);
+    bool                                                      dispatch(Operation operation);
     void                                                      taskFinished();
     std::shared_ptr<const CacheTopology>                      topology_;
     std::vector<DeviceBlockPoolPtr>                           device_pools_;

@@ -37,7 +37,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -191,6 +191,7 @@ struct KVCacheConfig {
     bool        enable_host_cache_pinned     = true;
     bool        enable_disk_cache            = false;
     bool        enable_remote_cache          = false;
+    bool        write_cache_sync             = false;
     std::string device_eviction_policy       = "lru";
     std::string host_eviction_policy         = "lru";
     std::string disk_eviction_policy         = "fifo";
@@ -429,7 +430,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
