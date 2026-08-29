@@ -82,6 +82,7 @@ private:
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
+    const bool                                    cache_status_snapshot_enabled_;
     StepWindowProfiler                            step_profiler_;
     int                                           reserve_step_ = 0;
 };
