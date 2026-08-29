@@ -734,13 +734,25 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
             // carries no valid aggregate signal — a persistent split
             // surfaces on the next certified capture instead.
             if (view.certified()) {
+                // Stage-2 L7 fix (soak round 2): the projection derives from
+                // the capture-frozen queued id set, never from a live re-read
+                // of entry.masterQueued(). view.inflight() is a shallow copy
+                // holding live RequestInflight references, so re-reading the
+                // mutable sub-state flag here would observe post-capture
+                // flips: a queued batch accepted between the endpoint capture
+                // and this reconciliation pass would read masterQueued=false
+                // against the frozen Phase-1 counters and fabricate a
+                // "certified" aggregate tear. The capture freezes
+                // queuedPhaseRequestIds inside the seqlock window, so the
+                // certified flag genuinely covers that projection;
+                // kvTokens/expectedKvTokens are immutable entry fields.
                 int queuedEntries = 0;
                 long queuedHardKv = 0L;
                 long queuedExpectedKv = 0L;
-                for (Map.Entry<Long, RequestInflight> inflight
-                        : view.inflight().entrySet()) {
-                    RequestInflight reservation = inflight.getValue();
-                    if (reservation.masterQueued()) {
+                for (Long requestId : view.queuedPhaseRequestIds()) {
+                    RequestInflight reservation =
+                            view.inflight().get(requestId);
+                    if (reservation != null) {
                         queuedEntries++;
                         queuedHardKv += reservation.kvTokens();
                         queuedExpectedKv += reservation.expectedKvTokens();
@@ -937,7 +949,11 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * Stage-2 L7 soak fix: because the aggregate identity is fixed
          * (request id 0), the rule runs on seqlock-certified captures
          * only — torn fallback captures would otherwise climb the
-         * confirm window into false confirmed REAL diffs.
+         * confirm window into false confirmed REAL diffs.  Soak round 2:
+         * the projection side reads the capture-frozen queued id set, not a
+         * live re-read of the mutable entry sub-state — the harness runs
+         * after the capture, so a live read would report post-capture
+         * admission flips as "certified" aggregate tears.
          */
         QUEUED_PHASE_OUTSIDE_INFLIGHT(true),
         /**

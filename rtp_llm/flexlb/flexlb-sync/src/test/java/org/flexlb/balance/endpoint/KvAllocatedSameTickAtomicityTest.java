@@ -145,6 +145,47 @@ class KvAllocatedSameTickAtomicityTest {
     }
 
     /**
+     * Stage-2 L7 soak fix (round 2): the aggregate mirror rule reads the
+     * capture-frozen queued projection, so queued retirements that land
+     * after the capture must not change what an already-captured view
+     * reports.  A live re-read of the mutable entry sub-state flag would
+     * flip the projection against the frozen Phase-1 counters and
+     * fabricate a "certified" aggregate tear on every post-capture
+     * admission batch.
+     */
+    @Test
+    void ledgerCaptureFreezesQueuedProjectionAgainstPostCaptureFlips() {
+        reserveQueued(REQUEST_A, 500, 700);
+        reserveQueued(REQUEST_B, 300, 400);
+
+        DecodeEndpoint.DecodeLedgerAuditView captured =
+                endpoint.ledgerAuditView();
+        assertTrue(captured.certified(),
+                "a quiet-window capture must certify");
+        assertEquals(2, captured.queuedPhaseRequestIds().size());
+        assertEquals(2, captured.queuedPhaseCount());
+        assertEquals(800L, captured.queuedKvReservedTotal());
+        assertEquals(1100L, captured.queuedExpectedKvReservedTotal());
+
+        // Post-capture flip: both queued reservations retire in one tick.
+        TaskInfo a = task(REQUEST_A);
+        a.setPhase(TaskPhase.KV_ALLOCATED);
+        TaskInfo b = task(REQUEST_B);
+        b.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("900", a, "901", b), null, 10_000);
+
+        // The already-captured view keeps reporting the frozen projection —
+        // the harness aggregate rule relies on exactly this freeze.
+        assertEquals(2, captured.queuedPhaseRequestIds().size(),
+                "the captured queued projection is frozen at capture time");
+        assertEquals(2, captured.queuedPhaseCount());
+        assertEquals(800L, captured.queuedKvReservedTotal());
+        assertEquals(1100L, captured.queuedExpectedKvReservedTotal());
+        assertTrue(captured.inflight().containsKey(REQUEST_A),
+                "the captured inflight layer is frozen too");
+    }
+
+    /**
      * Continuously samples the eight-layer projection and records the first
      * split state: reservation and projection coexisting, or both missing,
      * for any reserved-but-not-finished request.
