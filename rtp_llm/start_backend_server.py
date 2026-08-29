@@ -159,9 +159,7 @@ def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
         assert pc.world_rank % pc.tp_size == 0
 
 
-def _shutdown_order_indices(
-    local_world_size: int, first_world_rank: int, tp_size: int
-):
+def _shutdown_order_indices(local_world_size: int, first_world_rank: int, tp_size: int):
     """Return local follower/leader indices for two-phase engine shutdown."""
     if local_world_size <= 0:
         return [], []
@@ -318,7 +316,6 @@ def _wait_for_ranks_startup(
                     raise Exception(f"Rank {i} startup failed: {error_msg}")
             if all(ranks_received):
                 break
-            time.sleep(5)
 
         logging.info(f"All {local_world_size} ranks started successfully")
     finally:
@@ -370,9 +367,7 @@ def multi_rank_start(
         manager.set_processes(
             [processes[index] for index in shutdown_order],
             [
-                shutdown_ready_events[index]
-                if index in follower_indices
-                else None
+                shutdown_ready_events[index] if index in follower_indices else None
                 for index in shutdown_order
             ],
             shutdown_group="backend",
