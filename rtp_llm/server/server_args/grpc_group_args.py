@@ -16,9 +16,16 @@ def _default_model_grpc_config_json() -> str:
         {
             "client_config": {
                 "grpc.max_receive_message_length": b,
+                "grpc.max_send_message_length": b,
                 "grpc.max_metadata_size": b,
             },
             "server_config": {
+                # Without this the C++ gRPC server falls back to the gRPC
+                # default 4 MiB receive limit, which rejects PD RemoteGenerate
+                # messages carrying propose_hidden/propose_probs
+                # (RESOURCE_EXHAUSTED: Received message larger than max).
+                "grpc.max_receive_message_length": b,
+                "grpc.max_send_message_length": b,
                 "grpc.max_metadata_size": b,
                 "grpc.max_concurrent_streams": 100000,
                 "grpc.max_connection_idle_ms": 600000,
