@@ -144,9 +144,17 @@ class DecodeEndpointLayeredViewTest {
 
         assertFalse(isConfirmed(1L));
         assertEquals(0, endpoint.layeredAdmissionView().confirmed().size(),
-                "tracked TTL removal must release the published confirmed slot");
-        assertEquals(0, endpoint.getTotalLoad());
+                "tracked TTL removal must release the published confirmed entry");
+        // Stage-2 L3 retirement: the TTL purge removes the registry entry
+        // only; the confirmed-slot projection stays conservatively high
+        // until the next calibration pass (load over-estimated = admission
+        // under-admitted, the safe direction).
+        assertEquals(1, endpoint.getTotalLoad());
         assertTrue(endpoint.admissionVersion() > versionBefore);
+
+        updateStatus(Map.of(), Map.of(), 10_000);
+        assertEquals(0, endpoint.getTotalLoad(),
+                "the next pass drains the purged confirmed-slot projection");
     }
 
     @Test
@@ -193,7 +201,11 @@ class DecodeEndpointLayeredViewTest {
 
         assertFalse(isConfirmed(1L));
         assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
-        assertEquals(1, endpoint.getTotalLoad());
+        // Stage-2 L3 retirement: the out-of-band tombstone settlement
+        // removes the registry entry only; the confirmed-slot projection
+        // stays conservatively high until the next pass — one projected slot
+        // plus the committed incoming reservation.
+        assertEquals(2, endpoint.getTotalLoad());
         // Stage-2 L6 retirement: the late Decode sample no longer meets a
         // settled-tombstone layer. It re-installs an ownerless confirmed
         // shadow (reservation token 0, refused by the exact-handle
@@ -404,11 +416,13 @@ class DecodeEndpointLayeredViewTest {
 
         assertTrue(endpoint.settleEngineFenceClaim(
                 104L, reservations.get(1L)));
-        // Stage-2 L4 retirement: the exact fence settlement releases the
-        // confirmed slot immediately; the held-KV projection drains on the
-        // next calibration pass (conservative window — availability
-        // under-reported, never over-reported).
-        assertEquals(0, endpoint.getTotalLoad());
+        // Stage-2 L3/L4 retirement: the exact fence settlement removes the
+        // registry entries only; the confirmed-slot and held-KV projections
+        // drain on the next calibration pass (conservative window —
+        // availability under-reported, never over-reported).
+        assertEquals(1, endpoint.getTotalLoad(),
+                "the settled confirmed-slot projection stays conservatively high "
+                        + "until the next pass");
         assertEquals(9_500, endpoint.realKvAvailable());
         assertFalse(endpoint.settleEngineFenceClaim(
                 104L, reservations.get(1L)),

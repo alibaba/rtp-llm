@@ -266,12 +266,18 @@ class DecodeEngineFenceProtectionTest {
         assertTrue(settleTombstoned(1L));
         assertFalse(isConfirmed(1L));
         assertEquals(0, confirmedCount());
-        assertEquals(0, endpoint.getTotalLoad());
+        // Stage-2 L3 retirement: the out-of-band settlement removes the
+        // registry entry only; the confirmed-slot projection stays
+        // conservatively high until the next calibration pass (load
+        // over-estimated = admission under-admitted, the safe direction).
+        assertEquals(1, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable(),
                 "local settlement must not rewrite the last engine KV sample");
         assertFalse(closeFence(1L));
 
         updateStatus(Map.of(), Map.of(), 10_000);
+        assertEquals(0, endpoint.getTotalLoad(),
+                "the next pass drains the settled confirmed-slot projection");
         assertEquals(10_000, endpoint.realKvAvailable());
     }
 
@@ -285,11 +291,11 @@ class DecodeEngineFenceProtectionTest {
         assertTrue(settleTombstoned(1L));
         assertFalse(isConfirmed(1L));
         assertEquals(0, confirmedCount());
-        assertEquals(0, endpoint.getTotalLoad());
-        // Stage-2 L5 retirement: the settlement clears the registry entry and
-        // the confirmed slot immediately, while the fence-held KV projection
-        // drains on the next calibration pass (conservatively high window —
+        // Stage-2 L3/L5 retirement: the settlement clears the registry
+        // entries only; the confirmed-slot and fence-held KV projections
+        // drain on the next calibration pass (conservatively high window —
         // availability is under-reported, never over-reported).
+        assertEquals(1, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable());
         assertEquals(700, endpoint.realKvUsed());
         assertFalse(settleTombstoned(1L),
@@ -329,16 +335,17 @@ class DecodeEngineFenceProtectionTest {
         assertTrue(endpoint.settleEngineFenceClaim(
                 101L, reservations.get(1L)));
         // Settling the priority token owner is the authoritative terminal: it
-        // releases the confirmed slot immediately. The overlapping generic
-        // fence created just above never contributed an independent
-        // fence-held charge (the priority claim already owned the accounting),
-        // so there is no union hold left for it to inherit. Stage-2 L4
-        // retirement: the held-KV projection drains on the next calibration
-        // pass (conservative window — availability under-reported, never
-        // over-reported).
-        assertEquals(0, endpoint.getTotalLoad(),
-                "priority settlement releases the confirmed slot; the overlapping "
-                        + "generic fence added no independent fence-held charge");
+        // removes the registry entries only. The overlapping generic fence
+        // created just above never contributed an independent fence-held
+        // charge (the priority claim already owned the accounting), so there
+        // is no union hold left for it to inherit. Stage-2 L3/L4 retirement:
+        // the confirmed-slot and held-KV projections drain on the next
+        // calibration pass (conservative window — availability
+        // under-reported, never over-reported).
+        assertEquals(1, endpoint.getTotalLoad(),
+                "the settled confirmed-slot projection stays conservatively high "
+                        + "until the next pass; the overlapping generic fence added "
+                        + "no independent fence-held charge");
         assertEquals(9_500, endpoint.realKvAvailable());
 
         // The next pass re-derives the projection from registry facts: no

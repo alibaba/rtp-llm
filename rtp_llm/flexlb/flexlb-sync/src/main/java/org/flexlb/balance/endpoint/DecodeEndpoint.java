@@ -14,7 +14,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
@@ -29,13 +28,14 @@ import java.util.function.LongPredicate;
  * Decode-side endpoint with Auto-TPM shadow admission accounting.
  *
  * <p><b>Layered view (Phase 5):</b> {@code inflightRequests} only ever holds
-     * shadow entries; engine-confirmed requests are
- * folded into {@code confirmedRunningCount} by calibrate exactly as in
- * Phase 4 (accounting unchanged), and are additionally tracked per-request in
+ * shadow entries; engine-confirmed requests are tracked per-request in
  * {@link #trackedConfirmed} split by phase — {@code KV_ALLOCATED} →
  * {@code ACCEPTED_NOT_RUNNING} layer, {@code RUNNING} → {@code RUNNING}
- * layer — for accepted-eviction planning and layered gauges.
- * {@code totalLoad = confirmedRunningCount + reserved inflight count}.
+ * layer — for accepted-eviction planning and layered gauges. The
+ * {@code confirmedRunningCount} slot counter is a stage-2 L3 projection:
+ * recomputed from registry facts on every calibration pass, never an
+ * incrementally maintained state machine. {@code totalLoad =
+ * confirmedRunningCount + reserved inflight count}.
  *
  * <p><b>Known accepted cost:</b> the admission lock and version bump on every
  * reserve/release/calibrate stay active even when Auto-TPM is disabled; the
@@ -52,12 +52,26 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private final EndpointEventSink endpointEventSink;
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
-    /** Exact shadow identities already transferred beyond Master rollback. Guarded by admissionLock. */
-    private final Set<RequestInflight> engineLifecycleReservations =
-            Collections.newSetFromMap(new IdentityHashMap<>());
     private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
+    /**
+     * Engine-facing confirmed-slot projection (stage-2 L3 retirement): a
+     * counter recomputed from registry facts on every calibration pass
+     * (fresh confirmed observations + priority-held + fence-held absent
+     * survivors) — never an incrementally maintained state machine.
+     * Out-of-band registry mutations (settle / TTL purge) leave it
+     * conservatively high until the next pass recomputes it: load
+     * over-estimated = admission under-admitted, the safe direction.
+     */
     private volatile int confirmedRunningCount;
+    /**
+     * Admission version stamped when the confirmed-slot projection was
+     * last recomputed (stage-2 L3). An out-of-band registry mutation bumps
+     * the admission version without recomputing the projection; an audit
+     * capture whose stamp still differs reads a conservatively stale
+     * projection.
+     */
+    private volatile long confirmedProjectionVersion;
     private final TtlEvictor<Long, RequestInflight> requestEvictor;
 
     /**
@@ -253,7 +267,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 endpointEventSink, "endpointEventSink");
         this.requestEvictor = TtlEvictor.withKeyCallback(
                 inflightRequests, (requestId, req) -> {
-                    engineLifecycleReservations.remove(req);
+                    // Stage-2 L2: the engine-lifecycle marker lives on the
+                    // entry itself, so evicting the entry retires it — no
+                    // separate marker storage remains.
                     removeQueuedPhaseLocked(requestId, req);
                     // Stage-2 L8: the evicted entry may still hold a dispatch
                     // permit token (permit holders are not exempt from the
@@ -448,6 +464,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Stage-2 L8: permit holders are always L1 inflight entries (the
         // permit token lives on the entry), so the inflight traversal above
         // already collected every permit-holding owner.
+        // Stage-2 L2: the engine-lifecycle marker also lives on the entry
+        // (entry sub-state), so the same traversal already collected every
+        // engine-owned owner — the orphan-marker audit and its identity-set
+        // storage are deleted.
         engineFenceProtections.forEach((requestId, protection) ->
                 addRetiredOwner(
                         owners, generationId, requestId,
@@ -456,17 +476,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 addRetiredOwner(
                         owners, generationId, requestId,
                         claim.reservationToken));
-        Set<RequestInflight> mappedReservations =
-                Collections.newSetFromMap(new IdentityHashMap<>());
-        mappedReservations.addAll(inflightRequests.values());
-        for (RequestInflight engineOwned : engineLifecycleReservations) {
-            if (!mappedReservations.contains(engineOwned)) {
-                logger.error(
-                        "Decode retirement found an engine-lifecycle marker without a request owner: "
-                                + "generation={} reservation_token={}",
-                        generationId, engineOwned.reservationToken());
-            }
-        }
         for (EndpointPreemptionAttempt attempt : preemptionAttempts.values()) {
             addRetiredOwner(
                     owners, generationId,
@@ -498,12 +507,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         engineDispatchPermitExpectedKvReservedTotal.set(0L);
 
         inflightRequests.clear();
-        engineLifecycleReservations.clear();
         inflightKvReservedTotal.set(0L);
         inflightExpectedKvReservedTotal.set(0L);
 
         trackedConfirmed.clear();
         confirmedRunningCount = 0;
+        confirmedProjectionVersion = admissionVersion.get();
 
         queuedPhaseCount.set(0);
         queuedHardKvReservedTotal.set(0L);
@@ -607,9 +616,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         RequestInflight removed = inflightRequests.remove(requestId);
         // Stage-2 L8: clear the entry permit token (if held) before the
         // queued-phase teardown below — all under this one critical section.
+        // Stage-2 L2: the engine-lifecycle marker lives on the entry, so
+        // removing the entry retires it — no separate marker storage.
         boolean changed = removeEngineDispatchPermitLocked(removed);
         changed = clearEngineFenceProtectionLocked(requestId) || changed;
-        engineLifecycleReservations.remove(removed);
         changed = removeQueuedPhaseLocked(requestId, removed) || changed;
         if (removed != null) {
             inflightKvReservedTotal.addAndGet(-removed.kvTokens());
@@ -705,12 +715,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Stage-2 L8: the exact shadow carries the permit token when a
             // pre-delivery permit is still held (permit resource row); clear
             // it under the same critical section as the shadow removal.
+            // Stage-2 L2: the engine-lifecycle marker lives on the entry,
+            // so removing the entry retires it — no separate marker storage.
             removeEngineDispatchPermitLocked(current);
             if (!inflightRequests.remove(requestId, current)) {
                 throw rollbackInvariant(reservation,
                         "exact shadow changed while admissionLock was held");
             }
-            engineLifecycleReservations.remove(current);
             removeQueuedPhaseLocked(requestId, current);
             inflightKvReservedTotal.addAndGet(-current.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
@@ -763,11 +774,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Stage-2 L8: the exact shadow carries the permit token when a
             // pre-delivery permit is still held; clear it under the same
             // critical section as the shadow removal.
+            // Stage-2 L2: the engine-lifecycle marker lives on the entry,
+            // so removing the entry retires it — no separate marker storage.
             removeEngineDispatchPermitLocked(shadow);
             if (!inflightRequests.remove(requestId, shadow)) {
                 return false;
             }
-            engineLifecycleReservations.remove(shadow);
             removeQueuedPhaseLocked(requestId, shadow);
             inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
@@ -804,16 +816,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         == reservation.reservationToken();
     }
 
-    /** Caller holds {@link #admissionLock}. */
+    /**
+     * Caller holds {@link #admissionLock}. Stage-2 L2 retirement: the
+     * engine-lifecycle marker lives on the L1 inflight entry (entry
+     * sub-state), so the exact check is one map lookup — the identity-set
+     * storage is deleted.
+     */
     private boolean hasEngineLifecycleReservationExactLocked(
             ReservationHandle reservation) {
-        for (RequestInflight engineOwned : engineLifecycleReservations) {
-            if (engineOwned.reservationToken()
-                    == reservation.reservationToken()) {
-                return true;
-            }
-        }
-        return false;
+        RequestInflight entry = inflightRequests.get(
+                reservation.requestId());
+        return isExactReservation(entry, reservation)
+                && entry.isEngineLifecycleOwned();
     }
 
     private static IllegalStateException rollbackInvariant(
@@ -1116,23 +1130,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (confirmed != null
                 && confirmed.reservationToken() == reservationToken
                 && trackedConfirmed.remove(requestId, confirmed)) {
-            confirmedRunningCount = Math.max(
-                    0, confirmedRunningCount - 1);
+            // Stage-2 L3 retirement: registry removal only — the confirmed
+            // slot projection drains with the next calibration pass
+            // (conservatively high in between).
             changed = true;
         }
 
+        // Stage-2 L2: the engine-lifecycle marker lives on the entry, so
+        // removing the exact shadow below retires it — no separate marker
+        // storage to sweep.
         RequestInflight shadow = inflightRequests.get(requestId);
         if (isExactReservation(shadow, reservation)
                 && inflightRequests.remove(requestId, shadow)) {
-            engineLifecycleReservations.remove(shadow);
             removeQueuedPhaseLocked(requestId, shadow);
             inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
                     -shadow.expectedKvTokens());
             changed = true;
         }
-        changed = removeEngineLifecycleReservationExactLocked(
-                reservationToken) || changed;
 
         // Stage-2 L6 retirement: the settled-tombstone registry is deleted;
         // nothing remains to remember here after the exact owners clear.
@@ -1179,22 +1194,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 || !trackedConfirmed.remove(requestId, confirmed)) {
             return false;
         }
-        confirmedRunningCount = Math.max(0, confirmedRunningCount - 1);
+        // Stage-2 L3 retirement: registry removal only — the confirmed slot
+        // projection drains with the next calibration pass (conservatively
+        // high in between; the ownerless shadow holds no reservation).
         return true;
-    }
-
-    /** Caller holds {@link #admissionLock}. */
-    private boolean removeEngineLifecycleReservationExactLocked(
-            long reservationToken) {
-        java.util.Iterator<RequestInflight> it =
-                engineLifecycleReservations.iterator();
-        while (it.hasNext()) {
-            if (it.next().reservationToken() == reservationToken) {
-                it.remove();
-                return true;
-            }
-        }
-        return false;
     }
 
     /** Caller holds {@link #admissionLock}. */
@@ -1241,17 +1244,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Stage-2 L8: a live dispatch permit always sits on the L1 inflight
         // entry, so an exact permit is covered by the exact shadow check
         // below (the entry carries the token).
+        // Stage-2 L2: the engine-lifecycle marker also lives on the same
+        // entry, so the exact shadow check covers engine ownership too —
+        // the identity-set traversal is deleted.
         if (isExactReservation(shadow, reservation)
                 || (confirmed != null && confirmed.reservationToken() == token)
                 || (protection != null && protection.reservationToken == token)
                 || (claim != null && claim.reservationToken == token)
                 || hasExactIncomingAttemptLocked(reservation)) {
             return true;
-        }
-        for (RequestInflight engineOwned : engineLifecycleReservations) {
-            if (engineOwned.reservationToken() == token) {
-                return true;
-            }
         }
         return false;
     }
@@ -1473,7 +1474,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // bounded by the preemption / fence / tombstone populations, not
         // by the running-request population).
         final long version;
-        final int lifecycleReservationCount;
         final int queuedPhaseCountValue;
         final long queuedHardKvValue;
         final long queuedExpectedKvValue;
@@ -1500,7 +1500,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             version = admissionVersion.get();
-            lifecycleReservationCount = engineLifecycleReservations.size();
             // Stage-2 L7: capture the queued aggregate counters inside the
             // locked window so the version revalidation certifies them
             // against the lock-free entry-derived projection below (O(1)
@@ -1577,6 +1576,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
         trackedConfirmed.forEach((requestId, task) ->
                 confirmedTokens.put(requestId, task.reservationToken()));
         Map<Long, RequestInflight> inflightSnapshot = Map.copyOf(inflightRequests);
+        // Stage-2 L2 retirement complete: the engine-lifecycle projection
+        // derives from the entry sub-state flag on the same inflight
+        // snapshot — the sole engine-lifecycle authority (the former
+        // identity-set storage is deleted).
+        int lifecycleProjectionCount = 0;
+        for (RequestInflight entry : inflightSnapshot.values()) {
+            if (entry.isEngineLifecycleOwned()) {
+                lifecycleProjectionCount++;
+            }
+        }
         // Stage-2 L7 retirement complete: the queued projection derives
         // from the entry sub-state flags on the same inflight snapshot —
         // the sole queued authority (the layer-7 set storage is deleted).
@@ -1599,7 +1608,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         captured = new DecodeLedgerAuditView(
                 version,
                 inflightSnapshot,
-                lifecycleReservationCount,
+                lifecycleProjectionCount,
                 Map.copyOf(confirmedTokens),
                 claimRequestIds,
                 attemptIncomingRequestIds,
@@ -1663,10 +1672,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       {@code inflightExpectedKvReservedTotal} carry the L1 aggregate
      *       KV counters (same-tick decrement contract as the layer-1
      *       entries themselves).</li>
-     *   <li>L2 {@code engineLifecycleReservations} — engine-lifecycle
-     *       markers; count only (identities stay engine-side).</li>
+     *   <li>L2 engine-lifecycle sub-state — the entry-level
+     *       {@code engineLifecycleOwned} flag on each L1 entry (stage-2
+     *       retirement complete: the separate identity-set storage is
+     *       deleted; this view's {@code engineLifecycleReservationCount}
+     *       derives from the entry flags — count projection, identities stay
+     *       engine-side).</li>
      *   <li>L3 {@code trackedConfirmed} — B-road engine projection; slot
-     *       dRow claims the same reservationToken identity.</li>
+     *       dRow claims the same reservationToken identity. Stage-2 L3
+     *       retirement complete: the {@code confirmedRunningCount} slot
+     *       counter is a projection recomputed from the registry facts on
+     *       every calibration pass ({@code confirmedProjectionVersion}
+     *       stamps the last recompute) — never an incrementally maintained
+     *       state machine.</li>
      *   <li>L4 {@code preemptionClaims} / L4b
      *       {@code preemptionAttemptIncomingRequestIds} — stage-2
      *       retirement complete: the endpoint registry is an engine-fact
@@ -1699,12 +1717,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * </ol>
      *
      * <p><b>Capture certification (stage-2 L7 fix):</b> the Phase-1
-     * components (version, lifecycle count, the three queued counters, the
-     * three permit counters, the three HashMap-backed key sets) and the
-     * Phase-2 components (inflight map, confirmed tokens, entry-derived
-     * queued projection, entry-derived permit projection, inflight KV
-     * totals) are mutually consistent only when the seqlock version
-     * recheck passed — {@code certified} is {@code true} exactly then.
+     * components (version, the three queued counters, the three permit
+     * counters, the three HashMap-backed key sets) and the Phase-2
+     * components (inflight map, confirmed tokens, entry-derived lifecycle
+     * projection, entry-derived queued projection, entry-derived permit
+     * projection, inflight KV totals) are mutually consistent only when
+     * the seqlock version recheck passed — {@code certified} is
+     * {@code true} exactly then.
      * The torn fallback (bounded retries exhausted under extreme admission
      * contention) returns {@code certified = false}; cross-phase aggregate
      * derivations (queued / permit counters vs their entry projections)
@@ -2299,20 +2318,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // critical section as the rest of the claim teardown.
         removeEngineDispatchPermitLocked(shadow);
         if (confirmed != null) {
+            // Stage-2 L3 retirement: registry removal only — the confirmed
+            // slot projection drains with the next calibration pass
+            // (conservatively high in between).
             trackedConfirmed.remove(requestId, confirmed);
         }
-        if (claim.owner == ClaimOwner.ENGINE_CONFIRMED) {
-            confirmedRunningCount = Math.max(0, confirmedRunningCount - 1);
-        }
+        // Stage-2 L2: the engine-lifecycle marker lives on the entry, so
+        // removing the exact shadow below retires it — no separate marker
+        // storage to sweep.
         if (shadow != null
                 && inflightRequests.remove(requestId, shadow)) {
-            engineLifecycleReservations.remove(shadow);
             removeQueuedPhaseLocked(requestId, shadow);
             inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(
                     -shadow.expectedKvTokens());
         }
-        removeEngineLifecycleReservationExactLocked(reservationToken);
         // Stage-2 L4 retirement: registry removal only — the priority-held
         // projection drains with the next calibration pass (conservatively
         // high in between).
@@ -2591,7 +2611,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     && !terminalNow.contains(requestId)) {
                 actualConfirmed++;
                 RequestInflight removed = inflightRequests.remove(requestId);
-                engineLifecycleReservations.remove(removed);
+                // Stage-2 L2: the engine-lifecycle marker lives on the
+                // entry, so removing the entry retires it — no separate
+                // marker storage.
                 // Stage-2 L8: clear the entry permit token (if held) under
                 // the same critical section as the inflight removal.
                 removeEngineDispatchPermitLocked(removed);
@@ -2742,8 +2764,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         engineFenceHeldKv.set(fenceHeldKv);
         engineFenceHeldExpectedKv.set(fenceHeldExpectedKv);
+        // Stage-2 L3 retirement: the confirmed slot counter is a projection
+        // recomputed from registry facts on every pass — fresh confirmed
+        // observations plus the priority-held and fence-held absent
+        // survivors above. The four out-of-band decrement sites are
+        // deleted; out-of-band registry mutations (settle / TTL purge)
+        // leave the counter conservatively high until this pass recomputes
+        // it. The projection version stamps the recompute so an audit
+        // capture can gate cross-layer derivations on freshness.
         this.confirmedRunningCount = actualConfirmed + priorityHeldSlots
                 + fenceHeldSlots;
+        this.confirmedProjectionVersion = admissionVersion.get();
         this.fenceProjectionVersion = admissionVersion.get();
 
         return facts;
@@ -3023,10 +3054,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     trackedPurged++;
                 }
             }
-            if (trackedPurged > 0) {
-                confirmedRunningCount = Math.max(
-                        0, confirmedRunningCount - trackedPurged);
-            }
+            // Stage-2 L3 retirement: the tracked purge removes registry
+            // entries only — the confirmed-slot projection drains with the
+            // next calibration pass (conservatively high in between: load
+            // over-estimated = admission under-admitted, the safe direction).
             if (evicted > 0 || permitsRemoved > 0
                     || trackedPurged > 0) {
                 admissionVersion.incrementAndGet();
@@ -3403,7 +3434,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 // The identity and queued membership were checked while holding the
                 // same lock. Transfer only changes ownership; it never re-reads the cap.
                 removeQueuedPhaseLocked(permit.requestId, permit.reservation);
-                engineLifecycleReservations.add(permit.reservation);
+                // Stage-2 L2 retirement: the engine-lifecycle marker lives
+                // on the entry itself (entry sub-state — the identity-set
+                // storage is deleted); once set it stays set until the
+                // entry leaves the inflight map.
+                permit.reservation.enterEngineLifecycle();
                 admissionVersion.incrementAndGet();
                 transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
             }

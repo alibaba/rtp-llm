@@ -21,12 +21,12 @@ import org.flexlb.enums.DecodeTaskPhase;
  * was a record; it is now a plain class so the queued-ownership sub-state
  * — previously the endpoint's separate layer-7 set (storage now deleted) —
  * can live on the entry itself as the mutable {@code masterQueued} flag
- * flipped in place (the "L1 sub-state projection" landing). In-place mutation (instead of record-instance
- * replacement) preserves instance identity for the identity-based
- * engine-lifecycle reservation set (L2) and for the dispatch-permit
- * reservation reference, and keeps the queued transition off the inflight
- * map. The immutable components keep their record-style accessor names; no
- * code relied on the generated value equals/hashCode.
+ * flipped in place (the "L1 sub-state projection" landing). In-place
+ * mutation (instead of record-instance replacement) preserves instance
+ * identity for the dispatch-permit reservation reference, and keeps the
+ * queued transition off the inflight map. The immutable components keep
+ * their record-style accessor names; no code relied on the generated
+ * value equals/hashCode.
  *
  * <p>Immutable fields carry the frozen reservation numerics:
  * {@code kvTokens} hard KV demand — the prompt's seqLen, used for
@@ -74,6 +74,20 @@ public final class RequestInflight implements TtlEvictor.TtlTracked {
      * Zero means no permit is held.
      */
     private volatile long dispatchPermitToken;
+
+    /**
+     * Stage-2 L2 retirement complete: engine-lifecycle ownership sub-state
+     * — this reservation was dispatched to the engine and now lives beyond
+     * Master rollback (only an authoritative engine terminal may settle
+     * it). This flag is the sole engine-lifecycle authority (the old
+     * identity-set storage is deleted); once set it stays set — the flag
+     * disappears with the entry when the reservation leaves the inflight
+     * map (every leave path removes the entry itself).
+     *
+     * <p>Mutated only inside the endpoint admission lock; read lock-free by
+     * the audit capture (weakly consistent — confirm-window territory).
+     */
+    private volatile boolean engineLifecycleOwned;
 
     public RequestInflight(
             long kvTokens,
@@ -198,6 +212,28 @@ public final class RequestInflight implements TtlEvictor.TtlTracked {
             return false;
         }
         dispatchPermitToken = 0L;
+        return true;
+    }
+
+    /** Whether this reservation has crossed into the engine lifecycle. */
+    public boolean isEngineLifecycleOwned() {
+        return engineLifecycleOwned;
+    }
+
+    /**
+     * Mark this reservation as transferred into the engine lifecycle.
+     * Returns false when it was already engine-owned (idempotent no-op
+     * mirroring the old identity-set add semantics). Production callers
+     * hold the endpoint admission lock; public so reconciliation tests
+     * can construct the sub-state (the stage-2 audit projection reads it
+     * lock-free). Once set the flag never clears — the leave paths all
+     * remove the inflight entry itself.
+     */
+    public boolean enterEngineLifecycle() {
+        if (engineLifecycleOwned) {
+            return false;
+        }
+        engineLifecycleOwned = true;
         return true;
     }
 
