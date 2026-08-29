@@ -316,9 +316,17 @@ public final class JavaMockEngineCluster {
         // since the previous stats sample (drained, so each tick is disjoint).
         ClusterStats.DecodeWindow decodeWindow = stats.drainDecodeWindow();
         ClusterStats.PrefillWindow prefillWindow = stats.drainPrefillWindow();
+        // prefill_batch_requests = cumulative prefill requests that actually
+        // EXECUTED inside drained batches (same counter avg_batch_size divides).
+        // Downstream (aggregate_canvas_run.py interval_avg_batch_size) prices the
+        // executed caliber from it: Δprefill_batch_requests / Δprefill_batches
+        // — numerator and denominator both executed, unlike enqueued_requests
+        // which also counts queued-but-not-yet-run work and overstates the
+        // per-batch average under overload.
+        long prefillBatchRequests = stats.prefillBatchRequests.sum();
         long prefillBatches = stats.prefillBatches.sum();
         double avgBatchSize = prefillBatches == 0
-                ? 0.0 : stats.prefillBatchRequests.sum() / (double) prefillBatches;
+                ? 0.0 : prefillBatchRequests / (double) prefillBatches;
         double avgBatchMs = prefillBatches == 0
                 ? 0.0 : stats.prefillBatchExecutionMs.sum() / (double) prefillBatches;
         Runtime runtime = Runtime.getRuntime();
@@ -326,7 +334,7 @@ public final class JavaMockEngineCluster {
         long heapMaxMb = runtime.maxMemory() / (1024 * 1024);
         return String.format(
                 "java_mock_stats ts_epoch_ms=%d enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
-                        + "prefill_batches=%d avg_batch_size=%.2f max_batch_size=%d "
+                        + "prefill_batches=%d prefill_batch_requests=%d avg_batch_size=%.2f max_batch_size=%d "
                         + "avg_batch_ms=%.2f max_batch_ms=%d prefill_exec_p50=%d prefill_exec_p95=%d "
                         + "prefill_waiting=%d prefill_running=%d "
                         + "prefill_running_reqs=%d max_prefill_waiting=%d decode_waiting=%d decode_running=%d "
@@ -338,7 +346,7 @@ public final class JavaMockEngineCluster {
                 System.currentTimeMillis(),
                 stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                 stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
-                prefillBatches, avgBatchSize, stats.maxPrefillBatchSize.get(),
+                prefillBatches, prefillBatchRequests, avgBatchSize, stats.maxPrefillBatchSize.get(),
                 avgBatchMs, stats.maxPrefillBatchExecutionMs.get(),
                 prefillWindow.p50Ms(), prefillWindow.p95Ms(),
                 prefillWaiting, prefillRunning, prefillRunningReqs, maxPrefillWaiting,

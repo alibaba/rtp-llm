@@ -631,6 +631,10 @@ def main():
     queue_top_bottom_ts = agg.get("queue_top_bottom_ts") or {}
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
+    # master dispatch 批大小（flexlb_navi_queue_wait 行 requests= 逐秒聚合；
+    # aggregate 20260829+ 才有，旧 agg -> 空序列，面板条件渲染）
+    navi_dispatch_ts = agg.get("navi_dispatch_ts") or []
+    navi_dispatch_stats = agg.get("navi_dispatch_stats") or {}
     cancel_ts = agg.get("cancel_qps_ts") or []
     master_arrivals_ts = agg.get("master_arrivals_ts") or []
     integrity = agg.get("integrity") or {}
@@ -899,10 +903,22 @@ def main():
             ),
         )
         # 口径修复（Jack 诊断）：主线换区间均值 interval_avg_batch_size
-        # （相邻采样间隔内 enqueued 增量 ÷ batches 增量，反映真实波动），
-        # 集群累计均值降为参照淡线；旧 aggregate 无 interval 键时退回
-        # cum 单线（向后兼容）。
+        # （相邻采样间隔内的增量比值，反映真实波动），集群累计均值降为参照淡线；
+        # 旧 aggregate 无 interval 键时退回 cum 单线（向后兼容）。
+        # 口径标记（aggregate 20260829+，样本级 interval_avg_batch_size_caliber）：
+        # executed = Δprefill_batch_requests ÷ Δprefill_batches（分子分母同为
+        # 执行口径）；enqueued_fallback = 旧口径分子 Δenqueued_requests（含排队
+        # 未执行请求，过载下虚高）；旧 aggregate 无标记 -> 按 enqueued 口径
+        # 处理（历史数据即旧口径），caption 据此显式披露。
         has_interval_batch = any("interval_avg_batch_size" in q for q in queue_ts)
+        interval_caliber = next(
+            (
+                q.get("interval_avg_batch_size_caliber")
+                for q in queue_ts
+                if q.get("interval_avg_batch_size_caliber")
+            ),
+            "enqueued_fallback",
+        )
         if has_interval_batch:
             avg_batch = const(
                 "ivBatch",
@@ -1839,10 +1855,24 @@ def main():
                 ("iv", "区间均值（interval）", avg_batch, "info"),
                 ("cm", "累计均值（参照）", cum_batch_ref, "neutral"),
             ]
+            if interval_caliber == "executed":
+                cal_note = (
+                    "主线 = 区间均值（interval：相邻采样间隔内已执行请求增量 "
+                    "Δprefill_batch_requests ÷ 执行批增量 Δprefill_batches，"
+                    "executed 口径，分子分母同为执行口径）"
+                )
+            else:
+                cal_note = (
+                    "主线 = 区间均值（interval：enqueued 增量 ÷ batches 增量，"
+                    "enqueued_fallback 降级口径——旧引擎 stats 无 "
+                    "prefill_batch_requests 字段，分子含排队未执行请求，"
+                    "过载下偏虚高）"
+                )
             batch_cap = (
-                q_cap + "；y = 请求/批。主线 = 区间均值（interval：相邻采样间隔内 "
-                "enqueued 增量 ÷ batches 增量，反映真实波动）；淡线 = 集群"
-                "累计均值（cum，全程平均，含启动稀释）"
+                q_cap
+                + "；y = 请求/批。"
+                + cal_note
+                + "；淡线 = 集群累计均值（cum，全程平均，含启动稀释）"
             )
         else:
             batch_max = max((q.get("cum_avg_batch_size", 0) or 0) for q in queue_ts)
@@ -1862,6 +1892,77 @@ def main():
                 ),
             )
         )
+        # master dispatch 批大小（调度器组队视角，与上方引擎侧执行口径互补）：
+        # flexlb_navi_queue_wait 行 requests= = 每个 flush 窗口调度器实际组队
+        # 的请求数；NAVI_BATCH 不发 flexlb_batch_dispatch 日志，该行是调度器
+        # 真实组队大小的唯一观测源。逐秒聚合 min/mean/p50/max，时间轴注册
+        # 进报告级统一 time axis。旧 agg（无 navi_dispatch_ts）不渲染。
+        if navi_dispatch_ts:
+            nd_t = [r[0] for r in navi_dispatch_ts]
+            ND = const("ND", str_arr(sparse_cats(nd_t)))
+            reg_time(ND, nd_t)
+            nd_series = [
+                (
+                    "dmx",
+                    "max",
+                    const("ndMax", num_arr([r[4] for r in navi_dispatch_ts])),
+                    "warning",
+                ),
+                (
+                    "dme",
+                    "mean",
+                    const("ndMean", num_arr([r[2] for r in navi_dispatch_ts])),
+                    "info",
+                ),
+                (
+                    "dp5",
+                    "p50",
+                    const("ndP50", num_arr([r[3] for r in navi_dispatch_ts])),
+                    "success",
+                ),
+                (
+                    "dmn",
+                    "min",
+                    const("ndMin", num_arr([r[1] for r in navi_dispatch_ts])),
+                    "neutral",
+                ),
+            ]
+            nds = navi_dispatch_stats or {}
+            nd_cap = (
+                "x = 压测时间（s，逐秒聚合 flexlb_navi_queue_wait 行 requests=，"
+                "每行 = 一个 flush 窗口的调度器组队请求数）；y = 请求/窗口；"
+                "NAVI_BATCH 不发 flexlb_batch_dispatch 日志，该行是调度器真实"
+                "组队大小的唯一观测源"
+            )
+            if nds.get("windows"):
+                nd_cap += (
+                    "；run 级：windows="
+                    + num(nds.get("windows"))
+                    + " · mean="
+                    + num(nds.get("mean"))
+                    + " · p50="
+                    + num(nds.get("p50"))
+                    + " · p95="
+                    + num(nds.get("p95"))
+                    + " · max="
+                    + num(nds.get("max"))
+                    + " · 满批占比="
+                    + num(nds.get("full_batch_share_pct"))
+                    + "%（requests == 观测 max 的窗口占比）"
+                )
+            queue_containers.append(
+                emit_container(
+                    "master dispatch 批大小（NAVI 窗口组队）",
+                    nd_cap,
+                    emit_chart(
+                        "LineChart",
+                        ND,
+                        230,
+                        nd_series,
+                        suffix=" 请求/窗口",
+                    ),
+                )
+            )
         # master 侧队列深度（master prometheus G3，1s 采样；label 变体已聚合）。
         # 新口径（batcher_ts_by_role）：per-engine batcher 队列按 role 拆分；
         # 只画 prefill avg/engine + 128 容量线（decode 侧队列语义不同，不画）；

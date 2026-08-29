@@ -31,6 +31,10 @@ plus navi queue_wait observations (flexlb_navi_queue_wait log rows, both
 legacy and engine_ledger formats): navi_queue_wait_ts (per-second node
 estimates), navi_flush_ts (30s-bucket log-gap percentiles),
 navi_queue_wait_stats / navi_flush_stats (run-level summaries),
+navi_dispatch_ts / navi_dispatch_stats (per-second and run-level dispatch
+batch sizes priced from the same rows' requests= field — the scheduler's
+real windowed team size; NAVI_BATCH emits no flexlb_batch_dispatch line,
+so this row is its only observability source),
 engine_waiting_ts (mock per-engine prefill waiting 1s series),
 engine_accepted (per-engine ok-row prefill routing counts, named),
 latency_summary (run-level sched/e2e percentiles + err_rows + status dist)
@@ -745,6 +749,11 @@ for kv in mock_stats:
             "max_decode_waiting": int(float(kv.get("max_decode_waiting", 0))),
             "cum_prefill_batches": int(float(kv.get("prefill_batches", 0))),
             "cum_enqueued_requests": int(float(kv.get("enqueued_requests", 0))),
+            "cum_prefill_batch_requests": (
+                int(float(kv["prefill_batch_requests"]))
+                if "prefill_batch_requests" in kv
+                else None
+            ),
             "cum_avg_batch_size": float(kv.get("avg_batch_size", 0)),
             "heap_used_mb": int(float(kv.get("heap_used_mb", 0))),
         }
@@ -770,13 +779,30 @@ if epoch0 and queue_ts:
     if _rebased:
         queue_ts = _rebased
 
-# per-interval batch rate / incremental avg batch size from cumulative counters
-prev_b, prev_r = 0, 0
+# per-interval batch rate / incremental avg batch size from cumulative counters.
+# 口径（20260829 修复）：分子优先 Δprefill_batch_requests（已被执行的
+# prefill 请求数，mock-engine stats 新字段），与分母 Δprefill_batches 同为
+# 执行口径。旧 mock.log 无该字段（每个样本 None）→ 降级旧口径
+# Δenqueued_requests（含排队未执行请求，过载下虚高，如 pre run 峰值
+# 297.5 vs 引擎真实 per-batch avg 9.65），样本级标记 interval_avg_batch_size_caliber
+# = "executed" | "enqueued_fallback" 供报告 caption 显式披露。
+prev_b, prev_r, prev_x = 0, 0, 0
 for q in queue_ts:
     db = q["cum_prefill_batches"] - prev_b
     dr = q["cum_enqueued_requests"] - prev_r
+    dx = (
+        (q["cum_prefill_batch_requests"] - prev_x)
+        if q.get("cum_prefill_batch_requests") is not None
+        else None
+    )
     q["interval_batches"] = db
-    q["interval_avg_batch_size"] = round(dr / db, 2) if db > 0 else 0
+    if dx is not None:
+        q["interval_avg_batch_size"] = round(dx / db, 2) if db > 0 else 0
+        q["interval_avg_batch_size_caliber"] = "executed"
+        prev_x = q["cum_prefill_batch_requests"]
+    else:
+        q["interval_avg_batch_size"] = round(dr / db, 2) if db > 0 else 0
+        q["interval_avg_batch_size_caliber"] = "enqueued_fallback"
     prev_b, prev_r = q["cum_prefill_batches"], q["cum_enqueued_requests"]
 
 # ---- cancel / decode admission per-second rates (epoch-aligned) ----------
@@ -1928,7 +1954,7 @@ NAVIRE = re.compile(
     r"(?: engine_ms=([\d,]+) ledger_ms=([\d,]+)"
     r"(?: waiting=([\d,]+)| queued_tokens=([\d,]+))?)?"
 )
-navi_rows = []  # (epoch_ms, qw[], ems[]|None, lms[]|None)
+navi_rows = []  # (epoch_ms, requests, qw[], ems[]|None, lms[]|None)
 navi_rows_notimestamp = 0
 for f in log_files:
     with open(f, errors="replace") as stream:
@@ -1954,6 +1980,7 @@ for f in log_files:
             navi_rows.append(
                 (
                     ts,
+                    int(m.group(2)),
                     [int(x) for x in m.group(4).split(",")],
                     [int(x) for x in m.group(5).split(",")] if m.group(5) else None,
                     [int(x) for x in m.group(6).split(",")] if m.group(6) else None,
@@ -1965,19 +1992,29 @@ navi_queue_wait_ts = []
 navi_flush_ts = []
 navi_queue_wait_stats = {}
 navi_flush_stats = {}
+# master dispatch 批大小（flexlb_navi_queue_wait 行 requests= 字段：每窗口
+# 调度器实际组队请求数。NAVI_BATCH 不发 flexlb_batch_dispatch 日志，该行
+# 是调度器真实组队大小的唯一观测源）。逐秒聚合 [sec, min, mean, p50, max, n]
+# + run 级 summary；时间锚与 navi_queue_wait_ts 同源（epoch0 优先）。
+navi_dispatch_ts = []
+navi_dispatch_stats = {}
 if navi_rows:
     # 时间锚：与全部既有序列一致优先 per_request epoch0；无 per_request 的
     # 旧 run 退回 navi 首行自身（rel_axis 同款回退）。
     navi_anchor = epoch0 or navi_rows[0][0]
     qw_sec = defaultdict(list)  # sec -> [qw arrays]
+    req_sec = defaultdict(list)  # sec -> [dispatch batch sizes]
     flush_b = defaultdict(list)  # 30s bucket -> gaps
     qw_rows_nonzero = ems_rows_nonzero = lms_rows_nonzero = 0
     has_engine_ledger = False
     all_qw = []
-    for i, (ts, qw, ems, lms) in enumerate(navi_rows):
+    all_req = []
+    for i, (ts, req, qw, ems, lms) in enumerate(navi_rows):
         sec = int((ts - navi_anchor) // 1000)
         qw_sec[sec].append(qw)
+        req_sec[sec].append(req)
         all_qw.extend(qw)
+        all_req.append(req)
         if any(x > 0 for x in qw):
             qw_rows_nonzero += 1
         if ems is not None:
@@ -1989,7 +2026,7 @@ if navi_rows:
         if i + 1 < len(navi_rows):
             gap = navi_rows[i + 1][0] - ts
             flush_b[int((ts - navi_anchor) // 30000)].append(gap)
-    n_nodes = len(navi_rows[0][1]) if navi_rows else 0
+    n_nodes = len(navi_rows[0][2]) if navi_rows else 0
     for sec in sorted(qw_sec):
         arrs = qw_sec[sec]
         flat = [x for a in arrs for x in a]
@@ -2047,6 +2084,34 @@ if navi_rows:
         "last_bucket_p50_ms": last_fb[1] if last_fb else None,
         "windows_per_30s_first": first_fb[3] if first_fb else None,
         "windows_per_30s_last": last_fb[3] if last_fb else None,
+    }
+    # master dispatch 批大小逐秒序列 + run 级 summary（见上方块首注释；
+    # full_batch_share_pct = requests == 观测 max 的窗口占比，当观测 max
+    # 达到 naviBatchMaxCount 配置时即满批占比）。
+    for sec in sorted(req_sec):
+        v = req_sec[sec]
+        navi_dispatch_ts.append(
+            [
+                sec,
+                min(v),
+                round(sum(v) / len(v), 2),
+                _pct_cent(v, 50),
+                max(v),
+                len(v),
+            ]
+        )
+    _req_max = max(all_req) if all_req else None
+    navi_dispatch_stats = {
+        "windows": len(all_req),
+        "mean": round(sum(all_req) / len(all_req), 2) if all_req else None,
+        "p50": _pct_cent(all_req, 50),
+        "p95": _pct_cent(all_req, 95),
+        "max": _req_max,
+        "full_batch_share_pct": (
+            round(100.0 * sum(1 for r in all_req if r == _req_max) / len(all_req), 2)
+            if all_req and _req_max is not None
+            else None
+        ),
     }
 
 # ---- engine_waiting_ts：mock per-engine prefill waiting 1s 序列 ----
@@ -2294,6 +2359,10 @@ out = {
     "navi_flush_ts": navi_flush_ts,
     "navi_queue_wait_stats": navi_queue_wait_stats,
     "navi_flush_stats": navi_flush_stats,
+    # master dispatch 批大小（同源 flexlb_navi_queue_wait 行 requests= 字段；
+    # 空 run / 非 navi run -> 空序列 + 空 dict，消费方探测降级）
+    "navi_dispatch_ts": navi_dispatch_ts,
+    "navi_dispatch_stats": navi_dispatch_stats,
     "engine_waiting_ts": engine_waiting_ts,
     "engine_accepted": engine_accepted,
     "latency_summary": latency_summary,
