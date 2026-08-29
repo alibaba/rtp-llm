@@ -666,6 +666,40 @@ class LedgerReconciliationHarnessTest {
     }
 
     @Test
+    void tornCaptureAggregateMirrorDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L7 soak fix: an uncertified (torn fallback) capture read
+        // its Phase-1 counters and its Phase-2 entry projection in
+        // different admission quiet windows, so the aggregate drift it
+        // shows is a capture tear, not a ledger split — and because the
+        // aggregate DiffKey is fixed (request id 0), the confirm window
+        // cannot absorb it by request-id rotation. The identical drift as
+        // queuedAggregateMirrorDriftIsARealDiff, but certified=false,
+        // must therefore produce no diff at all.
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight queuedEntry = inflightEntry(16L, 24L, 3, 7L);
+        assertTrue(queuedEntry.enterMasterQueued());
+        inflight.put(704L, queuedEntry);
+        stubDecodeView(decode, auditView(
+                inflight, Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of(704L), Set.of(),
+                2, 16L, 24L, false));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "torn captures carry no aggregate-mirror signal: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "torn captures must not even surface as tear candidates: "
+                        + report.pendingRealDiffs());
+        harness.close();
+    }
+
+    @Test
     void dispatchPermitOutsideQueuedPhaseIsARealDiff() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         stubDecodeView(decode, auditView(
@@ -745,6 +779,30 @@ class LedgerReconciliationHarnessTest {
             int queuedPhaseCount,
             long queuedKvReservedTotal,
             long queuedExpectedKvReservedTotal) {
+        return auditView(inflight, confirmed, settledTombstones,
+                preemptionClaims, preemptionAttemptIncoming, fenceProtected,
+                queuedPhase, dispatchPermits, queuedPhaseCount,
+                queuedKvReservedTotal, queuedExpectedKvReservedTotal, true);
+    }
+
+    /**
+     * Stage-2 L7 soak-fix form: the trailing {@code certified} flag mirrors
+     * the seqlock capture contract (torn fallback captures carry false and
+     * are exempt from the cross-phase aggregate mirror rule).
+     */
+    private static DecodeLedgerAuditView auditView(
+            Map<Long, RequestInflight> inflight,
+            Map<Long, Long> confirmed,
+            Set<Long> settledTombstones,
+            Set<Long> preemptionClaims,
+            Set<Long> preemptionAttemptIncoming,
+            Set<Long> fenceProtected,
+            Set<Long> queuedPhase,
+            Set<Long> dispatchPermits,
+            int queuedPhaseCount,
+            long queuedKvReservedTotal,
+            long queuedExpectedKvReservedTotal,
+            boolean certified) {
         return new DecodeLedgerAuditView(
                 1L,
                 Map.copyOf(inflight),
@@ -760,7 +818,8 @@ class LedgerReconciliationHarnessTest {
                 0L,
                 queuedPhaseCount,
                 queuedKvReservedTotal,
-                queuedExpectedKvReservedTotal);
+                queuedExpectedKvReservedTotal,
+                certified);
     }
 
     private static void stubDecodeView(

@@ -720,32 +720,49 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
             // check: the three O(1) queued counters must match the
             // entry-derived projection. Request id 0 marks the
             // endpoint-level aggregate identity of this diff.
-            int queuedEntries = 0;
-            long queuedHardKv = 0L;
-            long queuedExpectedKv = 0L;
-            for (Map.Entry<Long, RequestInflight> inflight
-                    : view.inflight().entrySet()) {
-                RequestInflight reservation = inflight.getValue();
-                if (reservation.masterQueued()) {
-                    queuedEntries++;
-                    queuedHardKv += reservation.kvTokens();
-                    queuedExpectedKv += reservation.expectedKvTokens();
+            //
+            // Stage-2 L7 fix (soak round): the aggregate identity is
+            // endpoint-level, so a torn capture (seqlock retries
+            // exhausted under admission contention — Phase-1 counters
+            // read in a different quiet window than the Phase-2 entry
+            // projection) would recur under one fixed DiffKey and climb
+            // the confirm window into a false confirmed REAL diff, the
+            // exact failure mode request-level rules never see (their
+            // request-id rotation resets the window every pass). The
+            // cross-phase aggregate rule therefore runs on certified
+            // captures only; an uncertified (torn-fallback) capture
+            // carries no valid aggregate signal — a persistent split
+            // surfaces on the next certified capture instead.
+            if (view.certified()) {
+                int queuedEntries = 0;
+                long queuedHardKv = 0L;
+                long queuedExpectedKv = 0L;
+                for (Map.Entry<Long, RequestInflight> inflight
+                        : view.inflight().entrySet()) {
+                    RequestInflight reservation = inflight.getValue();
+                    if (reservation.masterQueued()) {
+                        queuedEntries++;
+                        queuedHardKv += reservation.kvTokens();
+                        queuedExpectedKv += reservation.expectedKvTokens();
+                    }
                 }
-            }
-            if (view.queuedPhaseCount() != queuedEntries
-                    || view.queuedKvReservedTotal() != queuedHardKv
-                    || view.queuedExpectedKvReservedTotal() != queuedExpectedKv) {
-                diffs.add(new LedgerDiff(
-                        Rule.QUEUED_PHASE_OUTSIDE_INFLIGHT,
-                        0L,
-                        "decode queued aggregate mirror drift: counters"
-                                + " (count=" + view.queuedPhaseCount()
-                                + ", hard=" + view.queuedKvReservedTotal()
-                                + ", expected="
-                                + view.queuedExpectedKvReservedTotal()
-                                + ") != entry-derived projection (count="
-                                + queuedEntries + ", hard=" + queuedHardKv
-                                + ", expected=" + queuedExpectedKv + ")"));
+                if (view.queuedPhaseCount() != queuedEntries
+                        || view.queuedKvReservedTotal() != queuedHardKv
+                        || view.queuedExpectedKvReservedTotal()
+                                != queuedExpectedKv) {
+                    diffs.add(new LedgerDiff(
+                            Rule.QUEUED_PHASE_OUTSIDE_INFLIGHT,
+                            0L,
+                            "decode queued aggregate mirror drift: counters"
+                                    + " (count=" + view.queuedPhaseCount()
+                                    + ", hard=" + view.queuedKvReservedTotal()
+                                    + ", expected="
+                                    + view.queuedExpectedKvReservedTotal()
+                                    + ") != entry-derived projection (count="
+                                    + queuedEntries + ", hard=" + queuedHardKv
+                                    + ", expected=" + queuedExpectedKv
+                                    + ")"));
+                }
             }
             for (Long requestId : view.engineDispatchPermitRequestIds()) {
                 if (!view.queuedPhaseRequestIds().contains(requestId)
@@ -917,6 +934,10 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * cross-checks the three O(1) queued aggregate counters against
          * the entry-derived projection (engine-internal invariant;
          * request id 0 marks the endpoint-level aggregate identity).
+         * Stage-2 L7 soak fix: because the aggregate identity is fixed
+         * (request id 0), the rule runs on seqlock-certified captures
+         * only — torn fallback captures would otherwise climb the
+         * confirm window into false confirmed REAL diffs.
          */
         QUEUED_PHASE_OUTSIDE_INFLIGHT(true),
         /**

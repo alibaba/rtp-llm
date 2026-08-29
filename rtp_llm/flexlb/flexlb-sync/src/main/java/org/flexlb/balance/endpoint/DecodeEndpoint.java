@@ -1444,7 +1444,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * moved version retries the capture (bounded, see
      * {@link #LEDGER_CAPTURE_MAX_ATTEMPTS}); under extreme admission
      * contention the last capture is returned torn — exactly the window
-     * the harness confirm-window absorbs.  The lock budget still never
+     * the harness confirm-window absorbs.  A returned view therefore
+     * carries a {@code certified} flag: {@code true} only when the
+     * Phase-3 version recheck passed, {@code false} for the torn
+     * fallback.  Consumers that derive aggregate facts across the two
+     * capture phases (e.g. the queued counters of Phase 1 against the
+     * entry-derived projection of Phase 2) must consult the flag — on an
+     * uncertified capture such cross-phase aggregates are meaningless
+     * (stage-2 L7: the endpoint-level aggregate diff identity defeats
+     * the request-id rotation that lets the confirm window absorb torn
+     * request-level tears, so the harness skips the aggregate rule
+     * entirely on uncertified captures).  The lock budget still never
      * scales with the running-request count, so the 10 ms reconciliation
      * period cannot squeeze {@code admission} / {@code doCalibrate}.</p>
      */
@@ -1521,7 +1531,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 inflightExpectedKvReservedTotal.get(),
                 queuedPhaseCountValue,
                 queuedHardKvValue,
-                queuedExpectedKvValue);
+                queuedExpectedKvValue,
+                false);
         // Phase 3 — admission lock: version revalidation.  Acquiring the
         // lock proves any prior writer finished its full critical section
         // (layer mutations plus the version bump happen together under
@@ -1532,7 +1543,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             if (admissionVersion.get() == version) {
-                return captured;
+                return captured.asCertified();
             }
         } finally {
             admissionLock.unlock();
@@ -1575,6 +1586,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       mirrors of the entry sub-state for the harness cross-check.</li>
      *   <li>L8 {@code engineDispatchPermits} — dispatch permit holders.</li>
      * </ol>
+     *
+     * <p><b>Capture certification (stage-2 L7 fix):</b> the Phase-1
+     * components (version, lifecycle count, the three queued counters,
+     * the four HashMap-backed key sets) and the Phase-2 components
+     * (inflight map, confirmed tokens, entry-derived queued projection,
+     * permit holders, inflight KV totals) are mutually consistent only
+     * when the seqlock version recheck passed — {@code certified} is
+     * {@code true} exactly then.  The torn fallback (bounded retries
+     * exhausted under extreme admission contention) returns
+     * {@code certified = false}; cross-phase aggregate derivations
+     * (queued counters vs entry projection) are valid on certified
+     * captures only.  Request-level consumers keep relying on the
+     * confirm-window tear absorption regardless of the flag.</p>
      */
     public record DecodeLedgerAuditView(
             long admissionVersion,
@@ -1591,7 +1615,32 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long inflightExpectedKvReservedTotal,
             int queuedPhaseCount,
             long queuedKvReservedTotal,
-            long queuedExpectedKvReservedTotal) {
+            long queuedExpectedKvReservedTotal,
+            boolean certified) {
+
+        /**
+         * Re-issue this capture as seqlock-certified (the Phase-3 version
+         * recheck passed): same components, {@code certified = true}.
+         */
+        public DecodeLedgerAuditView asCertified() {
+            return new DecodeLedgerAuditView(
+                    admissionVersion,
+                    inflight,
+                    engineLifecycleReservationCount,
+                    confirmedReservationTokens,
+                    preemptionClaimRequestIds,
+                    preemptionAttemptIncomingRequestIds,
+                    engineFenceProtectedRequestIds,
+                    settledTombstoneRequestIds,
+                    queuedPhaseRequestIds,
+                    engineDispatchPermitRequestIds,
+                    inflightKvReservedTotal,
+                    inflightExpectedKvReservedTotal,
+                    queuedPhaseCount,
+                    queuedKvReservedTotal,
+                    queuedExpectedKvReservedTotal,
+                    true);
+        }
     }
 
     /**
