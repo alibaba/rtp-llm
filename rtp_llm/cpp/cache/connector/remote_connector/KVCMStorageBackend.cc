@@ -27,8 +27,7 @@ size_t hashString(const std::string& value) {
     return std::hash<std::string>{}(value);
 }
 
-std::string nextTraceId(const char* operation) {
-    static std::atomic<uint64_t> sequence{0};
+std::string nextTraceId(const char* operation, std::atomic<uint64_t>& sequence) {
     return std::string("block_tree_") + operation + "_" + std::to_string(sequence.fetch_add(1));
 }
 
@@ -149,18 +148,17 @@ public:
                                 "KVCM metadata match must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
         RTP_LLM_CHECK(request.keys != nullptr && request.keys->size() == request.handles.size());
-        CacheKeysType keys = *request.keys;
-        if (!keys.empty()) {
-            keys.pop_back();
-        }
+        // The allocator already caps this sequence at the final reusable full
+        // block. Dropping another key here would exclude two tail blocks.
+        const CacheKeysType& keys = *request.keys;
         if (request.local_matched_blocks_num >= keys.size()) {
             return {request.local_matched_blocks_num, nullptr};
         }
-        const auto trace_id       = nextTraceId("match");
+        const auto trace_id       = nextTraceId("match", match_trace_sequence_);
         auto [success, locations] = client_wrapper_->match(
             "", trace_id, kv_cache_manager::QueryType::QT_PREFIX_MATCH, keys, request.local_matched_blocks_num, {});
         if (!success) {
-            throw std::runtime_error("KVCM prefix match failed");
+            return {request.local_matched_blocks_num, nullptr};
         }
         remote_connector::LocationsView locations_view;
         if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
@@ -192,7 +190,7 @@ public:
 
         std::vector<FunctionRequestPB> requests(static_cast<size_t>(parallelism_config_.tp_size));
         const auto&                    spec_info = group_policy_->spec_info_map();
-        const std::string              trace_id  = nextTraceId("read");
+        const std::string              trace_id  = nextTraceId("read", read_trace_sequence_);
         initializeRequests(requests, REMOTE_OPERATION_READ, trace_id);
         for (size_t location_idx = 0; location_idx < locations_view.size(); ++location_idx) {
             const size_t key_idx = request.local_matched_blocks_num + location_idx;
@@ -227,7 +225,7 @@ public:
         std::vector<std::string> location_spec_group_names;
         RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, valid_keys_size, location_spec_group_names),
                                 "KVCM write group selection failed");
-        const std::string trace_id     = nextTraceId("write");
+        const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
         auto [success, write_location] = client_wrapper_->getWriteLocation(
             "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600);
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
@@ -283,17 +281,18 @@ public:
             }
             const auto& actual_locations = has_actual_uri ? write_location.locations : empty_locations;
             finish_attempted             = true;
-            RTP_LLM_CHECK_WITH_INFO(client_wrapper_->finishWrite("",
-                                                                 nextTraceId("finish_write"),
-                                                                 write_location.write_session_id,
-                                                                 write_location.locations.size(),
-                                                                 actual_locations),
-                                    "KVCM FinishWrite failed");
+            RTP_LLM_CHECK_WITH_INFO(
+                client_wrapper_->finishWrite("",
+                                             nextTraceId("finish_write", finish_write_trace_sequence_),
+                                             write_location.write_session_id,
+                                             write_location.locations.size(),
+                                             actual_locations),
+                "KVCM FinishWrite failed");
         } catch (...) {
             if (!finish_attempted) {
                 try {
                     if (!client_wrapper_->finishWrite("",
-                                                      nextTraceId("abort_write"),
+                                                      nextTraceId("abort_write", finish_write_trace_sequence_),
                                                       write_location.write_session_id,
                                                       /*block_mask=*/kv_cache_manager::BlockMaskOffset{0},
                                                       empty_locations)) {
@@ -511,6 +510,12 @@ private:
     std::shared_ptr<BroadcastManager>                broadcast_manager_;
     std::unique_ptr<remote_connector::GroupPolicy>   group_policy_;
     std::shared_ptr<remote_connector::ClientWrapper> client_wrapper_;
+    // Preserve the legacy connector's operation-local, one-based request
+    // order. Abort and finish share a sequence because both call FinishWrite.
+    std::atomic<uint64_t> match_trace_sequence_{1};
+    std::atomic<uint64_t> read_trace_sequence_{1};
+    std::atomic<uint64_t> write_trace_sequence_{1};
+    std::atomic<uint64_t> finish_write_trace_sequence_{1};
 };
 
 KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                cache_config,
