@@ -26,7 +26,15 @@ request-BIRTH second — same axis as e2e/full_e2e, unlike the
 completion-window engine_exec_ts), process_ts (mock/master/client CPU+RSS),
 inflight_ts (G4 scheduler/prefill/decode), inflight_age_ts / kv_ts /
 batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
-per-second dispatch rate derived from the dispatch_reason_total counters).
+per-second dispatch rate derived from the dispatch_reason_total counters),
+plus navi queue_wait observations (flexlb_navi_queue_wait log rows, both
+legacy and engine_ledger formats): navi_queue_wait_ts (per-second node
+estimates), navi_flush_ts (30s-bucket log-gap percentiles),
+navi_queue_wait_stats / navi_flush_stats (run-level summaries),
+engine_waiting_ts (mock per-engine prefill waiting 1s series),
+engine_accepted (per-engine ok-row prefill routing counts, named),
+latency_summary (run-level sched/e2e percentiles + err_rows + status dist)
+and sched_latency_10s (10s-bucket sched p50/p95/p99 + completion qps).
 cancel_qps_ts additionally carries master/prefill/decode cancel split rates
 (census unknown/finished/tombstone diff for the master side; per-engine
 cancelled_rids matched against master terminal lines for prefill/decode).
@@ -43,6 +51,7 @@ schedule_latency_source) — all computed from the merged per_request rows
 plus the server_latency terminal state; rows missing -> None (no
 summary.json passthrough, no-backward-compat).
 """
+import bisect
 import glob
 import gzip
 import json
@@ -268,6 +277,10 @@ run_meta = load_json("run_meta.json") or {}
 # run 根合并文件（plain 或 gzip）唯一来源；shard_* 与 load_client/ 布局
 # 链已删（consolidate 成功即删 shard，残留仅意味着旧 run 复用，不支持）。
 rows = []
+# per_request 行的稳定引用：既有 G3 段（inflight_age_by_role）在文件后部会把
+# 变量名 rows 重绑定为 rel_axis 的 (t, v) 元组列表，后段新增的
+# latency_summary / sched_latency_10s 必须走本别名，避免读到元组。
+per_request_rows = rows
 per_request_files = []
 if os.path.isfile("per_request.jsonl"):
     per_request_files = ["per_request.jsonl"]
@@ -986,6 +999,10 @@ ed_notes = [
     "busy utilization needs mock final_snapshot busy_ms (mock-engine 4b14e05+)",
 ]
 engine_dist = {"notes": ed_notes}
+# per-engine accepted（ok 行 prefill 路由计数，带引擎名不排序；与
+# engine_dist.prefill.requests_per_engine 同数据源，但后者为降序无名数组，
+# html_report_gen.py 引擎均衡图需要名字）。
+engine_accepted = {}
 if rows:
     p_count = Counter()
     d_count = Counter()
@@ -1025,6 +1042,7 @@ if rows:
     d_vals = sorted(d_count.values(), reverse=True)
     p_tok_vals = sorted(p_tokens.values(), reverse=True)
     d_tok_vals = sorted(d_tokens.values(), reverse=True)
+    engine_accepted = dict(p_count)
     engine_dist["prefill"] = {
         "engine_count": len(p_count),
         "requests_per_engine": p_vals,
@@ -1883,6 +1901,274 @@ if reason_series:
     reason_rate_rows = sorted(rate_by_ts.items())
 dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)]
 
+# ---- navi queue_wait 观测（flexlb_navi_queue_wait 行，两种格式容错）----
+# 行格式（时间戳前缀与 flexlb_server_schedule_latency 同源的本地时区日志）：
+#   旧: nodes=N requests=M queue_wait_ms=a,b,c
+#       [engine_ms=.. ledger_ms=.. queued_tokens=..]（v1 修复版已带，pre 更旧不带）
+#   新: nodes=N requests=M avg_tokens=T queue_wait_ms=a,b,c
+#       engine_ms=a,b,c ledger_ms=a,b,c waiting=w,x,y,z（v2/intake3 O(1) 版）
+# queue_wait_ms 即节点最终估计（Java 侧 max(ledger, engine) 后打出）；旧格式无
+# engine/ledger 分列时相应非零行数计 None。非 navi run / 无该行 -> 字段省略。
+# 分位口径用最近秩（与 var/export_chart_data.py / diag_post2.py 同源，保证
+# 跨工具数字一致），不复用上方 pct()（它是截断秩且入参为小数）。
+
+
+def _pct_cent(vals, p_cent):
+    """最近秩分位（p_cent 为 0-100）；空 -> None。"""
+    if not vals:
+        return None
+    s = sorted(vals)
+    k = min(len(s) - 1, max(0, int(p_cent / 100.0 * (len(s) - 1) + 0.5)))
+    return s[k]
+
+
+NAVIRE = re.compile(
+    r"flexlb_navi_queue_wait nodes=(\d+) requests=(\d+)(?: avg_tokens=(\d+))? "
+    r"queue_wait_ms=([\d,]+)"
+    r"(?: engine_ms=([\d,]+) ledger_ms=([\d,]+)"
+    r"(?: waiting=([\d,]+)| queued_tokens=([\d,]+))?)?"
+)
+navi_rows = []  # (epoch_ms, qw[], ems[]|None, lms[]|None)
+navi_rows_notimestamp = 0
+for f in log_files:
+    with open(f, errors="replace") as stream:
+        for line in stream:
+            if "flexlb_navi_queue_wait" not in line:
+                continue
+            m = NAVIRE.search(line)
+            if not m:
+                continue
+            ts = None
+            tm = LOG_TS_RE.match(line)
+            if tm:
+                try:
+                    ts = (
+                        datetime.strptime(tm.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                        + int(tm.group(2)) / 1000.0
+                    ) * 1000.0
+                except ValueError:
+                    ts = None
+            if ts is None:
+                navi_rows_notimestamp += 1
+                continue
+            navi_rows.append(
+                (
+                    ts,
+                    [int(x) for x in m.group(4).split(",")],
+                    [int(x) for x in m.group(5).split(",")] if m.group(5) else None,
+                    [int(x) for x in m.group(6).split(",")] if m.group(6) else None,
+                )
+            )
+navi_rows.sort(key=lambda r: r[0])
+
+navi_queue_wait_ts = []
+navi_flush_ts = []
+navi_queue_wait_stats = {}
+navi_flush_stats = {}
+if navi_rows:
+    # 时间锚：与全部既有序列一致优先 per_request epoch0；无 per_request 的
+    # 旧 run 退回 navi 首行自身（rel_axis 同款回退）。
+    navi_anchor = epoch0 or navi_rows[0][0]
+    qw_sec = defaultdict(list)  # sec -> [qw arrays]
+    flush_b = defaultdict(list)  # 30s bucket -> gaps
+    qw_rows_nonzero = ems_rows_nonzero = lms_rows_nonzero = 0
+    has_engine_ledger = False
+    all_qw = []
+    for i, (ts, qw, ems, lms) in enumerate(navi_rows):
+        sec = int((ts - navi_anchor) // 1000)
+        qw_sec[sec].append(qw)
+        all_qw.extend(qw)
+        if any(x > 0 for x in qw):
+            qw_rows_nonzero += 1
+        if ems is not None:
+            has_engine_ledger = True
+            if any(x > 0 for x in ems):
+                ems_rows_nonzero += 1
+        if lms is not None and any(x > 0 for x in lms):
+            lms_rows_nonzero += 1
+        if i + 1 < len(navi_rows):
+            gap = navi_rows[i + 1][0] - ts
+            flush_b[int((ts - navi_anchor) // 30000)].append(gap)
+    n_nodes = len(navi_rows[0][1]) if navi_rows else 0
+    for sec in sorted(qw_sec):
+        arrs = qw_sec[sec]
+        flat = [x for a in arrs for x in a]
+        node_means = [
+            sum(a[ni] if ni < len(a) else 0 for a in arrs) / len(arrs)
+            for ni in range(n_nodes)
+        ]
+        navi_queue_wait_ts.append(
+            [
+                sec,
+                min(flat),
+                int(sum(flat) / len(flat)),
+                max(flat),
+                sum(1 for v in node_means if v > 0),
+                len(arrs),
+            ]
+        )
+    gaps_all = [g for v in flush_b.values() for g in v]
+    for b in sorted(flush_b):
+        v = flush_b[b]
+        navi_flush_ts.append(
+            [
+                b * 30,
+                int(_pct_cent(v, 50)),
+                int(_pct_cent(v, 99)),
+                len(v),
+                sum(1 for x in v if x > 200),
+            ]
+        )
+    first_fb = navi_flush_ts[0] if navi_flush_ts else None
+    last_fb = navi_flush_ts[-1] if navi_flush_ts else None
+    navi_queue_wait_stats = {
+        "rows": len(navi_rows),
+        "nonzero_rows": qw_rows_nonzero,
+        "nonzero_share_pct": round(100.0 * qw_rows_nonzero / len(navi_rows), 2),
+        "node_p50_ms": int(_pct_cent(all_qw, 50)) if all_qw else None,
+        "node_p99_ms": int(_pct_cent(all_qw, 99)) if all_qw else None,
+        "node_max_ms": max(all_qw) if all_qw else None,
+        "engine_ms_nonzero_rows": ems_rows_nonzero if has_engine_ledger else None,
+        "ledger_ms_nonzero_rows": lms_rows_nonzero if has_engine_ledger else None,
+        "format": "engine_ledger" if has_engine_ledger else "legacy",
+        "rows_without_timestamp": navi_rows_notimestamp,
+    }
+    navi_flush_stats = {
+        "windows": len(gaps_all),
+        "gap_p50_ms": int(_pct_cent(gaps_all, 50)) if gaps_all else None,
+        "gap_p99_ms": int(_pct_cent(gaps_all, 99)) if gaps_all else None,
+        "gap_max_ms": max(gaps_all) if gaps_all else None,
+        "gap_gt200ms_share_pct": (
+            round(100.0 * sum(1 for g in gaps_all if g > 200) / len(gaps_all), 2)
+            if gaps_all
+            else None
+        ),
+        "first_bucket_p50_ms": first_fb[1] if first_fb else None,
+        "last_bucket_p50_ms": last_fb[1] if last_fb else None,
+        "windows_per_30s_first": first_fb[3] if first_fb else None,
+        "windows_per_30s_last": last_fb[3] if last_fb else None,
+    }
+
+# ---- engine_waiting_ts：mock per-engine prefill waiting 1s 序列 ----
+# 源：mock_per_engine_timeseries.json.gz 的 mock_engine_waiting{engine_name=
+# "prefill-N"} 标签（与 var/export_chart_data.py 同口径，引擎名排序定列）。
+# summary 的 last60_max_min_ratio 取 1s 序列最后 12 个样本的 max/min 均值
+# （diag 口径）。缺文件 -> 空序列，字段保留（summary 全 None）。
+engine_waiting_ts = {"engines": [], "rows": [], "summary": {}}
+if mock_per_engine_ts:
+    _ew_series = []
+    for x in mock_per_engine_ts:
+        met = x.get("metrics") or {}
+        if not isinstance(met, dict):
+            continue
+        wmap = {}
+        for k, v in met.items():
+            if not isinstance(v, (int, float)):
+                continue
+            mm = re.search(
+                r'mock_engine_waiting\{[^}]*engine_name="(prefill-\d+)"', str(k)
+            )
+            if mm:
+                wmap[mm.group(1)] = int(v)
+        if wmap:
+            if not engine_waiting_ts["engines"]:
+                engine_waiting_ts["engines"] = sorted(wmap.keys())
+            _ew_series.append(
+                (x.get("ts"), [wmap.get(n, 0) for n in engine_waiting_ts["engines"]])
+            )
+    if _ew_series:
+        _ew_anchor = epoch0 or _ew_series[0][0]
+        engine_waiting_ts["rows"] = [
+            [round((ts - _ew_anchor) / 1000.0, 1)] + w for ts, w in _ew_series
+        ]
+        totals_series = [sum(w) for _, w in _ew_series]
+        ratios = []
+        for _, w in _ew_series[-12:]:
+            if min(w) > 0:
+                ratios.append(max(w) / min(w))
+        engine_waiting_ts["summary"] = {
+            "first": totals_series[0],
+            "peak": max(totals_series),
+            "last": totals_series[-1],
+            "last60_max_min_ratio": (
+                round(sum(ratios) / len(ratios), 3) if ratios else None
+            ),
+        }
+
+# ---- latency_summary + sched_latency_10s（run 级分位与 10s 桶，供 ----
+# ---- html_report_gen.py 多 run 对照；均为既有数据的增量字段） ----
+# sched 分位：is_ok 行的 schedule_ms（与 per_second 同口径）；
+# e2e 分位：is_ok 行且带 total_ms（与 per_second e2e 列表及旧
+# export_chart_data.py 的 e2e_caliber 同口径 —— timeout 行即使携带
+# total_ms 也不入列）；err_rows：全量行中 not is_ok 的行数（端到端
+# 错误行口径，与 error_breakdown 总和同源）。
+# completion_qps：master.json counters_timeseries 的 completion_count 差分
+# 除以桶长（10s）；缺该序列 -> 对应桶 None，不编造。
+latency_summary = {}
+sched_latency_10s = []
+if per_request_rows:
+    sched_all = [
+        float(d["schedule_ms"])
+        for d in per_request_rows
+        if is_ok(d) and d.get("schedule_ms") is not None
+    ]
+    e2e_all = [
+        float(d["total_ms"]) for d in per_request_rows if is_ok(d) and d.get("total_ms")
+    ]
+    err_rows = sum(1 for d in per_request_rows if not is_ok(d))
+    status_dist = Counter(str(d.get("status") or "") for d in per_request_rows)
+    latency_summary = {
+        "err_rows": err_rows,
+        "sched_p50_ms": round(_pct_cent(sched_all, 50), 1) if sched_all else None,
+        "sched_p95_ms": round(_pct_cent(sched_all, 95), 1) if sched_all else None,
+        "sched_p99_ms": round(_pct_cent(sched_all, 99), 1) if sched_all else None,
+        "sched_max_ms": max(sched_all) if sched_all else None,
+        "e2e_n": len(e2e_all),
+        "e2e_p50_ms": round(_pct_cent(e2e_all, 50), 1) if e2e_all else None,
+        "e2e_p95_ms": round(_pct_cent(e2e_all, 95), 1) if e2e_all else None,
+        "e2e_p99_ms": round(_pct_cent(e2e_all, 99), 1) if e2e_all else None,
+        "e2e_max_ms": max(e2e_all) if e2e_all else None,
+        "status_dist": dict(status_dist),
+    }
+
+    b_sched = defaultdict(list)
+    b_sends = defaultdict(int)
+    for d in per_request_rows:
+        _s = d.get("send_start_epoch_ms")
+        if not _s:
+            continue
+        _b = int((_s - epoch0) // 10000)
+        b_sends[_b] += 1
+        if is_ok(d) and d.get("schedule_ms") is not None:
+            b_sched[_b].append(float(d["schedule_ms"]))
+    ct = master_json.get("counters_timeseries") or []
+    ct = [c for c in ct if isinstance(c, dict)]
+    ct.sort(key=lambda x: x.get("ts_epoch_ms") or 0)
+    cts = [x.get("ts_epoch_ms") for x in ct]
+    ccc = [x.get("completion_count") or 0 for x in ct]
+
+    def _count_at(T):
+        i = bisect.bisect_right(cts, T) - 1
+        return ccc[i] if i >= 0 else 0
+
+    for b in sorted(b_sends):
+        v = b_sched.get(b) or []
+        ta = epoch0 + b * 10000
+        tb = epoch0 + (b + 1) * 10000
+        comp_qps = None
+        if cts:
+            comp_qps = round((_count_at(tb) - _count_at(ta)) / 10.0, 2)
+        sched_latency_10s.append(
+            [
+                b * 10,
+                round(_pct_cent(v, 50), 1) if v else None,
+                round(_pct_cent(v, 95), 1) if v else None,
+                round(_pct_cent(v, 99), 1) if v else None,
+                comp_qps,
+                b_sends[b],
+            ]
+        )
+
 # consolidate integrity markers (consolidate_run_outputs.py): how the
 # final_snapshot was obtained (live HTTP fetch vs stale fallback) and
 # whether the slo analysis predates this run's per_request data. Empty for
@@ -2002,5 +2288,15 @@ out = {
     "dispatch_reason_ts": dispatch_reason_ts,
     "dispatch_batch_size_ts": dispatch_batch_size_ts,
     "batch_size_final": batch_size_final,
+    # ---- navi queue_wait 观测（flexlb_navi_queue_wait 行；非 navi run /
+    # ---- 旧 run 无该行时字段为空/缺省，html_report_gen.py 探测降级） ----
+    "navi_queue_wait_ts": navi_queue_wait_ts,
+    "navi_flush_ts": navi_flush_ts,
+    "navi_queue_wait_stats": navi_queue_wait_stats,
+    "navi_flush_stats": navi_flush_stats,
+    "engine_waiting_ts": engine_waiting_ts,
+    "engine_accepted": engine_accepted,
+    "latency_summary": latency_summary,
+    "sched_latency_10s": sched_latency_10s,
 }
 json.dump(out, sys.stdout)
