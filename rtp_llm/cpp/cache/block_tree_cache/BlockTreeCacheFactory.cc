@@ -499,6 +499,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.enable_host_cache   = host_enabled;
     config.enable_disk_cache   = disk_enabled;
     config.enable_remote_cache = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+    config.write_cache_sync    = kv_cache_config.write_cache_sync;
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
     }
@@ -552,21 +553,22 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         parallelism_config.tp_rank == 0 && !parallelism_config.ffn_disaggregate_config.is_ffn_service();
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
-    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
-                                                                        DeviceHostCopyOptions{},
-                                                                        config.device_disk_staging_block_count,
-                                                                        config.max_descriptors_per_transfer_batch,
-                                                                        config.transfer_worker_count,
-                                                                        config.max_descriptors_per_non_device_host_transfer_batch);
+    auto per_rank_engine =
+        std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                     DeviceHostCopyOptions{},
+                                                     config.device_disk_staging_block_count,
+                                                     config.max_descriptors_per_transfer_batch,
+                                                     config.transfer_worker_count,
+                                                     config.max_descriptors_per_non_device_host_transfer_batch);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
-    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
-        std::move(per_rank_engine),
-        std::move(multi_rank_engine),
-        config.max_descriptors_per_transfer_batch,
-        config.max_descriptors_per_non_device_host_transfer_batch);
+    auto transfer_dispatcher =
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine),
+                                                  std::move(multi_rank_engine),
+                                                  config.max_descriptors_per_transfer_batch,
+                                                  config.max_descriptors_per_non_device_host_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
 

@@ -33,6 +33,11 @@ void CallbackBarrier::waitUntilEntered(size_t expected_count) {
     cv_.wait(lock, [this, expected_count] { return entered_count_ >= expected_count; });
 }
 
+bool CallbackBarrier::waitUntilEnteredFor(size_t expected_count, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, timeout, [this, expected_count] { return entered_count_ >= expected_count; });
+}
+
 void CallbackBarrier::release() {
     std::lock_guard<std::mutex> lock(mutex_);
     released_ = true;

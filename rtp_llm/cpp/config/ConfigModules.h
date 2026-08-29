@@ -191,6 +191,7 @@ struct KVCacheConfig {
     bool        enable_host_cache_pinned     = true;
     bool        enable_disk_cache            = false;
     bool        enable_remote_cache          = false;
+    bool        write_cache_sync             = false;
     std::string device_eviction_policy       = "lru";
     std::string host_eviction_policy         = "lru";
     std::string disk_eviction_policy         = "fifo";

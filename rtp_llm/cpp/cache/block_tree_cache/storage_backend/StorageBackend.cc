@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::storage_backend_detail {
 
@@ -20,21 +21,37 @@ void invokeCallback(const StorageBackend* backend, Callback&& callback) noexcept
 
 struct StorageTaskState {
     struct Pin {
-        DeviceBlockPoolPtr          pool;
-        BlockIdxType                block;
+        DeviceBlockPoolPtr pool;
+        BlockIdxType       block;
     };
 
-    StorageRequest   request;
-    std::vector<Pin> pins;
-    std::once_flag   finish_once;
+    StorageRequest          request;
+    std::vector<Pin>        pins;
+    std::once_flag          finish_once;
+    std::mutex              completion_mutex;
+    std::condition_variable completion_cv;
+    bool                    completed{false};
+    bool                    success{false};
 
-    void finish() {
-        std::call_once(finish_once, [this] {
+    void finish(bool write_success = false) {
+        std::call_once(finish_once, [this, write_success] {
             for (const Pin& pin : pins) {
                 pin.pool->decRef(pin.block);
             }
             pins.clear();
+            {
+                std::lock_guard<std::mutex> lock(completion_mutex);
+                success   = write_success;
+                completed = true;
+            }
+            completion_cv.notify_all();
         });
+    }
+
+    bool wait() {
+        std::unique_lock<std::mutex> lock(completion_mutex);
+        completion_cv.wait(lock, [this] { return completed; });
+        return success;
     }
 
     ~StorageTaskState() {
@@ -49,8 +66,8 @@ namespace {
 
 struct BlockKey {
     DeviceBlockPool* pool;
-    BlockIdxType block;
-    bool         operator==(const BlockKey& other) const {
+    BlockIdxType     block;
+    bool             operator==(const BlockKey& other) const {
         return pool == other.pool && block == other.block;
     }
 };
@@ -66,8 +83,7 @@ struct BlockKeyHash {
 StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::StorageTaskState> state):
     state_(std::move(state)) {}
 
-StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor):
-    executor_(std::move(executor)) {}
+StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor): executor_(std::move(executor)) {}
 
 StorageBackend::~StorageBackend() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -83,9 +99,9 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     for (const auto& pool : device_pools) {
         RTP_LLM_CHECK(pool != nullptr);
     }
-    topology_               = std::move(topology);
-    device_pools_           = std::move(device_pools);
-    buffer_resolver_        = std::move(buffer_resolver);
+    topology_        = std::move(topology);
+    device_pools_    = std::move(device_pools);
+    buffer_resolver_ = std::move(buffer_resolver);
     if (!initImpl()) {
         return false;
     }
@@ -108,7 +124,7 @@ bool StorageBackend::init(std::shared_ptr<const CacheTopology> topology,
     return true;
 }
 
-void StorageBackend::dispatch(Operation operation) {
+bool StorageBackend::dispatch(Operation operation) {
     const auto once = std::make_shared<std::once_flag>();
     Lifecycle  outcome;
     {
@@ -125,7 +141,7 @@ void StorageBackend::dispatch(Operation operation) {
         try {
             operation(outcome);
         } catch (...) {}
-        return;
+        return false;
     }
     auto complete = [this, once, operation = std::move(operation)](Lifecycle result) mutable {
         std::call_once(*once, [&] {
@@ -135,14 +151,15 @@ void StorageBackend::dispatch(Operation operation) {
     };
     if (outcome != Lifecycle::ACCEPTING) {
         complete(Lifecycle::STOPPING);
-        return;
+        return false;
     }
     try {
         if (executor_->submit([complete]() mutable { complete(Lifecycle::ACCEPTING); })) {
-            return;
+            return true;
         }
     } catch (...) {}
     complete(Lifecycle::STOPPING);
+    return false;
 }
 
 void StorageBackend::taskFinished() {
@@ -175,6 +192,7 @@ void StorageBackend::shutdown() {
         lifecycle_cv_.wait(lock, [this] { return in_flight_ == 0; });
         lifecycle_ = Lifecycle::FINALIZING;
     }
+    shutdownImpl();
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         lifecycle_ = Lifecycle::STOPPED;
@@ -205,6 +223,11 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
 const CacheTopology& StorageBackend::topology() const {
     RTP_LLM_CHECK(topology_ != nullptr);
     return *topology_;
+}
+
+const std::vector<DeviceBlockPoolPtr>& StorageBackend::devicePools() const {
+    RTP_LLM_CHECK(topology_ != nullptr && device_pools_.size() == topology_->groups().size());
+    return device_pools_;
 }
 
 std::vector<BlockInfo> StorageBackend::convertIndexToBuffer(int layer_id, int group_id, int block_id) const {
@@ -248,7 +271,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                 success = false;
             }
         }
-        state->finish();
+        state->finish(success);
         if (done) {
             done(success);
         }
@@ -263,18 +286,27 @@ StorageWriteTask StorageBackend::prepareWrite(StorageRequest request) {
     return StorageWriteTask(prepare(std::move(request)));
 }
 
-void StorageBackend::write(StorageWriteTask task) {
+bool StorageBackend::write(StorageWriteTask task, bool synchronous) {
     RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
-    dispatch([this, state = std::move(state)](Lifecycle outcome) {
-        if (outcome == Lifecycle::ACCEPTING) {
+    if (synchronous && storage_backend_detail::completing_backend == this) {
+        RTP_LLM_LOG_ERROR("synchronous StorageBackend write rejected from the same backend callback");
+        state->finish(false);
+        return false;
+    }
+    const bool admitted = dispatch([this, state](Lifecycle outcome) {
+        bool success = outcome == Lifecycle::ACCEPTING;
+        if (success) {
             try {
                 writeImpl(state->request);
-            } catch (...) {}
+            } catch (...) {
+                success = false;
+            }
         }
-        state->finish();
+        state->finish(success);
     });
+    return synchronous ? state->wait() : admitted;
 }
 
 }  // namespace rtp_llm
