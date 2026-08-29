@@ -61,7 +61,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
         request = runner.opener.open.call_args.args[0]
         payload = json.loads(request.data)
         self.assertEqual(
-            payload["role_addrs"],
+            payload["extra_configs"]["role_addrs"],
             [
                 {
                     "role": "DECODE",
@@ -71,6 +71,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 }
             ],
         )
+        self.assertNotIn("role_addrs", payload)
 
     def test_request_rejects_decode_owner_outside_world(self) -> None:
         runner = Runner(make_args())

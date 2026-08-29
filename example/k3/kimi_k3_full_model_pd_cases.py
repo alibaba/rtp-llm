@@ -279,9 +279,16 @@ class Runner:
                     f"{case.name}: decode owner rank {case.decode_owner_rank} is outside "
                     f"the configured world size {len(self.decode_role_addrs)}"
                 )
-            payload["role_addrs"] = [
-                self.decode_role_addrs[case.decode_owner_rank]
-            ]
+            # The OpenAI chat endpoint builds GenerateConfig exclusively from
+            # request.extra_configs.  A top-level role_addrs field is ignored
+            # by ChatCompletionRequest, which silently falls back to the
+            # process-wide REMOTE_RPC_SERVER_IP and routes every request to the
+            # first Decode rank.
+            payload["extra_configs"] = {
+                "role_addrs": [
+                    self.decode_role_addrs[case.decode_owner_rank]
+                ]
+            }
         request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(),
