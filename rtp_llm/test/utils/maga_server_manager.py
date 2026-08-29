@@ -397,6 +397,13 @@ class MagaServerManager(object):
 
             leftover = self._alive_processes(descendants)
             if leftover:
+                # multiprocessing helpers such as resource_tracker can outlive
+                # their cleanly exited owner by a short interval while closing
+                # inherited pipes. Let them retire naturally before treating
+                # them as leaked server processes.
+                _, leftover = psutil.wait_procs(leftover, timeout=5)
+                leftover = self._alive_processes(leftover)
+            if leftover:
                 leftover_pids = [process.pid for process in leftover]
                 self._terminate_descendants(leftover)
                 errors.append(

@@ -253,6 +253,60 @@ class MagaServerManagerShutdownTest(unittest.TestCase):
         child.kill.assert_not_called()
         self.assertEqual(manager.exit_code, 0)
 
+    def test_post_parent_grace_allows_helper_to_exit_naturally(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        child = Mock(pid=456)
+        child.is_running.return_value = True
+        child.status.return_value = "running"
+        parent = Mock()
+        parent.children.return_value = [child]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ), patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                return_value=([child], []),
+            ) as wait_procs:
+                self.assertTrue(manager.stop_server())
+
+        wait_procs.assert_called_once_with([child], timeout=5)
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+
+    def test_post_parent_grace_still_fails_for_surviving_descendant(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        child = Mock(pid=456)
+        child.is_running.return_value = True
+        child.status.return_value = "running"
+        parent = Mock()
+        parent.children.return_value = [child]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ), patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=[([], [child]), ([], [child]), ([child], [])],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "left descendant processes alive: \\[456\\]"
+                ):
+                    manager.stop_server()
+
+        child.terminate.assert_called_once()
+        child.kill.assert_called_once()
+
     def test_start_server_uses_test_drain_defaults_and_preserves_overrides(self):
         cases = [
             ({}, "0", "0"),
