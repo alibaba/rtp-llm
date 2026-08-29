@@ -66,13 +66,13 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size    = 100,
+    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size     = 100,
                                                    size_t max_inited_kv_cache_streams = 0) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                     = max_generate_batch_size;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        runtime_config.max_generate_batch_size                           = max_generate_batch_size;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
         runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
         PDSepConfig         pd_sep_config;
         ParallelismConfig   parallelism_config;
@@ -102,24 +102,24 @@ protected:
                                    const std::vector<int>& variable_num_beams = {},
                                    RoleType                role_type          = RoleType::PDFUSION) {
         ResourceContext resource_context;
-        resource_context.cache_manager       = cache_manager_;
-        resource_context.reuse_cache         = reuse_cache;
-        resource_context.enable_host_cache   = enable_host_cache;
-        resource_context.role_type           = role_type;
+        resource_context.cache_manager     = cache_manager_;
+        resource_context.reuse_cache       = reuse_cache;
+        resource_context.enable_host_cache = enable_host_cache;
+        resource_context.role_type         = role_type;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
 
-        auto query                           = std::make_shared<GenerateInput>();
-        auto generate_config                 = std::make_shared<GenerateConfig>();
-        query->request_id                    = next_request_id_++;
-        generate_config->reuse_cache         = reuse_cache;
-        generate_config->enable_host_cache   = enable_host_cache;
-        generate_config->max_new_tokens      = max_new_tokens;
-        generate_config->variable_num_beams  = variable_num_beams;
-        query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);
-        query->generate_config               = generate_config;
+        auto query                          = std::make_shared<GenerateInput>();
+        auto generate_config                = std::make_shared<GenerateConfig>();
+        query->request_id                   = next_request_id_++;
+        generate_config->reuse_cache        = reuse_cache;
+        generate_config->enable_host_cache  = enable_host_cache;
+        generate_config->max_new_tokens     = max_new_tokens;
+        generate_config->variable_num_beams = variable_num_beams;
+        query->input_ids                    = torch::tensor(input_tokens, torch::kInt32);
+        query->generate_config              = generate_config;
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     }
 
@@ -167,8 +167,8 @@ protected:
     }
 
     void installRetryableAllocator() {
-        real_allocator_ = cache_manager_->allocator_;
-        mock_allocator_ = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+        real_allocator_       = cache_manager_->allocator_;
+        mock_allocator_       = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
         initial_malloc_calls_ = 0;
 
         ON_CALL(*mock_allocator_, totalBlocksNum()).WillByDefault(testing::Return(64));
@@ -286,7 +286,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PrefillAllocatorFai
                                /*max_new_tokens=*/1,
                                /*variable_num_beams=*/{},
                                RoleType::PREFILL);
-    auto context = makeControlledAllocatorContext();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -399,11 +399,11 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_DoesNotSpinForLoadingCache
 TEST_F(FIFOSchedulerAsyncCacheTest, testRetryableKVShortageDoesNotSpinAndIsPolled) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3},
-                                  /*reuse_cache=*/true,
-                                  /*enable_host_cache=*/false,
-                                  /*max_new_tokens=*/1,
-                                  /*variable_num_beams=*/{},
-                                  RoleType::PREFILL);
+                               /*reuse_cache=*/true,
+                               /*enable_host_cache=*/false,
+                               /*max_new_tokens=*/1,
+                               /*variable_num_beams=*/{},
+                               RoleType::PREFILL);
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installRetryableAllocator();
 
@@ -421,7 +421,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testRetryableKVShortageDoesNotSpinAndIsPolle
     EXPECT_EQ(future.wait_for(std::chrono::milliseconds(2)), std::future_status::timeout);
     const auto wait_status = future.wait_for(std::chrono::milliseconds(250));
     if (wait_status != std::future_status::ready) {
-        scheduler->stop();
+        EXPECT_TRUE(scheduler->stop().ok());
     }
     schedule_thread.join();
 
@@ -732,10 +732,10 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testOrdinaryLoadingReleasesInitedLimitBefore
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testGroupedSurvivorContinuesLoadingAfterPeerTimeout) {
-    auto scheduler      = createScheduler();
-    auto direct_stream  = createStream({1, 2}, /*reuse_cache=*/false);
-    auto loading_stream = createStream({3, 4}, /*reuse_cache=*/true);
-    auto context        = makeControlledAllocatorContext();
+    auto scheduler                              = createScheduler();
+    auto direct_stream                          = createStream({1, 2}, /*reuse_cache=*/false);
+    auto loading_stream                         = createStream({3, 4}, /*reuse_cache=*/true);
+    auto context                                = makeControlledAllocatorContext();
     direct_stream->generateConfig()->timeout_ms = 1;
     direct_stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
 
@@ -797,7 +797,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupCompletionIsPolledWithoutExt
 
     const auto wait_status = future.wait_for(std::chrono::milliseconds(250));
     if (wait_status != std::future_status::ready) {
-        scheduler->stop();
+        EXPECT_TRUE(scheduler->stop().ok());
     }
     schedule_thread.join();
     ASSERT_EQ(wait_status, std::future_status::ready);
