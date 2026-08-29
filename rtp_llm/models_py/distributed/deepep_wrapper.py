@@ -66,7 +66,7 @@ except ImportError as _deep_ep_import_err:
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import QuantizationConfig
-from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -88,9 +88,9 @@ __all__ = [
 def use_accl_ep() -> bool:
     """Check if ACCL EP should be used based on device type."""
     device_type = get_device_type()
-    if device_type == DeviceType.ROCm:
+    if not is_cuda() or device_type == DeviceType.ROCm:
         return False
-    return torch.cuda.get_device_capability()[0] != 12
+    return not is_sm12x()
 
 
 def allow_mnnvl() -> bool:

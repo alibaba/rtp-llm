@@ -19,6 +19,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _log = _logging.getLogger(__name__)
@@ -264,7 +265,7 @@ def prewarm(
     """
     if not model_warm_up_enabled() or not _TILELANG_AVAILABLE:
         return
-    if str(device).startswith("cuda") and torch.cuda.get_device_capability(device)[0] == 12:
+    if str(device).startswith("cuda") and is_sm120(device):
         return
     h_padded = max(n_heads, 16)
     _log.info(

@@ -432,7 +432,6 @@ py_test(
         "--enable_cuda_graph", "1",
         "--reserver_runtime_mem_mb", "32768",
         "--max_context_batch_size", "1",
-        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -471,10 +470,9 @@ py_test(
 # EngineServer._build_engine_cli also overrides --concurrency_limit to
 # max(batch_size_list)=128 at engine startup, so the BUILD
 # --concurrency_limit below is effectively ignored.
-# DSV4 fixed pools are sized by --dsv4_fixed_pool_blocks.  Each request can hold
-# up to 3 fixed-pool blocks, so 128 concurrent reqs need 384 request-visible
-# blocks per rank.  The default 256 leaves the bs128 run short of admission
-# headroom and surfaces as incrKVBlock LACK MEM; 512 keeps roughly 33% margin.
+# DSV4 state pools use descriptor-specific sizing. HCA_STATE is an active-tail
+# ring controlled by --dsv4_hca_state_pool_blocks; other pools follow the
+# framework's normal linear-step policy.
 # Keep one frontend per DP rank for this smoke: the test readiness check probes a
 # shared rank port once, and multiple SO_REUSEPORT frontends can otherwise route
 # early scheduler updates to a process that is still completing startup.
@@ -515,7 +513,6 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
-        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -585,7 +582,6 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
-        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -751,7 +747,6 @@ py_test(
         "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
         "--warm_up", "0",
-        "--dsv4_fixed_pool_blocks", "1024"
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -938,7 +933,7 @@ test_suite(
 # SM120 DeepSeek-V4-Flash-0731 DSpark profiles matching the CP4/DP4 smoke
 # deployment.  Keep these manual: the full decode cartesian grid is expensive.
 py_test(
-name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
+    name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
     main = "batch_decode_test.py",
     srcs = ["batch_decode_test.py"],
     timeout = "eternal",
@@ -950,8 +945,8 @@ name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
-        "--tokenizer_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1",
         "--input_len", "1024,2048,4096,8192,16384,32768,65536,131072,262144",
         "--partial", "2",
@@ -979,7 +974,7 @@ name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
         "--sp_type", "dspark",
         "--gen_num_per_cycle", "3",
         "--sp_model_type", "deepseek_v4_dspark",
-        "--sp_checkpoint_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
+        "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
     ],
     env = {
@@ -1009,11 +1004,12 @@ name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
         "LINEAR_STEP": "64",
         "NCCL_P2P_DISABLE": "1",
     },
-    tags = ["manual"],
+    tags = ["manual", "SM120_X86"],
+    exec_properties = {"gpu": "SM120_X86"},
 )
 
 py_test(
-name = "v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
+    name = "v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
     main = "batch_decode_test.py",
     srcs = ["batch_decode_test.py"],
     timeout = "eternal",
@@ -1025,8 +1021,8 @@ name = "v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
-        "--tokenizer_path", "/home/tanboyu.tby/models/DeepSeek-V4-Flash-0731",
+        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1,2,4,8,16,32,64,128",
         "--input_len", "1024,4096,8192,16384,32768,65536,131072,262144",
         "--partial", "1",
@@ -1050,7 +1046,7 @@ name = "v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
         "--max_context_batch_size", "1",
         # HCA_STATE is an active-tail ring and does not participate in prefix
         # reuse; this pool is independently configurable from LINEAR_STEP.
-        "--dsv4_hca_state_pool_blocks", "258",
+        "--dsv4_hca_state_pool_blocks", "256",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -1078,7 +1074,17 @@ name = "v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
         "LINEAR_STEP": "16",
         "NCCL_P2P_DISABLE": "1",
     },
-    tags = ["manual"],
+    tags = ["manual", "SM120_X86"],
+    exec_properties = {"gpu": "SM120_X86"},
+)
+
+test_suite(
+    name = "perf_dsv4_v4_flash_sm120",
+    tests = [
+        ":v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
+        ":v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
+    ],
+    tags = ["manual", "SM120_X86"],
 )
 
 # DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).

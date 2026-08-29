@@ -428,16 +428,39 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
+    if py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks > 0:
+        logging.warning(
+            "DSV4_FIXED_POOL_BLOCKS is deprecated and has no effect on descriptor-based pool sizing"
+        )
+
     # Frontend doesn't need this setting
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
-        if torch.cuda.is_available():
-            if (
-                "NCCL_P2P_DISABLE" not in os.environ
-                and "RTX" in torch.cuda.get_device_name(0)
-                and torch.cuda.get_device_capability(0)[0] < 12
-            ):
-                os.environ["NCCL_P2P_DISABLE"] = "1"
-                logging.info("set NCCL_P2P_DISABLE to 1")
+        if (
+            torch.cuda.is_available()
+            and torch.cuda.device_count() > 1
+            and "NCCL_P2P_DISABLE" not in os.environ
+        ):
+            try:
+                device_count = torch.cuda.device_count()
+                peer_access = all(
+                    torch.cuda.can_device_access_peer(src, dst)
+                    for src in range(device_count)
+                    for dst in range(device_count)
+                    if src != dst
+                )
+            except (AttributeError, RuntimeError, AssertionError) as exc:
+                logging.warning(
+                    "unable to probe CUDA P2P access; leaving NCCL_P2P_DISABLE unset: %s",
+                    exc,
+                )
+            else:
+                if not peer_access:
+                    os.environ["NCCL_P2P_DISABLE"] = "1"
+                    logging.info(
+                        "set NCCL_P2P_DISABLE=1: at least one CUDA device pair "
+                        "does not support peer access (device_count=%d)",
+                        device_count,
+                    )
 
     if (
         py_env_configs.role_config.role_type == RoleType.PREFILL

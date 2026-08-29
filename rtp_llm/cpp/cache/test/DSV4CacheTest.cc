@@ -1277,6 +1277,48 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     }
 }
 
+TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency) {
+    auto make_config = [](uint32_t blocks, std::optional<CacheMemoryPlacement> placement) {
+        auto              mc = makeProModelConfig();
+        ParallelismConfig pc;
+        RuntimeConfig     runtime_config;
+        KVCacheConfig     kv_cache_config;
+        kv_cache_config.test_block_num = 100;
+        kv_cache_config.dsv4_hca_state_pool_blocks = blocks;
+        for (auto& descs : mc.kv_cache_spec_descs) {
+            for (auto& desc : descs) {
+                if (desc.tag != DSV4_HCA_STATE_TAG) {
+                    continue;
+                }
+                desc.capacity.reset();
+                if (placement.has_value()) {
+                    desc.memory = CacheMemoryPolicyDesc{placement};
+                }
+            }
+        }
+        runtime_config.max_generate_batch_size = 2;
+        runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+        return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+    };
+
+    auto device_config = make_config(256, CacheMemoryPlacement::DEVICE);
+    auto hca_gid = gidForTag(device_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(device_config.blockNumForGroup(hca_gid), 256u);
+    EXPECT_TRUE(device_config.policyForGroup(hca_gid).charge_to_paged_budget);
+    EXPECT_GT(device_config.explicitly_sized_pool_reserve_bytes, 0u);
+
+    auto host_config = make_config(256, CacheMemoryPlacement::HOST_PINNED);
+    hca_gid = gidForTag(host_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(host_config.blockNumForGroup(hca_gid), 256u);
+    EXPECT_FALSE(host_config.policyForGroup(hca_gid).charge_to_paged_budget);
+    EXPECT_EQ(host_config.explicitly_sized_pool_reserve_bytes, 0u);
+
+    auto fallback_config = make_config(0, std::nullopt);
+    hca_gid = gidForTag(fallback_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(fallback_config.blockNumForGroup(hca_gid), 100u);
+    EXPECT_EQ(fallback_config.explicitly_sized_pool_reserve_bytes, 0u);
+}
+
 TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKernelBlockSize) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;

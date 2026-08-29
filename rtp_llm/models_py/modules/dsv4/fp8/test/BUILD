@@ -68,6 +68,7 @@ _DSV4_FP8_CPU_TESTS = [
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
+    "test_sm120_sparse_mla",
 ]
 
 py_test(

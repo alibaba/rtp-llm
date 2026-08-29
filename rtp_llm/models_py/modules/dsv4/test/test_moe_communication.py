@@ -92,11 +92,18 @@ class Sm120FusedMoeTest(unittest.TestCase):
         )
         local = _FakeGroupedFp4Strategy(cfg)
 
+        gather_calls = []
+
         def fake_all_gather(tensor, group):
+            gather_calls.append(tensor)
+            # Activation all-gather must preserve rank order; metadata gathers
+            # are duplicated because their values are rank-invariant in this UT.
+            if len(gather_calls) == 1:
+                return torch.cat((tensor, tensor + 1), dim=0)
             return torch.cat((tensor, tensor.clone()), dim=0)
 
         def fake_reduce_scatter(tensor, group):
-            return tensor[: tensor.size(0) // 2]
+            return tensor.view(2, -1, *tensor.shape[1:]).sum(dim=0)
 
         with patch(
             "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router.all_gather",
@@ -118,9 +125,7 @@ class Sm120FusedMoeTest(unittest.TestCase):
             )
 
         self.assertIsInstance(fused_moe.router, PureCpRouterNoQuant)
-        self.assertTrue(
-            torch.allclose(output, torch.tensor([[0.2, 0.2], [0.6, 0.6]]))
-        )
+        self.assertTrue(torch.allclose(output, torch.tensor([[0.4, 0.4], [1.2, 1.2]])))
 
 
 if __name__ == "__main__":

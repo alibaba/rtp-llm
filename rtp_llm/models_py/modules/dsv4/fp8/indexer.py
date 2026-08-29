@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, NamedTuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from rtp_llm.models_py.utils.arch import is_sm120
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
@@ -93,7 +94,7 @@ def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     if (
         logits is not None
         and logits.is_cuda
-        and torch.cuda.get_device_capability(logits.device)[0] == 12
+        and is_sm120(logits.device)
     ):
         return False
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"

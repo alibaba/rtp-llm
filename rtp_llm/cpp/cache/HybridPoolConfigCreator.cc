@@ -279,13 +279,18 @@ void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, uint32_t 
     }
     for (auto& descs : layer_descs) {
         for (auto& desc : descs) {
-            if (desc.tag != "hca_state") {
+            if (desc.tag != DSV4_HCA_STATE_TAG) {
                 continue;
             }
             auto capacity = desc.capacity.value_or(CacheCapacityPolicyDesc{});
-            capacity.explicit_block_num     = block_num;
-            capacity.charge_to_paged_budget = true;
-            desc.capacity                   = capacity;
+            capacity.explicit_block_num = block_num;
+            // Explicit HCA sizing is independent from residency.  Host-pinned
+            // HCA state must not consume the device paged-cache budget.
+            const bool charge_to_paged_budget = !desc.memory.has_value()
+                || !desc.memory->placement.has_value()
+                || *desc.memory->placement == CacheMemoryPlacement::DEVICE;
+            capacity.charge_to_paged_budget = charge_to_paged_budget;
+            desc.capacity = capacity;
         }
     }
 }

@@ -7,6 +7,7 @@ from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.models_py.utils.arch import is_sm120
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 def _decode_ue8m0(scale: torch.Tensor, groups: int) -> torch.Tensor:
@@ -57,7 +58,7 @@ def _enable_sm120_cached_weight_scale(linear):
         os.environ.get("DSV4_SM120_CACHE_FP8_SCALES", "1") == "0"
         or weight is None
         or not weight.is_cuda
-        or torch.cuda.get_device_capability(weight.device)[0] != 12
+        or not is_sm120(weight.device)
     ):
         return linear
     weight_scale = _decode_ue8m0(linear.weight_scales, (linear.K + 127) // 128)

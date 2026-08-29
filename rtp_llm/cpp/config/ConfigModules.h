@@ -195,9 +195,10 @@ struct KVCacheConfig {
     // with older callers; HCA_STATE has its own explicit sizing knob below.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
-    // DSV4 HCA_STATE is an active-tail ring and does not participate in prefix
-    // reuse. The server CLI supplies the default fixed size (256); zero here
-    // means no explicit override for programmatic callers.
+    // DSV4 HCA_STATE is a small active-tail ring, independent of linear_step
+    // and prefix reuse.  The server CLI supplies the product default (256);
+    // zero here keeps programmatic callers on the framework fallback unless
+    // they explicitly request a fixed capacity.
     uint32_t dsv4_hca_state_pool_blocks = 0;
 
     // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
