@@ -117,6 +117,18 @@ CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) c
     return local;
 }
 
+BlockDependenciesType CPSlotMapper::canonicalBlockDependencies(const BlockDependenciesType& full_dependencies) const {
+    if (!isSharded()) {
+        return full_dependencies;
+    }
+    BlockDependenciesType local;
+    const size_t          stride = static_cast<size_t>(cp_size_);
+    for (size_t i = stride - 1; i < full_dependencies.size(); i += stride) {
+        local.push_back(full_dependencies[i]);
+    }
+    return local;
+}
+
 CacheKeysType
 CPSlotMapper::localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const {
     return usesCpCanonicalKeys(config, gid) ? canonicalCacheKeys(full_keys) : full_keys;
@@ -196,9 +208,21 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
 KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
                                                        const CacheConfig&     config,
                                                        const CacheKeysType&   selected_keys) const {
+    RTP_LLM_CHECK_WITH_INFO(source.cacheKeys().size() == source.blockDependencies().size(),
+                            "connector projection source timeline mismatch: keys=%zu dependencies=%zu",
+                            source.cacheKeys().size(),
+                            source.blockDependencies().size());
+    const auto expected_keys = canonicalCacheKeys(source.cacheKeys());
+    RTP_LLM_CHECK_WITH_INFO(selected_keys == expected_keys,
+                            "connector projection requires the canonical CP key subsequence: selected=%zu expected=%zu",
+                            selected_keys.size(),
+                            expected_keys.size());
+
     KVCacheResource selected = source;
     selected.initGroups(config.topologyPtr());
-    selected.setCacheKeys(selected_keys);
+    CacheKeysType         projected_keys         = selected_keys;
+    BlockDependenciesType projected_dependencies = canonicalBlockDependencies(source.blockDependencies());
+    RTP_LLM_CHECK(projected_dependencies.size() == projected_keys.size());
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size_);
     selected.setLastBlockAligned(selected_aligned);
 
@@ -208,10 +232,11 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     // original partial key as a connector-only dummy tail so the drop-last
     // contract discards the dummy, not the usable selected key.
     if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
-        selected.cacheKeys().push_back(source.cacheKeys().back());
-        selected.rebuildLinearBlockDependencies();
+        projected_keys.push_back(source.cacheKeys().back());
+        projected_dependencies.push_back(source.blockDependencies().back());
         selected.setLastBlockAligned(false);
     }
+    selected.setCacheKeysAndBlockDependencies(std::move(projected_keys), std::move(projected_dependencies));
 
     for (int gid = 0; gid < source.groupNums(); ++gid) {
         const auto&      src_blocks = source.blocks(gid);

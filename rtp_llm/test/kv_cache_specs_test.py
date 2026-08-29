@@ -9,7 +9,12 @@ from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 
 
 class HybridKVCacheSpecTest(TestCase):
@@ -24,6 +29,15 @@ class HybridKVCacheSpecTest(TestCase):
         config = self._build_model_config(layer_types)
         KimiLinear._post_build_model_config(config)
         return [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
+
+    def test_removed_group_memory_policy_keys_are_unknown(self):
+        capacity = CacheCapacityPolicyDesc()
+        with self.assertRaises(AttributeError):
+            setattr(capacity, "charge_to_" + "paged_budget", True)
+
+        desc = KVCacheSpecDesc()
+        with self.assertRaises(AttributeError):
+            desc.memory = None
 
     def test_qwen_v2_mtp_default_desc_matches_model_layers(self):
         config = ModelConfig()
@@ -79,7 +93,7 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(calculate_hybrid_group_layer_num(3, 0), 3)
         self.assertEqual(calculate_hybrid_group_layer_num(0, 3), 3)
 
-    def test_qwen3_next_40_layers_uses_contiguous_linear_split(self):
+    def test_qwen3_next_40_layers_uses_one_homogeneous_linear_tag(self):
         layer_types = [
             HybridAttentionType.NONE if (i + 1) % 4 == 0 else HybridAttentionType.LINEAR
             for i in range(40)
@@ -90,12 +104,10 @@ class HybridKVCacheSpecTest(TestCase):
 
         tags = [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
         self.assertEqual(tags.count("full"), 10)
-        self.assertEqual(tags.count("linear0"), 10)
-        self.assertEqual(tags.count("linear1"), 10)
-        self.assertEqual(tags.count("linear2"), 10)
+        self.assertEqual(tags.count("linear"), 30)
         self.assertEqual(tags[11], "full")
-        self.assertEqual(tags[12], "linear0")
-        self.assertEqual(tags[13], "linear1")
+        self.assertEqual(tags[12], "linear")
+        self.assertEqual(tags[13], "linear")
 
     def test_qwen35_defaults_missing_mrope_interleaved_to_true(self):
         config = ModelConfig()
@@ -267,7 +279,7 @@ class HybridKVCacheSpecTest(TestCase):
                 },
             )
 
-    def test_kimi_linear_uses_contiguous_tags_across_hybrid_cycles(self):
+    def test_kimi_linear_uses_one_homogeneous_tag_across_hybrid_cycles(self):
         tags = self._kimi_post_build_tags(
             [
                 HybridAttentionType.LINEAR,
@@ -283,18 +295,18 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(
             tags,
             [
-                "linear0",
-                "linear0",
-                "linear1",
+                "linear",
+                "linear",
+                "linear",
                 "full",
-                "linear1",
-                "linear2",
-                "linear2",
+                "linear",
+                "linear",
+                "linear",
                 "full",
             ],
         )
 
-    def test_kimi_linear_group_layer_num_fallback_keeps_sparse_linear_contiguous(self):
+    def test_kimi_linear_sparse_pattern_uses_one_homogeneous_tag(self):
         tags = self._kimi_post_build_tags(
             [
                 HybridAttentionType.LINEAR,
@@ -312,16 +324,16 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(
             tags,
             [
-                "linear0",
+                "linear",
                 "full",
                 "full",
-                "linear0",
+                "linear",
                 "full",
                 "full",
-                "linear0",
+                "linear",
                 "full",
                 "full",
-                "linear0",
+                "linear",
             ],
         )
 

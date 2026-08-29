@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -234,9 +235,16 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 
 std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
 #ifdef USE_REMOTE_KV_CACHE
-    RTP_LLM_CHECK_WITH_INFO(!cache_config_.use_independent_block_pools,
-                            "remote connector does not support independent KV cache block pools");
-    const auto block_pool = allocator_->getBlockPool();
+    RemoteConnector::validateConfig(cache_config_);
+    BlockPoolPtr block_pool;
+    if (cache_config_.use_independent_block_pools) {
+        const auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(allocator_);
+        RTP_LLM_CHECK_WITH_INFO(hybrid_allocator != nullptr,
+                                "independent KV cache pools require HybridPoolKVCacheAllocator");
+        block_pool = hybrid_allocator->soleGroupBlockPool();
+    } else {
+        block_pool = allocator_->getBlockPool();
+    }
     RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "remote connector requires a contiguous KV cache block pool");
     // TODO : get lora info map
     auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,

@@ -149,32 +149,24 @@ public:
 
     void popBackCacheKey(int batch_id = 0) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        auto& keys = batch_resource[batch_id].cacheKeys();
-        if (!keys.empty()) {
-            keys.pop_back();
-        }
+        batch_resource[batch_id].popBackCacheKey();
     }
 
     void popBackAllBatchCacheKeys() {
         for (auto& resource : batch_resource) {
-            auto& keys = resource.cacheKeys();
-            if (!keys.empty()) {
-                keys.pop_back();
-            }
+            resource.popBackCacheKey();
         }
     }
 
     void clearCacheKeys(int batch_id = 0) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].cacheKeys().clear();
+        batch_resource[batch_id].clearCacheKeys();
         cache_keys_initialized_ = false;
     }
 
     void pushBackCacheKey(int batch_id, CacheKeyType key) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        auto& resource = batch_resource[batch_id];
-        auto& keys     = resource.cacheKeys();
-        keys.push_back(key);
+        batch_resource[batch_id].appendCacheKey(key);
     }
 
     void setBatchBlocks(int batch_id, int group_id, const BlockIndicesType& blocks) {
@@ -184,7 +176,7 @@ public:
 
     void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].cacheKeys() = keys;
+        batch_resource[batch_id].setCacheKeys(keys);
     }
 
     void check() const {

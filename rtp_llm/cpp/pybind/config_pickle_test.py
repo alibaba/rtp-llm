@@ -1,7 +1,18 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
+    CacheCpPolicyDesc,
+    CacheTailPolicyDesc,
+    CpBlockMappingMode,
+    CpBlockSliceMode,
+    CpPrefillSliceLayout,
+    GrammarConfig,
+    KVCacheConfig,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 
 
 def _new_grammar_config():
@@ -82,6 +93,77 @@ class GrammarConfigPickleTest(unittest.TestCase):
             ):
                 config = _new_grammar_config()
                 config.__setstate__(state)
+
+
+class CacheConfigPickleTest(unittest.TestCase):
+    def test_kv_cache_config_round_trip_preserves_dsv4_adjacent_fields(self):
+        config = KVCacheConfig()
+        config.load_cache_retry_times = 17
+        config.dsv4_fixed_pool_blocks = 101
+        config.dsv4_hca_state_pool_blocks = 203
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertIs(type(restored), KVCacheConfig)
+        self.assertEqual(restored.load_cache_retry_times, 17)
+        self.assertEqual(restored.dsv4_fixed_pool_blocks, 101)
+        self.assertEqual(restored.dsv4_hca_state_pool_blocks, 203)
+        with self.assertRaises(AttributeError):
+            _ = restored.dsv4_fixed_pool_use_memory
+
+    def test_capacity_policy_round_trip_preserves_current_fields(self):
+        capacity = CacheCapacityPolicyDesc()
+        capacity.reservable = False
+        capacity.explicit_block_num = 307
+
+        restored = pickle.loads(pickle.dumps(capacity))
+
+        self.assertIs(type(restored), CacheCapacityPolicyDesc)
+        self.assertIs(restored.reservable, False)
+        self.assertEqual(restored.explicit_block_num, 307)
+
+    def test_kv_cache_spec_round_trip_preserves_adjacent_policy_fields(self):
+        capacity = CacheCapacityPolicyDesc()
+        capacity.reservable = True
+        capacity.explicit_block_num = 409
+
+        tail = CacheTailPolicyDesc()
+        tail.active_tail_blocks = 3
+        tail.validate_tail_blocks = False
+
+        cp = CacheCpPolicyDesc()
+        cp.mapping = CpBlockMappingMode.COMPACT_LAST_RANK
+        cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
+        cp.scale_seq_size = True
+        cp.align_payload = False
+        cp.prefill_slice_layout = CpPrefillSliceLayout.BLOCK_STRIDE
+
+        desc = KVCacheSpecDesc()
+        desc.tag = "pickle-policy"
+        desc.cache_type = KVCacheSpecType.OPAQUE_STATE
+        desc.capacity = capacity
+        desc.tail = tail
+        desc.cp = cp
+
+        restored = pickle.loads(pickle.dumps(desc))
+
+        self.assertIs(type(restored), KVCacheSpecDesc)
+        self.assertEqual(restored.tag, "pickle-policy")
+        self.assertEqual(restored.cache_type, KVCacheSpecType.OPAQUE_STATE)
+        self.assertIs(type(restored.capacity), CacheCapacityPolicyDesc)
+        self.assertIs(restored.capacity.reservable, True)
+        self.assertEqual(restored.capacity.explicit_block_num, 409)
+        self.assertIs(type(restored.tail), CacheTailPolicyDesc)
+        self.assertEqual(restored.tail.active_tail_blocks, 3)
+        self.assertIs(restored.tail.validate_tail_blocks, False)
+        self.assertIs(type(restored.cp), CacheCpPolicyDesc)
+        self.assertEqual(restored.cp.mapping, CpBlockMappingMode.COMPACT_LAST_RANK)
+        self.assertEqual(restored.cp.slice, CpBlockSliceMode.PAYLOAD_BYTES)
+        self.assertIs(restored.cp.scale_seq_size, True)
+        self.assertIs(restored.cp.align_payload, False)
+        self.assertEqual(
+            restored.cp.prefill_slice_layout, CpPrefillSliceLayout.BLOCK_STRIDE
+        )
 
 
 if __name__ == "__main__":

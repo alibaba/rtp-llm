@@ -54,6 +54,7 @@ public:
     const std::vector<BlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
     }
+    BlockPoolPtr soleGroupBlockPool() const;
 
 private:
     bool   doInit() override;

@@ -21,6 +21,19 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 
 }  // namespace
 
+void validateRemoteCacheTopology(const CacheConfig& cache_config) {
+    const auto group_num = static_cast<size_t>(cache_config.groupNums());
+    const auto full_group_num =
+        std::count_if(cache_config.topology().groups().begin(),
+                      cache_config.topology().groups().end(),
+                      [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::FULL; });
+    RTP_LLM_CHECK_WITH_INFO(group_num == 1 && full_group_num == 1
+                                && cache_config.typeForGroup(0) == CacheGroupType::FULL,
+                            "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
+                            group_num,
+                            static_cast<size_t>(full_group_num));
+}
+
 bool GroupPolicy::addSpecInfo(const std::string& spec_name, int32_t group_id, int32_t tp_rank) {
     if (spec_name_to_info_.find(spec_name) != spec_name_to_info_.end()) {
         RTP_LLM_LOG_ERROR("spec_name [%s] already exist", spec_name.c_str());

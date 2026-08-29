@@ -35,7 +35,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -190,7 +190,6 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
     // linear-step-derived block count.
@@ -199,10 +198,6 @@ struct KVCacheConfig {
     // Optional DSV4 HCA_STATE pool block count override. 0 means HCA_STATE
     // follows dsv4_fixed_pool_blocks or the normal linear-step-derived count.
     uint32_t dsv4_hca_state_pool_blocks = 0;
-
-    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
-    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
-    bool dsv4_fixed_pool_use_memory = false;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;
@@ -394,7 +389,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -404,9 +399,9 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
+    bool        terminate_without_stop_token = false;
+    int         num_workers                  = 8;
+    std::string tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;

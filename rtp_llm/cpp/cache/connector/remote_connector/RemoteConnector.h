@@ -39,6 +39,8 @@ public:
                     const std::map<std::string, std::string>& lora_info_map    = {});
     ~RemoteConnector() override;
 
+    static void validateConfig(const CacheConfig& cache_config);
+
     bool init();
 
     // for rank_0:

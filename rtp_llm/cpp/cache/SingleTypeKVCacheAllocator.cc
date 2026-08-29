@@ -272,7 +272,12 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         kvcache_resource.groupNums() == 1, "incrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
     std::unordered_map<CacheKeyType, size_t> key_to_pos;
-    const auto&                              resource_keys = kvcache_resource.cacheKeys();
+    const auto&                              resource_keys       = kvcache_resource.cacheKeys();
+    const auto&                              source_dependencies = kvcache_resource.blockDependencies();
+    RTP_LLM_CHECK_WITH_INFO(resource_keys.size() == source_dependencies.size(),
+                            "incrKVCacheRef source timeline mismatch: keys=%zu dependencies=%zu",
+                            resource_keys.size(),
+                            source_dependencies.size());
     key_to_pos.reserve(resource_keys.size());
     for (size_t i = 0; i < resource_keys.size(); ++i) {
         key_to_pos.emplace(resource_keys[i], i);
@@ -286,8 +291,9 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     std::shared_ptr<KVCacheResource> selected_resource(selected_resource_ptr, deleter);
     selected_resource->initGroups(config_.topologyPtr());
 
-    CacheKeysType    selected_cache_keys;
-    BlockIndicesType selected_blocks;
+    CacheKeysType         selected_cache_keys;
+    BlockDependenciesType selected_dependencies;
+    BlockIndicesType      selected_blocks;
 
     const auto& src_blocks = kvcache_resource.blocks(0);
 
@@ -302,11 +308,13 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
             const auto block = src_blocks[pos];
             if (block > 0 && !isNullBlockIdx(block)) {
                 selected_cache_keys.push_back(key);
+                selected_dependencies.push_back(source_dependencies[pos]);
                 selected_blocks.push_back(block);
                 real_blocks.push_back(block);
             }
         } else if (is_connector && !kvcache_resource.lastBlockAligned()) {
             selected_cache_keys.push_back(key);
+            selected_dependencies.push_back(source_dependencies[pos]);
             selected_blocks.push_back(NULL_BLOCK_IDX);
         }
     }
@@ -321,7 +329,9 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         block_pool_->requestReference(real_blocks);
     }
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
-    selected_resource->cacheKeys() = std::move(selected_cache_keys);
+    selected_resource->setCacheKeysAndBlockDependencies(std::move(selected_cache_keys),
+                                                        std::move(selected_dependencies));
+    selected_resource->setCacheKeysAreCpCanonical(kvcache_resource.cacheKeysAreCpCanonical());
 
     return selected_resource;
 }
@@ -410,8 +420,12 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
         if (fork_count == 1) {
             kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
+            const auto& source_resource = old_resources[old_batch_idx];
+            auto&       fork_resource   = kv_cache_resource->cacheResource(new_batch_idx);
+            fork_resource.setCacheKeysAndBlockDependencies(source_resource.cacheKeys(),
+                                                           source_resource.blockDependencies());
+            fork_resource.setCacheKeysAreCpCanonical(source_resource.cacheKeysAreCpCanonical());
             auto& block_ids = kv_cache_resource->mutableBlockIds(new_batch_idx, 0);
-            kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
             full_kv_cache_group_->reference(block_ids, old_resources[old_batch_idx].blocks(0));
 
             if (copy_last_block && !block_ids.blocks().empty()) {
