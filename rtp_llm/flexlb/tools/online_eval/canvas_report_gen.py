@@ -17,7 +17,6 @@ outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 pa
 engine_dist 内嵌于 aggregate 时标注），规模 P/D/shards/replay/duration，
 时间轴口径 T_END 动态取 timeAxis.max。同批下线头部 KPI 的「泄漏判定」
 chip（tsx 汇总表行保留但不进 HTML；见 main() 内 fail-closed 负向断言）。
-
 报告级统一时间轴：全部时序面板（x = 压测时间）共享同一 x 轴 [0, T_END]。
 T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；min 固定 0
 （t=0 = 压测正式开始，warmup 后；warmup 负值段在渲染层被轴裁剪，数据
