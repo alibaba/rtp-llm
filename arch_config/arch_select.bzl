@@ -12,6 +12,20 @@ def copy_all_so():
     copy_so("@rtp_llm//:th_transformer_config")
     copy_so("@rtp_llm//:th_grammar_tokenizer_info")
     copy_so("@rtp_llm//:rtp_compute_ops")
+    for target in [
+        "flashinfer_batch_paged_prefill",
+        "flashinfer_batch_paged_prefill_256",
+        "flashinfer_batch_paged_decode",
+        "flashinfer_batch_paged_decode_256",
+        "flashinfer_batch_ragged_prefill",
+        "flashinfer_batch_ragged_prefill_256",
+        "flashinfer_single_decode",
+        "flashinfer_single_decode_256",
+        "flashinfer_single_prefill",
+        "flashinfer_single_prefill_256",
+        "flashinfer_sm90",
+    ]:
+        copy_so("@flashinfer_cpp_cu13//:" + target)
 
 # flash_attn wheels are not published for CUDA 13; FlashInfer JIT provides the
 # kernels instead, so these requirements resolve to nothing on cuda13 configs.
