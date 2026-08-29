@@ -19,6 +19,73 @@
 
 namespace rtp_llm::test {
 
+struct CacheGroupSemanticSnapshot {
+    std::string        tag;
+    KVCacheSpecType    spec_type;
+    CacheGroupType     group_type;
+    bool               enable_prefix_reuse;
+    CacheEvictPolicy   evict_policy;
+    bool               reservable;
+    uint32_t           explicit_block_num;
+    uint32_t           active_tail_blocks;
+    bool               validate_tail_blocks;
+    CpBlockMappingMode cp_mapping;
+    CpBlockSliceMode   cp_slice;
+    std::vector<int>   layer_ids;
+    uint32_t           block_num;
+    size_t             physical_tokens_per_block;
+    size_t             kernel_tokens_per_block;
+    size_t             block_bytes;
+    size_t             kv_block_stride_bytes;
+    size_t             kv_scale_stride_bytes;
+
+    bool operator==(const CacheGroupSemanticSnapshot& other) const {
+        return tag == other.tag && spec_type == other.spec_type && group_type == other.group_type
+               && enable_prefix_reuse == other.enable_prefix_reuse && evict_policy == other.evict_policy
+               && reservable == other.reservable && explicit_block_num == other.explicit_block_num
+               && active_tail_blocks == other.active_tail_blocks && validate_tail_blocks == other.validate_tail_blocks
+               && cp_mapping == other.cp_mapping && cp_slice == other.cp_slice && layer_ids == other.layer_ids
+               && block_num == other.block_num && physical_tokens_per_block == other.physical_tokens_per_block
+               && kernel_tokens_per_block == other.kernel_tokens_per_block && block_bytes == other.block_bytes
+               && kv_block_stride_bytes == other.kv_block_stride_bytes
+               && kv_scale_stride_bytes == other.kv_scale_stride_bytes;
+    }
+};
+
+using CacheSemanticSnapshot = std::vector<CacheGroupSemanticSnapshot>;
+
+inline CacheSemanticSnapshot snapshotCacheConfig(const CacheConfig& config) {
+    CacheSemanticSnapshot snapshot;
+    const auto&           groups = config.topology().groups();
+    snapshot.reserve(groups.size());
+    for (size_t gid = 0; gid < groups.size(); ++gid) {
+        const auto& group = groups[gid];
+        RTP_LLM_CHECK_WITH_INFO(
+            group.spec != nullptr, "cache semantic snapshot requires group %zu to have a spec", gid);
+        const auto& policy = group.policy;
+        snapshot.push_back({group.tag,
+                            group.spec->type,
+                            policy.group_type,
+                            policy.enable_prefix_reuse,
+                            policy.evict_policy,
+                            policy.reservable,
+                            policy.explicit_block_num,
+                            policy.active_tail_blocks,
+                            policy.validate_tail_blocks,
+                            policy.cp_mapping,
+                            policy.cp_slice,
+                            group.layer_ids,
+                            group.block_num,
+                            group.seq_size_per_block,
+                            group.kernel_seq_size_per_block,
+                            config.blockSizeBytesForGroup(gid),
+                            group.kv_block_stride_bytes,
+                            group.kv_scale_stride_bytes});
+    }
+    std::sort(snapshot.begin(), snapshot.end(), [](const auto& lhs, const auto& rhs) { return lhs.tag < rhs.tag; });
+    return snapshot;
+}
+
 inline constexpr uint32_t DSV4_FP8_KV_ENTRY_BYTES            = 584;
 inline constexpr uint32_t DSV4_FP8_INDEXER_ENTRY_BYTES       = 132;
 inline constexpr size_t   DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576;
@@ -241,17 +308,16 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         desc.cp->prefill_slice_layout = CpPrefillSliceLayout::PAYLOAD;
         desc.cp->slice                = CpBlockSliceMode::PAYLOAD_BYTES;
     } else if (desc.tag == "hca_state") {
-        desc.compression_ratio                = 128;
-        desc.cp->align_payload                = true;
-        desc.cp->prefill_slice_layout         = CpPrefillSliceLayout::PAYLOAD;
-        desc.cp->slice                        = CpBlockSliceMode::PAYLOAD_BYTES;
-        desc.capacity                         = CacheCapacityPolicyDesc{};
-        desc.capacity->explicit_block_num     = 256;
-        desc.capacity->charge_to_paged_budget = true;
-        desc.reuse->enable_prefix_reuse       = false;
-        desc.tail                             = CacheTailPolicyDesc{};
-        desc.tail->active_tail_blocks         = 1;
-        desc.tail->validate_tail_blocks       = false;
+        desc.compression_ratio            = 128;
+        desc.cp->align_payload            = true;
+        desc.cp->prefill_slice_layout     = CpPrefillSliceLayout::PAYLOAD;
+        desc.cp->slice                    = CpBlockSliceMode::PAYLOAD_BYTES;
+        desc.capacity                     = CacheCapacityPolicyDesc{};
+        desc.capacity->explicit_block_num = 256;
+        desc.reuse->enable_prefix_reuse   = false;
+        desc.tail                         = CacheTailPolicyDesc{};
+        desc.tail->active_tail_blocks     = 1;
+        desc.tail->validate_tail_blocks   = false;
     } else if (desc.tag == "swa_kv") {
         desc.compression_ratio        = DSV4_SWA_WINDOW_ENTRIES;
         desc.cp->align_payload        = true;
@@ -374,8 +440,7 @@ inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::stri
                 if (!desc.capacity.has_value()) {
                     desc.capacity = CacheCapacityPolicyDesc{};
                 }
-                desc.capacity->explicit_block_num     = block_num;
-                desc.capacity->charge_to_paged_budget = block_num > 0;
+                desc.capacity->explicit_block_num = block_num;
             }
         }
     }

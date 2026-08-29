@@ -155,34 +155,6 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
     return groups;
 }
 
-KVCacheSpecPtr representativeSpec(const std::vector<GroupBase>& groups, CacheGroupType group_type) {
-    KVCacheSpecPtr result;
-    std::string    fingerprint;
-    for (const auto& group : groups) {
-        if (group.policy.group_type != group_type) {
-            continue;
-        }
-        if (result == nullptr) {
-            result      = group.spec->clone();
-            fingerprint = layoutFingerprint(*group.spec);
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(fingerprint == layoutFingerprint(*group.spec),
-                                    "hybrid %d cache groups have different kv cache spec layouts",
-                                    static_cast<int>(group_type));
-        }
-    }
-    return result;
-}
-
-int groupLayerNumForGroups(const std::vector<GroupBase>& groups) {
-    size_t group_layer_num = 0;
-    for (const auto& group : groups) {
-        group_layer_num = std::max(group_layer_num, group.layer_ids.size());
-    }
-    RTP_LLM_CHECK_WITH_INFO(group_layer_num > 0, "hybrid cache groups must not be empty");
-    return static_cast<int>(group_layer_num);
-}
-
 void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups) {
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
@@ -201,6 +173,47 @@ void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups)
         }
     }
     config.setTopology(std::move(groups), std::move(layers));
+}
+
+void setupIndependentPoolSizes(CacheConfig& config) {
+    config.use_independent_block_pools = true;
+    const auto            group_num    = static_cast<size_t>(config.groupNums());
+    std::vector<uint32_t> group_block_nums(group_num, 0);
+    std::vector<size_t>   group_kv_block_stride_bytes(group_num, 0);
+    std::vector<size_t>   group_kv_scale_stride_bytes(group_num, 0);
+
+    size_t max_kv_stride           = 0;
+    size_t max_scale_stride        = 0;
+    size_t total_kv_block_bytes    = 0;
+    size_t total_scale_block_bytes = 0;
+
+    config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
+    for (size_t gid = 0; gid < group_num; ++gid) {
+        const auto& spec = config.specForGroup(gid);
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
+        const auto   layer_count         = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
+        const size_t group_bpk           = config.kernelBlocksPerKvBlockForGroup(gid);
+        const size_t kv_stride           = spec->block_size_bytes() * group_bpk;
+        const size_t scale_stride        = spec->scale_block_size_bytes() * group_bpk;
+        group_kv_block_stride_bytes[gid] = kv_stride;
+        group_kv_scale_stride_bytes[gid] = scale_stride;
+        total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
+        total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
+        max_kv_stride    = std::max(max_kv_stride, kv_stride);
+        max_scale_stride = std::max(max_scale_stride, scale_stride);
+        for (int layer_id : config.layerIdsForGroup(gid)) {
+            config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
+                static_cast<int>(kv_stride + scale_stride);
+        }
+    }
+
+    config.kv_block_stride_bytes               = max_kv_stride;
+    config.kv_scale_stride_bytes               = max_scale_stride;
+    config.kv_block_size_bytes                 = total_kv_block_bytes;
+    config.kv_scale_size_bytes                 = total_scale_block_bytes;
+    config.block_size_bytes                    = total_kv_block_bytes + total_scale_block_bytes;
+    config.explicitly_sized_pool_reserve_bytes = 0;
+    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 
 }  // namespace
@@ -408,22 +421,12 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Initialize config
     CacheConfig config        = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
     config.seq_size_per_block = tokens_per_block;
+    config.group_layer_num    = HybridConfigCreator::calculateGroupLayerNum(static_cast<int>(linear_layers.size()),
+                                                                         static_cast<int>(full_layers.size()));
 
     auto cache_groups = buildTaggedGroups(runtime_specs, model_config, parallelism_config);
-    auto full_spec    = representativeSpec(cache_groups, CacheGroupType::FULL);
-    auto linear_spec  = representativeSpec(cache_groups, CacheGroupType::LINEAR);
-
-    config.group_layer_num = groupLayerNumForGroups(cache_groups);
     setupTopologyFromGroups(config, std::move(cache_groups));
-
-    // Setup physical sizes
-    HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
-
-    // Per-layer block stride (kv + scale).
-    // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    setupIndependentPoolSizes(config);
 
     return config;
 }

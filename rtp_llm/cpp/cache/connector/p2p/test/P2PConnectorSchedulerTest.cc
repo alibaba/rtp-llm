@@ -65,7 +65,7 @@ protected:
         }
 
         for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
+            resource->appendCacheKey(1000 + i);
         }
 
         return resource;

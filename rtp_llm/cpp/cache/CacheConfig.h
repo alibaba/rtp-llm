@@ -20,20 +20,6 @@
 
 namespace rtp_llm {
 
-// Residency (memory_placement) and budget (charge_to_paged_budget) are independent
-// knobs: CacheConfig::finalizeBlockNums only consults charge_to_paged_budget when it
-// accumulates explicitly_sized_pool_reserve_bytes. A pool that lives on host memory
-// therefore MUST opt out of the paged budget, otherwise its bytes are deducted from
-// the device paged pool it never occupies (silently shrinking the KV cache).
-inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std::string& tag) {
-    RTP_LLM_CHECK_WITH_INFO(
-        !(policy.memory_placement != CacheMemoryPlacement::DEVICE && policy.charge_to_paged_budget),
-        "cache group '%s' is host-resident (memory_placement=%d) but still charges the paged HBM budget; "
-        "host-resident pools must set capacity.charge_to_paged_budget=false",
-        tag.c_str(),
-        static_cast<int>(policy.memory_placement));
-}
-
 struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;

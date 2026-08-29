@@ -172,6 +172,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
+    validateConfig(cache_config);
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
                                             runtime_config,
@@ -179,24 +180,13 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             sp_config,
                                             register_buffer_addr,
                                             register_buffer_size};
-    init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
-    RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
-                            "remote connector requires an initialized cache topology with at least one group");
-    std::vector<int32_t> full_group_ids, linear_group_ids;
-    for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
-        if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
-            full_group_ids.push_back(group_id);
-        } else {
-            linear_group_ids.push_back(group_id);
-        }
-    }
-    if (linear_group_ids.empty()) {
-        group_policy_ =
-            std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
-    } else {
-        group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
-    }
+    init_params_  = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
+    group_policy_ = std::make_unique<remote_connector::FullLayerGroupPolicy>(
+        allocator, std::vector<int32_t>{0}, std::vector<int32_t>{});
+}
+
+void RemoteConnector::validateConfig(const CacheConfig& cache_config) {
+    remote_connector::validateRemoteCacheTopology(cache_config);
 }
 
 RemoteConnector::~RemoteConnector() {

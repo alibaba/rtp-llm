@@ -370,8 +370,10 @@ TEST_F(GenerateStreamStateTest, testRetryableInitMallocKeepsPrefillWaiting) {
     auto& cache_resource = stream->kvCacheMutable();
     ASSERT_TRUE(cache_resource.cacheKeysInitialized());
     ASSERT_FALSE(cache_resource.cacheKeys().empty());
-    constexpr CacheKeyType sentinel_key                = 0x12345678;
-    cache_resource.cacheResource().cacheKeys().front() = sentinel_key;
+    constexpr CacheKeyType sentinel_key  = 0x12345678;
+    CacheKeysType          sentinel_keys = cache_resource.cacheKeys();
+    sentinel_keys.front()                = sentinel_key;
+    cache_resource.setBatchCacheKeys(0, sentinel_keys);
 
     EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
     EXPECT_EQ(stream->curBlocksNum(), 0u);

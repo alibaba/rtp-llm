@@ -13,6 +13,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -150,6 +151,26 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
     ASSERT_TRUE(result.success);
     EXPECT_EQ(batch_res->blocksNum(0, gid_full), 2)
         << "cp_size=2 should halve allocation to ceil(4/2)=2 physical blocks per rank";
+}
+
+TEST_F(HybridKVCacheAllocatorCPShardTest, HybridPoolCoordinatorPreservesShardedAllocation) {
+    auto config                        = makeCPHybridConfig();
+    config.use_independent_block_pools = true;
+    config.setGroupBlockLayout(
+        {32, 32}, {config.kvBlockStrideBytesForGroup(0), config.kvBlockStrideBytesForGroup(1)}, {0, 0});
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
+    ASSERT_TRUE(allocator->init());
+
+    auto       batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
+    auto       tokens    = makeTokens(1, 16, 4);
+    MallocInfo info{batch_res, tokens};
+    info.enable_device_cache = false;
+    info.reuse_cache         = false;
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
+
+    ASSERT_TRUE(allocator->malloc(info).success);
+    EXPECT_EQ(batch_res->blocksNum(0, /*gid_full=*/1), 2);
 }
 
 // 3) Reuse path: cache the last-rank canonical key and confirm a second malloc hits it,

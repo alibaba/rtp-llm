@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 
 #include <stdio.h>
@@ -152,11 +155,51 @@ private:
     }
 };
 
+#ifdef USE_REMOTE_KV_CACHE
+TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAndBuildsFullPolicy) {
+    CacheConfig hybrid_config                 = cache_config_;
+    hybrid_config.use_independent_block_pools = true;
+    hybrid_config.setGroupBlockLayout({hybrid_config.block_num},
+                                      {hybrid_config.specForGroup(0)->block_size_bytes()},
+                                      {hybrid_config.specForGroup(0)->scale_block_size_bytes()});
+
+    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(hybrid_config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_EQ(allocator->groupBlockPools().size(), 1u);
+    const auto sole_pool = allocator->groupBlockPools()[0];
+    ASSERT_NE(sole_pool, nullptr);
+
+    auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
+    meta_clients_.push_back(meta_client.get());
+    EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
+        .WillOnce(
+            Invoke([&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
+
+    KVCacheConfig coordinator_kv_config       = kv_cache_config_;
+    coordinator_kv_config.reuse_cache         = true;
+    coordinator_kv_config.enable_remote_cache = true;
+    auto coordinator                          = std::make_shared<KVCacheConnectorCoordinator>(
+        hybrid_config, coordinator_kv_config, runtime_config_, parallelism_config_, sp_config_, allocator);
+
+    ASSERT_TRUE(coordinator->init());
+    ASSERT_NE(coordinator->remote_connector_, nullptr);
+    EXPECT_EQ(coordinator->remote_connector_->init_params_->register_buffer_addr, sole_pool->getBaseAddress());
+    EXPECT_EQ(coordinator->remote_connector_->init_params_->register_buffer_size, sole_pool->getTotalSizeBytes());
+    EXPECT_NE(
+        dynamic_cast<remote_connector::FullLayerGroupPolicy*>(coordinator->remote_connector_->group_policy_.get()),
+        nullptr);
+
+    coordinator->update_thread_->stop();
+    coordinator->update_thread_.reset();
+    coordinator.reset();
+}
+#endif
+
 // 初始reuse_len = 0
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
-    kv_cache_resouce->cache_keys = {1, 2, 3, 4};
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
+    kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
@@ -246,8 +289,8 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 // 初始reuse_len = 1
 TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu_reuse_len_not_zero) {
     // match
-    auto kv_cache_resouce        = std::make_shared<KVCacheResource>();
-    kv_cache_resouce->cache_keys = {1, 2, 3, 4};
+    auto kv_cache_resouce = std::make_shared<KVCacheResource>();
+    kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
     kv_cache_resouce->setDeviceReuseBlockNum(1);
@@ -338,7 +381,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, test_async_match_and_async_read_with_gpu
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_actual_locations_different) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
@@ -384,7 +427,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_block_mask) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
@@ -431,7 +474,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_block_mask_vec) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3, 4};
+    kv_cache_resouce->setCacheKeys({1, 2, 3, 4});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
@@ -479,7 +522,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
        test_write_success_broadcast_success_actual_locations_different_with_empty_write_locations) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
@@ -508,7 +551,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest,
 TEST_F(RemoteConnectorMockOnlyFullTest, test_write_success_broadcast_success_actual_locations_same) {
     auto kv_cache_resouce = std::make_shared<KVCacheResource>();
     kv_cache_resouce->setLastBlockAligned(true);
-    kv_cache_resouce->cache_keys = {1, 2, 3};
+    kv_cache_resouce->setCacheKeys({1, 2, 3});
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");

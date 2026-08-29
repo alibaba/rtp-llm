@@ -91,7 +91,7 @@ protected:
         }
 
         for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
+            resource->appendCacheKey(1000 + i);
         }
 
         return resource;
@@ -203,8 +203,8 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
 }
 
 TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
-    auto resource         = std::make_shared<KVCacheResource>();
-    resource->cacheKeys() = {1000, 1001, 1002};
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({1000, 1001, 1002});
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
     resource->mutableBlockIds(1).assign({10, 11, 12});
     resource->mutableBlockIds(3).assign({30, 31, 32});

@@ -1102,7 +1102,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
 
-    resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
+    const BlockDependenciesType dependencies{
+        BlockDependency{true, 900, 7},
+        BlockDependency{true, 100, 13},
+        BlockDependency{true, 101, 21},
+        BlockDependency{true, 777, 34},
+    };
+    resource.setCacheKeysAndBlockDependencies(CacheKeysType{100, 101, 102, 103}, dependencies);
+    resource.setCacheKeysAreCpCanonical(true);
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
     resource.setDeviceReuseBlockNum(3);
 
@@ -1111,6 +1118,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     ASSERT_NE(ref_resource, nullptr);
     // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
     EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
+    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103}));
+    ASSERT_EQ(ref_resource->blockDependencies().size(), 2u);
+    EXPECT_EQ(ref_resource->blockDependencies()[0].parent_key, 100);
+    EXPECT_EQ(ref_resource->blockDependencies()[0].ordinal, 13u);
+    EXPECT_EQ(ref_resource->blockDependencies()[1].parent_key, 777);
+    EXPECT_EQ(ref_resource->blockDependencies()[1].ordinal, 34u);
+    EXPECT_TRUE(ref_resource->cacheKeysAreCpCanonical());
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
@@ -1134,8 +1148,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{101, 103, 999};
-    resource.rebuildLinearBlockDependencies();
+    resource.setCacheKeys(CacheKeysType{101, 103, 999});
     resource.setLastBlockAligned(false);
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 
@@ -1167,7 +1180,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{100, 101};
+    resource.setCacheKeys(CacheKeysType{100, 101});
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
@@ -1513,6 +1526,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesA
     auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/5, /*seq_size_per_block=*/4);
     ASSERT_TRUE(allocator_->malloc(MallocInfo{resource, token_ids}).success);
     ASSERT_EQ(allocator_->freeBlocksNum(), 3);
+    resource->cacheResource(0).setCacheKeysAndBlockDependencies(CacheKeysType{100, 101},
+                                                                BlockDependenciesType{{true, 900, 7}, {true, 777, 34}});
+    resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
 
     // The two future KV steps fit in the current tail, but a delayed 1-to-4 beam expansion copies it three times.
     EXPECT_EQ(allocator_->estimateBatchPeakNeedBlocks(resource,
@@ -1530,6 +1546,18 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesA
     EXPECT_EQ(resource->batchSize(), 4);
     EXPECT_EQ(block_update_mapping.size(), 3);
     EXPECT_EQ(allocator_->freeBlocksNum(), 0);
+    for (int batch_id = 0; batch_id < 4; ++batch_id) {
+        const auto& batch = resource->cacheResource(batch_id);
+        EXPECT_EQ(batch.cacheKeys(), (CacheKeysType{100, 101}));
+        ASSERT_EQ(batch.blockDependencies().size(), 2u);
+        EXPECT_TRUE(batch.blockDependencies()[0].has_parent);
+        EXPECT_EQ(batch.blockDependencies()[0].parent_key, 900);
+        EXPECT_EQ(batch.blockDependencies()[0].ordinal, 7u);
+        EXPECT_TRUE(batch.blockDependencies()[1].has_parent);
+        EXPECT_EQ(batch.blockDependencies()[1].parent_key, 777);
+        EXPECT_EQ(batch.blockDependencies()[1].ordinal, 34u);
+        EXPECT_TRUE(batch.cacheKeysAreCpCanonical());
+    }
 }
 
 }  // namespace test

@@ -60,9 +60,10 @@ public:
     int effectiveSeqLenForAlloc(int actual_seq_len) const;
     int effectiveSeqLenForAlloc(const CacheConfig& config, size_t gid, int seq_len) const;
 
-    size_t        logicalSeqSizePerBlock(const CacheConfig& config, size_t gid) const;
-    CacheKeysType canonicalCacheKeys(const CacheKeysType& full_keys) const;
-    CacheKeysType localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const;
+    size_t                logicalSeqSizePerBlock(const CacheConfig& config, size_t gid) const;
+    CacheKeysType         canonicalCacheKeys(const CacheKeysType& full_keys) const;
+    BlockDependenciesType canonicalBlockDependencies(const BlockDependenciesType& full_dependencies) const;
+    CacheKeysType         localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const;
 
     std::vector<CacheStoreBlockPair> buildStorePlan(const CacheConfig& config,
                                                     size_t             gid,
