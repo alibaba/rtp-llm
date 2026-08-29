@@ -667,7 +667,9 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                                        bool perform_successful_transfers):
-    PerRankBlockTransferEngine(groups), perform_successful_transfers_(perform_successful_transfers) {}
+    PerRankBlockTransferEngine(groups),
+    group_set_results_(groups.size()),
+    perform_successful_transfers_(perform_successful_transfers) {}
 
 std::shared_ptr<AsyncContext>
 ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
@@ -676,7 +678,11 @@ ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>
         std::lock_guard<std::mutex> lock(mutex_);
         ++submitted_batch_count_;
         descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
-        if (!results_.empty()) {
+        const size_t group_set_id = descriptors.empty() ? group_set_results_.size() : descriptors.front().group_set_id;
+        if (group_set_id < group_set_results_.size() && !group_set_results_[group_set_id].empty()) {
+            success = group_set_results_[group_set_id].front();
+            group_set_results_[group_set_id].pop_front();
+        } else if (!results_.empty()) {
             success = results_.front();
             results_.pop_front();
         }
@@ -696,9 +702,18 @@ void ScriptedPerRankBlockTransferEngine::enqueue(bool success) {
     results_.push_back(success);
 }
 
+void ScriptedPerRankBlockTransferEngine::enqueueForGroupSet(size_t group_set_id, bool success) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RTP_LLM_CHECK(group_set_id < group_set_results_.size());
+    group_set_results_[group_set_id].push_back(success);
+}
+
 void ScriptedPerRankBlockTransferEngine::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     results_.clear();
+    for (auto& results : group_set_results_) {
+        results.clear();
+    }
     descriptors_.clear();
     submitted_batch_count_ = 0;
 }

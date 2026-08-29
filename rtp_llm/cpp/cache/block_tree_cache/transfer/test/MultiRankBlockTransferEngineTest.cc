@@ -209,7 +209,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
     EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
 }
 
-bool executeAndWait(MultiRankBlockTransferEngine&                 engine,
+bool executeAndWait(MultiRankBlockTransferEngine&          engine,
                     const std::vector<TransferDescriptor>& descriptors,
                     int                                    timeout_ms) {
     auto context = engine.execute(descriptors, timeout_ms);
@@ -240,8 +240,8 @@ TEST_F(MultiRankBlockTransferEngineTest, ExecuteReturnsBeforeSlowWorkersFinish) 
     ASSERT_NE(broadcast_manager, nullptr);
     auto cache = makeBroadcastCache(broadcast_manager);
 
-    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-        makeBroadcastDescriptors(), /*timeout_ms=*/1000);
+    auto context =
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/1000);
 
     EXPECT_FALSE(context->done());
     context->waitDone();
@@ -257,14 +257,14 @@ TEST_F(MultiRankBlockTransferEngineTest, PollingDoneSettlesSuccessAndErrorState)
         auto broadcast_manager = makeBroadcastManager(configs, servers);
         ASSERT_NE(broadcast_manager, nullptr);
         auto cache = makeBroadcastCache(broadcast_manager);
-        auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-            makeBroadcastDescriptors(), /*timeout_ms=*/500);
+        auto context =
+            cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500);
 
         // BroadcastResult completion is driven by waitDone(). Exercise the public
         // polling contract concurrently and verify that observing done also means
         // the success/error state has already been settled.
         std::thread waiter([&context]() { context->waitDone(); });
-        const auto  deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        const auto  deadline      = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         bool        observed_done = false;
         while (!(observed_done = context->done()) && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -286,8 +286,8 @@ TEST_F(MultiRankBlockTransferEngineTest, CallbackCompletesWithoutCallingWaitDone
     auto broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
     auto cache = makeBroadcastCache(broadcast_manager);
-    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-        makeBroadcastDescriptors(), /*timeout_ms=*/1000);
+    auto context =
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/1000);
 
     std::promise<ErrorInfo> done;
     auto                    future = done.get_future();
@@ -310,8 +310,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWithoutDispatchOn
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
     EXPECT_FALSE(executeAndWait(*cache->transfer_dispatcher_->multi_rank_engine_, {}, /*timeout_ms=*/500));
-    EXPECT_FALSE(executeAndWait(
-        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/0));
+    EXPECT_FALSE(
+        executeAndWait(*cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/0));
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError) {
@@ -397,11 +397,10 @@ struct InvalidWorkerResponse {
     MemoryOperationResponsePB::Code code;
 };
 
-class MultiRankBlockTransferInvalidResponseTest:
-    public ::testing::TestWithParam<InvalidWorkerResponse> {};
+class MultiRankBlockTransferInvalidResponseTest: public ::testing::TestWithParam<InvalidWorkerResponse> {};
 
 TEST_P(MultiRankBlockTransferInvalidResponseTest, BroadcastTransferRejectsInvalidWorkerResponse) {
-    const auto param = GetParam();
+    const auto                                         param   = GetParam();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
         {param.has_response, param.code, grpc::Status::OK},
@@ -415,12 +414,12 @@ TEST_P(MultiRankBlockTransferInvalidResponseTest, BroadcastTransferRejectsInvali
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    InvalidWorkerResponses,
-    MultiRankBlockTransferInvalidResponseTest,
-    ::testing::Values(InvalidWorkerResponse{false, MemoryOperationResponsePB::CODE_UNSPECIFIED},
-                      InvalidWorkerResponse{true, MemoryOperationResponsePB::CODE_UNSPECIFIED},
-                      InvalidWorkerResponse{true, static_cast<MemoryOperationResponsePB::Code>(42)}));
+INSTANTIATE_TEST_SUITE_P(InvalidWorkerResponses,
+                         MultiRankBlockTransferInvalidResponseTest,
+                         ::testing::Values(InvalidWorkerResponse{false, MemoryOperationResponsePB::CODE_UNSPECIFIED},
+                                           InvalidWorkerResponse{true, MemoryOperationResponsePB::CODE_UNSPECIFIED},
+                                           InvalidWorkerResponse{true,
+                                                                 static_cast<MemoryOperationResponsePB::Code>(42)}));
 
 class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {};
 
@@ -887,7 +886,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) 
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, EncodeEvictionTransferRequestIncludesPrimaryAndCascades) {
+TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDescriptors) {
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
     std::shared_ptr<FullGroupSet> primary_group       = makeBroadcastGroup("broadcast_primary", host_pool, disk_pool);
@@ -897,12 +896,12 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeEvictionTransferRequestIncludesPr
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups));
     ASSERT_NE(cache, nullptr);
 
-    EvictionTask task;
-    task.primary_desc.group_set_id  = 0;
-    task.primary_desc.source_tier   = Tier::HOST;
-    task.primary_desc.target_tier   = Tier::DISK;
-    task.primary_desc.source_blocks = {3};
-    task.primary_desc.target_blocks = {4};
+    TransferDescriptor primary_desc;
+    primary_desc.group_set_id  = 0;
+    primary_desc.source_tier   = Tier::HOST;
+    primary_desc.target_tier   = Tier::DISK;
+    primary_desc.source_blocks = {3};
+    primary_desc.target_blocks = {4};
 
     TransferDescriptor cascade_desc;
     cascade_desc.group_set_id  = 1;
@@ -910,10 +909,9 @@ TEST_F(MultiRankBlockTransferEngineTest, EncodeEvictionTransferRequestIncludesPr
     cascade_desc.target_tier   = Tier::DISK;
     cascade_desc.source_blocks = {5};
     cascade_desc.target_blocks = {6};
-    task.cascade_descs.push_back(cascade_desc);
 
-    std::vector<TransferDescriptor> descriptors{task.primary_desc, task.cascade_descs.front()};
-    MemoryOperationRequestPB request;
+    std::vector<TransferDescriptor> descriptors{primary_desc, cascade_desc};
+    MemoryOperationRequestPB        request;
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, descriptors, cache->groupSets()));
     ASSERT_EQ(request.copy_items_size(), 2);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
