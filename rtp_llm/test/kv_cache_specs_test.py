@@ -1,6 +1,7 @@
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
 from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
@@ -11,9 +12,11 @@ from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
+    DataType,
     HybridAttentionType,
     KVCacheSpecDesc,
     KVCacheSpecType,
+    OpaqueBlockEntryCountMode,
 )
 
 
@@ -64,6 +67,154 @@ class HybridKVCacheSpecTest(TestCase):
         for layer_descs in config.kv_cache_spec_descs:
             self.assertEqual(layer_descs[0].tag, "default")
             self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MLA)
+
+    def test_sparse_mla_declares_kernel_compressed_indexer_descriptor(self):
+        config = ModelConfig()
+        config.num_layers = 2
+        config.attn_config.use_mla = True
+        config.mla_ops_type = "FLASH_MLA"
+        config.attn_config.is_sparse = True
+        config.attn_config.indexer_head_dim = 256
+        config.attn_config.tokens_per_block = 512
+
+        BaseModel._post_build_model_config(config)
+
+        self.assertTrue(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertEqual(len(config.kv_cache_spec_descs), 2)
+        for layer_descs in config.kv_cache_spec_descs:
+            self.assertEqual(
+                [desc.tag for desc in layer_descs], ["default", "indexer_kv"]
+            )
+            self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MLA)
+            indexer_desc = layer_descs[1]
+            self.assertEqual(indexer_desc.cache_type, KVCacheSpecType.OPAQUE_KV)
+            self.assertEqual(indexer_desc.entry_dtype, DataType.TYPE_UINT8)
+            self.assertEqual(indexer_desc.entry_elems, 264)
+            self.assertEqual(
+                indexer_desc.entry_count_mode,
+                OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
+            )
+            self.assertEqual(indexer_desc.compression_ratio, 1)
+            self.assertNotEqual(
+                indexer_desc.explicit_entry_count,
+                config.attn_config.tokens_per_block,
+            )
+
+    def test_sparse_mla_mha_fallback_still_declares_indexer_descriptor(self):
+        config = ModelConfig()
+        config.num_layers = 2
+        config.attn_config.use_mla = True
+        config.mla_ops_type = "MHA"
+        config.attn_config.is_sparse = True
+        config.attn_config.indexer_head_dim = 128
+        config.attn_config.tokens_per_block = 256
+
+        BaseModel._post_build_model_config(config)
+
+        self.assertTrue(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        for layer_descs in config.kv_cache_spec_descs:
+            self.assertEqual(
+                [desc.tag for desc in layer_descs], ["default", "indexer_kv"]
+            )
+            self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MHA)
+            self.assertEqual(layer_descs[1].cache_type, KVCacheSpecType.OPAQUE_KV)
+            self.assertEqual(layer_descs[1].entry_elems, 132)
+            self.assertEqual(
+                layer_descs[1].entry_count_mode,
+                OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
+            )
+            self.assertEqual(layer_descs[1].compression_ratio, 1)
+            self.assertNotEqual(
+                layer_descs[1].explicit_entry_count,
+                config.attn_config.tokens_per_block,
+            )
+
+    def test_sparse_mtp_declares_same_indexer_descriptor_as_target(self):
+        target = ModelConfig()
+        target.num_layers = 1
+        target.attn_config.use_mla = True
+        target.mla_ops_type = "FLASH_MLA"
+        target.attn_config.is_sparse = True
+        target.attn_config.indexer_head_dim = 128
+        target.attn_config.tokens_per_block = 256
+        propose = ModelConfig()
+        propose.num_layers = 1
+        propose.is_mtp = True
+        propose.attn_config.use_mla = True
+        propose.mla_ops_type = "FLASH_MLA"
+        propose.attn_config.is_sparse = True
+        propose.attn_config.indexer_head_dim = 128
+        propose.attn_config.tokens_per_block = 256
+
+        BaseModel._post_build_model_config(target)
+        DeepSeekV3Mtp._post_build_model_config(propose)
+
+        self.assertTrue(
+            target.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertTrue(
+            propose.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertEqual(
+            [desc.tag for desc in target.kv_cache_spec_descs[0]],
+            ["default", "indexer_kv"],
+        )
+        self.assertEqual(
+            [desc.tag for desc in propose.kv_cache_spec_descs[0]],
+            ["default", "indexer_kv"],
+        )
+        self.assertEqual(
+            propose.kv_cache_spec_descs[0][1].entry_elems,
+            target.kv_cache_spec_descs[0][1].entry_elems,
+        )
+
+    def test_sparse_mtp_mha_fallback_aligns_indexer_descriptor_with_target(self):
+        target = ModelConfig()
+        target.num_layers = 2
+        target.attn_config.use_mla = True
+        target.mla_ops_type = "MHA"
+        target.attn_config.is_sparse = True
+        target.attn_config.indexer_head_dim = 256
+        target.attn_config.tokens_per_block = 128
+        propose = ModelConfig()
+        propose.num_layers = 1
+        propose.is_mtp = True
+        propose.attn_config.use_mla = True
+        propose.mla_ops_type = "MHA"
+        propose.attn_config.is_sparse = True
+        propose.attn_config.indexer_head_dim = 256
+        propose.attn_config.tokens_per_block = 128
+
+        BaseModel._post_build_model_config(target)
+        DeepSeekV3Mtp._post_build_model_config(propose)
+
+        for config in (target, propose):
+            self.assertTrue(
+                config.hybrid_attention_config.enable_independent_kv_cache_pools
+            )
+            self.assertEqual(
+                [desc.tag for desc in config.kv_cache_spec_descs[0]],
+                ["default", "indexer_kv"],
+            )
+            self.assertEqual(
+                config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
+            )
+            self.assertEqual(
+                config.kv_cache_spec_descs[0][1].cache_type,
+                KVCacheSpecType.OPAQUE_KV,
+            )
+        self.assertEqual(
+            propose.kv_cache_spec_descs[0][1].entry_elems,
+            target.kv_cache_spec_descs[0][1].entry_elems,
+        )
+        self.assertEqual(
+            propose.kv_cache_spec_descs[0][1].explicit_entry_count,
+            target.kv_cache_spec_descs[0][1].explicit_entry_count,
+        )
 
     def test_mtp_single_layer_models_keep_one_descriptor(self):
         for model_cls in (QwenV2MTP, DeepSeekV3Mtp):

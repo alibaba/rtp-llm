@@ -142,6 +142,8 @@ class Dsv4KvCacheSpecTest(TestCase):
         self.assertEqual(by_tag[CSA_KV_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[INDEXER_KV_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[HCA_KV_TAG].compression_ratio, 128)
+        for tag in (CSA_KV_TAG, INDEXER_KV_TAG, HCA_KV_TAG):
+            self.assertEqual(by_tag[tag].kernel_tokens_per_block_alignment, 128, tag)
         self.assertEqual(by_tag[INDEXER_STATE_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[CSA_STATE_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[HCA_STATE_TAG].compression_ratio, 128)

@@ -542,7 +542,7 @@ class DeepSeekV4(DeepSeekV2):
 
         hybrid_config = model_config.hybrid_attention_config
         hybrid_config.hybrid_attention_types = [HybridAttentionType.NONE] * layer_num
-        # Without this the C++ side never dispatches into HybridPoolConfigCreator
+        # Without this the C++ side never dispatches into CacheConfigCreator
         # and falls back to a single homogeneous pool.
         hybrid_config.enable_independent_kv_cache_pools = True
 
