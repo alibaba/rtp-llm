@@ -245,7 +245,7 @@ class DecodeEndpointTest {
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(0, endpoint.inflightHardKvReserved());
         assertEquals(0, endpoint.routingView().inflightExpectedKv());
-        assertEquals(0, endpoint.engineFacingKvUsed());
+        assertEquals(0, endpoint.routingView().engineFacingKvUsed());
     }
 
     /**

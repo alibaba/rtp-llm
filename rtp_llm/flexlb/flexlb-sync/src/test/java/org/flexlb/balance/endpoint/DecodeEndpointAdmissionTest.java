@@ -276,10 +276,10 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(900, endpoint.realKvUsed(),
                 "placement scoring must retain queued expected KV");
-        assertEquals(0, endpoint.engineFacingKvUsed(),
+        assertEquals(0, endpoint.routingView().engineFacingKvUsed(),
                 "queued expected KV must not poison the dispatch gate");
         assertEquals(600, endpoint.realKvAvailable());
-        assertEquals(1_000, endpoint.engineFacingKvAvailable());
+        assertEquals(1_000, endpoint.routingView().engineFacingKvAvailable());
 
         DecodeEndpoint.EngineDispatchPermitAcquisition first =
                 endpoint.acquireEngineDispatchPermit(1L, 256, 90);
@@ -299,12 +299,12 @@ class DecodeEndpointAdmissionTest {
                 "a permit already occupying the 90% KV fence must prevent oversubscription");
         assertNull(second.permit());
         assertTrue(endpoint.layeredAdmissionView().queued().contains(2L));
-        assertEquals(900, endpoint.engineFacingKvUsed(),
+        assertEquals(900, endpoint.routingView().engineFacingKvUsed(),
                 "the failed candidate must not add KV beyond the first acquired permit");
 
         assertEquals(TRANSFERRED, first.permit().transferToEngineLifecycle());
-        assertEquals(900, endpoint.engineFacingKvUsed());
-        assertEquals(600, endpoint.engineFacingKvAvailable());
+        assertEquals(900, endpoint.routingView().engineFacingKvUsed());
+        assertEquals(600, endpoint.routingView().engineFacingKvAvailable());
     }
 
     @Test

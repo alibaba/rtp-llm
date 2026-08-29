@@ -2164,6 +2164,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * One on-demand routing projection captured under the canonical admission
      * lock. It is not a second owner: every value is derived from the live
      * registries and the one committed WorkerStatus holder at capture time.
+     *
+     * <p><b>Stage-2 T7 S2.5 dual-view semantics (ruling 4):</b> the record
+     * carries both KV-views of the same endpoint side by side —
+     * {@code realKvUsed} / {@code realKvAvailable} are the conservative
+     * full-accounting view (engine-reported used plus every local
+     * reservation <b>including the queued soft holds</b> plus the
+     * priority-claim / engine-fence retained demand: placement scoring and
+     * the availability gate), while {@code engineFacingKvUsed} /
+     * {@code engineFacingKvAvailable} are the engine-facing view (queued
+     * soft holds excluded: the dispatch hard gates). The dual views are a
+     * contract, not an accident — the placement side must stay conservative
+     * about work that will eventually demand KV, while the dispatch side
+     * must not let parked queues close engine capacity. The single
+     * construction point for both is {@link #buildRoutingView}: the former
+     * scattered engineFacing accessor methods retired into these fields.
      */
     public record DecodeRoutingView(
             WorkerStatus.CommittedWorkerStatus workerStatus,
@@ -2174,7 +2189,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long realKvAvailable,
             long totalKv,
             long inflightHardKv,
-            long inflightExpectedKv) {
+            long inflightExpectedKv,
+            long engineFacingKvUsed,
+            long engineFacingKvAvailable) {
     }
 
     public DecodeRoutingView routingView() {
@@ -2213,7 +2230,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     && cached.admissionVersion() == version) {
                 return cached.routing();
             }
-            DecodeRoutingView routing = routingViewLocked(
+            DecodeRoutingView routing = buildRoutingView(
                     committed, version);
             routingViewCache = new RoutingViewCache(
                     committed, version, routing);
@@ -2227,11 +2244,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private DecodeRoutingView routingViewLocked() {
         WorkerStatus.CommittedWorkerStatus committed =
                 getStatus().committedWorkerStatus();
-        return routingViewLocked(committed, admissionVersion.get());
+        return buildRoutingView(committed, admissionVersion.get());
     }
 
-    /** Caller holds {@link #admissionLock}; both key values were read there. */
-    private DecodeRoutingView routingViewLocked(
+    /**
+     * Single construction point of the routing view (stage-2 T7 S2.5,
+     * ruling 4). Every source read inside is lock-free-safe on its own
+     * (the volatile placement row, the AtomicLong hold counters, the
+     * volatile confirmed count, and the immutable committed-fields
+     * holder), so two call shapes share this one method:
+     * <ul>
+     *   <li>under {@link #admissionLock} (both routing paths): the
+     *       version key is consistent with the rest of the capture;</li>
+     *   <li>lock-free tolerant snapshot
+     *       ({@link #isEngineDispatchPermitAvailable}): fields may tear
+     *       across the capture — the B-path hard gate only needs the
+     *       engineFacing KV-view, and a torn snapshot can at worst cause
+     *       an extra authoritative acquisition attempt that re-validates
+     *       under the admissionLock.</li>
+     * </ul>
+     */
+    private DecodeRoutingView buildRoutingView(
             WorkerStatus.CommittedWorkerStatus committed,
             long version) {
         WorkerStatus.EngineObservation fields = committed.fields();
@@ -2260,6 +2293,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 - hardInflight
                 - priorityPreemptionHeldKv.get()
                 - engineFenceHeldKv.get());
+        // Stage-2 T7 S2.5 (ruling 4): the engineFacing KV-view is built
+        // right here — the single construction point for the dual-view
+        // record, replacing the former scattered accessor methods.
+        long engineFacingUsed = engineFacingKvUsedProjection(fields);
+        long engineFacingAvailable =
+                engineFacingKvAvailableProjection(fields);
         return new DecodeRoutingView(
                 committed,
                 version,
@@ -2269,7 +2308,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 available,
                 fields.totalKvCacheTokens(),
                 hardInflight,
-                expectedInflight);
+                expectedInflight,
+                engineFacingUsed,
+                engineFacingAvailable);
     }
 
     /** Immutable point-in-time view of one layered-registry entry. */
@@ -3322,25 +3363,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * KV demand which may reach the engine now. Reservations parked in a
-     * Prefill queue are soft placement hints: charging all of them against the
-     * hard availability gate makes a long scheduler queue report every Decode
-     * worker unavailable even though none of that work has been dispatched.
-     */
-    public long engineFacingKvUsed() {
-        WorkerStatus.EngineObservation fields =
-                getStatus().committedWorkerStatus().fields();
-        return engineFacingKvUsedProjection(fields);
-    }
-
-    /**
-     * Stage-2 T7 S2c: every reader — the lock-free production surfaces and
-     * the authoritative in-lock gate alike — takes the placement-domain
-     * components from the aggregate row. The row is maintained
-     * in-transaction under {@link #admissionLock}, so an in-lock read is
-     * the latest committed fact with full transactional consistency (the
-     * S2b projection-lag concern retired with the post-commit delivery
-     * protocol); a lock-free read is one volatile snapshot, never torn.
+     * Engine-facing KV demand — the projection behind the routing view's
+     * {@code engineFacingKvUsed} field (stage-2 T7 S2.5). KV demand which
+     * may reach the engine now: reservations parked in a Prefill queue are
+     * soft placement hints, and charging all of them against the hard
+     * dispatch gate makes a long scheduler queue report every Decode
+     * worker unavailable even though none of that work has been
+     * dispatched.
+     *
+     * <p>Stage-2 T7 S2c/S2.5: both remaining readers — the routing-view
+     * construction ({@link #buildRoutingView}) and the authoritative
+     * in-lock gate — take the placement-domain components from the
+     * aggregate row. The row is maintained in-transaction under
+     * {@link #admissionLock}, so an in-lock read is the latest committed
+     * fact with full transactional consistency (the S2b projection-lag
+     * concern retired with the post-commit delivery protocol); a
+     * lock-free read is one volatile snapshot, never torn.
      */
     private long engineFacingKvUsedProjection(
             WorkerStatus.EngineObservation fields) {
@@ -3380,14 +3418,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 - engineFenceHeldKv.get());
     }
 
-    /** Hard prompt KV available to the next engine dispatch, excluding soft queued holds. */
-    public long engineFacingKvAvailable() {
-        WorkerStatus.EngineObservation fields =
-                getStatus().committedWorkerStatus().fields();
-        return engineFacingKvAvailableProjection(fields);
-    }
-
-    /** Same S2c single-row source as {@link #engineFacingKvUsedProjection}. */
+    /**
+     * Hard prompt KV available to the next engine dispatch, excluding soft
+     * queued holds — the projection behind the routing view's
+     * {@code engineFacingKvAvailable} field (stage-2 T7 S2.5). Same S2c
+     * single-row source as {@link #engineFacingKvUsedProjection}.
+     */
     private long engineFacingKvAvailableProjection(
             WorkerStatus.EngineObservation fields) {
         DecodePlacementProjectionRow row = placementProjectionRow;
@@ -4194,6 +4230,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * {@code candidate} is still a queued soft reservation and is
      * projected exactly once here.
      *
+     * <p>Stage-2 T7 S2.5 (ruling 4): the KV half of this B-path hard gate
+     * reads the engineFacing fields of the caller-supplied routing view —
+     * the same single view construction every other routing consumer
+     * uses (the former direct projection calls retired with the scattered
+     * accessors). The view is built by
+     * {@link #isEngineDispatchPermitAvailable} lock-free as a
+     * torn-tolerant snapshot.
+     *
      * <p>Stage-2 T7 S2c: every placement-domain component reads the
      * aggregate placement row. A torn row snapshot can only cause an
      * extra authoritative acquisition attempt, which re-validates under
@@ -4203,17 +4247,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
             RequestInflight candidate,
             long concurrencyLimit,
             long maxKvUsagePercent,
-            WorkerStatus.EngineObservation fields) {
+            DecodeRoutingView view) {
         if (concurrencyLimit > 0
                 && engineDispatchGateUsageSnapshot() >= concurrencyLimit) {
             return true;
         }
 
-        long totalKv = fields.totalKvCacheTokens();
+        long totalKv = view.totalKv();
         if (maxKvUsagePercent < 0 || totalKv <= 0) {
             return false;
         }
-        if (candidate.kvTokens() > engineFacingKvAvailableProjection(fields)) {
+        if (candidate.kvTokens() > view.engineFacingKvAvailable()) {
             return true;
         }
         if (maxKvUsagePercent == 0) {
@@ -4221,7 +4265,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         long projectedExpectedKv = saturatedAddNonNegative(
-                engineFacingKvUsedProjection(fields),
+                view.engineFacingKvUsed(),
                 candidate.expectedKvTokens());
         return (double) projectedExpectedKv * 100.0
                 > (double) maxKvUsagePercent * (double) totalKv;
@@ -4278,9 +4322,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // the former entry-flag read had. The slot monitor taken
         // inside never nests the admissionLock, and the queue-condition
         // caller lock is not part of the admission lock order, so this
-        // stays lock-cycle free. The capacity formula keeps reading the
-        // entry's immutable identity numerics (kvTokens /
-        // expectedKvTokens) and the L1 aggregate counters until S2b.
+        // stays lock-cycle free. Stage-2 T7 S2.5 (ruling 4): the
+        // capacity formula takes the engineFacing KV-view from the
+        // routing view (single construction point) plus the entry's
+        // immutable identity numerics (kvTokens / expectedKvTokens).
         boolean queued;
         boolean permitHeld;
         if (authorityPort == null) {
@@ -4304,13 +4349,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (!queued || permitHeld) {
             return true;
         }
-        WorkerStatus.CommittedWorkerStatus committed =
-                getStatus().committedWorkerStatus();
+        // Stage-2 T7 S2.5 (ruling 4): the B-path hard gate consumes the
+        // engineFacing KV-view from the routing view built at the same
+        // single construction point every other routing consumer uses.
+        // The snapshot is taken lock-free — buildRoutingView reads only
+        // lock-free-safe sources and a torn inter-field capture can only
+        // cause an extra authoritative acquisition attempt, which
+        // re-validates under the admissionLock (the same torn tolerance
+        // the former direct projection read had).
         return !isEngineDispatchCapacityFullSnapshot(
                 candidate,
                 concurrencyLimit,
                 maxKvUsagePercent,
-                committed.fields());
+                buildRoutingView(
+                        getStatus().committedWorkerStatus(),
+                        admissionVersion.get()));
     }
 
     @Override

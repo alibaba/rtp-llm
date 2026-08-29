@@ -14,6 +14,13 @@ import java.util.Map;
  * Decode role resource measure
  * Availability criteria: KV cache usage percentage below threshold and decode concurrency below limit
  *
+ * <p><b>Stage-2 T7 S2.5 dual-view gate semantics (ruling 4):</b>
+ * {@link #isResourceAvailable} deliberately mixes two KV-views of the same
+ * endpoint — the split is the contract, not an accident. The concurrency
+ * gate reads the <b>engineFacing</b> view while the KV-usage gate reads the
+ * <b>real hard</b> view; see the per-gate comments below for the ownership
+ * of each reading.
+ *
  * @author saichen.sm
  * @since 2025/12/23
  */
@@ -37,19 +44,49 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         this.concurrencyLimit = configuredLimit == null ? 0 : configuredLimit;
     }
 
-    /** Pure availability decision over one caller-owned routing snapshot. */
+    /**
+     * Pure availability decision over one caller-owned routing snapshot.
+     *
+     * <p><b>Dual-view gate semantics (stage-2 T7 S2.5, ruling 4):</b> the
+     * two gates below read different KV-views of the same endpoint, and
+     * the split is deliberate:
+     * <ul>
+     *   <li><b>Concurrency gate — engineFacing semantics</b>
+     *       ({@code view.engineLoad()}, derived from
+     *       {@link DecodeEndpoint#getEngineLoad()}): confirmed running
+     *       requests plus non-queued reservations plus dispatch permits.
+     *       Reservations parked in a prefill queue guard KV only and must
+     *       not saturate this limit (root cause C of the 8400 storm:
+     *       shadow saturation on an idle engine).</li>
+     *   <li><b>KV-usage gate — real hard semantics</b>
+     *       ({@code view.realKvUsed()} over {@code view.totalKv()}): the
+     *       conservative full-accounting view — engine-reported used plus
+     *       every local reservation <b>including the queued soft holds</b>
+     *       plus the priority-claim / engine-fence retained expected
+     *       demand (see {@link DecodeEndpoint#realKvUsed()}). Queued work
+     *       will eventually demand KV, so placement availability must
+     *       stay conservative even though the concurrency gate above does
+     *       not count it.</li>
+     * </ul>
+     */
     public boolean isResourceAvailable(
             DecodeEndpoint.DecodeRoutingView view) {
         if (view == null) {
             return false;
         }
-        // Gate on the engine-facing load — reservations parked in a prefill
-        // queue guard KV only and must not saturate this limit (root cause C
-        // of the 8400 storm: shadow saturation on an idle engine).
+        // Gate 1 — engineFacing semantics: confirmed + non-queued
+        // reservations + dispatch permits. Queued reservations are
+        // excluded: they guard KV only and must not saturate the engine
+        // concurrency limit (root cause C of the 8400 storm: shadow
+        // saturation on an idle engine).
         long engineLoad = view.engineLoad();
         if (concurrencyLimit > 0 && engineLoad >= concurrencyLimit) {
             return false;
         }
+        // Gate 2 — real hard semantics: engine-reported used plus every
+        // local reservation (queued soft holds included) plus the
+        // priority/fence retained expected demand — the conservative
+        // placement view, so queued work cannot silently oversubscribe KV.
         long used = view.realKvUsed();
         long total = view.totalKv();
         if (total == 0) {
