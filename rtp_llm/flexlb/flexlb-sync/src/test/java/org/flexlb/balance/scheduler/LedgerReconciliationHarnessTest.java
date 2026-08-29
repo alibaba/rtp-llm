@@ -985,6 +985,132 @@ class LedgerReconciliationHarnessTest {
         harness.close();
     }
 
+    @Test
+    void priorityHeldAggregateProjectionDriftIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L4 retirement: the priority-held aggregate is a
+        // projection derived from claim-registry facts — one
+        // ENGINE_CONFIRMED claim whose victim is absent from the fresh
+        // observation here, so the claim-derived hold is 500/700, but the
+        // projection counters drifted to zero.
+        stubDecodeView(decode, priorityAuditView(
+                Map.of(707L, 9L),
+                Map.of(707L, 500L),
+                Map.of(707L, 700L),
+                Set.of(707L),
+                Set.of(),
+                0L, 0L, 1L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .PRIORITY_PREEMPTION_AGGREGATE_MISMATCH,
+                real.get(0).rule());
+        assertEquals(0L, real.get(0).requestId(),
+                "the rewritten rule reports the endpoint-level aggregate");
+        harness.close();
+    }
+
+    /**
+     * Stage-2 L4 soak-fix form: an uncertified (torn fallback) capture read
+     * its Phase-1 priority aggregates and its Phase-2 claim projection in
+     * different admission quiet windows — the aggregate drift is a capture
+     * tear, and the endpoint-level identity (request id 0) defeats the
+     * confirm-window rotation. The identical drift as
+     * priorityHeldAggregateProjectionDriftIsARealDiff, but certified=false,
+     * must produce no diff at all.
+     */
+    @Test
+    void tornCapturePriorityAggregateDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        stubDecodeView(decode, priorityAuditView(
+                Map.of(707L, 9L),
+                Map.of(707L, 500L),
+                Map.of(707L, 700L),
+                Set.of(707L),
+                Set.of(),
+                0L, 0L, 1L, false));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "torn captures carry no priority aggregate signal: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "torn captures must not even surface as tear candidates: "
+                        + report.pendingRealDiffs());
+        harness.close();
+    }
+
+    @Test
+    void staleProjectionWindowPriorityAggregateDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L4 projection-fresh gate: an out-of-band registry mutation
+        // (settlement, reconciliation, abort) bumps the admission version
+        // without recomputing the projection, so a capture from inside that
+        // window (certified, but its captured admission version 1 no longer
+        // matches the priority projection stamp 0) carries a conservatively
+        // stale aggregate — no valid aggregate signal until the next
+        // calibration pass re-derives it.
+        stubDecodeView(decode, priorityAuditView(
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Set.of(),
+                Set.of(),
+                500L, 700L, 0L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "the out-of-band mutation window carries no priority"
+                        + " aggregate signal: " + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "no tear candidates either: " + report.pendingRealDiffs());
+        harness.close();
+    }
+
+    @Test
+    void priorityHeldProjectionMatchesFreshAndOwnerExemptions() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L4: the hold predicate counts only an ENGINE_CONFIRMED
+        // claim whose victim is absent from the fresh observation — 707 is
+        // fresh (observed → the engine owns the accounting), 709 is a
+        // non-confirmed claim owner (shadow-side, never in the projection).
+        // Only 708 contributes to the claim-derived hold, and the projection
+        // agrees — no diff.
+        stubDecodeView(decode, priorityAuditView(
+                Map.of(707L, 9L, 708L, 10L, 709L, 11L),
+                Map.of(707L, 500L, 708L, 600L, 709L, 700L),
+                Map.of(707L, 700L, 708L, 800L, 709L, 900L),
+                Set.of(707L, 708L),
+                Set.of(707L),
+                600L, 800L, 1L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "a faithful priority projection produces no diff: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "no tear candidates either: " + report.pendingRealDiffs());
+        harness.close();
+    }
+
     // ==================== fixtures ====================
 
     private Map<Long, RequestInflight> cleanARoadway(
@@ -1150,10 +1276,61 @@ class LedgerReconciliationHarnessTest {
                 Map.copyOf(fenceHardKvTokens),
                 Map.copyOf(fenceExpectedKvTokens),
                 Map.copyOf(claimReservationTokens),
+                // Stage-2 L4: the fence fixture carries no priority
+                // projection facts (empty claim KV, no ENGINE_CONFIRMED
+                // owner, zero aggregates, fresh stamp).
+                Map.of(), Map.of(), Set.of(),
+                0L, 0L, 1L,
                 Set.copyOf(observedConfirmed),
                 fenceHeldKv,
                 fenceHeldExpectedKv,
                 fenceProjectionVersion,
+                certified);
+    }
+
+    /**
+     * Stage-2 L4 priority-projection fixture: only the claim-registry
+     * layers are populated — per-victim KV, the ENGINE_CONFIRMED ownership
+     * flag, the observed-confirmed engine fact, the two aggregate totals
+     * and the priority projection stamp (the claim id set derives from the
+     * token map so the request-level rules stay consistent with the
+     * aggregate derivation; the fence layers carry the fresh empty
+     * projection).
+     */
+    private static DecodeLedgerAuditView priorityAuditView(
+            Map<Long, Long> claimReservationTokens,
+            Map<Long, Long> claimHardKvTokens,
+            Map<Long, Long> claimExpectedKvTokens,
+            Set<Long> engineConfirmedClaims,
+            Set<Long> observedConfirmed,
+            long priorityHeldKv,
+            long priorityHeldExpectedKv,
+            long priorityProjectionVersion,
+            boolean certified) {
+        return new DecodeLedgerAuditView(
+                1L,
+                Map.of(),
+                0,
+                Map.of(),
+                Set.copyOf(claimReservationTokens.keySet()),
+                Set.of(),
+                Set.of(),
+                Set.of(),
+                Set.of(),
+                0L,
+                0L,
+                0, 0L, 0L,
+                0, 0L, 0L,
+                Map.of(), Map.of(), Map.of(),
+                Map.copyOf(claimReservationTokens),
+                Map.copyOf(claimHardKvTokens),
+                Map.copyOf(claimExpectedKvTokens),
+                Set.copyOf(engineConfirmedClaims),
+                priorityHeldKv,
+                priorityHeldExpectedKv,
+                priorityProjectionVersion,
+                Set.copyOf(observedConfirmed),
+                0L, 0L, 1L,
                 certified);
     }
 

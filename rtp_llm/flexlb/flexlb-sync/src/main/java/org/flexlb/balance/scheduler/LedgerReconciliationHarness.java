@@ -898,6 +898,54 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                     + derivedHeldExpectedKv + ")"));
                 }
             }
+            // Stage-2 L4 source switch: the priority-held aggregate is a
+            // projection recomputed from claim-registry facts on every
+            // calibration pass (an ENGINE_CONFIRMED claim whose victim is
+            // absent from the fresh observation) — the phase state machine
+            // and the incremental hold latch are deleted. The rule mirrors
+            // the L5/L7/L8 aggregate treatment with the same four gates:
+            // seqlock-certified captures only, the priority projection stamp
+            // must equal the captured admission version (an out-of-band
+            // registry mutation — settlement, reconciliation, abort — bumps
+            // the version without recomputing the aggregate, and that window
+            // carries no aggregate signal until the next calibration pass),
+            // the derivation reads the capture-frozen claim maps (per-victim
+            // KV, the ENGINE_CONFIRMED ownership flag, the observed-confirmed
+            // engine fact) rather than live re-reads, and the endpoint-level
+            // identity is request id 0 (the confirm window cannot absorb it
+            // by request-id rotation).
+            if (view.certified()
+                    && view.priorityProjectionVersion()
+                            == view.admissionVersion()) {
+                long derivedPriorityHeldKv = 0L;
+                long derivedPriorityHeldExpectedKv = 0L;
+                for (Long requestId : view.engineConfirmedClaimRequestIds()) {
+                    if (view.observedConfirmedRequestIds()
+                            .contains(requestId)) {
+                        continue;
+                    }
+                    derivedPriorityHeldKv += view.preemptionClaimHardKvTokens()
+                            .getOrDefault(requestId, 0L);
+                    derivedPriorityHeldExpectedKv +=
+                            view.preemptionClaimExpectedKvTokens()
+                                    .getOrDefault(requestId, 0L);
+                }
+                if (view.priorityPreemptionHeldKv() != derivedPriorityHeldKv
+                        || view.priorityPreemptionHeldExpectedKv()
+                                != derivedPriorityHeldExpectedKv) {
+                    diffs.add(new LedgerDiff(
+                            Rule.PRIORITY_PREEMPTION_AGGREGATE_MISMATCH,
+                            0L,
+                            "decode priority-held aggregate projection drift:"
+                                    + " projection (hard="
+                                    + view.priorityPreemptionHeldKv()
+                                    + ", expected="
+                                    + view.priorityPreemptionHeldExpectedKv()
+                                    + ") != claim-derived hold (hard="
+                                    + derivedPriorityHeldKv + ", expected="
+                                    + derivedPriorityHeldExpectedKv + ")"));
+                }
+            }
         }
     }
 
@@ -1078,6 +1126,28 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * rotation).
          */
         ENGINE_FENCE_AGGREGATE_MISMATCH(true),
+        /**
+         * Stage-2 L4 source switch: the priority-held accounting is a
+         * projection recomputed from claim-registry facts (an
+         * ENGINE_CONFIRMED claim absent from the fresh observation) on
+         * every calibration pass — the phase state machine and the
+         * incremental hold latch are deleted.  The rule cross-checks the
+         * two O(1) priority-held aggregate totals against the
+         * capture-frozen claim-derived hold (engine-internal invariant;
+         * request id 0 marks the endpoint-level aggregate identity).
+         * Four gates make the signal trustworthy, mirroring the L5
+         * aggregate: seqlock-certified captures only (torn fallback
+         * captures carry no cross-phase aggregate signal), the priority
+         * projection stamp must equal the captured admission version (an
+         * out-of-band registry mutation — settlement, reconciliation,
+         * abort — bumps the version without recomputing the aggregate,
+         * and that window carries no aggregate signal until the next
+         * calibration pass), the derivation reads the capture-frozen
+         * claim/observed-confirmed maps rather than live re-reads, and the
+         * endpoint-level identity is request id 0 (the confirm window
+         * cannot absorb it by request-id rotation).
+         */
+        PRIORITY_PREEMPTION_AGGREGATE_MISMATCH(true),
         /**
          * Stage-1 fix C originally guarded the layer-7 set against members
          * outside the layer-1 inflight set.  Stage-2 L7 retirement rewrote

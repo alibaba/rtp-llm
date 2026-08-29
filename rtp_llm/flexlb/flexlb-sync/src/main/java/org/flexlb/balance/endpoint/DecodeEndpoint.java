@@ -1487,6 +1487,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         final Map<Long, Long> fenceProtectedHardKvTokens;
         final Map<Long, Long> fenceProtectedExpectedKvTokens;
         final Map<Long, Long> claimReservationTokens;
+        final Map<Long, Long> claimHardKvTokens;
+        final Map<Long, Long> claimExpectedKvTokens;
+        final Set<Long> engineConfirmedClaimRequestIds;
+        final long priorityHeldKvValue;
+        final long priorityHeldExpectedKvValue;
+        final long priorityProjectionVersionValue;
         final Set<Long> observedConfirmedRequestIds;
         final long fenceHeldKvValue;
         final long fenceHeldExpectedKvValue;
@@ -1512,9 +1518,26 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     engineDispatchPermitExpectedKvReservedTotal.get();
             claimRequestIds = Set.copyOf(preemptionClaims.keySet());
             Map<Long, Long> claimTokens = new HashMap<>();
-            preemptionClaims.forEach((requestId, claim) ->
-                    claimTokens.put(requestId, claim.reservationToken));
+            Map<Long, Long> claimHardKv = new HashMap<>();
+            Map<Long, Long> claimExpectedKv = new HashMap<>();
+            Set<Long> engineConfirmedClaims = new HashSet<>();
+            // Stage-2 L4: the claim registry facts (tokens, per-victim KV,
+            // the ENGINE_CONFIRMED ownership flag) join the locked window so
+            // the certified version revalidation covers the harness
+            // priority-held projection derivation end to end.
+            preemptionClaims.forEach((requestId, claim) -> {
+                claimTokens.put(requestId, claim.reservationToken);
+                claimHardKv.put(requestId, claim.hardKvTokens);
+                claimExpectedKv.put(requestId, claim.expectedKvTokens);
+                if (claim.owner == ClaimOwner.ENGINE_CONFIRMED) {
+                    engineConfirmedClaims.add(requestId);
+                }
+            });
             claimReservationTokens = Map.copyOf(claimTokens);
+            claimHardKvTokens = Map.copyOf(claimHardKv);
+            claimExpectedKvTokens = Map.copyOf(claimExpectedKv);
+            engineConfirmedClaimRequestIds =
+                    Set.copyOf(engineConfirmedClaims);
             Set<Long> attemptIncoming = new HashSet<>();
             for (EndpointPreemptionAttempt attempt
                     : preemptionAttempts.values()) {
@@ -1537,6 +1560,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             fenceProtectedReservationTokens = Map.copyOf(fenceTokens);
             fenceProtectedHardKvTokens = Map.copyOf(fenceHardKv);
             fenceProtectedExpectedKvTokens = Map.copyOf(fenceExpectedKv);
+            priorityHeldKvValue = priorityPreemptionHeldKv.get();
+            priorityHeldExpectedKvValue =
+                    priorityPreemptionHeldExpectedKv.get();
+            priorityProjectionVersionValue = priorityProjectionVersion;
             observedConfirmedRequestIds = lastObservedConfirmedRequestIds;
             fenceHeldKvValue = engineFenceHeldKv.get();
             fenceHeldExpectedKvValue = engineFenceHeldExpectedKv.get();
@@ -1591,6 +1618,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 fenceProtectedHardKvTokens,
                 fenceProtectedExpectedKvTokens,
                 claimReservationTokens,
+                claimHardKvTokens,
+                claimExpectedKvTokens,
+                engineConfirmedClaimRequestIds,
+                priorityHeldKvValue,
+                priorityHeldExpectedKvValue,
+                priorityProjectionVersionValue,
                 observedConfirmedRequestIds,
                 fenceHeldKvValue,
                 fenceHeldExpectedKvValue,
@@ -1635,8 +1668,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *   <li>L3 {@code trackedConfirmed} — B-road engine projection; slot
      *       dRow claims the same reservationToken identity.</li>
      *   <li>L4 {@code preemptionClaims} / L4b
-     *       {@code preemptionAttemptIncomingRequestIds} — preemption
-     *       protocol ownership (slot PreemptionRegistration domain).</li>
+     *       {@code preemptionAttemptIncomingRequestIds} — stage-2
+     *       retirement complete: the endpoint registry is an engine-fact
+     *       claim ledger (exact fencing tokens, owner, per-victim KV, the
+     *       NOT_FOUND / transport-unknown facts, the fence-transfer
+     *       marker); the Cancel protocol state machine lives in the
+     *       slot-side PreemptionRegistration, and the two priority-held KV
+     *       totals are a projection recomputed from the registry facts on
+     *       every calibration pass ({@code priorityProjectionVersion}
+     *       stamps the last recompute).</li>
      *   <li>L5 {@code engineFenceProtections} — engine fence registrations.</li>
      *   <li>L6 settled request tombstones — Stage-2 retirement complete: the
      *       layer-6 registry is deleted; request-id reuse fencing is the
@@ -1694,6 +1734,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             Map<Long, Long> engineFenceProtectedHardKvTokens,
             Map<Long, Long> engineFenceProtectedExpectedKvTokens,
             Map<Long, Long> preemptionClaimReservationTokens,
+            Map<Long, Long> preemptionClaimHardKvTokens,
+            Map<Long, Long> preemptionClaimExpectedKvTokens,
+            Set<Long> engineConfirmedClaimRequestIds,
+            long priorityPreemptionHeldKv,
+            long priorityPreemptionHeldExpectedKv,
+            long priorityProjectionVersion,
             Set<Long> observedConfirmedRequestIds,
             long engineFenceHeldKv,
             long engineFenceHeldExpectedKv,
@@ -1727,6 +1773,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     engineFenceProtectedHardKvTokens,
                     engineFenceProtectedExpectedKvTokens,
                     preemptionClaimReservationTokens,
+                    preemptionClaimHardKvTokens,
+                    preemptionClaimExpectedKvTokens,
+                    engineConfirmedClaimRequestIds,
+                    priorityPreemptionHeldKv,
+                    priorityPreemptionHeldExpectedKv,
+                    priorityProjectionVersion,
                     observedConfirmedRequestIds,
                     engineFenceHeldKv,
                     engineFenceHeldExpectedKv,
