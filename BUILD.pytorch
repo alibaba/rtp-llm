@@ -81,7 +81,15 @@ cc_library(
         "torch.libs/libgfortran*.so*",
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
-    ]),
+    ]) + select({
+        "@//:using_cuda13_arm": glob([
+            "torch/lib/libarm_compute*.so*",
+            "torch/lib/libgfortran*.so*",
+            "torch/lib/libnvpl*.so*",
+            "torch/lib/libtorch_nvshmem.so*",
+        ]),
+        "//conditions:default": [],
+    }),
     linkopts = select({
         "@//:cuda_pre_12_9": [
             "-L/usr/local/cuda/lib64",
