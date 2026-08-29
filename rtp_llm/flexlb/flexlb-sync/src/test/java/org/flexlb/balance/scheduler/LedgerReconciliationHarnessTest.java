@@ -520,7 +520,8 @@ class LedgerReconciliationHarnessTest {
                         decode, 5L, 77L, true, 0L, false),
                 () -> null,
                 () -> new DecodePlacementAuthorityPort
-                        .DecodeAdmissionEntry(77L, true, 0L, false));
+                        .DecodeAdmissionEntry(77L, true, 0L, false,
+                                16L, 24L));
 
         Map<Long, RequestInflight> inflight = new HashMap<>();
         RequestInflight queued = inflightEntry(16L, 24L, 3, 77L);
@@ -1827,6 +1828,11 @@ class LedgerReconciliationHarnessTest {
                         Set.of()),
                 1L,
                 Set.of(),
+                // Stage-2 T7 S2b: the placement-projection row defaults to
+                // the zero row (stamp 0 — the harness skips the projection
+                // rule on a zero-stamp row since the fixture endpoint is a
+                // mock that never receives deliveries).
+                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
                 certified);
     }
 
@@ -1882,6 +1888,9 @@ class LedgerReconciliationHarnessTest {
                         Map.of(), Map.of(), engineConfirmedClaims),
                 1L,
                 Set.of(),
+                // Stage-2 T7 S2b: zero placement-projection row (stamp 0 —
+                // the projection rule skips the fixture mock endpoint).
+                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
                 certified);
     }
 
@@ -2003,6 +2012,9 @@ class LedgerReconciliationHarnessTest {
                 confirmedRunningCount,
                 confirmedProjectionVersion,
                 Set.of(),
+                // Stage-2 T7 S2b: zero placement-projection row (stamp 0 —
+                // the projection rule skips the fixture mock endpoint).
+                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
                 certified);
     }
 
@@ -2042,6 +2054,9 @@ class LedgerReconciliationHarnessTest {
                 0,
                 1L,
                 Set.copyOf(engineLifecycleRequestIds),
+                // Stage-2 T7 S2b: zero placement-projection row (stamp 0 —
+                // the projection rule skips the fixture mock endpoint).
+                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
                 certified);
     }
 
@@ -2082,7 +2097,7 @@ class LedgerReconciliationHarnessTest {
                     () -> new DecodePlacementAuthorityPort
                             .DecodeAdmissionEntry(
                             reservation.reservationToken(),
-                            false, 0L, false));
+                            false, 0L, false, 16L, 24L));
         }
     }
 

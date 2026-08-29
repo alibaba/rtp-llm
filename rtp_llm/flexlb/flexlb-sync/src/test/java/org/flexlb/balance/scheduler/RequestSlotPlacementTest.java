@@ -213,7 +213,8 @@ class RequestSlotPlacementTest {
                             decode, 7L, 11L, 16L, 24L, 50, false),
                     () -> null,
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(11L, false, 0L, false));
+                            .DecodeAdmissionEntry(
+                            11L, false, 0L, false, 16L, 24L));
 
             RequestSlot slot = lifecycle.requestSlot(301L);
             synchronized (slot) {
@@ -261,7 +262,8 @@ class RequestSlotPlacementTest {
                             decode, 7L, 12L, 16L, 24L, 50, false),
                     () -> null,
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(12L, false, 0L, false));
+                            .DecodeAdmissionEntry(12L, false, 0L, false,
+                                    16L, 24L));
             RequestSlot slot = lifecycle.requestSlot(311L);
             synchronized (slot) {
                 assertTrue(slot.tryBindItemForPublication(
@@ -303,7 +305,8 @@ class RequestSlotPlacementTest {
                     () -> lifecycle.commitInflight(
                             registered.item(), false, () -> true),
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(13L, false, 0L, false));
+                            .DecodeAdmissionEntry(13L, false, 0L, false,
+                                    16L, 24L));
             RequestSlot slot = lifecycle.requestSlot(321L);
             synchronized (slot) {
                 assertNotNull(slot.decodeAdmissionAuthorityView());
@@ -336,7 +339,8 @@ class RequestSlotPlacementTest {
                             decode, 7L, 14L, 16L, 24L, 50, false),
                     () -> null,
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(14L, false, 0L, false));
+                            .DecodeAdmissionEntry(14L, false, 0L, false,
+                                    16L, 24L));
             // A foreign fence (a stale clear delivery after
             // request-id reuse) must not remove the newer authority.
             lifecycle.clearDecodeAdmission(331L, decode, 7L, 999L);
@@ -377,7 +381,8 @@ class RequestSlotPlacementTest {
                             decode, 7L, 15L, 16L, 24L, 50, true),
                     () -> null,
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(15L, true, 0L, false));
+                            .DecodeAdmissionEntry(15L, true, 0L, false,
+                                    16L, 24L));
 
             // The exact fence resolves to the authority sub-state
             // snapshot (the read-source switch's channel B).
@@ -421,14 +426,17 @@ class RequestSlotPlacementTest {
                             decode, 7L, 16L, 16L, 24L, 50, true),
                     () -> null,
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(16L, true, 0L, false));
+                            .DecodeAdmissionEntry(16L, true, 0L, false,
+                                    16L, 24L));
 
             // The permit flip: queued → permit held (the post-commit
             // delivery class of the dispatch-permit acquisition).
             lifecycle.deliverDecodeAdmissionAfterCommit(
                     351L,
                     DecodePlacementAuthorityPort.Projection.flip(
-                            decode, 7L, 16L, false, 5L, false));
+                            decode, 7L, 16L, false, 5L, false),
+                    new DecodePlacementAuthorityPort.DecodeAdmissionEntry(
+                            16L, true, 0L, false, 16L, 24L));
             DecodePlacementAuthorityPort.DecodeAdmissionEntry view =
                     lifecycle.decodeAdmissionView(351L, decode, 7L, 16L);
             assertNotNull(view);
@@ -440,7 +448,9 @@ class RequestSlotPlacementTest {
             lifecycle.deliverDecodeAdmissionAfterCommit(
                     351L,
                     DecodePlacementAuthorityPort.Projection.flip(
-                            decode, 7L, 16L, false, 0L, true));
+                            decode, 7L, 16L, false, 0L, true),
+                    new DecodePlacementAuthorityPort.DecodeAdmissionEntry(
+                            16L, false, 5L, false, 16L, 24L));
             view = lifecycle.decodeAdmissionView(351L, decode, 7L, 16L);
             assertNotNull(view);
             assertFalse(view.masterQueued());
@@ -467,7 +477,8 @@ class RequestSlotPlacementTest {
                     () -> lifecycle.commitInflight(
                             registered.item(), false, () -> true),
                     () -> new DecodePlacementAuthorityPort
-                            .DecodeAdmissionEntry(17L, true, 0L, false));
+                            .DecodeAdmissionEntry(17L, true, 0L, false,
+                                    16L, 24L));
             assertNotNull(lifecycle.decodeAdmissionView(
                     361L, decode, 7L, 17L));
 

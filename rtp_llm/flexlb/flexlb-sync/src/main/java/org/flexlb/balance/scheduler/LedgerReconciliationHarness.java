@@ -258,6 +258,7 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
         compareDecodeAdmissionMirror(slots, decode, raw);
         compareDecodeDomainsAgainstSlots(slots, decode, raw);
         compareDecodeInternalConsistency(decode, raw);
+        comparePlacementProjectionRow(decode, raw);
         comparePrefillAgainstSlots(slots, prefill, raw);
 
         List<LedgerDiff> confirmedReal = new ArrayList<>();
@@ -398,6 +399,83 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
     }
 
     // ==================== rules ====================
+
+    /**
+     * Stage-2 T7 S2b (channel A) dual-write guard: the aggregate
+     * placement-projection row must equal the native counter aggregates
+     * (the nine placement-domain components) on every certified
+     * capture. The row is a volatile single-reference snapshot (never
+     * torn); the native side is certified by the seqlock revalidation,
+     * so the only legal divergence is the delivery window itself (µs
+     * projection lag) — a persistent split is a lost or duplicated fact
+     * delivery and this rule confirms it. Request id 0 marks the
+     * endpoint-level aggregate identity; a row whose delivery stamp is
+     * still zero never received a delivery (a port-less test endpoint —
+     * its native mirrors are the only fact source), so it carries no
+     * cross-check signal.
+     */
+    private void comparePlacementProjectionRow(
+            IdentityHashMap<DecodeEndpoint, DecodeLedgerAuditView> decode,
+            List<LedgerDiff> diffs) {
+        for (Map.Entry<DecodeEndpoint, DecodeLedgerAuditView> entry
+                : decode.entrySet()) {
+            DecodeLedgerAuditView view = entry.getValue();
+            if (!view.certified()) {
+                continue;
+            }
+            DecodeEndpoint.DecodePlacementProjectionRow row =
+                    view.placementProjectionRow();
+            if (row.placementProjectionVersion() == 0L) {
+                continue;
+            }
+            int inflightCount = view.inflight().size();
+            if (row.inflightCount() != inflightCount
+                    || row.inflightHardKv()
+                            != view.inflightKvReservedTotal()
+                    || row.inflightExpectedKv()
+                            != view.inflightExpectedKvReservedTotal()
+                    || row.queuedCount() != view.queuedPhaseCount()
+                    || row.queuedHardKv()
+                            != view.queuedKvReservedTotal()
+                    || row.queuedExpectedKv()
+                            != view.queuedExpectedKvReservedTotal()
+                    || row.permitCount()
+                            != view.engineDispatchPermitCount()
+                    || row.permitHardKv()
+                            != view.engineDispatchPermitHardKvReservedTotal()
+                    || row.permitExpectedKv()
+                            != view.engineDispatchPermitExpectedKvReservedTotal()) {
+                diffs.add(new LedgerDiff(
+                        Rule.PLACEMENT_PROJECTION_MISMATCH,
+                        0L,
+                        "decode placement-projection row (inflight="
+                                + row.inflightCount() + "/"
+                                + row.inflightHardKv() + "/"
+                                + row.inflightExpectedKv()
+                                + ", queued=" + row.queuedCount() + "/"
+                                + row.queuedHardKv() + "/"
+                                + row.queuedExpectedKv()
+                                + ", permit=" + row.permitCount() + "/"
+                                + row.permitHardKv() + "/"
+                                + row.permitExpectedKv()
+                                + ", row_version="
+                                + row.placementProjectionVersion()
+                                + ") != native aggregates (inflight="
+                                + inflightCount + "/"
+                                + view.inflightKvReservedTotal() + "/"
+                                + view.inflightExpectedKvReservedTotal()
+                                + ", queued=" + view.queuedPhaseCount()
+                                + "/" + view.queuedKvReservedTotal() + "/"
+                                + view.queuedExpectedKvReservedTotal()
+                                + ", permit="
+                                + view.engineDispatchPermitCount() + "/"
+                                + view.engineDispatchPermitHardKvReservedTotal()
+                                + "/"
+                                + view.engineDispatchPermitExpectedKvReservedTotal()
+                                + ") — delivery-window tear if single-pass"));
+            }
+        }
+    }
 
     private void compareSlotsAgainstDecode(
             List<SlotAudit> slots,
@@ -1554,6 +1632,20 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * </ul>
          */
         DECODE_ADMISSION_MIRROR_MISMATCH(true),
+        /**
+         * Stage-2 T7 S2b (channel A) dual-write rule: the delivered
+         * placement-projection row must equal the nine native O(1)
+         * aggregate mirrors (inflight / queued / permit × count / hard
+         * KV / expected KV) on seqlock-certified captures. Endpoint-level
+         * aggregate identity (request id 0); the µs delivery window
+         * surfaces as a single-pass tear the confirm window absorbs,
+         * and a persistent split is a lost or duplicated fact delivery —
+         * the exact regression class the S2c read-source switch (native
+         * maintenance retirement) depends on this rule having excluded.
+         * Rows with delivery stamp zero (port-less test endpoints, never
+         * delivered) carry no signal and are skipped.
+         */
+        PLACEMENT_PROJECTION_MISMATCH(true),
         /** Engine confirmed before the slot applied the handover. */
         DECODE_CONFIRMED_AHEAD_OF_SLOT(false),
         /** Decode reservation inside the admission bind window. */
