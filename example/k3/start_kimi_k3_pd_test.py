@@ -12,6 +12,32 @@ from typing import Optional
     "the production launcher requires Bash 4+ and runs in lhc_GPU Linux",
 )
 class StartKimiK3PdDryRunTest(unittest.TestCase):
+    @staticmethod
+    def _find_free_port_block(span: int = 72) -> int:
+        for _ in range(64):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                base_port = probe.getsockname()[1]
+            if base_port + span - 1 > 65535:
+                continue
+            held = []
+            try:
+                for port in range(base_port, base_port + span):
+                    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    try:
+                        listener.bind(("127.0.0.1", port))
+                    except OSError:
+                        listener.close()
+                        raise
+                    held.append(listener)
+            except OSError:
+                continue
+            finally:
+                for listener in held:
+                    listener.close()
+            return base_port
+        raise RuntimeError(f"could not find a free {span}-port block")
+
     def _run(
         self,
         role: str,
@@ -131,6 +157,7 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
             "name:k3_part1,ip:10.0.0.2,port:28188"
         )
         with tempfile.TemporaryDirectory() as temp_dir:
+            decode_port = self._find_free_port_block()
             probe = pathlib.Path(temp_dir) / "print_local_world_size.sh"
             probe.write_text(
                 "#!/usr/bin/env bash\n"
@@ -142,6 +169,8 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
                 "decode",
                 "dp16_ktp16_ep16",
                 gang_config=gang,
+                prefill_endpoint="127.0.0.1:27188",
+                decode_endpoint=f"127.0.0.1:{decode_port}",
                 server_binary=str(probe),
                 dry_run=False,
             )
