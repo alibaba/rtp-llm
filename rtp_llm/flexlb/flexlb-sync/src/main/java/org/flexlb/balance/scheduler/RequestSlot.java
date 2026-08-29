@@ -1662,10 +1662,10 @@ final class RequestSlot extends RequestLifecycle {
         engineOwnership = EngineOwnership.DECODE_OWNED;
         // A→B authority handover (v2 C1/C8): the master reservation row
         // ends and the engine projection row begins in this exact slot
-        // mutation — the same tick the DecodeEndpoint layers retire the
-        // shadow reservation (inflightRequests/engineLifecycleReservations/
-        // dispatch permits/queued phase) and install the confirmed one.
-        // Repeated accepted facts keep the first handover identity.
+        // mutation — the same tick the DecodeEndpoint layer-1 shadow entry
+        // (with its engine-lifecycle / dispatch-permit / queued sub-state
+        // flags) retires and the confirmed projection installs. Repeated
+        // accepted facts keep the first handover identity.
         prefillRow = null;
         if (decodeRow == null) {
             decodeRow = SlotResourceRow.engineProjection(
