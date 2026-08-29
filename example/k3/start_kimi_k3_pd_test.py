@@ -125,21 +125,29 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
         self.assertIn("WORLD_RANK must be 0 or 8", bad_rank.stderr)
 
     def test_worker_port_block_rejects_occupied_derived_port(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-            listener.bind(("127.0.0.1", 0))
-            occupied_port = listener.getsockname()[1]
-            base_port = occupied_port - 22  # local rank 2, RDMA offset 4
-            if base_port < 1024 or base_port + 71 > 65535:
-                self.skipTest("ephemeral port cannot form a valid worker block")
-            result = self._run(
-                "decode",
-                "dp8_ktp8_ep8",
-                decode_endpoint=f"127.0.0.1:{base_port}",
-                dry_run=False,
-                check=False,
-            )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(f"port {occupied_port} cannot bind", result.stderr)
+        last_stderr = ""
+        for _ in range(16):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+                listener.bind(("127.0.0.1", 0))
+                occupied_port = listener.getsockname()[1]
+                base_port = occupied_port - 22  # local rank 2, RDMA offset 4
+                if base_port < 1024 or base_port + 71 > 65535:
+                    continue
+                result = self._run(
+                    "decode",
+                    "dp8_ktp8_ep8",
+                    decode_endpoint=f"127.0.0.1:{base_port}",
+                    dry_run=False,
+                    check=False,
+                )
+            self.assertNotEqual(result.returncode, 0)
+            last_stderr = result.stderr
+            if f"port {occupied_port} cannot bind" in result.stderr:
+                return
+        self.fail(
+            "could not isolate the intended derived-port collision after "
+            f"16 attempts; last stderr={last_stderr!r}"
+        )
 
 
 if __name__ == "__main__":
