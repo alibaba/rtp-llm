@@ -15,6 +15,9 @@
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+#include "rtp_llm/cpp/cache/connector/remote_connector/KVCMStorageBackend.h"
+#endif
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
@@ -171,8 +174,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const KVCacheConfig&               kv_cache_config,
                                const ParallelismConfig&           parallelism_config,
                                const RuntimeConfig&               runtime_config,
-                               const SpeculativeExecutionConfig& /*sp_config*/,
-                               const PDSepConfig& pd_sep_config,
+                               const SpeculativeExecutionConfig&  sp_config,
+                               const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig& /*cache_store_config*/,
                                bool use_cuda_malloc_block_pool):
     config_(config),
@@ -180,6 +183,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
     runtime_config_(runtime_config),
+    sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
@@ -233,6 +237,17 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
+    if (kv_cache_config_.enable_remote_cache && config_.use_independent_block_pools) {
+        RTP_LLM_LOG_ERROR("remote cache does not support independent device block pools");
+        return false;
+    }
+    if (kv_cache_config_.enable_remote_cache
+        && (kv_cache_config_.reco_asyncwrapper_thread_num == 0 || kv_cache_config_.reco_asyncwrapper_queue_size == 0)) {
+        RTP_LLM_LOG_ERROR("remote cache executor thread count and queue size must be positive, got %zu/%zu",
+                          kv_cache_config_.reco_asyncwrapper_thread_num,
+                          kv_cache_config_.reco_asyncwrapper_queue_size);
+        return false;
+    }
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
@@ -269,8 +284,19 @@ bool KVCacheManager::init() {
         }
     }
 
+    std::shared_ptr<StorageBackend> storage_backend;
+    if (kv_cache_config_.enable_remote_cache) {
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        storage_backend = std::make_shared<KVCMStorageBackend>(
+            config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, broadcast_manager);
+#else
+        RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
+        return false;
+#endif
+    }
+
     block_tree_cache_ = createBlockTreeCache(
-        config_, kv_cache_config_, allocator_, parallelism_config_, /*storage_backend=*/nullptr, broadcast_manager);
+        config_, kv_cache_config_, allocator_, parallelism_config_, std::move(storage_backend), broadcast_manager);
     if (!block_tree_cache_) {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
@@ -634,6 +660,23 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+    if (request.has_remote_request()) {
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        if (!block_tree_cache_) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: block tree cache is not initialized");
+            return false;
+        }
+        auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+        if (!backend) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
+            return false;
+        }
+        return backend->execute(request.remote_request(), *response.mutable_remote_response());
+#else
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
+        return false;
+#endif
+    }
     if (!request.has_mem_request()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: unsupported request type");
         return false;

@@ -108,6 +108,7 @@ public:
     bool enableHostCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;
+    bool enableRemoteCache() const;
     bool enableCacheLookup() const;
     Tier storeTarget() const;
     void reportCacheReuseMetrics();
@@ -127,9 +128,9 @@ public:
     }
 
 private:
-    void clearCacheReuseState();
-    void recordCacheReuseMallocResult(const MallocResult& result);
-    void publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
+    void         clearCacheReuseState();
+    void         recordCacheReuseMallocResult(const MallocResult& result);
+    void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
 
     GenerateStream*                stream_;
@@ -137,15 +138,15 @@ private:
     ResourceContext                resource_context_;
     std::vector<TaggedBlockIdPair> block_update_mapping_;
 
-    bool                          need_release_resource_ = true;
-    bool                          last_block_aligned_    = false;
-    int                           malloc_failed_times_   = 0;
-    bool                          fake_inited_           = false;
-    bool                          resource_released_     = false;
-    std::shared_ptr<AsyncContext> allocator_load_context_;
+    bool                             need_release_resource_ = true;
+    bool                             last_block_aligned_    = false;
+    int                              malloc_failed_times_   = 0;
+    bool                             fake_inited_           = false;
+    bool                             resource_released_     = false;
+    std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
-    int64_t                       malloc_begin_time_us_    = 0;
-    int64_t                       load_wait_begin_time_us_ = 0;
+    int64_t                          malloc_begin_time_us_    = 0;
+    int64_t                          load_wait_begin_time_us_ = 0;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
