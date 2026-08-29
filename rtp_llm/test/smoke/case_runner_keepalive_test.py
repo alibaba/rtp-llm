@@ -9,7 +9,12 @@ from unittest.mock import Mock, patch
 
 from smoke.case_runner import CaseRunner
 from smoke.task_info import TaskStates
+
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
+from rtp_llm.utils.process_manager import (
+    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+)
 
 
 class FakeServerManager:
@@ -126,9 +131,7 @@ class KeepaliveTest(unittest.TestCase):
                 clear=False,
             ):
                 with self.assertRaisesRegex(RuntimeError, "disappeared"):
-                    runner._keep_servers_alive(
-                        {"prefill": healthy, "decode": dead}
-                    )
+                    runner._keep_servers_alive({"prefill": healthy, "decode": dead})
 
         self.assertEqual(healthy.stop_count, 1)
         self.assertEqual(dead.stop_count, 1)
@@ -175,9 +178,7 @@ class KeepaliveTest(unittest.TestCase):
                 side_effect=OSError("injected live-info directory failure"),
             ):
                 with self.assertRaisesRegex(OSError, "directory failure"):
-                    runner._keep_servers_alive(
-                        {"prefill": prefill, "decode": decode}
-                    )
+                    runner._keep_servers_alive({"prefill": prefill, "decode": decode})
 
         self.assertEqual(prefill.stop_count, 1)
         self.assertEqual(decode.stop_count, 1)
@@ -251,6 +252,103 @@ class MagaServerManagerShutdownTest(unittest.TestCase):
         child.terminate.assert_not_called()
         child.kill.assert_not_called()
         self.assertEqual(manager.exit_code, 0)
+
+    def test_post_parent_grace_allows_helper_to_exit_naturally(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        child = Mock(pid=456)
+        child.is_running.return_value = True
+        child.status.return_value = "running"
+        parent = Mock()
+        parent.children.return_value = [child]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ), patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                return_value=([child], []),
+            ) as wait_procs:
+                self.assertTrue(manager.stop_server())
+
+        wait_procs.assert_called_once_with([child], timeout=5)
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+
+    def test_post_parent_grace_still_fails_for_surviving_descendant(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        child = Mock(pid=456)
+        child.is_running.return_value = True
+        child.status.return_value = "running"
+        parent = Mock()
+        parent.children.return_value = [child]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ), patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                side_effect=[([], [child]), ([], [child]), ([child], [])],
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "left descendant processes alive: \\[456\\]"
+                ):
+                    manager.stop_server()
+
+        child.terminate.assert_called_once()
+        child.kill.assert_called_once()
+
+    def test_start_server_uses_test_drain_defaults_and_preserves_overrides(self):
+        cases = [
+            ({}, "0", "0"),
+            (
+                {
+                    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "3",
+                    DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV: "4",
+                },
+                "3",
+                "4",
+            ),
+        ]
+
+        for env_args, expected_frontend, expected_dash_sc in cases:
+            with self.subTest(
+                env_args=env_args
+            ), tempfile.TemporaryDirectory() as temp_dir:
+                process = Mock(pid=123)
+                manager = MagaServerManager(env_args=env_args, port="12345")
+                with patch.dict(
+                    os.environ,
+                    {
+                        "HOME": temp_dir,
+                        "TEST_UNDECLARED_OUTPUTS_DIR": temp_dir,
+                    },
+                    clear=True,
+                ), patch(
+                    "rtp_llm.test.utils.maga_server_manager.subprocess.Popen",
+                    return_value=process,
+                ) as popen, patch.object(
+                    manager, "wait_sever_done", return_value=True
+                ):
+                    self.assertTrue(manager.start_server(log_to_file=False))
+
+                child_env = popen.call_args.kwargs["env"]
+                self.assertEqual(
+                    child_env[FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV], expected_frontend
+                )
+                self.assertEqual(
+                    child_env[DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV], expected_dash_sc
+                )
+                manager._server_process = None
 
     def test_fatal_shutdown_log_fails_smoke(self):
         process = Mock(pid=123)
