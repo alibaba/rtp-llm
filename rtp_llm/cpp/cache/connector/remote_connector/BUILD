@@ -34,7 +34,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/utils:core_utils",
     ],
