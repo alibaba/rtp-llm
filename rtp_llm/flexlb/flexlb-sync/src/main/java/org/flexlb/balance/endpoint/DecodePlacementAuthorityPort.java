@@ -103,14 +103,9 @@ public interface DecodePlacementAuthorityPort {
      * mirror-consistency reconciliation rule absorbs through its confirm
      * window.
      *
-     * <p>Stage-2 T7 S2b: {@code beforeEntry} carries the exact pre-
-     * transaction entry facts (bits and numerics) captured inside the
-     * admissionLock — the placement-projection delta is derived from the
-     * before/after fact pair, which is out-of-order immune (each delta is
-     * a pure state difference, and the sum of a serial transaction
-     * sequence's deltas equals the net change regardless of delivery
-     * interleaving). {@code null} means the entry was absent before the
-     * transaction (install semantics).
+     * <p>Stage-2 T7 S2c: the placement row is maintained in-transaction
+     * inside the admissionLock, so this delivery stages the slot-side
+     * authority only — nothing placement-domain remains to deliver.
      *
      * <p>Fence-guarded on the slot side: an install projection overwrites
      * (a newer reservation is the newer fact), a flip projection installs
@@ -119,13 +114,10 @@ public interface DecodePlacementAuthorityPort {
      *
      * @param requestId     exact request identity
      * @param projection    the committed projection (install or flip)
-     * @param beforeEntry   the pre-transaction entry facts, or null when
-     *                      the entry was absent before the transaction
      */
     void deliverDecodeAdmissionAfterCommit(
             long requestId,
-            Projection projection,
-            DecodeAdmissionEntry beforeEntry);
+            Projection projection);
 
     /**
      * Stage-2 T7 S2 read-source switch (channel B): query the slot-side
@@ -157,42 +149,6 @@ public interface DecodePlacementAuthorityPort {
             DecodeEndpoint endpoint,
             long endpointGeneration,
             long reservationToken);
-
-    /**
-     * Stage-2 T7 S2b: inflight-entry removal fact delivery (projection-
-     * lag, same class as {@link #clearDecodeAdmission}). The caller is a
-     * layer-1 removal site (rollback, release/settle, abort,
-     * calibration, TTL eviction, local-eviction victims, retirement of
-     * inflight members) whose admissionLock transaction already
-     * committed and removed the exact entry; {@code removedEntry} is the
-     * entry's fact snapshot captured inside that transaction (sub-state
-     * bits and numerics, captured before the transaction's own bit
-     * teardown).
-     *
-     * <p>Two independent effects. The slot-side authority clear is the
-     * same fence-guarded idempotent clear as {@link #clearDecodeAdmission}.
-     * The placement-projection delta is fact-driven and unconditional:
-     * the entry existed, so its inflight component is always subtracted
-     * (the entry's own install delivery once added it), while the queued /
-     * permit components subtract exactly what the entry facts held. This
-     * closes the compensation race the pure authority clear could not —
-     * when a slot-side death path force-cleared the authority earlier,
-     * the projection row still gets its exact subtraction here, so the
-     * aggregate reaches zero exactly once.
-     *
-     * @param requestId          exact request identity
-     * @param endpoint           endpoint identity of the fence
-     * @param endpointGeneration endpoint generation of the fence
-     * @param reservationToken   reservation token of the fence
-     * @param removedEntry       the removed entry's fact snapshot (never
-     *                           null at the removal sites)
-     */
-    void clearInflightReservation(
-            long requestId,
-            DecodeEndpoint endpoint,
-            long endpointGeneration,
-            long reservationToken,
-            DecodeAdmissionEntry removedEntry);
 
     /** One admission transaction; runs inside the wrapper's slot tick. */
     @FunctionalInterface

@@ -63,8 +63,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private final DecodePlacementAuthorityPort authorityPort;
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
-    private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
-    private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
     /**
      * Engine-facing confirmed-slot projection (stage-2 L3 retirement): a
      * counter recomputed from registry facts on every calibration pass
@@ -161,70 +159,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private volatile long fenceProjectionVersion;
 
-    /**
-     * Reserved entries whose request is still sitting in a prefill queue —
-     * committed by the scheduler but not yet dispatched to the engine (N2,
-     * plan-commit redesign). These reservations keep protecting KV against
-     * oversell, but must not count against the decode concurrency limit:
-     * counting them produced the shadow-saturation 8400 storm (root cause C —
-     * queued reservations saturating {@code getTotalLoad()} while the engine
-     * sat idle). Queue schedulers mark an exact reservation before queue
-     * publication and unmark through an acquired
-     * {@link EngineDispatchPermit}; release/calibrate prune it
-     * alongside {@code inflightRequests}. DIRECT paths never mark, so their
-     * accounting is unchanged.
-     *
-     * <p><b>Stage-2 L7 retirement complete (plan section 6):</b> the queued
-     * sub-state lives on each {@link RequestInflight} entry as the mutable
-     * {@code masterQueued} flag — L7 is now an "L1 sub-state projection"
-     * and the former layer-7 set storage is deleted. This counter is the
-     * O(1) aggregate mirror of the entry sub-state (PR-C: {@link
-     * #getEngineLoad} avoids the per-call O(n) scan): incremented when a
-     * reservation is marked queued and decremented when it is dispatched /
-     * released / calibrated out. Read lock-free; written under
-     * {@link #admissionLock}. The reconciliation harness cross-checks it
-     * (plus the two queued KV mirrors below) against the entry-derived
-     * projection.
-     */
-    private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
-
-    /** Prompt-only KV held by reservations which are still Prefill-queued. */
-    private final AtomicLong queuedHardKvReservedTotal = new AtomicLong(0);
-
-    /** Expected KV held by reservations which are still Prefill-queued. */
-    private final AtomicLong queuedExpectedKvReservedTotal = new AtomicLong(0);
-
-    /**
-     * Decode slots reserved before a queued request is irreversibly exposed to
-     * its Prefill/Decode delivery path. The request remains in the queued
-     * sub-state, so {@link #getEngineLoad()} continues to describe
-     * only engine-facing work. Capacity acquisition instead uses
-     * {@code getEngineLoad() + activeEngineDispatchPermitCount} under
-     * {@link #admissionLock}.
-     *
-     * <p>Each entry carries both the immutable reservation identity and a
-     * monotonic token. The pair fences request-id reuse while the slot is
-     * reserved. A successful commit removes the lease permanently: committed
-     * Decode ownership is never rolled back by a delivery token.
-     *
-     * <p><b>Stage-2 L8 retirement complete (plan section 6):</b> the permit
-     * sub-state lives on each {@link RequestInflight} entry as the mutable
-     * {@code dispatchPermitToken} — L8 is now a "permit resource row" on
-     * the L1 entries and the former layer-8 map storage is deleted. The
-     * token identity checks ({@code isCurrentEngineDispatchPermitLocked})
-     * read the entry token directly: a permit is current exactly while its
-     * captured reservation still carries its token. The three counters
-     * below remain as the O(1) aggregate mirrors.</p>
-     */
-    /** Hard prompt KV already committed to acquired pre-delivery permits. */
-    private final AtomicLong engineDispatchPermitHardKvReservedTotal = new AtomicLong();
-    /** Expected KV already committed to acquired pre-delivery permits. */
-    private final AtomicLong engineDispatchPermitExpectedKvReservedTotal = new AtomicLong();
     /** Permit tokens invalidated specifically by this endpoint generation retiring. */
     /** Guarded by admissionLock; replaced atomically by retirement commit. */
     private Set<Long> retiredEngineDispatchPermitTokens = new HashSet<>();
-    /** Mutated under admissionLock; volatile for the lock-free waiter predicate. */
-    private volatile int activeEngineDispatchPermitCount;
     /**
      * Stage-2 T7 S3 (ruling 3): AtomicLong so a wrapper can pre-allocate
      * the full reservation fence before the admission body opens; the
@@ -253,34 +190,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong admissionVersion = new AtomicLong();
 
     /**
-     * Stage-2 T7 S2b channel A: the per-endpoint aggregate placement
-     * projection row. Immutable snapshot published under {@link
-     * #placementProjectionDeliveryLock} by "read old row &#8594; compute
-     * new row &#8594; volatile publish"; readers (R1-R4 during the
-     * dual-write window, the reconciliation harness) consume it
-     * lock-free.
+     * Stage-2 T7 S2c: the per-endpoint aggregate placement row — the
+     * L1 placement domain's sole aggregate. Maintained in-transaction
+     * under {@link #admissionLock} (each maintenance site applies its
+     * delta right where the retired native counters used to live) and
+     * published as one immutable volatile snapshot; readers (R1-R4,
+     * the reconciliation harness, the metrics surfaces) consume it
+     * lock-free. The S2b post-commit delivery protocol retired with
+     * the native counters — an in-transaction publish has no delivery
+     * lag, so the authoritative in-lock gate reads it with full
+     * transactional consistency.
      */
     private volatile DecodePlacementProjectionRow placementProjectionRow =
             DecodePlacementProjectionRow.ZERO;
-
-    /**
-     * Serializes placement-projection row updates. Taken inside slot
-     * monitors by the delivery points (lock order: slot monitor &#8594;
-     * this lock, one-way); never held while taking a slot monitor or the
-     * admissionLock. Short critical section — arithmetic plus one
-     * volatile publish.
-     */
-    private final Object placementProjectionDeliveryLock = new Object();
-
-    /**
-     * Stage-2 T7 S2b: facts of entries evicted by the TTL sweep — the
-     * evictor callback collects them (inside the admissionLock the sweep
-     * runs under, before the callback's own bit teardown) and {@link
-     * #evictExpiredRequests} swaps them out for the post-commit delivery.
-     * Guarded by the admissionLock.
-     */
-    private final List<ClearedReservationFacts> pendingEvictionFacts =
-            new ArrayList<>();
 
     /**
      * Bounded seqlock retry budget for {@link #ledgerAuditView()}: a
@@ -318,18 +240,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         ? port : null;
         this.requestEvictor = TtlEvictor.withKeyCallback(
                 inflightRequests, (requestId, req) -> {
-                    // Stage-2 T7 S2b: capture the entry facts before the
-                    // sub-state teardown below mutates the bits — the
-                    // sweep collects them under this admissionLock and
-                    // evictExpiredRequests delivers the placement-
-                    // projection subtraction after the transaction
-                    // commits.
-                    pendingEvictionFacts.add(new ClearedReservationFacts(
-                            new ReservationHandle(
-                                    getStatus().getGenerationId(),
-                                    requestId,
-                                    req.reservationToken()),
-                            entryFacts(req)));
+                    // Stage-2 T7 S2c: the removal deltas apply in-transaction
+                    // right here (the S2b post-commit fact delivery retired
+                    // with the native counters).
                     // Stage-2 L2: the engine-lifecycle marker lives on the
                     // entry itself, so evicting the entry retires it — no
                     // separate marker storage remains.
@@ -340,8 +253,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     // permit accounting under the same callback so the token
                     // never outlives its entry.
                     removeEngineDispatchPermitLocked(req);
-                    inflightKvReservedTotal.addAndGet(-req.kvTokens());
-                    inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
+                    applyPlacementRowLocked(inflightRemovalDelta(
+                            req.kvTokens(), req.expectedKvTokens()));
                 });
     }
 
@@ -484,7 +397,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     @Override
     protected void closeEndpoint() {
         EndpointEvent.DecodeGenerationRetired retirementEvent;
-        List<ClearedReservationFacts> inflightRemovals;
         admissionLock.lock();
         try {
             Set<Long> plannedRetiredPermitTokens = new HashSet<>(
@@ -497,9 +409,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     plannedRetiredPermitTokens.add(permitToken);
                 }
             });
-            inflightRemovals = new ArrayList<>();
             retirementEvent = retireGenerationOwnershipLocked(
-                    plannedRetiredPermitTokens, inflightRemovals);
+                    plannedRetiredPermitTokens);
             admissionVersion.incrementAndGet();
         } finally {
             admissionLock.unlock();
@@ -509,25 +420,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // authority of this generation's owners — fence-guarded and
             // idempotent, strictly outside the admissionLock. The
             // projection-lag window until each slot's own terminal tick
-            // is the confirm-window class.
-            //
-            // Stage-2 T7 S2b: the inflight members carry layer-1 entry
-            // facts, so their delivery also subtracts the placement-
-            // projection row in the same fence-guarded clear. Owners
-            // without a live inflight entry (confirmed / fence / claim
-            // owners) hold no placement-projection components and keep
-            // the plain authority clear.
+            // is the confirm-window class. Stage-2 T7 S2c: the placement
+            // row retired inside the transaction above (one zero-row
+            // publish), so the slot-side authority clear is the only
+            // post-commit effect left.
             if (authorityPort != null) {
-                Set<ReservationHandle> inflightOwners = new HashSet<>();
-                for (ClearedReservationFacts removal : inflightRemovals) {
-                    inflightOwners.add(removal.reservation());
-                }
-                deliverPlacementRemovalsAfterCommit(inflightRemovals);
                 for (ReservationHandle owner :
                         retirementEvent.ownedReservations()) {
-                    if (!inflightOwners.contains(owner)) {
-                        clearAuthorityAfterCommit(owner);
-                    }
+                    clearAuthorityAfterCommit(owner);
                 }
             }
             endpointEventSink.onEndpointEvent(retirementEvent);
@@ -539,8 +439,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Materialize every exact owner, then atomically drain this generation. */
     private EndpointEvent.DecodeGenerationRetired
             retireGenerationOwnershipLocked(
-                    Set<Long> plannedRetiredPermitTokens,
-                    List<ClearedReservationFacts> inflightRemovals) {
+                    Set<Long> plannedRetiredPermitTokens) {
         Set<ReservationHandle> owners = new HashSet<>();
         long generationId = getStatus().getGenerationId();
 
@@ -548,15 +447,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             addRetiredOwner(
                     owners, generationId, requestId,
                     reservation.reservationToken());
-            // Stage-2 T7 S2b: capture the inflight member facts before
-            // the clear below drains the generation — closeEndpoint
-            // delivers the placement-projection subtraction after the
-            // retirement transaction commits.
-            inflightRemovals.add(new ClearedReservationFacts(
-                    new ReservationHandle(
-                            generationId, requestId,
-                            reservation.reservationToken()),
-                    entryFacts(reservation)));
         });
         trackedConfirmed.forEach((requestId, confirmed) ->
                 addRetiredOwner(
@@ -603,21 +493,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Canonical retirement commit. The immutable event and every exact
         // ReservationHandle have been validated above this line.
         retiredEngineDispatchPermitTokens = plannedRetiredPermitTokens;
-        activeEngineDispatchPermitCount = 0;
-        engineDispatchPermitHardKvReservedTotal.set(0L);
-        engineDispatchPermitExpectedKvReservedTotal.set(0L);
 
         inflightRequests.clear();
-        inflightKvReservedTotal.set(0L);
-        inflightExpectedKvReservedTotal.set(0L);
 
         trackedConfirmed.clear();
         confirmedRunningCount = 0;
         confirmedProjectionVersion = admissionVersion.get();
 
-        queuedPhaseCount.set(0);
-        queuedHardKvReservedTotal.set(0L);
-        queuedExpectedKvReservedTotal.set(0L);
+        // Stage-2 T7 S2c: the aggregate row retires with the generation —
+        // one zero-row publish (stamp reset) replaces the eight retired
+        // native counter resets. A retired endpoint never admits again, so
+        // the zero row is the terminal truth, not a transient.
+        placementProjectionRow = DecodePlacementProjectionRow.ZERO;
 
         preemptionClaims.clear();
         preemptionAttempts.clear();
@@ -728,8 +615,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     "Decode reservation appeared while admissionLock was held: "
                             + requestId);
         }
-        inflightKvReservedTotal.addAndGet(kvTokens);
-        inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
+        // Stage-2 T7 S2c: the row takes the install delta in-transaction
+        // (the retired native counters' slot).
+        applyPlacementRowLocked(inflightInstallDelta(
+                kvTokens, expectedKvTokens));
         admissionVersion.incrementAndGet();
         return new ReservationHandle(
                 getStatus().getGenerationId(), requestId, reservationToken);
@@ -793,8 +682,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         changed = clearEngineFenceProtectionLocked(requestId) || changed;
         changed = removeQueuedPhaseLocked(requestId, removed) || changed;
         if (removed != null) {
-            inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+            // Stage-2 T7 S2c: the row takes the removal delta
+            // in-transaction.
+            applyPlacementRowLocked(inflightRemovalDelta(
+                    removed.kvTokens(), removed.expectedKvTokens()));
             changed = true;
         }
         if (changed) {
@@ -850,10 +741,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long placementProjectionVersion) {
 
         /**
-         * The all-zero row (stamp 0): the never-delivered baseline. The
-         * harness skips the projection rule on a zero-stamp row
-         * (port-less fixture endpoints never receive deliveries); test
-         * fixtures also use it as the placement-row default.
+         * The all-zero row (stamp 0): the pre-transaction initial value
+         * and the retirement terminal (stage-2 T7 S2c — one zero-row
+         * publish replaces the retired native counter resets; a retired
+         * endpoint never admits again, so the zero row is terminal
+         * truth). Test fixtures also use it as the placement-row default
+         * when constructing audit views.
          */
         public static final DecodePlacementProjectionRow ZERO =
                 new DecodePlacementProjectionRow(
@@ -861,12 +754,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * One placement-domain fact delta: the difference between two
-     * consecutive entry-state facts of one reservation (or the install /
-     * removal boundary). Components are independent; zeros mean "this
-     * transaction did not touch that sub-domain".
+     * Stage-2 T7 S2c: one placement-domain row delta — the in-transaction
+     * fact weight of one maintenance site (an install / removal boundary
+     * or a single sub-domain flip). Components are independent; zeros
+     * mean "this transaction did not touch that sub-domain". Private to
+     * the endpoint: the row is the sole aggregate, and only the
+     * in-transaction maintenance sites construct deltas.
      */
-    public record PlacementProjectionDelta(
+    private record PlacementProjectionDelta(
             int inflightCount,
             long inflightHardKv,
             long inflightExpectedKv,
@@ -876,94 +771,103 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int permitCount,
             long permitHardKv,
             long permitExpectedKv) {
-
-        public static final PlacementProjectionDelta ZERO =
-                new PlacementProjectionDelta(
-                        0, 0L, 0L, 0, 0L, 0L, 0, 0L, 0L);
     }
 
     /**
-     * Lock-free placement-projection row read (S2b dual-write window:
-     * the reconciliation harness cross-checks it against the native
-     * counters; R1-R4 read it as their placement-domain source).
-     */
-    public DecodePlacementProjectionRow placementProjectionRow() {
-        return placementProjectionRow;
-    }
-
-    /**
-     * S2b read-source switch: true when the placement-projection row has
-     * received at least one fact delivery (a non-zero in-row stamp). Every
-     * lock-free reader then takes the row; a zero-stamp row means the
-     * authority port has never delivered any fact — a port-less endpoint,
-     * or a bare-flip test stub that runs bodies without deliveries — and
-     * the readers keep the native mirror reads (the same zero-stamp skip
-     * the reconciliation rule applies). In production a zero stamp
-     * coincides with a zero native side (nothing admitted yet), so the
-     * fallback is behavior-neutral there.
-     */
-    private boolean placementProjectionRowActive() {
-        return authorityPort != null
-                && placementProjectionRow.placementProjectionVersion() != 0L;
-    }
-
-    /**
-     * Stage-2 T7 S2b channel A update channel: apply one placement
-     * fact delta to the aggregate row under {@link
-     * #placementProjectionDeliveryLock} — read old row, compute the new
-     * row, bump the in-row stamp, volatile publish. Called only from
-     * the slot-monitor delivery points (lock order: slot monitor &#8594;
-     * this lock) or the bare (no-slot) delivery paths. Public since the
-     * authority host (the coordinator, another package) computes the
-     * deltas and drives this channel.
-     *
-     * <p><b>Conservatism-direction contract (S2 approval rider ②).</b>
-     * The row is delivered strictly after the admission transaction
-     * committed (projection-lag, µs window). The lag directions are
-     * load-bearing for admission safety and must never be flipped by a
-     * future change to the delivery order:
-     * <ul>
-     * <li><b>queued components lag low</b> right after a request leaves
-     * the queue (mark-queued removal / transfer / removal delivery
-     * pending) &#8594; {@code inflight − queued} reads high &#8594;
-     * {@code getEngineLoad()} over-estimates &#8594; <b>fewer admits</b>
-     * — the conservative direction.</li>
-     * <li><b>queued components lag high</b> right after a mark-queued /
-     * queued-install commit (delivery pending) &#8594; engine load reads
-     * low, but a queued reservation is a soft placement hint that the
-     * authoritative acquisition re-validates under the admissionLock —
-     * the hard gates (concurrency / KV) never trust the queued
-     * projection alone.</li>
-     * <li><b>KV components lag high</b> (install / flip delivery
-     * pending, removal delivered) &#8594; engine-facing KV used reads
-     * high / available reads low &#8594; <b>under-admission</b> — the
-     * conservative direction. KV components lag low only inside the µs
-     * window before an install delivery, and only for a reservation
-     * whose admission body has already validated under the
-     * admissionLock.</li>
-     * </ul>
-     * Anyone reordering deliveries or re-sourcing the deltas must keep
-     * every lag direction conservative in this sense.
+     * Stage-2 T7 S2c row-maintenance core: apply one placement-domain
+     * delta to the aggregate row — read the current row, compute the
+     * successor, bump the in-row stamp, volatile publish. The caller
+     * holds {@link #admissionLock}: every maintenance site applies its
+     * delta in-transaction right where the retired native counters used
+     * to live, so the read-modify-write is fully serialized by the
+     * admission transaction itself and the published row is
+     * transactionally consistent — no delivery lag (the S2b post-commit
+     * protocol retired with the native counters). A lock-free reader
+     * that races a transaction may observe the pre-transaction row for
+     * the transaction's duration only; every such window direction is
+     * the S2 conservatism rider's conservative one (an in-flight install
+     * reads absent from used / available until it commits).
      *
      * <p>Deltas are <b>not clamped</b>: a negative aggregate component
-     * is a delivery bug, and the dual-write reconciliation rule exists
-     * to surface it rather than hide it.
+     * is a maintenance bug, and the reconciliation rule (the
+     * entry-derived cross-check) exists to surface it rather than hide
+     * it.
      */
-    public void applyPlacementProjectionDelta(PlacementProjectionDelta delta) {
-        synchronized (placementProjectionDeliveryLock) {
-            DecodePlacementProjectionRow old = placementProjectionRow;
-            placementProjectionRow = new DecodePlacementProjectionRow(
-                    old.inflightCount() + delta.inflightCount(),
-                    old.inflightHardKv() + delta.inflightHardKv(),
-                    old.inflightExpectedKv() + delta.inflightExpectedKv(),
-                    old.queuedCount() + delta.queuedCount(),
-                    old.queuedHardKv() + delta.queuedHardKv(),
-                    old.queuedExpectedKv() + delta.queuedExpectedKv(),
-                    old.permitCount() + delta.permitCount(),
-                    old.permitHardKv() + delta.permitHardKv(),
-                    old.permitExpectedKv() + delta.permitExpectedKv(),
-                    old.placementProjectionVersion() + 1L);
-        }
+    private void applyPlacementRowLocked(PlacementProjectionDelta delta) {
+        DecodePlacementProjectionRow old = placementProjectionRow;
+        placementProjectionRow = new DecodePlacementProjectionRow(
+                old.inflightCount() + delta.inflightCount(),
+                old.inflightHardKv() + delta.inflightHardKv(),
+                old.inflightExpectedKv() + delta.inflightExpectedKv(),
+                old.queuedCount() + delta.queuedCount(),
+                old.queuedHardKv() + delta.queuedHardKv(),
+                old.queuedExpectedKv() + delta.queuedExpectedKv(),
+                old.permitCount() + delta.permitCount(),
+                old.permitHardKv() + delta.permitHardKv(),
+                old.permitExpectedKv() + delta.permitExpectedKv(),
+                old.placementProjectionVersion() + 1L);
+    }
+
+    /**
+     * Stage-2 T7 S2c domain delta: one reservation installed into the
+     * inflight domain (the reserve transaction; the queued / permit
+     * bits install through their own maintenance sites).
+     */
+    private static PlacementProjectionDelta inflightInstallDelta(
+            long kvTokens, long expectedKvTokens) {
+        return new PlacementProjectionDelta(
+                1, kvTokens, expectedKvTokens,
+                0, 0L, 0L,
+                0, 0L, 0L);
+    }
+
+    /**
+     * Stage-2 T7 S2c domain delta: one reservation removed from the
+     * inflight domain (every layer-1 entry-removal site; the queued /
+     * permit domains subtract through their own maintenance sites).
+     */
+    private static PlacementProjectionDelta inflightRemovalDelta(
+            long kvTokens, long expectedKvTokens) {
+        return new PlacementProjectionDelta(
+                -1, -kvTokens, -expectedKvTokens,
+                0, 0L, 0L,
+                0, 0L, 0L);
+    }
+
+    /** Stage-2 T7 S2c domain delta: one entry entered the queued phase. */
+    private static PlacementProjectionDelta queuedInstallDelta(
+            long kvTokens, long expectedKvTokens) {
+        return new PlacementProjectionDelta(
+                0, 0L, 0L,
+                1, kvTokens, expectedKvTokens,
+                0, 0L, 0L);
+    }
+
+    /** Stage-2 T7 S2c domain delta: one entry left the queued phase. */
+    private static PlacementProjectionDelta queuedRemovalDelta(
+            long kvTokens, long expectedKvTokens) {
+        return new PlacementProjectionDelta(
+                0, 0L, 0L,
+                -1, -kvTokens, -expectedKvTokens,
+                0, 0L, 0L);
+    }
+
+    /** Stage-2 T7 S2c domain delta: one dispatch permit acquired. */
+    private static PlacementProjectionDelta permitInstallDelta(
+            long kvTokens, long expectedKvTokens) {
+        return new PlacementProjectionDelta(
+                0, 0L, 0L,
+                0, 0L, 0L,
+                1, kvTokens, expectedKvTokens);
+    }
+
+    /** Stage-2 T7 S2c domain delta: one dispatch permit retired. */
+    private static PlacementProjectionDelta permitRemovalDelta(
+            long kvTokens, long expectedKvTokens) {
+        return new PlacementProjectionDelta(
+                0, 0L, 0L,
+                0, 0L, 0L,
+                -1, -kvTokens, -expectedKvTokens);
     }
 
     /**
@@ -1011,18 +915,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Post-commit projection delivery (projection-lag; see the port).
-     * Stage-2 T7 S2b: {@code beforeEntry} is the pre-transaction entry
-     * fact snapshot captured inside the admissionLock (null for
-     * installs) — the delivery derives the placement-projection delta
-     * from the before/after fact pair.
+     * Stage-2 T7 S2c: the slot-side authority staging only — the
+     * placement row is maintained in-transaction, so nothing placement
+     * remains to deliver.
      */
     private void deliverAdmissionAfterCommit(
             long requestId,
-            DecodePlacementAuthorityPort.Projection projection,
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry) {
+            DecodePlacementAuthorityPort.Projection projection) {
         if (authorityPort != null) {
             authorityPort.deliverDecodeAdmissionAfterCommit(
-                    requestId, projection, beforeEntry);
+                    requestId, projection);
         }
     }
 
@@ -1033,27 +935,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     reservation.requestId(), this,
                     reservation.endpointGenerationId(),
                     reservation.reservationToken());
-        }
-    }
-
-    /**
-     * Stage-2 T7 S2b: post-commit removal-fact delivery for layer-1
-     * entry removal sites — the fence-guarded authority clear plus the
-     * unconditional fact-driven placement-projection subtraction in one
-     * delivery (see {@link DecodePlacementAuthorityPort#
-     * clearInflightReservation}). {@code removedEntry} must be captured
-     * inside the removal transaction before its own bit teardown.
-     */
-    private void clearInflightReservationAfterCommit(
-            ReservationHandle reservation,
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry removedEntry) {
-        if (authorityPort != null && reservation != null
-                && removedEntry != null) {
-            authorityPort.clearInflightReservation(
-                    reservation.requestId(), this,
-                    reservation.endpointGenerationId(),
-                    reservation.reservationToken(),
-                    removedEntry);
         }
     }
 
@@ -1076,7 +957,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         boolean capacityChanged = false;
         boolean removedExact = false;
-        DecodePlacementAuthorityPort.DecodeAdmissionEntry removedFacts = null;
         admissionLock.lock();
         try {
             long requestId = reservation.requestId();
@@ -1115,9 +995,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         "exact ownership is held by Engine/protocol lifecycle");
             }
 
-            // Stage-2 T7 S2b: capture the removal facts (bits still
-            // intact) before the permit / queued teardown flips them.
-            removedFacts = entryFacts(current);
             // Stage-2 L8: the exact shadow carries the permit token when a
             // pre-delivery permit is still held (permit resource row); clear
             // it under the same critical section as the shadow removal.
@@ -1129,9 +1006,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         "exact shadow changed while admissionLock was held");
             }
             removeQueuedPhaseLocked(requestId, current);
-            inflightKvReservedTotal.addAndGet(-current.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(
-                    -current.expectedKvTokens());
+            // Stage-2 T7 S2c: the row takes the removal delta
+            // in-transaction.
+            applyPlacementRowLocked(inflightRemovalDelta(
+                    current.kvTokens(), current.expectedKvTokens()));
             admissionVersion.incrementAndGet();
             capacityChanged = true;
             removedExact = true;
@@ -1145,10 +1023,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // the fence-guarded authority clear strictly outside the
         // admissionLock (projection-lag; the confirm window absorbs the µs
         // gap, and a newer reservation's install simply fences it out).
-        // Stage-2 T7 S2b: the removal facts drive the placement-projection
-        // subtraction (unconditional — the entry existed).
+        // Stage-2 T7 S2c: the placement row took its subtraction inside
+        // the transaction above; the slot-side authority clear is the only
+        // post-commit effect left.
         if (removedExact) {
-            clearInflightReservationAfterCommit(reservation, removedFacts);
+            clearAuthorityAfterCommit(reservation);
         }
     }
 
@@ -1164,7 +1043,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
         boolean released = false;
-        DecodePlacementAuthorityPort.DecodeAdmissionEntry removedFacts = null;
         admissionLock.lock();
         try {
             long requestId = reservation.requestId();
@@ -1188,9 +1066,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || hasExactIncomingAttemptLocked(reservation)) {
                 return false;
             }
-            // Stage-2 T7 S2b: capture the removal facts before the
-            // permit / queued teardown flips the entry bits.
-            removedFacts = entryFacts(shadow);
             // Stage-2 L8: the exact shadow carries the permit token when a
             // pre-delivery permit is still held; clear it under the same
             // critical section as the shadow removal.
@@ -1201,9 +1076,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             removeQueuedPhaseLocked(requestId, shadow);
-            inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(
-                    -shadow.expectedKvTokens());
+            // Stage-2 T7 S2c: the row takes the removal delta
+            // in-transaction.
+            applyPlacementRowLocked(inflightRemovalDelta(
+                    shadow.kvTokens(), shadow.expectedKvTokens()));
             admissionVersion.incrementAndGet();
             released = true;
         } finally {
@@ -1214,10 +1090,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         // Stage-2 T7 S3 (ruling 3): same post-commit fence-guarded clear as
         // rollbackExact — projection-lag delivery outside the admissionLock.
-        // Stage-2 T7 S2b: the removal facts drive the placement-projection
-        // subtraction.
+        // Stage-2 T7 S2c: the placement row took its subtraction inside the
+        // transaction above.
         if (released) {
-            clearInflightReservationAfterCommit(reservation, removedFacts);
+            clearAuthorityAfterCommit(reservation);
         }
         return released;
     }
@@ -1392,23 +1268,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Stage-2 T7 S2b: post-commit removal-fact delivery for a batch of
-     * removals collected inside one admissionLock transaction (settles,
-     * calibration, TTL eviction, retirement). Strictly outside the
-     * admissionLock; projection-lag µs window, confirm-window class.
-     */
-    private void deliverPlacementRemovalsAfterCommit(
-            List<ClearedReservationFacts> removals) {
-        if (authorityPort == null || removals == null) {
-            return;
-        }
-        for (ClearedReservationFacts removal : removals) {
-            clearInflightReservationAfterCommit(
-                    removal.reservation(), removal.removedEntry());
-        }
-    }
-
-    /**
      * Atomically consume one exact authoritative Engine terminal proof.
      * Normal return guarantees that no owner for the proof's reservation token
      * remains; a reused request id is left untouched.
@@ -1426,10 +1285,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     "Authoritative Decode terminal proof belongs to another endpoint generation");
         }
         boolean capacityChanged = false;
-        List<ClearedReservationFacts> removals = new ArrayList<>(1);
         admissionLock.lock();
         try {
-            boolean changed = settleAuthoritativeTerminalLocked(proof, removals);
+            boolean changed = settleAuthoritativeTerminalLocked(proof);
             if (changed) {
                 admissionVersion.incrementAndGet();
             }
@@ -1440,8 +1298,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
     }
 
     /**
@@ -1463,7 +1319,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         boolean capacityChanged = false;
         DispatchRejectionSettlement result;
-        List<ClearedReservationFacts> removals = new ArrayList<>(1);
         admissionLock.lock();
         try {
             long requestId = reservation.requestId();
@@ -1480,7 +1335,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     return DispatchRejectionSettlement.ENGINE_ACCEPTED;
                 }
                 if (!settlePriorityClaimTerminalLocked(
-                        claim.attemptToken, reservation, claim, removals)) {
+                        claim.attemptToken, reservation, claim)) {
                     return DispatchRejectionSettlement.CONFLICT;
                 }
                 capacityChanged = true;
@@ -1513,7 +1368,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                 null,
                                 AuthoritativeTerminalOwner.DISPATCH_REJECTION);
                 capacityChanged = settleAuthoritativeTerminalLocked(
-                        proof, removals);
+                        proof);
                 if (capacityChanged) {
                     admissionVersion.incrementAndGet();
                 }
@@ -1525,15 +1380,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
         return result;
     }
 
     /** Caller holds {@link #admissionLock}. */
     private boolean settleAuthoritativeTerminalLocked(
-            AuthoritativeTerminalProof proof,
-            List<ClearedReservationFacts> removals) {
+            AuthoritativeTerminalProof proof) {
         ReservationHandle reservation = proof.reservation;
         long requestId = reservation.requestId();
         long reservationToken = reservation.reservationToken();
@@ -1570,16 +1422,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             changed = true;
         }
 
-        // Stage-2 T7 S2b: capture the removal facts (permit bit still
-        // intact) before the permit teardown below flips them.
+        // Stage-2 L8: the exact shadow carries the permit token when a
+        // pre-delivery permit is still held (permit resource row); clear
+        // it under the same critical section as the rest of the teardown.
         RequestInflight permitHolder = inflightRequests.get(requestId);
-        DecodePlacementAuthorityPort.DecodeAdmissionEntry removedFacts = null;
         if (isExactReservation(permitHolder, reservation)) {
-            removedFacts = entryFacts(permitHolder);
-            // Stage-2 L8: the exact shadow carries the permit token when a
-            // pre-delivery permit is still held (permit resource row);
-            // clear it under the same critical section as the rest of the
-            // teardown.
             changed = removeEngineDispatchPermitLocked(permitHolder) || changed;
         }
 
@@ -1599,17 +1446,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         RequestInflight shadow = inflightRequests.get(requestId);
         if (isExactReservation(shadow, reservation)
                 && inflightRequests.remove(requestId, shadow)) {
-            // Stage-2 T7 S2b: queue the fact delivery (the permit-bit
-            // facts were captured above; a permit-free entry captures
-            // here — the bits are still intact before the queued-phase
-            // teardown below).
-            removals.add(new ClearedReservationFacts(
-                    reservation,
-                    removedFacts != null ? removedFacts : entryFacts(shadow)));
             removeQueuedPhaseLocked(requestId, shadow);
-            inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(
-                    -shadow.expectedKvTokens());
+            // Stage-2 T7 S2c: the row takes the removal delta
+            // in-transaction.
+            applyPlacementRowLocked(inflightRemovalDelta(
+                    shadow.kvTokens(), shadow.expectedKvTokens()));
             changed = true;
         }
 
@@ -1741,19 +1582,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Stage-2 T7 S2b: one removed reservation's fence plus its
-     * removal-fact snapshot (captured inside the transaction, before
-     * the bit teardown) for the post-commit fact delivery. Shared by
-     * every layer-1 entry-removal site (rollback, shadow release,
-     * settles, calibration, eviction victims, TTL eviction, preemption
-     * abort, retirement).
-     */
-    private record ClearedReservationFacts(
-            ReservationHandle reservation,
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry removedEntry) {
-    }
-
-    /**
      * Atomically replace a fully validated set of exact Master-queued
      * reservations with one incoming reservation. Any stale victim or
      * incoming-id conflict leaves every owner untouched.
@@ -1786,8 +1614,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             AdmissionCapacity capacity) {
         boolean committed = false;
         ReservationHandle incomingReservation = null;
-        List<ClearedReservationFacts> removedVictims = new ArrayList<>(
-                victims == null ? 0 : victims.size());
         admissionLock.lock();
         try {
             if (victims == null || victims.isEmpty()
@@ -1841,15 +1667,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             victim,
                             "validated victim changed while admissionLock was held");
                 }
-                // Stage-2 T7 S2b: capture the removal facts (bits still
-                // intact — the map removal only unlists the entry)
-                // before the queued-phase teardown flips them.
-                removedVictims.add(
-                        new ClearedReservationFacts(victim, entryFacts(exact)));
                 removeQueuedPhaseLocked(victim.requestId(), exact);
-                inflightKvReservedTotal.addAndGet(-exact.kvTokens());
-                inflightExpectedKvReservedTotal.addAndGet(
-                        -exact.expectedKvTokens());
+                // Stage-2 T7 S2c: the row takes the removal delta
+                // in-transaction.
+                applyPlacementRowLocked(inflightRemovalDelta(
+                        exact.kvTokens(), exact.expectedKvTokens()));
             }
             incomingReservation = reserveLocked(
                     incomingRequestId,
@@ -1864,14 +1686,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 // Stage-2 T7 S3 (ruling 3): post-commit projection delivery
                 // — the victims' authority clears (fence-guarded) and the
                 // incoming install (ruling 2(a) preloaded numeric row),
-                // strictly outside the admissionLock.  Stage-2 T7 S2b:
-                // the victims now carry their removal facts (projection-
-                // row subtraction) and the incoming install carries null
-                // before-facts (the entry was absent).
+                // strictly outside the admissionLock. Stage-2 T7 S2c: the
+                // victims' placement subtraction already applied inside
+                // the transaction; only the slot-side effects remain.
                 if (authorityPort != null) {
-                    for (ClearedReservationFacts victim : removedVictims) {
-                        clearInflightReservationAfterCommit(
-                                victim.reservation(), victim.removedEntry());
+                    for (ReservationHandle victim : victims) {
+                        clearAuthorityAfterCommit(victim);
                     }
                     deliverAdmissionAfterCommit(
                             incomingReservation.requestId(),
@@ -1880,8 +1700,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     incomingReservation.endpointGenerationId(),
                                     incomingReservation.reservationToken(),
                                     kvTokens, expectedKvTokens, priority,
-                                    false),
-                            null);
+                                    false));
                 }
                 notifyEngineDispatchCapacityListeners();
             }
@@ -2010,21 +1829,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             version = admissionVersion.get();
-            // Stage-2 L7: capture the queued aggregate counters inside the
-            // locked window so the version revalidation certifies them
-            // against the lock-free entry-derived projection below (O(1)
-            // reads — the lock budget stays request-count independent).
-            queuedPhaseCountValue = queuedPhaseCount.get();
-            queuedHardKvValue = queuedHardKvReservedTotal.get();
-            queuedExpectedKvValue = queuedExpectedKvReservedTotal.get();
-            // Stage-2 L8: capture the permit aggregate counters inside the
-            // same locked window (O(1) reads — the lock budget stays
-            // request-count independent), certified against the lock-free
-            // entry-derived projection below.
-            permitCountValue = activeEngineDispatchPermitCount;
-            permitHardKvValue = engineDispatchPermitHardKvReservedTotal.get();
+            // Stage-2 T7 S2c: the queued / permit aggregate components and
+            // the whole placement row come from the same in-lock snapshot —
+            // the row is maintained in-transaction, so one locked-window
+            // read certifies every placement-domain aggregate against the
+            // version revalidation below (O(1) reads — the lock budget
+            // stays request-count independent).
+            placementProjectionRowValue = placementProjectionRow;
+            queuedPhaseCountValue = placementProjectionRowValue.queuedCount();
+            queuedHardKvValue = placementProjectionRowValue.queuedHardKv();
+            queuedExpectedKvValue =
+                    placementProjectionRowValue.queuedExpectedKv();
+            permitCountValue = placementProjectionRowValue.permitCount();
+            permitHardKvValue = placementProjectionRowValue.permitHardKv();
             permitExpectedKvValue =
-                    engineDispatchPermitExpectedKvReservedTotal.get();
+                    placementProjectionRowValue.permitExpectedKv();
             claimRequestIds = Set.copyOf(preemptionClaims.keySet());
             Map<Long, Long> claimTokens = new HashMap<>();
             Map<Long, Long> claimHardKv = new HashMap<>();
@@ -2083,14 +1902,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // to end.
             confirmedRunningCountValue = confirmedRunningCount;
             confirmedProjectionVersionValue = confirmedProjectionVersion;
-            // Stage-2 T7 S2b: capture the placement-projection row in the
-            // same locked window (a plain volatile read — the delivery
-            // lock is never taken here) so the harness dual-write rule
-            // compares it against the native aggregates certified by the
-            // same version revalidation. A row behind the native side is
-            // the legal delivery window; a persistent split is a lost
-            // fact delivery.
-            placementProjectionRowValue = placementProjectionRow;
         } finally {
             admissionLock.unlock();
         }
@@ -2142,8 +1953,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 fenceProtectedRequestIds,
                 Set.copyOf(queuedProjection),
                 Set.copyOf(permitProjection),
-                inflightKvReservedTotal.get(),
-                inflightExpectedKvReservedTotal.get(),
+                placementProjectionRowValue.inflightHardKv(),
+                placementProjectionRowValue.inflightExpectedKv(),
                 queuedPhaseCountValue,
                 queuedHardKvValue,
                 queuedExpectedKvValue,
@@ -2199,9 +2010,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * <ol>
      *   <li>L1 {@code inflightRequests} — A-road master reservations; slot
      *       pRow mirrors these numerics until the KV_ALLOCATED critical
-     *       point.  {@code inflightKvReservedTotal} /
-     *       {@code inflightExpectedKvReservedTotal} carry the L1 aggregate
-     *       KV counters (same-tick decrement contract as the layer-1
+     *       point.  Stage-2 T7 S2c: the {@code inflightKvReservedTotal} /
+     *       {@code inflightExpectedKvReservedTotal} aggregates in this view
+     *       derive from the placement row (the retired native counters'
+     *       sole successor — same-tick decrement contract as the layer-1
      *       entries themselves).</li>
      *   <li>L2 engine-lifecycle sub-state — the entry-level
      *       {@code engineLifecycleOwned} flag on each L1 entry (stage-2
@@ -2235,24 +2047,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       flag on each L1 entry (stage-2 retirement complete: the
      *       separate layer-7 set storage is deleted; this view's
      *       {@code queuedPhaseRequestIds} derives from the entry flags);
-     *       {@code queuedPhaseCount} / {@code queuedKvReservedTotal} /
-     *       {@code queuedExpectedKvReservedTotal} carry the O(1) aggregate
-     *       mirrors of the entry sub-state for the harness cross-check.</li>
+     *       stage-2 T7 S2c: {@code queuedPhaseCount} /
+     *       {@code queuedKvReservedTotal} /
+     *       {@code queuedExpectedKvReservedTotal} derive from the placement
+     *       row (the retired O(1) native mirrors' successor).</li>
      *   <li>L8 dispatch-permit sub-state — the entry-level
      *       {@code dispatchPermitToken} on each L1 entry (stage-2 retirement
      *       complete: the separate layer-8 map storage is deleted; this
      *       view's {@code engineDispatchPermitRequestIds} derives from the
      *       entry tokens — the "permit resource row");
-     *       {@code engineDispatchPermitCount} and the two permit KV totals
-     *       carry the O(1) aggregate mirrors for the harness cross-check.</li>
+     *       stage-2 T7 S2c: {@code engineDispatchPermitCount} and the two
+     *       permit KV totals derive from the placement row (the retired
+     *       O(1) native mirrors' successor).</li>
      * </ol>
      *
-     * <p><b>Capture certification (stage-2 L7 fix):</b> the Phase-1
-     * components (version, the three queued counters, the three permit
-     * counters, the three HashMap-backed key sets) and the Phase-2
+     * <p><b>Capture certification (stage-2 L7 fix, T7 S2c update):</b> the
+     * Phase-1 components (version, the aggregate placement row — the nine
+     * placement-domain aggregates derive from it in the same locked
+     * window — and the three HashMap-backed key sets) and the Phase-2
      * components (inflight map, confirmed tokens, entry-derived lifecycle
      * projection, entry-derived queued projection, entry-derived permit
-     * projection, inflight KV totals) are mutually consistent only when
+     * projection) are mutually consistent only when
      * the seqlock version recheck passed — {@code certified} is
      * {@code true} exactly then.
      * The torn fallback (bounded retries exhausted under extreme admission
@@ -2420,31 +2235,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
             WorkerStatus.CommittedWorkerStatus committed,
             long version) {
         WorkerStatus.EngineObservation fields = committed.fields();
-        // Stage-2 T7 S2b (channel A): the placement-domain components
-        // (inflight count / queued count / both inflight KV totals) read
-        // the placement-projection row once the first fact delivery has
-        // landed — the routing view is a lock-free projection, and the
-        // row lag directions are the conservative ones. A zero-stamp row
-        // (port-less endpoint, or a bare-flip stub that never delivers)
-        // keeps the native mirror reads.
-        int inflight;
-        int queued;
-        long hardInflight;
-        long expectedInflight;
-        if (placementProjectionRowActive()) {
-            DecodePlacementProjectionRow row = placementProjectionRow;
-            inflight = row.inflightCount();
-            queued = Math.max(0, Math.min(
-                    row.queuedCount(), inflight));
-            hardInflight = row.inflightHardKv();
-            expectedInflight = row.inflightExpectedKv();
-        } else {
-            inflight = inflightRequests.size();
-            queued = Math.max(0, Math.min(
-                    queuedPhaseCount.get(), inflight));
-            hardInflight = inflightKvReservedTotal.get();
-            expectedInflight = inflightExpectedKvReservedTotal.get();
-        }
+        // Stage-2 T7 S2c: the placement-domain components (inflight count /
+        // queued count / both inflight KV totals) read the aggregate
+        // placement row — one volatile snapshot maintained in-transaction,
+        // so the lock-free routing view never tears. The queued clamp
+        // keeps the historical read-side drift self-healing.
+        DecodePlacementProjectionRow row = placementProjectionRow;
+        int inflight = row.inflightCount();
+        int queued = Math.max(0, Math.min(row.queuedCount(), inflight));
+        long hardInflight = row.inflightHardKv();
+        long expectedInflight = row.inflightExpectedKv();
         int totalLoad = confirmedRunningCount + inflight;
         int engineLoad = confirmedRunningCount + Math.max(0, inflight - queued);
         long reportedUsed = fields.totalKvCacheTokens() > 0
@@ -2647,8 +2447,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // preloaded numeric row) — projection-lag, strictly outside
             // the admissionLock.
             if (incomingReservation != null) {
-                // Stage-2 T7 S2b: null before-facts — the embedded
-                // provisional install created the entry.
                 deliverAdmissionAfterCommit(
                         incomingReservation.requestId(),
                         DecodePlacementAuthorityPort.Projection.install(
@@ -2656,8 +2454,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                 incomingReservation.endpointGenerationId(),
                                 incomingReservation.reservationToken(),
                                 incomingKvTokens, incomingExpectedKvTokens,
-                                incomingPriority, false),
-                        null);
+                                incomingPriority, false));
             }
         }
     }
@@ -2721,7 +2518,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long requestId = reservation.requestId();
         boolean settled = false;
         boolean capacityChanged = false;
-        List<ClearedReservationFacts> removals = new ArrayList<>(1);
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -2733,7 +2529,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             settled = settlePriorityClaimTerminalLocked(
-                    attemptToken, reservation, claim, removals);
+                    attemptToken, reservation, claim);
             capacityChanged = settled;
         } finally {
             admissionLock.unlock();
@@ -2741,8 +2537,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
         return settled;
     }
 
@@ -2765,7 +2559,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long requestId = reservation.requestId();
         boolean settled = false;
         boolean capacityChanged = false;
-        List<ClearedReservationFacts> removals = new ArrayList<>(1);
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -2780,7 +2573,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             settled = settlePriorityClaimTerminalLocked(
-                    attemptToken, reservation, claim, removals);
+                    attemptToken, reservation, claim);
             capacityChanged = settled;
         } finally {
             admissionLock.unlock();
@@ -2788,8 +2581,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
         return settled;
     }
 
@@ -2835,7 +2626,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long requestId = reservation.requestId();
         boolean settled = false;
         boolean capacityChanged = false;
-        List<ClearedReservationFacts> removals = new ArrayList<>(1);
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -2846,7 +2636,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return false;
             }
             settled = settlePriorityClaimTerminalLocked(
-                    attemptToken, reservation, claim, removals);
+                    attemptToken, reservation, claim);
             capacityChanged = settled;
         } finally {
             admissionLock.unlock();
@@ -2854,8 +2644,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
         return settled;
     }
 
@@ -2863,8 +2651,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private boolean settlePriorityClaimTerminalLocked(
             long attemptToken,
             ReservationHandle reservation,
-            PreemptionClaim claim,
-            List<ClearedReservationFacts> removals) {
+            PreemptionClaim claim) {
         long requestId = reservation.requestId();
         long reservationToken = reservation.reservationToken();
         if (preemptionClaims.get(requestId) != claim
@@ -2896,13 +2683,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
 
-        // Stage-2 T7 S2b: capture the removal facts (permit bit still
-        // intact) before the permit teardown below flips them. The
-        // shadow reference itself was resolved above.
-        DecodePlacementAuthorityPort.DecodeAdmissionEntry removedFacts = null;
-        if (shadow != null && isExactReservation(shadow, reservation)) {
-            removedFacts = entryFacts(shadow);
-        }
         // Stage-2 L5 retirement: registry removal only — the fence-held
         // projection drains with the next calibration pass.
         if (protection != null) {
@@ -2923,15 +2703,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // storage to sweep.
         if (shadow != null
                 && inflightRequests.remove(requestId, shadow)) {
-            // Stage-2 T7 S2b: queue the fact delivery (facts captured
-            // above, before the bit teardown).
-            removals.add(new ClearedReservationFacts(
-                    reservation,
-                    removedFacts != null ? removedFacts : entryFacts(shadow)));
             removeQueuedPhaseLocked(requestId, shadow);
-            inflightKvReservedTotal.addAndGet(-shadow.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(
-                    -shadow.expectedKvTokens());
+            // Stage-2 T7 S2c: the row takes the removal delta
+            // in-transaction.
+            applyPlacementRowLocked(inflightRemovalDelta(
+                    shadow.kvTokens(), shadow.expectedKvTokens()));
         }
         // Stage-2 L4 retirement: registry removal only — the priority-held
         // projection drains with the next calibration pass (conservatively
@@ -2983,8 +2759,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             List<ReservationHandle> releasableVictims) {
         boolean capacityChanged = false;
         ReservationHandle incomingCleared = null;
-        DecodePlacementAuthorityPort.DecodeAdmissionEntry incomingRemovedFacts =
-                null;
         admissionLock.lock();
         try {
             EndpointPreemptionAttempt attempt = preemptionAttempts.remove(attemptToken);
@@ -2995,13 +2769,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     getStatus().getGenerationId(),
                     attempt.incomingRequestId,
                     attempt.incomingReservationToken);
-            // Stage-2 T7 S2b: capture the incoming entry facts before the
-            // release teardown below mutates its sub-state bits; a null
-            // snapshot means another removal site already removed the
-            // entry — that site's own fact delivery owns the projection
-            // subtraction and the authority clear.
-            incomingRemovedFacts = entryFacts(
-                    inflightRequests.get(attempt.incomingRequestId));
             releaseLocked(attempt.incomingRequestId);
             if (releasableVictims != null) {
                 for (ReservationHandle victim : releasableVictims) {
@@ -3027,11 +2794,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         // Stage-2 T7 S3 (ruling 3): post-commit fence-guarded clear for the
         // aborted provisional incoming reservation — projection-lag,
-        // strictly outside the admissionLock. Stage-2 T7 S2b: the removal
-        // facts also drive the placement-projection subtraction.
+        // strictly outside the admissionLock. Stage-2 T7 S2c: the placement
+        // row took its subtraction inside releaseLocked's transaction; the
+        // slot-side authority clear is the only post-commit effect left.
         if (incomingCleared != null) {
-            clearInflightReservationAfterCommit(
-                    incomingCleared, incomingRemovedFacts);
+            clearAuthorityAfterCommit(incomingCleared);
         }
     }
 
@@ -3087,7 +2854,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long requestId = reservation.requestId();
         boolean reconciled = false;
         boolean capacityChanged = false;
-        List<ClearedReservationFacts> removals = new ArrayList<>(1);
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -3114,8 +2880,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                 this,
                                 reservation,
                                 null,
-                                AuthoritativeTerminalOwner.WORKER_STATUS),
-                        removals);
+                                AuthoritativeTerminalOwner.WORKER_STATUS));
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
             }
@@ -3128,8 +2893,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
         return reconciled;
     }
 
@@ -3167,12 +2930,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
         List<WorkerStatusFact> facts;
-        List<ClearedReservationFacts> removals = new ArrayList<>();
         admissionLock.lock();
         try {
             facts = doCalibrate(
-                    observation.engine(), observation.finishedTasks(),
-                    removals);
+                    observation.engine(), observation.finishedTasks());
             if (!observation.alive()) {
                 beginRetirement();
             }
@@ -3184,10 +2945,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         notifyEngineDispatchCapacityListeners();
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock (also
-        // on the retirement failure path — the calibration transaction
-        // committed either way).
-        deliverPlacementRemovalsAfterCommit(removals);
         return new StatusReduction(this, facts);
     }
 
@@ -3197,18 +2954,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
         List<WorkerStatusFact> facts;
-        List<ClearedReservationFacts> removals = new ArrayList<>();
         admissionLock.lock();
         try {
             facts = doCalibrate(
-                    observation.engine(), observation.finishedTasks(),
-                    removals);
+                    observation.engine(), observation.finishedTasks());
         } finally {
             admissionLock.unlock();
-            // Stage-2 T7 S2b: fact delivery outside the admissionLock,
-            // before the private-candidate invariant trip below fires
-            // (the calibration transaction committed either way).
-            deliverPlacementRemovalsAfterCommit(removals);
         }
         if (!facts.isEmpty()) {
             throw new IllegalStateException(
@@ -3219,8 +2970,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private List<WorkerStatusFact> doCalibrate(
             WorkerStatus.EngineObservation engine,
-            Map<String, WorkerStatus.TaskObservation> finishedTasks,
-            List<ClearedReservationFacts> removals) {
+            Map<String, WorkerStatus.TaskObservation> finishedTasks) {
         admissionVersion.incrementAndGet();
         List<WorkerStatusFact> facts = new ArrayList<>();
 
@@ -3250,17 +3000,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     && !terminalNow.contains(requestId)) {
                 actualConfirmed++;
                 RequestInflight removed = inflightRequests.remove(requestId);
-                // Stage-2 T7 S2b: capture the removal facts (bits still
-                // intact — the map removal only unlists the entry) before
-                // the permit / queued teardown flips them, and queue the
-                // fact delivery for the post-commit pass.
-                if (removed != null) {
-                    removals.add(new ClearedReservationFacts(
-                            new ReservationHandle(
-                                    getStatus().getGenerationId(),
-                                    requestId, removed.reservationToken()),
-                            entryFacts(removed)));
-                }
                 // Stage-2 L2: the engine-lifecycle marker lives on the
                 // entry, so removing the entry retires it — no separate
                 // marker storage.
@@ -3269,9 +3008,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 removeEngineDispatchPermitLocked(removed);
                 if (removed != null) {
                     removeQueuedPhaseLocked(requestId, removed);
-                    inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    inflightExpectedKvReservedTotal.addAndGet(
-                            -removed.expectedKvTokens());
+                    // Stage-2 T7 S2c: the row takes the removal delta
+                    // in-transaction.
+                    applyPlacementRowLocked(inflightRemovalDelta(
+                            removed.kvTokens(), removed.expectedKvTokens()));
                 }
                 PreemptionClaim claim = preemptionClaims.get(requestId);
                 if (claim != null
@@ -3308,7 +3048,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (claim != null) {
                 if (terminal != null
                         && settlePriorityClaimTerminalLocked(
-                                claim.attemptToken, terminal, claim, removals)) {
+                                claim.attemptToken, terminal, claim)) {
                     facts.add(new TerminalWorkerStatusFact(
                             terminal,
                             task.errorCode()));
@@ -3333,7 +3073,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             null,
                             AuthoritativeTerminalOwner.WORKER_STATUS);
             if (proof != null) {
-                settleAuthoritativeTerminalLocked(proof, removals);
+                settleAuthoritativeTerminalLocked(proof);
             } else {
                 settleUntrackedWorkerTerminalLocked(requestId);
             }
@@ -3543,20 +3283,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Local inflight KV reservation (conservative estimate) not yet confirmed by the engine.
      * Sums {@code expectedKvTokens} (seqLen + maxNewTokens) to account for generation-phase
      * KV growth. Used for scoring / load balancing.
-     * Backed by {@code inflightExpectedKvReservedTotal} counter — O(1) incremental maintenance.
+     * Stage-2 T7 S2c: reads the aggregate placement row's inflight expected
+     * component — the retired {@code inflightExpectedKvReservedTotal}
+     * counter's O(1) slot, one volatile read.
      */
     private long inflightKvReserved() {
-        return inflightExpectedKvReservedTotal.get();
+        return placementProjectionRow.inflightExpectedKv();
     }
 
     /**
      * Local inflight KV reservation (hard demand) not yet confirmed by the engine.
      * Sums {@code kvTokens} (seqLen only) — the minimum KV needed for the prompt itself.
      * Used for hard-capacity filtering to ensure the prompt fits.
-     * Backed by {@code inflightKvReservedTotal} counter — O(1) incremental maintenance.
+     * Stage-2 T7 S2c: reads the aggregate placement row's inflight hard
+     * component — the retired {@code inflightKvReservedTotal} counter's
+     * O(1) slot, one volatile read.
      */
     public long inflightHardKvReserved() {
-        return inflightKvReservedTotal.get();
+        return placementProjectionRow.inflightHardKv();
     }
 
     /**
@@ -3590,44 +3334,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Stage-2 T7 S2b (channel A): lock-free production readers take the
-     * placement-domain components from the projection row; port-less
-     * test endpoints keep the native mirror reads. The authoritative
-     * in-transaction gate keeps the native-count math below — a
-     * projection-lagging gate could admit past the concurrency / KV
-     * limits (the non-conservative direction).
+     * Stage-2 T7 S2c: every reader — the lock-free production surfaces and
+     * the authoritative in-lock gate alike — takes the placement-domain
+     * components from the aggregate row. The row is maintained
+     * in-transaction under {@link #admissionLock}, so an in-lock read is
+     * the latest committed fact with full transactional consistency (the
+     * S2b projection-lag concern retired with the post-commit delivery
+     * protocol); a lock-free read is one volatile snapshot, never torn.
      */
     private long engineFacingKvUsedProjection(
             WorkerStatus.EngineObservation fields) {
         long totalCap = fields.totalKvCacheTokens();
         long avail = fields.availableKvCacheTokens();
         long reportedUsed = totalCap > 0 ? Math.max(0, totalCap - avail) : 0;
-        long localEngineFacing;
-        if (placementProjectionRowActive()) {
-            DecodePlacementProjectionRow row = placementProjectionRow;
-            localEngineFacing = Math.max(0L,
-                    row.inflightExpectedKv() - row.queuedExpectedKv())
-                    + row.permitExpectedKv();
-        } else {
-            localEngineFacing = Math.max(0L,
-                    inflightKvReserved() - queuedExpectedKvReservedTotal.get())
-                    + engineDispatchPermitExpectedKvReservedTotal.get();
-        }
-        return saturatedAddNonNegative(
-                saturatedAddNonNegative(reportedUsed, localEngineFacing),
-                saturatedAddNonNegative(
-                        priorityPreemptionHeldExpectedKv.get(),
-                        engineFenceHeldExpectedKv.get()));
-    }
-
-    private long engineFacingKvUsed(
-            WorkerStatus.EngineObservation fields) {
-        long totalCap = fields.totalKvCacheTokens();
-        long avail = fields.availableKvCacheTokens();
-        long reportedUsed = totalCap > 0 ? Math.max(0, totalCap - avail) : 0;
+        DecodePlacementProjectionRow row = placementProjectionRow;
         long localEngineFacing = Math.max(0L,
-                inflightKvReserved() - queuedExpectedKvReservedTotal.get())
-                + engineDispatchPermitExpectedKvReservedTotal.get();
+                row.inflightExpectedKv() - row.queuedExpectedKv())
+                + row.permitExpectedKv();
         return saturatedAddNonNegative(
                 saturatedAddNonNegative(reportedUsed, localEngineFacing),
                 saturatedAddNonNegative(
@@ -3664,31 +3387,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return engineFacingKvAvailableProjection(fields);
     }
 
-    /** Same S2b source split as {@link #engineFacingKvUsedProjection}. */
+    /** Same S2c single-row source as {@link #engineFacingKvUsedProjection}. */
     private long engineFacingKvAvailableProjection(
             WorkerStatus.EngineObservation fields) {
-        long localEngineFacing;
-        if (placementProjectionRowActive()) {
-            DecodePlacementProjectionRow row = placementProjectionRow;
-            localEngineFacing = Math.max(0L,
-                    row.inflightHardKv() - row.queuedHardKv())
-                    + row.permitHardKv();
-        } else {
-            localEngineFacing = Math.max(0L,
-                    inflightHardKvReserved() - queuedHardKvReservedTotal.get())
-                    + engineDispatchPermitHardKvReservedTotal.get();
-        }
-        return Math.max(0, fields.availableKvCacheTokens()
-                - localEngineFacing
-                - priorityPreemptionHeldKv.get()
-                - engineFenceHeldKv.get());
-    }
-
-    private long engineFacingKvAvailable(
-            WorkerStatus.EngineObservation fields) {
+        DecodePlacementProjectionRow row = placementProjectionRow;
         long localEngineFacing = Math.max(0L,
-                inflightHardKvReserved() - queuedHardKvReservedTotal.get())
-                + engineDispatchPermitHardKvReservedTotal.get();
+                row.inflightHardKv() - row.queuedHardKv())
+                + row.permitHardKv();
         return Math.max(0, fields.availableKvCacheTokens()
                 - localEngineFacing
                 - priorityPreemptionHeldKv.get()
@@ -3726,7 +3431,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     LongPredicate schedulerOwnsRequest) {
         int evicted;
         boolean capacityChanged;
-        List<ClearedReservationFacts> removals;
         admissionLock.lock();
         try {
             // A priority claim or generic EngineFence is a stronger accounting
@@ -3734,21 +3438,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // ENGINE_MAY_HAVE_SEEN shadow remains charged until reconciliation.
             // Stage-2 L8: the TtlEvictor callback retires the entry permit
             // token (if held) in the same eviction sweep, so the permit
-            // counter delta below observes exactly those reclaimed permits.
-            int permitCountBefore = activeEngineDispatchPermitCount;
+            // count delta below observes exactly those reclaimed permits.
+            // Stage-2 T7 S2c: the callback also applies the row's removal
+            // deltas in-transaction — no post-commit sweep remains.
+            int permitCountBefore = placementProjectionRow.permitCount();
             evicted = requestEvictor.evictExpired(
                     ttlMs, requestId -> !schedulerOwnsRequest.test(requestId)
                             && !preemptionClaims.containsKey(requestId)
                             && !engineFenceProtections.containsKey(requestId));
             int permitsRemoved = permitCountBefore
-                    - activeEngineDispatchPermitCount;
-            // Stage-2 T7 S2b: swap out the sweep-collected entry facts for
-            // the post-commit delivery (the callback ran inside this
-            // admissionLock; the clear below resets the list for the next
-            // sweep).
-            removals = pendingEvictionFacts.isEmpty()
-                    ? null : new ArrayList<>(pendingEvictionFacts);
-            pendingEvictionFacts.clear();
+                    - placementProjectionRow.permitCount();
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
             java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedEvictIt =
@@ -3778,8 +3477,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
         }
-        // Stage-2 T7 S2b: fact delivery outside the admissionLock.
-        deliverPlacementRemovalsAfterCommit(removals);
         return evicted;
     }
 
@@ -3796,39 +3493,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * view for observability and eviction planning.
      *
      * <p>O(1) formula (PR-C): {@code confirmedRunningCount
-     * + max(0, inflightRequests.size() − queuedPhaseCount)}. The
-     * {@link #queuedPhaseCount} AtomicInteger is maintained incrementally at
-     * every queuedPhase mutation point ({@link #markQueuedExact},
-     * {@link EngineDispatchPermit#transferToEngineLifecycle()}, {@link #reserve},
-     * {@link #release},
-     * {@link #doCalibrate}, {@link #evictExpiredRequests}) so the hot gate
-     * path no longer scans the queued set.
+     * + max(0, inflightCount − queuedCount)} over the aggregate placement
+     * row (stage-2 T7 S2c: the retired {@code queuedPhaseCount} counter's
+     * slot — the row's queued component is maintained in-transaction at
+     * every queued-phase mutation point, so the hot gate path still never
+     * scans the inflight map).
      *
-     * <p><b>Drift self-healing:</b> the counter is read lock-free and may
-     * transiently drift outside {@code [0, inflight]} under torn updates;
-     * the read side clamps to that range and emits a drift metric so the
-     * gate never sees an out-of-range load.
+     * <p><b>Drift self-healing:</b> the queued component is read lock-free
+     * and may transiently drift outside {@code [0, inflight]} under torn
+     * updates; the read side clamps to that range and emits a drift metric
+     * so the gate never sees an out-of-range load.
      */
     public int getEngineLoad() {
-        // Stage-2 T7 S2b (channel A): the placement-domain components read
-        // the aggregate placement-projection row once the first fact
-        // delivery has landed — a volatile single reference, so the
-        // multi-field read never tears. A zero-stamp row (port-less
-        // endpoint, or a bare-flip stub that never delivers) keeps the
-        // native mirror read. The projection lags the committed
-        // transaction by the delivery window only, and every lag
-        // direction is conservative (see
-        // {@link #applyPlacementProjectionDelta}).
-        int inflight;
-        int queued;
-        if (placementProjectionRowActive()) {
-            DecodePlacementProjectionRow row = placementProjectionRow;
-            inflight = row.inflightCount();
-            queued = row.queuedCount();
-        } else {
-            inflight = inflightRequests.size();
-            queued = queuedPhaseCount.get();
-        }
+        // Stage-2 T7 S2c: the placement-domain components read the
+        // aggregate placement row — one volatile snapshot maintained
+        // in-transaction, so the multi-field read never tears.
+        DecodePlacementProjectionRow row = placementProjectionRow;
+        int inflight = row.inflightCount();
+        int queued = row.queuedCount();
         // Drift self-healing: queued should stay within [0, inflight].
         if (queued < 0 || queued > inflight) {
             logger.warn("Decode queuedPhaseCount drift: count={}, inflight={}, confirmed={}, "
@@ -3918,11 +3600,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
         // Stage-2 L7 retirement complete: the entry sub-state flag is the
-        // sole queued authority (the transitional layer-7 set is deleted);
-        // these counters stay as its O(1) aggregate mirror.
-        queuedPhaseCount.incrementAndGet();
-        queuedHardKvReservedTotal.addAndGet(reservation.kvTokens());
-        queuedExpectedKvReservedTotal.addAndGet(reservation.expectedKvTokens());
+        // sole queued authority; the aggregate row keeps its O(1)
+        // queued-domain mirror (Stage-2 T7 S2c in-transaction delta).
+        applyPlacementRowLocked(queuedInstallDelta(
+                reservation.kvTokens(), reservation.expectedKvTokens()));
         return true;
     }
 
@@ -3931,11 +3612,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return false;
         }
         // Stage-2 L7 retirement complete: the entry sub-state flag is the
-        // sole queued authority; these counters stay as its O(1) aggregate
-        // mirror.
-        queuedPhaseCount.decrementAndGet();
-        queuedHardKvReservedTotal.addAndGet(-reservation.kvTokens());
-        queuedExpectedKvReservedTotal.addAndGet(-reservation.expectedKvTokens());
+        // sole queued authority; the aggregate row keeps its O(1)
+        // queued-domain mirror (Stage-2 T7 S2c in-transaction delta).
+        applyPlacementRowLocked(queuedRemovalDelta(
+                reservation.kvTokens(), reservation.expectedKvTokens()));
         return true;
     }
 
@@ -4115,9 +3795,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // known inside the transaction (the entry's token), so the
             // permit flip is delivered post-commit — projection-lag, the
             // confirm-window class; never a slot monitor under the
-            // admissionLock.  Stage-2 T7 S2b: the pre-transaction entry
-            // facts ride along so the delivery derives its
-            // placement-projection delta from the fact pair.
+            // admissionLock. Stage-2 T7 S2c: slot-side authority staging
+            // only — the placement row took its permit delta inside the
+            // transaction.
             deliverAdmissionAfterCommit(
                     requestId,
                     DecodePlacementAuthorityPort.Projection.flip(
@@ -4125,16 +3805,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             acquisition.acquisition().permit()
                                     .reservationToken(),
                             true, acquisition.acquisition().permit().token(),
-                            false),
-                    acquisition.beforeEntry());
+                            false));
         }
         return acquisition.acquisition();
     }
 
-    /** Transaction result plus the captured pre-transaction entry facts. */
+    /** Transaction result of {@link #acquireEngineDispatchPermitTransaction}. */
     private record AcquisitionTransaction(
-            EngineDispatchPermitAcquisition acquisition,
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry) {
+            EngineDispatchPermitAcquisition acquisition) {
     }
 
     private AcquisitionTransaction acquireEngineDispatchPermitTransaction(
@@ -4147,35 +3825,25 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (reservation == null || preemptionClaims.containsKey(requestId)) {
                 return new AcquisitionTransaction(
                         rejectedEngineDispatchPermit(
-                                EngineDispatchPermitAcquireStatus.NOT_OWNED),
-                        null);
+                                EngineDispatchPermitAcquireStatus.NOT_OWNED));
             }
             if (!reservation.masterQueued()) {
                 return new AcquisitionTransaction(
                         rejectedEngineDispatchPermit(
-                                EngineDispatchPermitAcquireStatus.NOT_QUEUED),
-                        null);
+                                EngineDispatchPermitAcquireStatus.NOT_QUEUED));
             }
             if (reservation.dispatchPermitToken() != 0L) {
                 return new AcquisitionTransaction(
                         rejectedEngineDispatchPermit(
-                                EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED),
-                        null);
+                                EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED));
             }
             if (isEngineDispatchCapacityFullLocked(
                     reservation, concurrencyLimit, maxKvUsagePercent)) {
                 return new AcquisitionTransaction(
                         rejectedEngineDispatchPermit(
-                                EngineDispatchPermitAcquireStatus.CAPACITY_FULL),
-                        null);
+                                EngineDispatchPermitAcquireStatus.CAPACITY_FULL));
             }
 
-            // Stage-2 T7 S2b: capture the pre-transaction entry facts
-            // (queued, permit-free) before this transaction installs the
-            // permit token — the post-commit delivery derives its delta
-            // from this snapshot.
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry =
-                    entryFacts(reservation);
             long token = nextEngineDispatchPermitTokenLocked();
             EngineDispatchPermit permit = new EngineDispatchPermit(
                     this, requestId, token, reservation);
@@ -4186,19 +3854,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (!reservation.installDispatchPermitToken(token)) {
                 throw new IllegalStateException(
                         "Decode dispatch permit install failed on a token-free"
-                                + " entry for request "
-                                + requestId);
+                                + " entry for request " + requestId);
             }
-            activeEngineDispatchPermitCount++;
-            engineDispatchPermitHardKvReservedTotal.addAndGet(
-                    reservation.kvTokens());
-            engineDispatchPermitExpectedKvReservedTotal.addAndGet(
-                    reservation.expectedKvTokens());
+            // Stage-2 T7 S2c: the row takes the permit install delta
+            // in-transaction.
+            applyPlacementRowLocked(permitInstallDelta(
+                    reservation.kvTokens(), reservation.expectedKvTokens()));
             admissionVersion.incrementAndGet();
             return new AcquisitionTransaction(
                     new EngineDispatchPermitAcquisition(
-                            EngineDispatchPermitAcquireStatus.ACQUIRED, permit),
-                    beforeEntry);
+                            EngineDispatchPermitAcquireStatus.ACQUIRED, permit));
         } finally {
             admissionLock.unlock();
         }
@@ -4306,7 +3971,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private boolean releaseEngineDispatchPermit(EngineDispatchPermit permit) {
         boolean released = false;
-        DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry = null;
+        boolean masterQueued;
         admissionLock.lock();
         try {
             if (retiredEngineDispatchPermitTokens.remove(permit.token)) {
@@ -4315,10 +3980,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (!isCurrentEngineDispatchPermitLocked(permit)) {
                 return false;
             }
-            // Stage-2 T7 S2b: capture the pre-transaction facts (permit
-            // held, queued state preserved) before the token clears —
-            // the release flip delivery derives its delta from them.
-            beforeEntry = entryFacts(permit.reservation);
+            // Stage-2 T7 S2c: capture the queued bit before the token
+            // clears — the release flip's slot-side projection keeps the
+            // entry's queued state (release never touches that bit).
+            masterQueued = permit.reservation.masterQueued();
             removeEngineDispatchPermitLocked(permit.reservation);
             admissionVersion.incrementAndGet();
             released = true;
@@ -4326,18 +3991,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (released) {
-            // Stage-2 T7 S2b: the permit release is a placement-domain
-            // fact (permit component leaves) — post-commit flip
-            // delivery with the captured before facts, same class as
-            // the acquisition delivery above.
+            // Stage-2 T7 S2c: the placement row took the permit removal
+            // delta inside the transaction above; the post-commit flip
+            // stages only the slot-side authority (permit bit off, queued
+            // bit preserved) — projection-lag, the same confirm-window
+            // class as the acquisition delivery above.
             deliverAdmissionAfterCommit(
                     permit.requestId(),
                     DecodePlacementAuthorityPort.Projection.flip(
                             this, getStatus().getGenerationId(),
                             permit.reservationToken(),
-                            beforeEntry != null && beforeEntry.masterQueued(),
-                            0L, false),
-                    beforeEntry);
+                            masterQueued,
+                            0L, false));
             notifyEngineDispatchCapacityListeners();
         }
         return true;
@@ -4363,20 +4028,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (reservation == null || !reservation.clearDispatchPermitToken()) {
             return false;
         }
-        engineDispatchPermitHardKvReservedTotal.addAndGet(
-                -reservation.kvTokens());
-        engineDispatchPermitExpectedKvReservedTotal.addAndGet(
-                -reservation.expectedKvTokens());
-        decrementActiveEngineDispatchPermitCountLocked();
-        return true;
-    }
-
-    /** Caller holds admissionLock. */
-    private void decrementActiveEngineDispatchPermitCountLocked() {
-        activeEngineDispatchPermitCount--;
-        if (activeEngineDispatchPermitCount < 0) {
+        // Stage-2 T7 S2c: the row takes the permit removal delta
+        // in-transaction; the negative-permit tripwire survives as a
+        // post-publish count check.
+        applyPlacementRowLocked(permitRemovalDelta(
+                reservation.kvTokens(), reservation.expectedKvTokens()));
+        if (placementProjectionRow.permitCount() < 0) {
             throw new IllegalStateException("negative active Decode dispatch permit count");
         }
+        return true;
     }
 
     /** Caller holds {@link #admissionLock} (legacy in-transaction form). */
@@ -4422,10 +4082,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private int engineDispatchHardGateUsageLocked() {
+        DecodePlacementProjectionRow row = placementProjectionRow;
         int engineFacingInflight = Math.max(0,
-                inflightRequests.size() - queuedPhaseCount.get());
+                row.inflightCount() - row.queuedCount());
         return confirmedRunningCount + engineFacingInflight
-                + activeEngineDispatchPermitCount;
+                + row.permitCount();
     }
 
     /** Caller holds admissionLock; this is the authoritative pre-admission gate. */
@@ -4433,13 +4094,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             RequestInflight candidate,
             long concurrencyLimit,
             long maxKvUsagePercent) {
-        // Stage-2 T7 S2b: the authoritative gate keeps the native
-        // in-transaction counters — they are the latest committed facts
-        // under the admissionLock serialization. The projection row
-        // lags its delivery window and would under-count gate usage / KV
-        // usage, admitting past the limits (the non-conservative
-        // direction). The waiter-hint snapshot below mirrors this math
-        // on the projection row for the lock-free readers.
+        // Stage-2 T7 S2c: the authoritative gate reads the aggregate
+        // placement row in-lock — the row is maintained in-transaction,
+        // so an in-lock read is the latest committed fact with full
+        // transactional consistency (the S2b projection-lag concern
+        // retired with the post-commit delivery protocol).
         if (concurrencyLimit > 0
                 && engineDispatchHardGateUsageLocked() >= concurrencyLimit) {
             return true;
@@ -4450,14 +4109,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (maxKvUsagePercent < 0 || totalKv <= 0) {
             return false;
         }
-        if (candidate.kvTokens() > engineFacingKvAvailable(fields)) {
+        if (candidate.kvTokens() > engineFacingKvAvailableProjection(fields)) {
             return true;
         }
         if (maxKvUsagePercent == 0) {
             return false;
         }
         long projectedExpectedKv = saturatedAddNonNegative(
-                engineFacingKvUsed(fields), candidate.expectedKvTokens());
+                engineFacingKvUsedProjection(fields), candidate.expectedKvTokens());
         return (double) projectedExpectedKv * 100.0
                 > (double) maxKvUsagePercent * (double) totalKv;
     }
@@ -4499,7 +4158,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 priorityPreemptionHeldExpectedKv.get();
         long currentHardCharges = saturatedAddNonNegative(
                 saturatedAddNonNegative(
-                        inflightKvReservedTotal.get(),
+                        placementProjectionRow.inflightHardKv(),
                         priorityHeldHardKv),
                 engineFenceHeldKv.get());
         long projectedHardSupply = saturatedAddNonNegative(
@@ -4517,7 +4176,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 fields.totalKvCacheTokens() - fields.availableKvCacheTokens());
         long currentExpectedUsage = saturatedAddNonNegative(
                 saturatedAddNonNegative(
-                        reportedUsed, inflightExpectedKvReservedTotal.get()),
+                        reportedUsed, placementProjectionRow.inflightExpectedKv()),
                 saturatedAddNonNegative(
                         priorityHeldExpectedKv,
                         engineFenceHeldExpectedKv.get()));
@@ -4535,11 +4194,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * {@code candidate} is still a queued soft reservation and is
      * projected exactly once here.
      *
-     * <p>Stage-2 T7 S2b (channel A): every placement-domain component
-     * reads the projection row (port-less test endpoints keep the
-     * native mirrors). A torn row snapshot can only cause an extra
-     * authoritative acquisition attempt, which re-validates under the
-     * admissionLock with the native gate above.
+     * <p>Stage-2 T7 S2c: every placement-domain component reads the
+     * aggregate placement row. A torn row snapshot can only cause an
+     * extra authoritative acquisition attempt, which re-validates under
+     * the admissionLock with the in-lock gate above.
      */
     private boolean isEngineDispatchCapacityFullSnapshot(
             RequestInflight candidate,
@@ -4571,15 +4229,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Lock-free mirror of {@link #engineDispatchHardGateUsageLocked()}
-     * on the placement-projection row (S2b channel A); a zero-stamp row
-     * (port-less endpoint, or a bare-flip stub that never delivers)
-     * keeps the native counters.
+     * on the aggregate placement row (stage-2 T7 S2c: one volatile
+     * snapshot, maintained in-transaction, never tears).
      */
     private long engineDispatchGateUsageSnapshot() {
-        if (!placementProjectionRowActive()) {
-            return getEngineLoad()
-                    + Math.max(0, activeEngineDispatchPermitCount);
-        }
         DecodePlacementProjectionRow row = placementProjectionRow;
         int inflight = row.inflightCount();
         int queued = Math.max(0, Math.min(

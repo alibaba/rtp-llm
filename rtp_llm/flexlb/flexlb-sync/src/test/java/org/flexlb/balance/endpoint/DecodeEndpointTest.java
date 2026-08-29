@@ -248,13 +248,28 @@ class DecodeEndpointTest {
         assertEquals(0, endpoint.engineFacingKvUsed());
     }
 
-    /** Directly mutate the private counter to simulate drift. */
+    /**
+     * Directly mutate the placement row's queued component to simulate
+     * drift (stage-2 T7 S2c: the retired queuedPhaseCount counter's slot
+     * lives in the aggregate placement row).
+     */
     private void setQueuedPhaseCount(int value) throws Exception {
-        java.lang.reflect.Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
+        java.lang.reflect.Field f =
+                DecodeEndpoint.class.getDeclaredField("placementProjectionRow");
         f.setAccessible(true);
-        java.util.concurrent.atomic.AtomicInteger counter =
-                (java.util.concurrent.atomic.AtomicInteger) f.get(endpoint);
-        counter.set(value);
+        DecodeEndpoint.DecodePlacementProjectionRow current =
+                (DecodeEndpoint.DecodePlacementProjectionRow) f.get(endpoint);
+        f.set(endpoint, new DecodeEndpoint.DecodePlacementProjectionRow(
+                current.inflightCount(),
+                current.inflightHardKv(),
+                current.inflightExpectedKv(),
+                value,
+                current.queuedHardKv(),
+                current.queuedExpectedKv(),
+                current.permitCount(),
+                current.permitHardKv(),
+                current.permitExpectedKv(),
+                current.placementProjectionVersion() + 1L));
     }
 
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,

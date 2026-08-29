@@ -401,18 +401,28 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
     // ==================== rules ====================
 
     /**
-     * Stage-2 T7 S2b (channel A) dual-write guard: the aggregate
-     * placement-projection row must equal the native counter aggregates
-     * (the nine placement-domain components) on every certified
-     * capture. The row is a volatile single-reference snapshot (never
-     * torn); the native side is certified by the seqlock revalidation,
-     * so the only legal divergence is the delivery window itself (µs
-     * projection lag) — a persistent split is a lost or duplicated fact
-     * delivery and this rule confirms it. Request id 0 marks the
-     * endpoint-level aggregate identity; a row whose delivery stamp is
-     * still zero never received a delivery (a port-less test endpoint —
-     * its native mirrors are the only fact source), so it carries no
-     * cross-check signal.
+     * Stage-2 T7 S2c placement mirror rule: the aggregate placement row
+     * must equal the capture-frozen entry facts (the nine placement-domain
+     * components) on every certified capture. The row is maintained
+     * in-transaction under the endpoint admissionLock and read inside the
+     * same locked window as the version; the inflight snapshot is the
+     * Phase-2 weakly-consistent copy the seqlock revalidation certifies
+     * against that same version — so a certified capture proves both sides
+     * share one quiet window, and any split is a row-maintenance bug (a
+     * lost or duplicated in-transaction delta), never a delivery window
+     * (the S2b post-commit protocol retired with the native counters).
+     *
+     * <p>Stage-2 T7 S2c soak round-3 fix: the queued / permit domains must
+     * derive from the capture-frozen projection sets (the same treatment
+     * as the L7 / L8 aggregate mirrors — soak round-2 lesson), never from
+     * a live re-read of the mutable entry flags. The entry objects inside
+     * {@code view.inflight()} are shared references, so a flag flip that
+     * lands after the Phase-3 certification but before this rule runs
+     * would fabricate a "certified" split (row high on a queued-off flip,
+     * row low on a permit install): the certified window covers the
+     * capture only. kvTokens / expectedKvTokens are immutable entry
+     * fields, so the per-domain KV totals join through the frozen map
+     * lookups. Request id 0 marks the endpoint-level aggregate identity.
      */
     private void comparePlacementProjectionRow(
             IdentityHashMap<DecodeEndpoint, DecodeLedgerAuditView> decode,
@@ -425,30 +435,49 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
             }
             DecodeEndpoint.DecodePlacementProjectionRow row =
                     view.placementProjectionRow();
-            if (row.placementProjectionVersion() == 0L) {
-                continue;
-            }
             int inflightCount = view.inflight().size();
+            long inflightHardKv = 0L;
+            long inflightExpectedKv = 0L;
+            for (Map.Entry<Long, RequestInflight> inflight
+                    : view.inflight().entrySet()) {
+                inflightHardKv += inflight.getValue().kvTokens();
+                inflightExpectedKv += inflight.getValue().expectedKvTokens();
+            }
+            int queuedCount = 0;
+            long queuedHardKv = 0L;
+            long queuedExpectedKv = 0L;
+            for (Long requestId : view.queuedPhaseRequestIds()) {
+                RequestInflight reservation = view.inflight().get(requestId);
+                if (reservation != null) {
+                    queuedCount++;
+                    queuedHardKv += reservation.kvTokens();
+                    queuedExpectedKv += reservation.expectedKvTokens();
+                }
+            }
+            int permitCount = 0;
+            long permitHardKv = 0L;
+            long permitExpectedKv = 0L;
+            for (Long requestId : view.engineDispatchPermitRequestIds()) {
+                RequestInflight reservation = view.inflight().get(requestId);
+                if (reservation != null) {
+                    permitCount++;
+                    permitHardKv += reservation.kvTokens();
+                    permitExpectedKv += reservation.expectedKvTokens();
+                }
+            }
             if (row.inflightCount() != inflightCount
-                    || row.inflightHardKv()
-                            != view.inflightKvReservedTotal()
-                    || row.inflightExpectedKv()
-                            != view.inflightExpectedKvReservedTotal()
-                    || row.queuedCount() != view.queuedPhaseCount()
-                    || row.queuedHardKv()
-                            != view.queuedKvReservedTotal()
-                    || row.queuedExpectedKv()
-                            != view.queuedExpectedKvReservedTotal()
-                    || row.permitCount()
-                            != view.engineDispatchPermitCount()
-                    || row.permitHardKv()
-                            != view.engineDispatchPermitHardKvReservedTotal()
-                    || row.permitExpectedKv()
-                            != view.engineDispatchPermitExpectedKvReservedTotal()) {
+                    || row.inflightHardKv() != inflightHardKv
+                    || row.inflightExpectedKv() != inflightExpectedKv
+                    || row.queuedCount() != queuedCount
+                    || row.queuedHardKv() != queuedHardKv
+                    || row.queuedExpectedKv() != queuedExpectedKv
+                    || row.permitCount() != permitCount
+                    || row.permitHardKv() != permitHardKv
+                    || row.permitExpectedKv() != permitExpectedKv) {
                 diffs.add(new LedgerDiff(
                         Rule.PLACEMENT_PROJECTION_MISMATCH,
                         0L,
-                        "decode placement-projection row (inflight="
+                        "decode placement row (inflight="
                                 + row.inflightCount() + "/"
                                 + row.inflightHardKv() + "/"
                                 + row.inflightExpectedKv()
@@ -460,19 +489,17 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                 + row.permitExpectedKv()
                                 + ", row_version="
                                 + row.placementProjectionVersion()
-                                + ") != native aggregates (inflight="
+                                + ") != entry-derived facts (inflight="
                                 + inflightCount + "/"
-                                + view.inflightKvReservedTotal() + "/"
-                                + view.inflightExpectedKvReservedTotal()
-                                + ", queued=" + view.queuedPhaseCount()
-                                + "/" + view.queuedKvReservedTotal() + "/"
-                                + view.queuedExpectedKvReservedTotal()
-                                + ", permit="
-                                + view.engineDispatchPermitCount() + "/"
-                                + view.engineDispatchPermitHardKvReservedTotal()
-                                + "/"
-                                + view.engineDispatchPermitExpectedKvReservedTotal()
-                                + ") — delivery-window tear if single-pass"));
+                                + inflightHardKv + "/"
+                                + inflightExpectedKv
+                                + ", queued=" + queuedCount
+                                + "/" + queuedHardKv + "/"
+                                + queuedExpectedKv
+                                + ", permit=" + permitCount + "/"
+                                + permitHardKv + "/"
+                                + permitExpectedKv
+                                + ") — row-maintenance bug if persistent"));
             }
         }
     }

@@ -2199,18 +2199,11 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
                 // entry — undo this projection's own installation only.
                 slot.restoreDecodeAdmission(prior, projection);
             } else {
+                // Stage-2 T7 S2c: the placement row is maintained
+                // in-transaction inside the admission body — the wrapper
+                // only refreshes the slot-side authority from the entry
+                // truth the body left behind.
                 slot.refreshDecodeAdmissionFromEntry(entry, projection);
-                // Stage-2 T7 S2b (channel A): derive the placement-
-                // projection delta from the before/after fact pair —
-                // the prior authority snapshot is the "before", the
-                // entryReader fact the "after". Out-of-order immune:
-                // each delta is a pure state difference, so the sum over
-                // a serial transaction sequence equals the net change
-                // regardless of delivery interleaving. Applied inside
-                // the slot monitor (slot monitor → delivery lock, the
-                // anchored one-way order).
-                projection.endpoint().applyPlacementProjectionDelta(
-                        wrapperPlacementDelta(prior, entry, projection));
             }
             return result;
         }
@@ -2246,34 +2239,27 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
      * no-op for terminal-track slots (their own ticks force-clear the
      * authority).
      *
-     * <p>Stage-2 T7 S2b (channel A): the placement-projection delta
-     * applies unconditionally of the slot state — the committed
-     * transaction's fact weight must reach the endpoint row even when
-     * the slot already left the ACTIVE window (a missing update would
-     * fork the row from the native aggregates permanently). Lock order
-     * stays slot monitor → delivery lock.
+     * <p>Stage-2 T7 S2c: slot-side authority staging only — the placement
+     * row is maintained in-transaction inside the admissionLock, so no
+     * placement-domain fact weight rides this delivery.
      */
     @Override
     public void deliverDecodeAdmissionAfterCommit(
             long requestId,
-            DecodePlacementAuthorityPort.Projection projection,
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry) {
+            DecodePlacementAuthorityPort.Projection projection) {
         Objects.requireNonNull(projection, "projection");
         RequestSlot slot = requestSlot(requestId);
         if (slot == null) {
-            // No slot ever hosted this request: the endpoint-side
-            // transaction still committed, so the row still takes its
-            // fact delta (the bare, no-slot delivery path).
-            projection.endpoint().applyPlacementProjectionDelta(
-                    deliveryPlacementDelta(projection, beforeEntry));
+            // No slot ever hosted this request: nothing slot-side to
+            // stage (stage-2 T7 S2c — the placement row is maintained
+            // in-transaction on the endpoint, so a no-slot delivery
+            // carries no fact weight).
             return;
         }
         synchronized (slot) {
             if (slot.ownsActiveGeneration()) {
                 slot.stageDecodeAdmission(projection);
             }
-            projection.endpoint().applyPlacementProjectionDelta(
-                    deliveryPlacementDelta(projection, beforeEntry));
         }
     }
 
@@ -2318,151 +2304,6 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
                     authority.preloadedKvTokens(),
                     authority.preloadedExpectedKvTokens());
         }
-    }
-
-    /**
-     * Stage-2 T7 S2b: inflight-entry removal fact delivery — the
-     * fence-guarded authority clear of {@link #clearDecodeAdmission}
-     * plus the unconditional, fact-driven placement-projection
-     * subtraction in one delivery. The subtraction runs before the slot
-     * lookup so a dead / missing slot never loses the row update (the
-     * removed entry's facts are the exact negative of its own
-     * install / flip contributions — the aggregate reaches zero exactly
-     * once even when a slot-side death path force-cleared the authority
-     * earlier, closing the compensation race the pure authority clear
-     * could not).
-     */
-    @Override
-    public void clearInflightReservation(
-            long requestId,
-            DecodeEndpoint endpoint,
-            long endpointGeneration,
-            long reservationToken,
-            DecodePlacementAuthorityPort.DecodeAdmissionEntry removedEntry) {
-        Objects.requireNonNull(removedEntry, "removedEntry");
-        endpoint.applyPlacementProjectionDelta(
-                placementRemovalDelta(removedEntry));
-        RequestSlot slot = requestSlot(requestId);
-        if (slot == null) {
-            return;
-        }
-        synchronized (slot) {
-            slot.clearDecodeAdmissionExact(
-                    endpoint, endpointGeneration, reservationToken);
-        }
-    }
-
-    /**
-     * Stage-2 T7 S2b (channel A): wrapper-path placement delta — the
-     * "before" is the prior slot authority snapshot, the "after" is
-     * the entryReader fact the admission body left behind. A rejected /
-     * rolled-back body (null entry) and a foreign fence contributed
-     * nothing to the layer-1 state, so they carry no delta.
-     */
-    private static DecodeEndpoint.PlacementProjectionDelta
-            wrapperPlacementDelta(
-                    RequestSlot.SlotDecodeAdmission prior,
-                    DecodePlacementAuthorityPort.DecodeAdmissionEntry after,
-                    DecodePlacementAuthorityPort.Projection projection) {
-        if (after == null
-                || after.reservationToken()
-                        != projection.reservationToken()) {
-            return DecodeEndpoint.PlacementProjectionDelta.ZERO;
-        }
-        if (prior == null || !prior.matchesFence(projection)) {
-            // Install semantics: the reservation enters the row with
-            // its full fact weight. A stale prior fence's own
-            // subtraction arrives with its removal delivery, so the
-            // transient double-count is the conservative direction.
-            return placementInstallDelta(
-                    after.masterQueued(),
-                    after.dispatchPermitToken(),
-                    after.kvTokens(), after.expectedKvTokens());
-        }
-        return placementSubStateDelta(
-                prior.masterQueued(), prior.dispatchPermitToken(),
-                after.masterQueued(), after.dispatchPermitToken(),
-                after.kvTokens(), after.expectedKvTokens());
-    }
-
-    /**
-     * Stage-2 T7 S2b (channel A): post-commit delivery delta. Installs
-     * take their numerics from the install projection; flips diff the
-     * before/after bits and scale by the immutable entry numerics riding
-     * in {@code beforeEntry}.
-     */
-    private static DecodeEndpoint.PlacementProjectionDelta
-            deliveryPlacementDelta(
-                    DecodePlacementAuthorityPort.Projection projection,
-                    DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry) {
-        if (projection.install()) {
-            return placementInstallDelta(
-                    projection.masterQueued(),
-                    projection.dispatchPermitToken(),
-                    projection.kvTokens(),
-                    projection.expectedKvTokens());
-        }
-        Objects.requireNonNull(beforeEntry, "beforeEntry");
-        return placementSubStateDelta(
-                beforeEntry.masterQueued(),
-                beforeEntry.dispatchPermitToken(),
-                projection.masterQueued(),
-                projection.dispatchPermitToken(),
-                beforeEntry.kvTokens(),
-                beforeEntry.expectedKvTokens());
-    }
-
-    /** Install fact weight: the inflight domain plus the queued / permit bits. */
-    private static DecodeEndpoint.PlacementProjectionDelta
-            placementInstallDelta(
-                    boolean queued, long permitToken,
-                    long kvTokens, long expectedKvTokens) {
-        int queuedBit = queued ? 1 : 0;
-        int permitBit = permitToken != 0L ? 1 : 0;
-        return new DecodeEndpoint.PlacementProjectionDelta(
-                1, kvTokens, expectedKvTokens,
-                queuedBit, queuedBit * kvTokens,
-                queuedBit * expectedKvTokens,
-                permitBit, permitBit * kvTokens,
-                permitBit * expectedKvTokens);
-    }
-
-    /** Same-fence bits transition; the numerics are immutable entry fields. */
-    private static DecodeEndpoint.PlacementProjectionDelta
-            placementSubStateDelta(
-                    boolean beforeQueued, long beforePermitToken,
-                    boolean afterQueued, long afterPermitToken,
-                    long kvTokens, long expectedKvTokens) {
-        int queuedDelta =
-                (afterQueued ? 1 : 0) - (beforeQueued ? 1 : 0);
-        int permitDelta =
-                (afterPermitToken != 0L ? 1 : 0)
-                        - (beforePermitToken != 0L ? 1 : 0);
-        return new DecodeEndpoint.PlacementProjectionDelta(
-                0, 0L, 0L,
-                queuedDelta, queuedDelta * kvTokens,
-                queuedDelta * expectedKvTokens,
-                permitDelta, permitDelta * kvTokens,
-                permitDelta * expectedKvTokens);
-    }
-
-    /**
-     * Removal fact weight: the inflight domain always subtracts; the
-     * queued / permit domains subtract exactly what the removed facts
-     * held (the capture happened before the transaction's own bit
-     * teardown).
-     */
-    private static DecodeEndpoint.PlacementProjectionDelta
-            placementRemovalDelta(
-                    DecodePlacementAuthorityPort.DecodeAdmissionEntry removed) {
-        long kv = removed.kvTokens();
-        long expected = removed.expectedKvTokens();
-        int queuedBit = removed.masterQueued() ? 1 : 0;
-        int permitBit = removed.dispatchPermitToken() != 0L ? 1 : 0;
-        return new DecodeEndpoint.PlacementProjectionDelta(
-                -1, -kv, -expected,
-                -queuedBit, -queuedBit * kv, -queuedBit * expected,
-                -permitBit, -permitBit * kv, -permitBit * expected);
     }
 
     // ==================== Internal: resource rollback ====================

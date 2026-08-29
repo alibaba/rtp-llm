@@ -1828,11 +1828,11 @@ class LedgerReconciliationHarnessTest {
                         Set.of()),
                 1L,
                 Set.of(),
-                // Stage-2 T7 S2b: the placement-projection row defaults to
-                // the zero row (stamp 0 — the harness skips the projection
-                // rule on a zero-stamp row since the fixture endpoint is a
-                // mock that never receives deliveries).
-                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
+                // Stage-2 T7 S2c: the placement row derives from the
+                // inflight entry facts — the placement mirror rule's
+                // expected side (a real endpoint maintains this row
+                // in-transaction at the retired native counters' sites).
+                entryDerivedPlacementRow(inflight),
                 certified);
     }
 
@@ -1888,9 +1888,9 @@ class LedgerReconciliationHarnessTest {
                         Map.of(), Map.of(), engineConfirmedClaims),
                 1L,
                 Set.of(),
-                // Stage-2 T7 S2b: zero placement-projection row (stamp 0 —
-                // the projection rule skips the fixture mock endpoint).
-                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
+                // Stage-2 T7 S2c: the placement row derives from the
+                // (empty) inflight entry facts.
+                entryDerivedPlacementRow(Map.of()),
                 certified);
     }
 
@@ -1923,6 +1923,47 @@ class LedgerReconciliationHarnessTest {
                 observedConfirmed,
                 fenceHeldKv, fenceHeldExpectedKv,
                 fenceProjectionVersion, certified);
+    }
+
+    /**
+     * Stage-2 T7 S2c: the placement row a real endpoint's in-transaction
+     * maintenance would hold for this inflight snapshot — every fixture
+     * view derives its row from the entry facts so the placement mirror
+     * rule observes a consistent aggregate (drift is injected through the
+     * view's explicit nine-value parameters, which the retired
+     * queued / permit mirror rules still consume).
+     */
+    private static DecodeEndpoint.DecodePlacementProjectionRow
+            entryDerivedPlacementRow(Map<Long, RequestInflight> inflight) {
+        int inflightCount = 0;
+        long inflightHardKv = 0L;
+        long inflightExpectedKv = 0L;
+        int queuedCount = 0;
+        long queuedHardKv = 0L;
+        long queuedExpectedKv = 0L;
+        int permitCount = 0;
+        long permitHardKv = 0L;
+        long permitExpectedKv = 0L;
+        for (RequestInflight request : inflight.values()) {
+            inflightCount++;
+            inflightHardKv += request.kvTokens();
+            inflightExpectedKv += request.expectedKvTokens();
+            if (request.masterQueued()) {
+                queuedCount++;
+                queuedHardKv += request.kvTokens();
+                queuedExpectedKv += request.expectedKvTokens();
+            }
+            if (request.dispatchPermitToken() != 0L) {
+                permitCount++;
+                permitHardKv += request.kvTokens();
+                permitExpectedKv += request.expectedKvTokens();
+            }
+        }
+        return new DecodeEndpoint.DecodePlacementProjectionRow(
+                inflightCount, inflightHardKv, inflightExpectedKv,
+                queuedCount, queuedHardKv, queuedExpectedKv,
+                permitCount, permitHardKv, permitExpectedKv,
+                1L);
     }
 
     private static void stubDecodeView(
@@ -2012,9 +2053,9 @@ class LedgerReconciliationHarnessTest {
                 confirmedRunningCount,
                 confirmedProjectionVersion,
                 Set.of(),
-                // Stage-2 T7 S2b: zero placement-projection row (stamp 0 —
-                // the projection rule skips the fixture mock endpoint).
-                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
+                // Stage-2 T7 S2c: the placement row derives from the
+                // (empty) inflight entry facts.
+                entryDerivedPlacementRow(Map.of()),
                 certified);
     }
 
@@ -2054,9 +2095,9 @@ class LedgerReconciliationHarnessTest {
                 0,
                 1L,
                 Set.copyOf(engineLifecycleRequestIds),
-                // Stage-2 T7 S2b: zero placement-projection row (stamp 0 —
-                // the projection rule skips the fixture mock endpoint).
-                DecodeEndpoint.DecodePlacementProjectionRow.ZERO,
+                // Stage-2 T7 S2c: the placement row derives from the
+                // inflight entry facts (the mirror rule's expected side).
+                entryDerivedPlacementRow(inflight),
                 certified);
     }
 

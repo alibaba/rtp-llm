@@ -297,18 +297,7 @@ final class EndpointTestSupport {
         @Override
         public void deliverDecodeAdmissionAfterCommit(
                 long requestId,
-                DecodePlacementAuthorityPort.Projection projection,
-                DecodePlacementAuthorityPort.DecodeAdmissionEntry beforeEntry) {
-        }
-
-        // Stage-2 T7 S2b: no placement-projection row is hosted here.
-        @Override
-        public void clearInflightReservation(
-                long requestId,
-                DecodeEndpoint endpoint,
-                long endpointGeneration,
-                long reservationToken,
-                DecodePlacementAuthorityPort.DecodeAdmissionEntry removedEntry) {
+                DecodePlacementAuthorityPort.Projection projection) {
         }
 
         // Stage-2 T7 S2: no slot-side authority is hosted here, so the

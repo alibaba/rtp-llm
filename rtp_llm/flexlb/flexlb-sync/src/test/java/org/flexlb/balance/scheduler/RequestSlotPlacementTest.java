@@ -434,9 +434,7 @@ class RequestSlotPlacementTest {
             lifecycle.deliverDecodeAdmissionAfterCommit(
                     351L,
                     DecodePlacementAuthorityPort.Projection.flip(
-                            decode, 7L, 16L, false, 5L, false),
-                    new DecodePlacementAuthorityPort.DecodeAdmissionEntry(
-                            16L, true, 0L, false, 16L, 24L));
+                            decode, 7L, 16L, false, 5L, false));
             DecodePlacementAuthorityPort.DecodeAdmissionEntry view =
                     lifecycle.decodeAdmissionView(351L, decode, 7L, 16L);
             assertNotNull(view);
@@ -448,9 +446,7 @@ class RequestSlotPlacementTest {
             lifecycle.deliverDecodeAdmissionAfterCommit(
                     351L,
                     DecodePlacementAuthorityPort.Projection.flip(
-                            decode, 7L, 16L, false, 0L, true),
-                    new DecodePlacementAuthorityPort.DecodeAdmissionEntry(
-                            16L, false, 5L, false, 16L, 24L));
+                            decode, 7L, 16L, false, 0L, true));
             view = lifecycle.decodeAdmissionView(351L, decode, 7L, 16L);
             assertNotNull(view);
             assertFalse(view.masterQueued());
