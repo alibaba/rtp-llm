@@ -27,6 +27,8 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
+    // Owns all production descriptor lowering. The legacy creator classes are
+    // retained only as test oracles until their Task 9 deletion.
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          bool                     is_mtp,
@@ -57,11 +59,6 @@ private:
     // Removed functions moved to MemoryEvaluationHelper:
     // getDefaultRuntimeMemorySize
     // getKVCacheMemorySize
-
-    // Removed functions moved to dedicated creators:
-    // createSingleConfig
-    // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
 };
 
 }  // namespace rtp_llm

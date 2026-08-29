@@ -184,7 +184,7 @@ class FusedRopeKVCacheDecodeOp:
         #
         # `is not None` is sufficient here: pybind11 maps an undefined C++ torch::Tensor to
         # Python None, and the cache allocator only stores defined tensors with numel > 0
-        # (see SingleTypeKVCacheAllocator::allLayerCacheBase). MHAKVCacheSpec guarantees
+        # (see HybridPoolKVCacheAllocator::allLayerCacheBase). MHAKVCacheSpec guarantees
         # FP8 dtype always has a scale buffer, so the dummy-scale branch below is purely
         # defensive and unreachable under normal operation.
         if kv_cache.kv_scale_base is not None:

@@ -997,6 +997,7 @@ class KVCacheSpecDesc:
     entry_count_mode: OpaqueBlockEntryCountMode
     explicit_entry_count: int
     compression_ratio: int
+    kernel_tokens_per_block_alignment: int
     state_ring_overlap: int
     state_ring_include_gen_num_per_cycle: bool
     block_stride_bytes_override: int

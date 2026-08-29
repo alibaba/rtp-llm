@@ -285,10 +285,11 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
     desc.entry_elems = entry_elems;
     desc.entry_dtype = dtype;
     if (kind == "compressed_kv") {
-        desc.cache_type        = KVCacheSpecType::OpaqueKV;
-        desc.is_state_cache    = false;
-        desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
-        desc.compression_ratio = compression_ratio;
+        desc.cache_type                        = KVCacheSpecType::OpaqueKV;
+        desc.is_state_cache                    = false;
+        desc.entry_count_mode                  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+        desc.compression_ratio                 = compression_ratio;
+        desc.kernel_tokens_per_block_alignment = 128;
         if (desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES) {
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES;
         }

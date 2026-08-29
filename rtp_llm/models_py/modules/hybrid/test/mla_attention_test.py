@@ -3,8 +3,10 @@ import math
 import os
 import random
 import sys
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
+from unittest.mock import Mock
 
 import torch
 import torch.nn.functional as F
@@ -20,9 +22,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
     MlaFlashInferDecodeImpl,
     MlaFlashInferPrefillImpl,
 )
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.test.mla_attention_ref import MlaAttentionRef
 from rtp_llm.ops import ParallelismConfig
-from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -74,6 +77,161 @@ def create_cos_sin_cache():
         .to(torch.float32)
     )
     return cos_sin_cache
+
+
+class RecordingSparseMlaImpl(MlaImplBase):
+    def __init__(self, attn_inputs, output: torch.Tensor):
+        self.attn_inputs = attn_inputs
+        self.output = output
+        self.fmha_params = object()
+        self.cp_params = object()
+        self.calls = []
+
+    @staticmethod
+    def support(attn_configs, attn_inputs) -> bool:
+        return True
+
+    @staticmethod
+    def is_sparse() -> bool:
+        return True
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_id: int,
+        topk_indices: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        self.calls.append((q, compressed_kv, k_pe, kv_cache, layer_id, topk_indices))
+        if (
+            self.attn_inputs.cache_store_inputs is not None
+            and self.attn_inputs.cache_store_writer is not None
+        ):
+            self.attn_inputs.cache_store_writer.write(
+                self.attn_inputs.cache_store_inputs, kv_cache
+            )
+        return self.output
+
+
+def make_sparse_routing_attention():
+    attention = object.__new__(MlaAttention)
+    torch.nn.Module.__init__(attention)
+    topk_indices = torch.tensor([[1]], dtype=torch.int32)
+    attention.indexer = Mock(return_value=topk_indices)
+    attention.q_lora_rank = 0
+    attention.num_heads = 1
+    attention.attn_config = SimpleNamespace(size_per_head=2)
+    attention.q_head_dim = 2
+    attention.kv_lora_rank = 1
+    attention.qk_rope_head_dim = 1
+    attention.v_head_dim = 2
+    attention.layer_idx = 0
+    attention.fused_qkv_proj = Mock(
+        return_value=torch.tensor(
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            dtype=torch.float32,
+        )
+    )
+    attention.kv_a_layernorm = Mock(side_effect=lambda value: value)
+    attention.o_proj = Mock(side_effect=lambda value: value)
+    attention.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 1)
+    return attention, topk_indices
+
+
+class SparseMlaRoutingTest(TestCase):
+    def setUp(self) -> None:
+        self.default_cache = LayerKVCache(
+            torch.ones(8, dtype=torch.uint8), 64, 0, 7, "default"
+        )
+        self.indexer_cache = LayerKVCache(
+            torch.ones(8, dtype=torch.uint8) * 2, 64, 0, 3, "indexer_kv"
+        )
+
+    @staticmethod
+    def _attention_inputs(tag: str):
+        return SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=SimpleNamespace(tag=tag),
+            cache_store_writer=Mock(),
+        )
+
+    def test_sparse_forward_routes_exact_caches_independent_of_order(self):
+        attention, topk_indices = make_sparse_routing_attention()
+        default_inputs = self._attention_inputs("default")
+        indexer_inputs = self._attention_inputs("indexer_kv")
+        default_impl = RecordingSparseMlaImpl(
+            default_inputs, torch.tensor([[[9.0, 10.0]], [[11.0, 12.0]]])
+        )
+        indexer_impl = RecordingSparseMlaImpl(indexer_inputs, torch.empty(0))
+        fmha_routes = {"indexer_kv": indexer_impl, "default": default_impl}
+        cache_routes = {
+            "indexer_kv": self.indexer_cache,
+            "default": self.default_cache,
+        }
+
+        output = attention(
+            torch.zeros((2, 4), dtype=torch.float32), fmha_routes, cache_routes
+        )
+
+        self.assertTrue(torch.equal(output, torch.tensor([[9.0, 10.0], [11.0, 12.0]])))
+        self.assertEqual(len(default_impl.calls), 1)
+        _, compressed_kv, k_pe, cache, layer_id, observed_topk = default_impl.calls[0]
+        self.assertEqual(tuple(compressed_kv.shape), (2, 1))
+        self.assertEqual(tuple(k_pe.shape), (2, 1))
+        self.assertIs(cache, self.default_cache)
+        self.assertEqual(layer_id, 0)
+        self.assertIs(observed_topk, topk_indices)
+        default_inputs.cache_store_writer.write.assert_called_once_with(
+            default_inputs.cache_store_inputs, self.default_cache
+        )
+
+        attention.indexer.assert_called_once()
+        indexer_args = attention.indexer.call_args.args
+        self.assertIs(indexer_args[2], self.indexer_cache)
+        self.assertIs(indexer_args[3], indexer_impl.fmha_params)
+        self.assertIs(indexer_args[4], indexer_inputs)
+        indexer_inputs.cache_store_writer.write.assert_called_once_with(
+            indexer_inputs.cache_store_inputs, self.indexer_cache
+        )
+
+    def test_sparse_forward_rejects_missing_extra_and_wrong_routes(self):
+        default_impl = RecordingSparseMlaImpl(
+            self._attention_inputs("default"), torch.zeros((2, 1, 2))
+        )
+        indexer_impl = RecordingSparseMlaImpl(
+            self._attention_inputs("indexer_kv"), torch.empty(0)
+        )
+        valid_fmha = {"default": default_impl, "indexer_kv": indexer_impl}
+        valid_cache = {
+            "default": self.default_cache,
+            "indexer_kv": self.indexer_cache,
+        }
+        invalid_routes = (
+            ({"default": default_impl}, valid_cache),
+            ({**valid_fmha, "extra": indexer_impl}, valid_cache),
+            ({"default": default_impl, "wrong": indexer_impl}, valid_cache),
+            (valid_fmha, {"default": self.default_cache}),
+            (valid_fmha, {**valid_cache, "extra": self.indexer_cache}),
+            (
+                valid_fmha,
+                {"default": self.default_cache, "wrong": self.indexer_cache},
+            ),
+        )
+
+        for fmha_routes, cache_routes in invalid_routes:
+            attention, _ = make_sparse_routing_attention()
+            with self.subTest(
+                fmha_tags=list(fmha_routes), cache_tags=list(cache_routes)
+            ):
+                with self.assertRaisesRegex(RuntimeError, "requires exactly"):
+                    attention(
+                        torch.zeros((2, 4), dtype=torch.float32),
+                        fmha_routes,
+                        cache_routes,
+                    )
+                attention.fused_qkv_proj.assert_not_called()
 
 
 class MLATest(TestCase):
