@@ -21,6 +21,7 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
         gang_config: Optional[str] = None,
         prefill_endpoint: str = "127.0.0.1:27188",
         decode_endpoint: str = "127.0.0.1:28188",
+        server_binary: Optional[str] = None,
         dry_run: bool = True,
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
@@ -49,7 +50,7 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
             else:
                 env.pop("RTP_LLM_DRY_RUN", None)
                 env["RTP_LLM_SKIP_BUILD"] = "1"
-                env["RTP_LLM_SERVER_BINARY"] = "/bin/true"
+                env["RTP_LLM_SERVER_BINARY"] = server_binary or "/bin/true"
             if gang_config is None:
                 env.pop("GANG_CONFIG_STRING", None)
             else:
@@ -123,6 +124,28 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
         )
         self.assertNotEqual(bad_rank.returncode, 0)
         self.assertIn("WORLD_RANK must be 0 or 8", bad_rank.stderr)
+
+    def test_decode_projection_ktp16_exports_local_world_size(self):
+        gang = (
+            "name:k3_part0,ip:10.0.0.1,port:28188;"
+            "name:k3_part1,ip:10.0.0.2,port:28188"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            probe = pathlib.Path(temp_dir) / "print_local_world_size.sh"
+            probe.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'LOCAL_WORLD_SIZE=%s\\n' \"${LOCAL_WORLD_SIZE:-}\"\n",
+                encoding="utf-8",
+            )
+            probe.chmod(0o755)
+            result = self._run(
+                "decode",
+                "dp16_ktp16_ep16",
+                gang_config=gang,
+                server_binary=str(probe),
+                dry_run=False,
+            )
+        self.assertIn("LOCAL_WORLD_SIZE=8", result.stdout)
 
     def test_worker_port_block_rejects_occupied_derived_port(self):
         last_stderr = ""

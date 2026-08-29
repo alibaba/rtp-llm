@@ -426,6 +426,12 @@ model_service_config="$(
 )"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+# start_server.py spawns frontend and dash_sc helpers before the backend
+# workers.  Those helper paths read LOCAL_WORLD_SIZE from the environment
+# (rather than from --local_world_size), so a multi-node world must export the
+# node-local value explicitly.  Without this, every DP16 node spawns helpers
+# for all 16 global ranks and collides on the repeated local port block.
+export LOCAL_WORLD_SIZE="${local_world_size}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export TMPDIR="${runtime_tmpdir}"
