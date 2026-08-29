@@ -512,7 +512,6 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             state_settled = true;
             if (task.target_installed[desc_index]) {
                 evictor_.onLoaded(desc.node, desc.group_set_id);
-                evictor_.onTierChanged(desc.node, desc.group_set_id);
             } else {
                 evictor_.admitCandidate(desc.node, desc.group_set_id, resource.getTopTier());
             }

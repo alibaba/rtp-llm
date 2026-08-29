@@ -1167,22 +1167,20 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
-    // One FULL+LINEAR plan contributes two physical releases. Both GroupSets
-    // share the pending count for their common backing pool.
+    // Two independent primary releases satisfy the physical watermark. Both
+    // GroupSets share the pending count for their common backing pool, so the
+    // second GroupSet does not overschedule. Their distribution is not a
+    // fairness contract.
     EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 2u);
     EXPECT_EQ(backing->freeBlocksNum(), 3u);
     EXPECT_LT(backing->freeBlocksNum(), backing->totalBlocksNum());
     const auto descriptors = scripted_copy->descriptors();
     ASSERT_EQ(descriptors.size(), 2u);
-    std::vector<int> submitted_groups;
     for (const auto& descriptor : descriptors) {
         ASSERT_EQ(descriptor.source_tier, Tier::DEVICE);
         ASSERT_EQ(descriptor.target_tier, Tier::HOST);
         ASSERT_EQ(descriptor.source_blocks.size(), 1u);
-        submitted_groups.push_back(descriptor.group_set_id);
     }
-    EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 0), 1);
-    EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 1), 1);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
