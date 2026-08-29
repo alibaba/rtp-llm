@@ -10,6 +10,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3Weight
+from rtp_llm.models.kimi_k3.quantization import get_kimi_k3_load_time_fp8_config
 from rtp_llm.ops import HybridAttentionType
 
 _MLA_PREFILL_KV_CHUNK_TOKENS_ENV = "KIMI_K3_MLA_PREFILL_KV_CHUNK_TOKENS"
@@ -60,6 +61,12 @@ class KimiK3ModelConfig(ModelConfig):
         """K3 MegaMoE performs dispatch/combine through symmetric memory."""
         return True
 
+    def get_fmha_quant_config(self):
+        """Use K3's selective MLA load-time FP8 config in runtime FMHA."""
+        return get_kimi_k3_load_time_fp8_config(
+            is_kda=False
+        ) or super().get_fmha_quant_config()
+
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
     ) -> None:
@@ -69,7 +76,12 @@ class KimiK3ModelConfig(ModelConfig):
                 "Kimi K3 currently supports only BF16 compute, got "
                 f"{self.compute_dtype}"
             )
-        if self.quant_config is not None:
+        is_eagle3_checkpoint_fp8 = (
+            self.model_type == "kimi_k3_mla_swa_eagle3"
+            and self.quant_config is not None
+            and self.quant_config.get_method() == "FP8_PER_BLOCK"
+        )
+        if self.quant_config is not None and not is_eagle3_checkpoint_fp8:
             raise ValueError(
                 "Kimi K3 does not support runtime weight quantization; its "
                 "checkpoint-native MXFP4 experts are loaded by the K3 weight path"

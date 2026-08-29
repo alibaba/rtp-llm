@@ -7,7 +7,14 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import DenseMLP, Embedding, LinearFactory, MlaAttention, RMSNorm
+from rtp_llm.models_py.modules import (
+    DenseMLP,
+    Embedding,
+    FusedSiluAndMul,
+    LinearFactory,
+    MlaAttention,
+    RMSNorm,
+)
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
 )
@@ -18,6 +25,71 @@ from rtp_llm.models_py.modules.kimi_k3.utils import (
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+
+def _split_checkpoint_native_fp8_ffn_weights(
+    weights: Dict[str, torch.Tensor],
+    hidden_size: int,
+) -> tuple[Dict[str, torch.Tensor], bool]:
+    gate_weight = weights.get(W.ffn_w1)
+    up_weight = weights.get(W.ffn_w3)
+    gate_scale = weights.get(W.ffn_s1)
+    up_scale = weights.get(W.ffn_s3)
+    if (
+        gate_weight is not None
+        and up_weight is not None
+        and gate_scale is not None
+        and up_scale is not None
+        and gate_weight.dtype == torch.float8_e4m3fn
+        and up_weight.dtype == torch.float8_e4m3fn
+        and gate_scale.dtype == torch.int32
+        and up_scale.dtype == torch.int32
+        and gate_weight.dim() == 2
+        and up_weight.dim() == 2
+        and gate_weight.shape[-1] == hidden_size
+        and up_weight.shape[-1] == hidden_size
+    ):
+        return weights, True
+
+    fused_weight = weights.get(W.ffn_w13)
+    fused_scale = weights.get(W.ffn_s13)
+    if (
+        fused_weight is None
+        or fused_scale is None
+        or fused_weight.dtype != torch.float8_e4m3fn
+        or fused_scale.dtype != torch.int32
+        or fused_weight.dim() != 2
+        or fused_scale.dim() != 2
+        or fused_weight.shape[-1] != hidden_size * 2
+        or fused_scale.shape[-1] % 2
+    ):
+        return weights, False
+
+    split_weights = dict(weights)
+    split_weights[W.ffn_w1], split_weights[W.ffn_w3] = torch.chunk(
+        fused_weight, 2, dim=-1
+    )
+    split_weights[W.ffn_s1], split_weights[W.ffn_s3] = torch.chunk(
+        fused_scale, 2, dim=-1
+    )
+    split_weights.pop(W.ffn_w13)
+    split_weights.pop(W.ffn_s13)
+
+    fused_bias = split_weights.pop(W.ffn_b13, None)
+    if fused_bias is not None:
+        split_weights[W.ffn_b1], split_weights[W.ffn_b3] = torch.chunk(
+            fused_bias, 2, dim=-1
+        )
+    return split_weights, True
+
+
+class _SplitFusedSiluAndMul(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self._fused = FusedSiluAndMul()
+
+    def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        return self._fused(torch.cat((gate, up), dim=-1))
 
 
 class _GatedEagle3MLA(MlaAttention):
@@ -35,10 +107,26 @@ class _GatedEagle3MLA(MlaAttention):
             layernorm_eps=config.layernorm_eps,
             quant_config=config.quant_config,
         )
+        self._uses_separate_gate_layout = W.attn_gate_w in weights
+        self._gate_proj = (
+            LinearFactory.create_linear_from_weights(
+                weights,
+                W.attn_gate_w,
+                W.attn_gate_s,
+                None,
+                quant_config=config.quant_config,
+            )
+            if self._uses_separate_gate_layout
+            else None
+        )
+
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         fused_qkv_gate = self.fused_qkv_a_proj(hidden_states)
+        if self._uses_separate_gate_layout:
+            assert self._gate_proj is not None
+            return fused_qkv_gate, self._gate_proj(hidden_states)
         qkv_width = self.q_lora_rank + self.kv_lora_rank + self.qk_rope_head_dim
         return fused_qkv_gate[..., :qkv_width], fused_qkv_gate[..., qkv_width:]
 
@@ -68,11 +156,18 @@ class _KimiK3Eagle3Layer(nn.Module):
         self.post_attention_norm = RMSNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
+        mlp_weights, use_split_gate_up = _split_checkpoint_native_fp8_ffn_weights(
+            weights, config.hidden_size
+        )
         self.mlp = DenseMLP(
             config.activation_type,
             parallelism_config,
-            weights,
+            mlp_weights,
             config.quant_config,
+            merge_gate_up=not use_split_gate_up,
+            gated_activation=(
+                _SplitFusedSiluAndMul() if use_split_gate_up else None
+            ),
         )
 
     def forward(self, embedding, hidden_states, fmha_impl, kv_cache):

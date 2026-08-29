@@ -246,7 +246,7 @@ class AttnImplFactory(object):
             weight,
             attn_inputs,
             fmha_config,
-            model_config.quant_config,
+            model_config.get_fmha_quant_config(),
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,

@@ -529,6 +529,10 @@ class ModelConfig(CppModelConfig):
         self.mm_related_params = VitParameters()
         self.quant_config = None
 
+    def get_fmha_quant_config(self):
+        """Return the quantization config used by runtime attention kernels."""
+        return self.quant_config
+
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
 

@@ -143,6 +143,39 @@ class TestPackUe8m0KernelLauncher(TestCase):
         diff = (ref_output != our_output).sum().item()
         self.assertEqual(diff, 0, f"Values mismatch: {diff} elements differ")
 
+    def test_k3_weight_scale_transform_uses_portable_ue8m0_pack(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
+            _transform_scale_ue8m0,
+        )
+
+        block_scale = torch.tensor(
+            [[1.0, 2.0, 4.0, 8.0], [16.0, 32.0, 64.0, 128.0]],
+            device="cuda",
+            dtype=torch.float32,
+        )
+
+        packed = _transform_scale_ue8m0(block_scale, mn=256)
+
+        first_block = int.from_bytes(
+            bytes((127, 128, 129, 130)), byteorder="little", signed=True
+        )
+        second_block = int.from_bytes(
+            bytes((131, 132, 133, 134)), byteorder="little", signed=True
+        )
+        self.assertEqual(packed.shape, (256, 1))
+        torch.testing.assert_close(
+            packed[:128],
+            torch.full_like(packed[:128], first_block),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            packed[128:],
+            torch.full_like(packed[128:], second_block),
+            rtol=0,
+            atol=0,
+        )
+
 
 # ============================================================================
 # Tests for create_packed_scale_tensor

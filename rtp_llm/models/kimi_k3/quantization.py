@@ -8,6 +8,7 @@ from typing import Optional, Union
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     LoadQuantPerBlockFp8Weight,
@@ -109,8 +110,11 @@ class KimiK3LoadTimeFp8Weight(LoadQuantPerBlockFp8Weight):
         merged = self._source_weight._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
-        rank_local = self._source_weight._split(merged, load_config)
-        weight = rank_local[self._source_weight.name]
+        if self._is_mla_output_gate():
+            weight = self._split_mla_output_gate(merged, load_config)
+        else:
+            rank_local = self._source_weight._split(merged, load_config)
+            weight = rank_local[self._source_weight.name]
         quantized, scale = quantize_rank_local_fp8(
             weight,
             group_size=self.group_size,
@@ -122,6 +126,31 @@ class KimiK3LoadTimeFp8Weight(LoadQuantPerBlockFp8Weight):
             self.kernel.name: quantized,
             self.scale.name: scale,
         }
+
+    def _is_mla_output_gate(self) -> bool:
+        return self._source_weight.name == W.attn_gate_w and isinstance(
+            self._source_weight, MlaAttnAtomicWeight
+        )
+
+    def _split_mla_output_gate(
+        self,
+        merged: dict[str, torch.Tensor],
+        load_config: LoadConfig,
+    ) -> torch.Tensor:
+        config = self._source_weight.config
+        head_num = int(config.head_num)
+        value_dim = int(config.v_head_dim)
+        tp_size = int(load_config.tp_size)
+        tp_rank = int(load_config.tp_rank)
+        if head_num % tp_size:
+            raise ValueError(
+                f"MLA gate heads {head_num} must be divisible by TP {tp_size}"
+            )
+        local_width = head_num // tp_size * value_dim
+        start = tp_rank * local_width
+        return merged[self._source_weight.name].narrow(
+            1, start, local_width
+        ).clone(memory_format=torch.contiguous_format)
 
     def _split(self, tensor, load_config: LoadConfig):
         # The source weight was already split before quantization above.

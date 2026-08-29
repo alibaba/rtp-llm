@@ -54,12 +54,14 @@ def ceil_to_ue8m0(x: torch.Tensor):
 
 # NOTE copy and modified from DeepGEMM
 def _transform_scale_ue8m0(sf, mn):
-    import deep_gemm.utils.layout
+    from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+        pack_ue8m0_kernel_launcher,
+    )
 
     if not sf.is_cuda:
         sf = sf.cuda()
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
-    sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
+    sf = pack_ue8m0_kernel_launcher(sf, gran_mn=1)
     return sf
 
 

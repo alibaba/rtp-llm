@@ -6,17 +6,24 @@ from unittest import mock
 import torch
 from torch import nn
 
+from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     split_kda_qkvg,
 )
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 from rtp_llm.models.kimi_k3.quantization import (
     KimiK3LoadTimeFp8Weight,
     get_kimi_k3_load_time_fp8_config,
     quantize_rank_local_fp8,
     wrap_kimi_k3_load_time_fp8_weight,
+)
+from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import (
+    _GatedEagle3MLA,
+    _SplitFusedSiluAndMul,
+    _split_checkpoint_native_fp8_ffn_weights,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda.module import KimiK3KDA
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
@@ -37,6 +44,64 @@ class _TensorSource(TensorSource):
 
 
 class KimiK3LoadTimeQuantTest(unittest.TestCase):
+    def test_eagle3_split_fp8_ffn_activation_accepts_gate_and_up(self):
+        activation = _SplitFusedSiluAndMul()
+        gate = torch.tensor([[1.0, -1.0]], dtype=torch.bfloat16)
+        up = torch.tensor([[2.0, 3.0]], dtype=torch.bfloat16)
+
+        actual = activation(gate, up)
+
+        torch.testing.assert_close(actual, torch.nn.functional.silu(gate) * up)
+
+    def test_eagle3_keeps_checkpoint_native_fp8_split_ffn_projections(self):
+        weights = {
+            W.ffn_w1: torch.zeros((6, 4), dtype=torch.float8_e4m3fn),
+            W.ffn_s1: torch.zeros((6, 1), dtype=torch.int32),
+            W.ffn_w3: torch.zeros((6, 4), dtype=torch.float8_e4m3fn),
+            W.ffn_s3: torch.zeros((6, 1), dtype=torch.int32),
+        }
+
+        split_weights, use_split_gate_up = (
+            _split_checkpoint_native_fp8_ffn_weights(weights, hidden_size=4)
+        )
+
+        self.assertTrue(use_split_gate_up)
+        self.assertIs(split_weights, weights)
+
+    def test_eagle3_splits_checkpoint_native_fp8_merged_ffn_input_axis(self):
+        weights = {
+            W.ffn_w13: torch.zeros((6, 8), dtype=torch.float8_e4m3fn),
+            W.ffn_s13: torch.zeros((6, 2), dtype=torch.int32),
+        }
+
+        split_weights, use_split_gate_up = (
+            _split_checkpoint_native_fp8_ffn_weights(weights, hidden_size=4)
+        )
+
+        self.assertTrue(use_split_gate_up)
+        self.assertNotIn(W.ffn_w13, split_weights)
+        self.assertNotIn(W.ffn_s13, split_weights)
+        self.assertEqual(split_weights[W.ffn_w1].shape, (6, 4))
+        self.assertEqual(split_weights[W.ffn_w3].shape, (6, 4))
+        self.assertEqual(split_weights[W.ffn_s1].shape, (6, 1))
+        self.assertEqual(split_weights[W.ffn_s3].shape, (6, 1))
+
+    def test_eagle3_uses_separate_mla_output_gate_when_present(self):
+        attention = _GatedEagle3MLA.__new__(_GatedEagle3MLA)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 2
+        attention.kv_lora_rank = 3
+        attention.qk_rope_head_dim = 1
+        attention._uses_separate_gate_layout = True
+        attention.fused_qkv_a_proj = nn.Linear(2, 6, bias=False)
+        attention._gate_proj = nn.Linear(2, 4, bias=False)
+
+        hidden_states = torch.tensor([[1.0, 2.0]])
+        fused_qkv, output_gate = attention._project_qkv_a_input(hidden_states)
+
+        self.assertEqual(fused_qkv.shape, (1, 6))
+        self.assertEqual(output_gate.shape, (1, 4))
+
     def test_kda_and_mla_switches_are_independent_and_default_off(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(get_kimi_k3_load_time_fp8_config(is_kda=True))
@@ -59,6 +124,44 @@ class KimiK3LoadTimeQuantTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "KIMI_K3_W8A8_MLA"):
                 get_kimi_k3_load_time_fp8_config(is_kda=False)
+
+    def test_k3_fmha_uses_mla_load_time_quant_config(self):
+        config = KimiK3ModelConfig()
+        config.quant_config = None
+
+        with mock.patch.dict(
+            os.environ,
+            {"KIMI_K3_W8A8_KDA": "0", "KIMI_K3_W8A8_MLA": "1"},
+            clear=True,
+        ):
+            fmha_quant_config = config.get_fmha_quant_config()
+
+        self.assertIsNotNone(fmha_quant_config)
+        self.assertEqual(fmha_quant_config.get_method(), "FP8_PER_BLOCK")
+        self.assertEqual(fmha_quant_config.group_size(), 128)
+        self.assertFalse(fmha_quant_config.is_quanted())
+
+    def test_eagle3_accepts_checkpoint_native_fp8_quantization(self):
+        config = KimiK3ModelConfig()
+        config.ckpt_path = ""
+        config.model_type = "kimi_k3_mla_swa_eagle3"
+        config.config_dtype = "bfloat16"
+        config.quantization = "FP8_PER_BLOCK"
+
+        config.init_precision_config(None, None)
+
+        self.assertIsNotNone(config.quant_config)
+        self.assertEqual(config.quant_config.get_method(), "FP8_PER_BLOCK")
+
+    def test_main_k3_still_rejects_framework_quantization(self):
+        config = KimiK3ModelConfig()
+        config.ckpt_path = ""
+        config.model_type = "kimi_k3"
+        config.config_dtype = "bfloat16"
+        config.quantization = "FP8_PER_BLOCK"
+
+        with self.assertRaisesRegex(ValueError, "runtime weight quantization"):
+            config.init_precision_config(None, None)
 
     def test_quantizes_rank_local_runtime_layout(self):
         weight = torch.empty((130, 257), dtype=torch.bfloat16)
@@ -287,6 +390,49 @@ class KimiK3LoadTimeQuantTest(unittest.TestCase):
         )
 
         self.assertEqual(loaded[W.attn_gate_w].shape, (2, 4))
+        self.assertEqual(loaded[W.attn_gate_s].shape, (1, 1))
+
+    def test_mla_gate_split_uses_value_head_dim(self):
+        source_weight = MlaAttnAtomicWeight(
+            W.attn_gate_w,
+            [CkptWeightInfo("self_attn.g_proj.weight", identity)],
+            process_fun=transpose,
+            config=MlaConfig(head_num=4, v_head_dim=2),
+        )
+        with mock.patch.dict(
+            os.environ, {"KIMI_K3_W8A8_MLA": "1"}, clear=True
+        ):
+            wrapped = KimiK3LoadTimeFp8Weight(
+                source_weight,
+                get_kimi_k3_load_time_fp8_config(is_kda=False),
+            )
+
+        load_config = SimpleNamespace(
+            compute_dtype=torch.bfloat16,
+            tp_size=2,
+            tp_rank=1,
+            ep_size=1,
+            ep_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            ffn_tp_size=1,
+            ffn_tp_rank=0,
+            hidden_size=4,
+            head_num=4,
+            head_num_kv=4,
+            size_per_head=3,
+            moe_pure_tp_mode=False,
+            bit=16,
+        )
+        checkpoint_weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        loaded = wrapped._load_raw_tensor(
+            _TensorSource({"self_attn.g_proj.weight": checkpoint_weight}),
+            None,
+            "cpu",
+            load_config,
+        )
+
+        self.assertEqual(loaded[W.attn_gate_w].shape, (4, 4))
         self.assertEqual(loaded[W.attn_gate_s].shape, (1, 1))
 
 
