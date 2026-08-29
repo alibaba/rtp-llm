@@ -156,8 +156,9 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 128, 136, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(101L));
-        assertTrue(endpoint.markPriorityCancelAccepted(101L, 1L));
+        // Stage-2 L4 retirement: the protocol phase gate is slot-side;
+        // settlement only needs the exact attemptToken + reservationToken
+        // fencing.
         assertTrue(endpoint.settlePriorityCanceled(
                 101L, reservations.get(1L)));
         assertTrue(endpoint.commitPriorityPreemption(101L));
@@ -185,7 +186,6 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(102L, List.of(1L),
                         9L, 128, 136, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(102L));
 
         assertTrue(endpoint.settlePriorityTombstoned(
                 102L, reservations.get(1L)));
@@ -240,8 +240,6 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(confirmedView(2L).claimedForPreemption());
         assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
         assertEquals(700, endpoint.inflightHardKvReserved());
-        assertTrue(endpoint.markPriorityCancelInFlight(101L));
-        assertTrue(endpoint.markPriorityCancelAccepted(101L, 2L));
         assertTrue(isConfirmed(2L));
         assertTrue(endpoint.admissionVersion() > version);
     }
@@ -315,7 +313,6 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 700, 708, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(101L));
 
         assertEquals(0, endpoint.evictExpiredRequests(
                 100, requestId -> false));
@@ -324,7 +321,10 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(1_200, endpoint.inflightHardKvReserved(),
                 "victim and provisional incoming remain fully charged");
 
-        endpoint.abortPriorityPreemption(101L);
+        // Stage-2 L4 retirement: the victim never crossed an outbound
+        // boundary, so the coordinator passes it as locally releasable.
+        endpoint.abortPriorityPreemption(
+                101L, List.of(reservations.get(1L)));
         assertEquals(1, endpoint.evictExpiredRequests(
                 100, requestId -> false));
         assertFalse(endpoint.layeredAdmissionView().reserved().containsKey(1L));
@@ -338,9 +338,10 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 700, 708, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(101L));
         assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));
-        endpoint.abortPriorityPreemption(101L);
+        // The NOT_FOUND claim already crossed the outbound boundary; the
+        // coordinator passes no releasable victim.
+        endpoint.abortPriorityPreemption(101L, List.of());
 
         // Decode disappears while NOT_FOUND is being reconciled. Its KV is
         // conservatively held until the original Prefill reports it active.
@@ -349,9 +350,17 @@ class DecodeEndpointLayeredViewTest {
 
         assertTrue(endpoint.reconcilePriorityVictimActive(
                 101L, reservations.get(1L)));
-        assertEquals(10_000, endpoint.realKvAvailable(),
-                "active reconciliation must release held KV before dropping the claim");
+        // Stage-2 L4 retirement: active reconciliation removes the registry
+        // entry only; the held-KV projection and the synthetic confirmed
+        // entry drain on the next calibration pass (conservative window —
+        // availability under-reported, never over-reported).
+        assertEquals(9_500, endpoint.realKvAvailable());
         assertFalse(confirmedView(1L).claimedForPreemption());
+
+        updateStatus(Map.of(), null, 10_000);
+        assertEquals(10_000, endpoint.realKvAvailable(),
+                "the next calibration pass releases the reconciled victim's held KV");
+        assertEquals(0, endpoint.getTotalLoad());
     }
 
     @Test
@@ -361,7 +370,6 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(104L, List.of(1L),
                         9L, 700, 708, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(104L));
         assertTrue(endpoint.markPriorityCancelNotFound(104L, 1L));
 
         // Decode disappearance moves the victim's 500-token charge into a
@@ -382,7 +390,9 @@ class DecodeEndpointLayeredViewTest {
         assertFalse(endpoint.settlePriorityTombstoned(
                 104L, reservations.get(1L)),
                 "the original attempt cannot settle a transferred fence");
-        endpoint.abortPriorityPreemption(104L);
+        // The transferred claim is not locally releasable; abort releases
+        // only the provisional incoming reservation.
+        endpoint.abortPriorityPreemption(104L, List.of());
 
         assertEquals(0, endpoint.inflightHardKvReserved(),
                 "aborting the attempt releases only its provisional incoming reservation");
@@ -393,12 +403,20 @@ class DecodeEndpointLayeredViewTest {
 
         assertTrue(endpoint.settleEngineFenceClaim(
                 104L, reservations.get(1L)));
-        assertEquals(10_000, endpoint.realKvAvailable());
+        // Stage-2 L4 retirement: the exact fence settlement releases the
+        // confirmed slot immediately; the held-KV projection drains on the
+        // next calibration pass (conservative window — availability
+        // under-reported, never over-reported).
         assertEquals(0, endpoint.getTotalLoad());
+        assertEquals(9_500, endpoint.realKvAvailable());
         assertFalse(endpoint.settleEngineFenceClaim(
                 104L, reservations.get(1L)),
                 "the exact fence generation settles accounting at most once");
-        assertEquals(10_000, endpoint.realKvAvailable());
+
+        updateStatus(Map.of(), null, 10_000);
+        assertEquals(10_000, endpoint.realKvAvailable(),
+                "the next calibration pass drains the settled fence hold");
+        assertEquals(0, endpoint.getTotalLoad());
     }
 
     // ==================== snapshot capture: layered lists ====================

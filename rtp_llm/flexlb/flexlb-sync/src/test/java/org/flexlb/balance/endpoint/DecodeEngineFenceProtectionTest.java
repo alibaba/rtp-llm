@@ -131,9 +131,10 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 100, 120, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(101L));
         assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));
-        endpoint.abortPriorityPreemption(101L);
+        // The NOT_FOUND claim already crossed the outbound boundary; the
+        // coordinator passes no releasable victim.
+        endpoint.abortPriorityPreemption(101L, List.of());
 
         assertTrue(endpoint.reconcilePriorityVictimFinished(
                 101L, reservations.get(1L)));
@@ -308,12 +309,13 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 100, 120, 70));
-        assertTrue(endpoint.markPriorityCancelInFlight(101L));
         assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));
 
         updateStatus(Map.of(), Map.of(), 10_000);
         assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(101L, 1L));
-        endpoint.abortPriorityPreemption(101L);
+        // The transferred claim is not locally releasable; abort releases
+        // only the provisional incoming reservation.
+        endpoint.abortPriorityPreemption(101L, List.of());
         assertEquals(1, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable());
 
@@ -327,14 +329,22 @@ class DecodeEngineFenceProtectionTest {
         assertTrue(endpoint.settleEngineFenceClaim(
                 101L, reservations.get(1L)));
         // Settling the priority token owner is the authoritative terminal: it
-        // releases the confirmed slot and its held KV. The overlapping generic
+        // releases the confirmed slot immediately. The overlapping generic
         // fence created just above never contributed an independent
         // fence-held charge (the priority claim already owned the accounting),
-        // so there is no union hold left for it to inherit; the load and KV
-        // return to idle.
+        // so there is no union hold left for it to inherit. Stage-2 L4
+        // retirement: the held-KV projection drains on the next calibration
+        // pass (conservative window — availability under-reported, never
+        // over-reported).
         assertEquals(0, endpoint.getTotalLoad(),
                 "priority settlement releases the confirmed slot; the overlapping "
                         + "generic fence added no independent fence-held charge");
+        assertEquals(9_500, endpoint.realKvAvailable());
+
+        // The next pass re-derives the projection from registry facts: no
+        // priority claim backs the victim anymore, so accounting drops to idle.
+        updateStatus(Map.of(), Map.of(), 10_000);
+        assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
 
         assertTrue(settleTombstoned(1L));

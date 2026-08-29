@@ -1,7 +1,6 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.execution.TtlEvictor;
-import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -71,18 +70,38 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final ConcurrentHashMap<Long, ConfirmedTask> trackedConfirmed = new ConcurrentHashMap<>();
 
     /**
-     * Token-fenced priority-preemption ownership.  Victim accounting remains
-     * in its original layer until a typed Prefill WorkerStatus CANCELED event
-     * is settled; an ACCEPTED Cancel response only advances the claim state.
-     * All access is under {@link #admissionLock}.
+     * Engine-fact projection of priority-preemption ownership (stage-2 L4
+     * retirement): attempt token, claim owner, exact reservation identity,
+     * per-victim KV, the NOT_FOUND / transport-unknown acknowledgement
+     * facts, and the fence-transfer marker. The Cancel protocol state
+     * machine lives in the slot-side PreemptionRegistration (the stage-1
+     * mirror is the sole authority); endpoint methods keep only the exact
+     * attemptToken + reservationToken fencing so a late acknowledgement from
+     * an older attempt can never settle a newer claim. All access is under
+     * {@link #admissionLock}.
      */
     private final Map<Long, PreemptionClaim> preemptionClaims = new HashMap<>();
     private final Map<Long, EndpointPreemptionAttempt> preemptionAttempts = new HashMap<>();
 
-    /** KV that Decode has reported free but the Prefill CANCELED fence has not settled yet. */
+    /**
+     * KV held for engine-confirmed victims that temporarily disappeared
+     * from WorkerStatus while a priority claim still owns them (stage-2 L4
+     * retirement): a projection recomputed from registry facts on every
+     * calibration pass (claim owner ENGINE_CONFIRMED + absent from the
+     * fresh observation), never an incrementally maintained latch.
+     * Conservatively high between a registry mutation and the next pass —
+     * availability is under-reported, never over-reported.
+     */
     private final AtomicLong priorityPreemptionHeldKv = new AtomicLong();
-    /** Expected-demand counterpart; invariant: expected hold >= hard hold >= 0. */
     private final AtomicLong priorityPreemptionHeldExpectedKv = new AtomicLong();
+    /**
+     * Admission version stamped when the priority-held projection was last
+     * recomputed (stage-2 L4). An out-of-band registry mutation bumps the
+     * admission version without recomputing the projection; an audit
+     * capture whose stamp still differs reads a conservatively stale
+     * projection.
+     */
+    private volatile long priorityProjectionVersion;
 
     /**
      * Request-scoped ownership retained by a generic scheduler EngineFence.
@@ -494,6 +513,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         preemptionAttempts.clear();
         priorityPreemptionHeldKv.set(0L);
         priorityPreemptionHeldExpectedKv.set(0L);
+        priorityProjectionVersion = admissionVersion.get();
 
         engineFenceProtections.clear();
         engineFenceHeldKv.set(0L);
@@ -1993,60 +2013,43 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** CLAIMED -> CANCEL_IN_FLIGHT; must complete before any outbound RPC. */
-    public boolean markPriorityCancelInFlight(long attemptToken) {
+    /**
+     * Record the engine's Cancel NOT_FOUND acknowledgement fact (stage-2 L4
+     * retirement): the protocol transition is slot-side; this setter only
+     * stores the observation on the claim projection, idempotently.
+     */
+    public boolean markPriorityCancelNotFound(long attemptToken, long requestId) {
         admissionLock.lock();
         try {
-            EndpointPreemptionAttempt attempt = preemptionAttempts.get(attemptToken);
-            if (attempt == null) {
+            PreemptionClaim claim = preemptionClaims.get(requestId);
+            if (claim == null || claim.attemptToken != attemptToken) {
                 return false;
             }
-            for (ReservationHandle victim
-                    : attempt.remainingVictims.values()) {
-                long victimId = victim.requestId();
-                PreemptionClaim claim = preemptionClaims.get(victimId);
-                if (claim == null || claim.attemptToken != attemptToken
-                        || claim.reservationToken
-                                != victim.reservationToken()
-                        || !claim.phase.canStartCancel()) {
-                    return false;
-                }
+            if (!claim.notFoundStale) {
+                claim.notFoundStale = true;
+                admissionVersion.incrementAndGet();
             }
-            for (ReservationHandle victim
-                    : attempt.remainingVictims.values()) {
-                preemptionClaims.get(victim.requestId()).phase =
-                        PreemptionCancelPhase.CANCEL_IN_FLIGHT;
-            }
-            admissionVersion.incrementAndGet();
             return true;
         } finally {
             admissionLock.unlock();
         }
     }
 
-    /** Cancel ACCEPTED: retain every byte/slot and only advance control state. */
-    public boolean markPriorityCancelAccepted(long attemptToken, long requestId) {
-        return transitionClaim(attemptToken, requestId,
-                PreemptionCancelPhase.CANCEL_IN_FLIGHT,
-                PreemptionCancelPhase.CANCEL_REQUESTED);
-    }
-
-    public boolean markPriorityCancelNotFound(long attemptToken, long requestId) {
-        return transitionClaim(attemptToken, requestId,
-                PreemptionCancelPhase.CANCEL_IN_FLIGHT,
-                PreemptionCancelPhase.NOT_FOUND_STALE);
-    }
-
+    /**
+     * Record a transport-unknown Cancel outcome fact (stage-2 L4
+     * retirement): idempotent observation, no accounting change.
+     */
     public boolean markPriorityCancelUnknown(long attemptToken, long requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
-            if (claim == null || claim.attemptToken != attemptToken
-                    || !claim.phase.canRecordUnknown()) {
+            if (claim == null || claim.attemptToken != attemptToken) {
                 return false;
             }
-            claim.phase = PreemptionCancelPhase.CANCEL_UNKNOWN;
-            admissionVersion.incrementAndGet();
+            if (!claim.cancelUnknown) {
+                claim.cancelUnknown = true;
+                admissionVersion.incrementAndGet();
+            }
             return true;
         } finally {
             admissionLock.unlock();
@@ -2072,10 +2075,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
+            // Stage-2 L4 retirement: the protocol gate moved to the
+            // slot-side registration; only the exact fencing stays.
             if (claim == null || claim.attemptToken != attemptToken
                     || claim.reservationToken
-                            != reservation.reservationToken()
-                    || !claim.phase.acceptsPriorityTerminal()) {
+                            != reservation.reservationToken()) {
                 return false;
             }
             settled = settlePriorityClaimTerminalLocked(
@@ -2112,11 +2116,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
+            // Stage-2 L4 retirement: the tombstone protocol gate is
+            // slot-side; the exact fencing and the un-transferred fence
+            // marker stay (a transferred claim settles only through the
+            // fence channel).
             if (claim == null || claim.attemptToken != attemptToken
                     || claim.reservationToken
                             != reservation.reservationToken()
-                    || claim.engineFenceTransferred
-                    || !claim.phase.acceptsTombstone()) {
+                    || claim.engineFenceTransferred) {
                 return false;
             }
             settled = settlePriorityClaimTerminalLocked(
@@ -2136,10 +2143,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Engine fence without releasing any victim accounting.
      *
      * <p>The original attempt token becomes the exact endpoint-side fence
-     * generation. In particular, {@code kvHeldAfterWorkerRelease} remains
-     * charged when Decode has already stopped reporting an ENGINE_CONFIRMED
-     * victim; dropping that synthetic hold here would oversell KV before the
-     * new Cancel observes TOMBSTONED or another authoritative terminal.</p>
+     * generation. In particular, the priority-held KV projection keeps
+     * charging this victim when Decode has already stopped reporting an
+     * ENGINE_CONFIRMED victim; dropping that hold here would oversell KV
+     * before the new Cancel observes TOMBSTONED or another authoritative
+     * terminal.</p>
      */
     public boolean transferPriorityNotFoundClaimToEngineFence(
             long attemptToken,
@@ -2149,7 +2157,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             PreemptionClaim claim = preemptionClaims.get(requestId);
             if (claim == null || claim.attemptToken != attemptToken
                     || claim.engineFenceTransferred
-                    || claim.phase != PreemptionCancelPhase.NOT_FOUND_STALE) {
+                    || !claim.notFoundStale) {
                 return false;
             }
             claim.engineFenceTransferred = true;
@@ -2253,7 +2261,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     -shadow.expectedKvTokens());
         }
         removeEngineLifecycleReservationExactLocked(reservationToken);
-        releaseHeldKv(claim);
+        // Stage-2 L4 retirement: registry removal only — the priority-held
+        // projection drains with the next calibration pass (conservatively
+        // high in between).
         preemptionClaims.remove(requestId, claim);
         if (attempt != null) {
             attempt.remainingVictims.remove(requestId, reservation);
@@ -2290,8 +2300,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * successfully canceled victims become ordinary free capacity, while
      * NOT_FOUND/unknown claims retain their accounting and reconciliation
      * fence.
+     *
+     * <p>Stage-2 L4 retirement: the locally-releasable protocol judgement is
+     * coordinator-side (the claim never crossed an outbound boundary); the
+     * caller therefore passes the releasable victim reservations explicitly,
+     * and this method only applies the exact-fenced registry removal.</p>
      */
-    public void abortPriorityPreemption(long attemptToken) {
+    public void abortPriorityPreemption(
+            long attemptToken,
+            List<ReservationHandle> releasableVictims) {
         boolean capacityChanged = false;
         admissionLock.lock();
         try {
@@ -2300,17 +2317,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return;
             }
             releaseLocked(attempt.incomingRequestId);
-            for (ReservationHandle victim
-                    : attempt.remainingVictims.values()) {
-                long victimId = victim.requestId();
-                PreemptionClaim claim = preemptionClaims.get(victimId);
-                if (claim == null || claim.attemptToken != attemptToken
-                        || claim.reservationToken
-                                != victim.reservationToken()) {
-                    continue;
-                }
-                if (claim.phase.isLocallyReleasable()) {
-                    releaseHeldKv(claim);
+            if (releasableVictims != null) {
+                for (ReservationHandle victim : releasableVictims) {
+                    long victimId = victim.requestId();
+                    PreemptionClaim claim = preemptionClaims.get(victimId);
+                    if (claim == null || claim.attemptToken != attemptToken
+                            || claim.reservationToken
+                                    != victim.reservationToken()) {
+                        continue;
+                    }
+                    // Stage-2 L4 retirement: registry removal only — the
+                    // priority-held projection drains with the next pass.
                     preemptionClaims.remove(victimId);
                 }
             }
@@ -2343,10 +2360,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || claim.reservationToken
                             != reservation.reservationToken()
                     || claim.engineFenceTransferred
-                    || claim.phase != PreemptionCancelPhase.NOT_FOUND_STALE) {
+                    || !claim.notFoundStale) {
                 return false;
             }
-            releaseHeldKv(claim);
+            // Stage-2 L4 retirement: registry removal only — the held KV is
+            // a projection that drains with the next calibration pass.
             preemptionClaims.remove(requestId);
             admissionVersion.incrementAndGet();
             reconciled = true;
@@ -2378,18 +2396,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
+            // Stage-2 L4 retirement: ordinary reconciliation applies to
+            // claims whose Cancel outcome is NOT_FOUND or transport-unknown
+            // (the acknowledgement facts), never to a transferred fence.
             if (claim == null
                     || claim.attemptToken != attemptToken
                     || claim.reservationToken
                             != reservation.reservationToken()
                     || claim.engineFenceTransferred
-                    || !claim.phase.requiresOrdinaryReconciliation()) {
+                    || !(claim.notFoundStale || claim.cancelUnknown)) {
                 return false;
             }
             // An ordinary finished sample is authoritative. Unlike an
             // ambiguous priority ACK, it must clear the generic fence rather
-            // than transfer accounting into it.
-            releaseHeldKv(claim);
+            // than transfer accounting into it. Registry removal only — the
+            // priority-held projection drains with the next calibration
+            // pass (stage-2 L4 retirement).
             preemptionClaims.remove(requestId);
             if (claim.reservationToken > 0L) {
                 settleAuthoritativeTerminalLocked(
@@ -2411,25 +2433,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             notifyEngineDispatchCapacityListeners();
         }
         return reconciled;
-    }
-
-    private boolean transitionClaim(long attemptToken, long requestId,
-                                    PreemptionCancelPhase expected,
-                                    PreemptionCancelPhase next) {
-        admissionLock.lock();
-        try {
-            PreemptionClaim claim = preemptionClaims.get(requestId);
-            if (claim == null
-                    || claim.attemptToken != attemptToken
-                    || claim.phase != expected) {
-                return false;
-            }
-            claim.phase = next;
-            admissionVersion.incrementAndGet();
-            return true;
-        } finally {
-            admissionLock.unlock();
-        }
     }
 
     /** Accepted-not-running layer size (Phase 5 gauge). */
@@ -2548,15 +2551,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 PreemptionClaim claim = preemptionClaims.get(requestId);
                 if (claim != null
                         && !claim.engineFenceTransferred
-                        && claim.phase == PreemptionCancelPhase.NOT_FOUND_STALE
+                        && claim.notFoundStale
                         && !preemptionAttempts.containsKey(claim.attemptToken)) {
-                    releaseHeldKv(claim);
+                    // Stage-2 L4 retirement: registry removal only — the
+                    // priority-held projection drains with the next pass.
                     preemptionClaims.remove(requestId);
                     claim = null;
                 }
                 if (claim != null) {
                     claim.owner = ClaimOwner.ENGINE_CONFIRMED;
-                    releaseHeldKv(claim);
                 }
                 confirmedNow.add(requestId);
                 trackConfirmed(task, phase, removed, now);
@@ -2611,15 +2614,31 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
 
-        int syntheticallyHeldSlots = 0;
+        // Stage-2 L4 retirement: the priority-held aggregates are a
+        // projection recomputed from registry facts on every pass — an
+        // ENGINE_CONFIRMED claim whose victim is absent from the fresh
+        // observation keeps its slot and KV charged. The incremental
+        // hold-latch state machine is deleted; out-of-band registry
+        // mutations (settle / reconcile / abort) leave the totals
+        // conservatively high until the next pass recomputes them.
+        long priorityHeldKv = 0L;
+        long priorityHeldExpectedKv = 0L;
+        int priorityHeldSlots = 0;
         for (Map.Entry<Long, PreemptionClaim> entry : preemptionClaims.entrySet()) {
             PreemptionClaim claim = entry.getValue();
-            if (claim.owner == ClaimOwner.ENGINE_CONFIRMED
-                    && !confirmedNow.contains(entry.getKey())) {
-                syntheticallyHeldSlots++;
-                holdReleasedKv(claim);
+            if (claim.owner != ClaimOwner.ENGINE_CONFIRMED
+                    || confirmedNow.contains(entry.getKey())) {
+                continue;
             }
+            priorityHeldKv = saturatedAddNonNegative(
+                    priorityHeldKv, claim.hardKvTokens);
+            priorityHeldExpectedKv = saturatedAddNonNegative(
+                    priorityHeldExpectedKv, claim.expectedKvTokens);
+            priorityHeldSlots++;
         }
+        priorityPreemptionHeldKv.set(priorityHeldKv);
+        priorityPreemptionHeldExpectedKv.set(priorityHeldExpectedKv);
+        this.priorityProjectionVersion = admissionVersion.get();
 
         // Stage-2 L5: freeze the fresh half of the engine-fact projection.
         // The absent-pass below and the harness hold predicate both read it,
@@ -2670,7 +2689,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         engineFenceHeldKv.set(fenceHeldKv);
         engineFenceHeldExpectedKv.set(fenceHeldExpectedKv);
-        this.confirmedRunningCount = actualConfirmed + syntheticallyHeldSlots
+        this.confirmedRunningCount = actualConfirmed + priorityHeldSlots
                 + fenceHeldSlots;
         this.fenceProjectionVersion = admissionVersion.get();
 
@@ -2784,74 +2803,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return claim != null;
     }
 
-    private void holdReleasedKv(PreemptionClaim claim) {
-        requirePriorityPreemptionHoldLock();
-        if (claim.kvHeldAfterWorkerRelease) {
-            return;
-        }
-        long currentHardKv = priorityPreemptionHeldKv.get();
-        long currentExpectedKv = priorityPreemptionHeldExpectedKv.get();
-        requirePriorityPreemptionHoldInvariant(currentHardKv, currentExpectedKv);
-        long nextHardKv;
-        long nextExpectedKv;
-        try {
-            nextHardKv = Math.addExact(currentHardKv, claim.hardKvTokens);
-            nextExpectedKv = Math.addExact(
-                    currentExpectedKv, claim.expectedKvTokens);
-        } catch (ArithmeticException overflow) {
-            throw new IllegalStateException(
-                    "Priority preemption KV hold counter overflow", overflow);
-        }
-        requirePriorityPreemptionHoldInvariant(nextHardKv, nextExpectedKv);
-
-        // Preserve expected >= hard even for lock-free readers between writes.
-        priorityPreemptionHeldExpectedKv.set(nextExpectedKv);
-        priorityPreemptionHeldKv.set(nextHardKv);
-        claim.kvHeldAfterWorkerRelease = true;
-    }
-
-    private void releaseHeldKv(PreemptionClaim claim) {
-        requirePriorityPreemptionHoldLock();
-        if (!claim.kvHeldAfterWorkerRelease) {
-            return;
-        }
-        long currentHardKv = priorityPreemptionHeldKv.get();
-        long currentExpectedKv = priorityPreemptionHeldExpectedKv.get();
-        requirePriorityPreemptionHoldInvariant(currentHardKv, currentExpectedKv);
-        if (currentHardKv < claim.hardKvTokens
-                || currentExpectedKv < claim.expectedKvTokens) {
-            throw new IllegalStateException(
-                    "Priority preemption KV hold counter underflow: hard="
-                            + currentHardKv + "-" + claim.hardKvTokens
-                            + ", expected=" + currentExpectedKv + "-"
-                            + claim.expectedKvTokens);
-        }
-        long nextHardKv = currentHardKv - claim.hardKvTokens;
-        long nextExpectedKv = currentExpectedKv - claim.expectedKvTokens;
-        requirePriorityPreemptionHoldInvariant(nextHardKv, nextExpectedKv);
-
-        // Preserve expected >= hard even for lock-free readers between writes.
-        priorityPreemptionHeldKv.set(nextHardKv);
-        priorityPreemptionHeldExpectedKv.set(nextExpectedKv);
-        claim.kvHeldAfterWorkerRelease = false;
-    }
-
-    private void requirePriorityPreemptionHoldLock() {
-        if (!admissionLock.isHeldByCurrentThread()) {
-            throw new IllegalStateException(
-                    "Priority preemption KV hold mutation requires admissionLock");
-        }
-    }
-
-    private static void requirePriorityPreemptionHoldInvariant(
-            long hardKvTokens, long expectedKvTokens) {
-        if (hardKvTokens < 0L || expectedKvTokens < hardKvTokens) {
-            throw new IllegalStateException(
-                    "Invalid priority preemption KV hold counters: hard="
-                            + hardKvTokens + ", expected=" + expectedKvTokens);
-        }
-    }
-
     // ==================== KV Cache 三视图 ====================
 
     /**
@@ -2876,7 +2827,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Real KV used: engine-reported used (total - available), local inflight
-     * reservations, and expected demand retained by a synthetic EngineFence owner.
+     * reservations, and expected demand retained by the priority-claim and
+     * engine-fence projections.
      */
     public long realKvUsed() {
         WorkerStatus.EngineObservation status =
@@ -3545,8 +3497,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long priorityHeldHardKv = priorityPreemptionHeldKv.get();
         long priorityHeldExpectedKv =
                 priorityPreemptionHeldExpectedKv.get();
-        requirePriorityPreemptionHoldInvariant(
-                priorityHeldHardKv, priorityHeldExpectedKv);
         long currentHardCharges = saturatedAddNonNegative(
                 saturatedAddNonNegative(
                         inflightKvReservedTotal.get(),
@@ -3740,6 +3690,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ENGINE_CONFIRMED
     }
 
+    /**
+     * Engine-fact projection entry for one priority victim (stage-2 L4
+     * retirement). The Cancel protocol phase machine is slot-side only;
+     * {@code notFoundStale} and {@code cancelUnknown} are acknowledgement
+     * facts (engine answered NOT_FOUND / transport outcome unknown), and the
+     * KV hold is a projection recomputed by the calibration pass.
+     */
     private static final class PreemptionClaim {
         private final long attemptToken;
         private ClaimOwner owner;
@@ -3747,10 +3704,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         private final long reservationToken;
         private final long hardKvTokens;
         private final long expectedKvTokens;
-        private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
+        /** Engine answered Cancel with NOT_FOUND. */
+        private boolean notFoundStale;
+        /** Cancel transport outcome was unknown (never an ACK). */
+        private boolean cancelUnknown;
         /** Endpoint accounting moved from this attempt to the Engine fence. */
         private boolean engineFenceTransferred;
-        private boolean kvHeldAfterWorkerRelease;
 
         private PreemptionClaim(long attemptToken, ClaimOwner owner,
                                 long reservationToken,

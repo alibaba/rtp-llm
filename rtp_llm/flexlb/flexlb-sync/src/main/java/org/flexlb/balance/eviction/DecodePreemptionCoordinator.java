@@ -162,11 +162,9 @@ public final class DecodePreemptionCoordinator {
                         "attempt_claim_linearization_failed"));
             }
 
-            if (!command.endpoint().markPriorityCancelInFlight(token)) {
-                return CompletableFuture.completedFuture(capability.abort(
-                        Outcome.CONTROL_FAILED,
-                        "endpoint_cancel_linearization_failed"));
-            }
+            // Stage-2 L4 retirement: the CLAIMED -> CANCEL_IN_FLIGHT
+            // transition is slot-side only (the registration phase
+            // machine); the endpoint claim projection no longer mirrors it.
             for (ClaimedVictim owned : capability.claims()) {
                 if (!lifecycle.tryApplyUpdate(
                         owned.claim(), Step.CANCEL_STARTED)) {
@@ -258,9 +256,7 @@ public final class DecodePreemptionCoordinator {
             switch (outcome.ack()) {
                 case ACCEPTED -> {
                     boolean transitioned =
-                            command.endpoint().markPriorityCancelAccepted(
-                                    attempt.token(), victim.requestId())
-                            && lifecycle.tryApplyUpdate(
+                            lifecycle.tryApplyUpdate(
                                     terminal.owned().claim(),
                                     Step.CANCEL_ACCEPTED);
                     if (transitioned) {
@@ -615,9 +611,24 @@ public final class DecodePreemptionCoordinator {
                 }
             }
             if (endpointBegun) {
+                // Stage-2 L4 retirement: the locally-releasable judgement
+                // is this coordinator's disposition (the claim never
+                // crossed an outbound boundary), passed explicitly to the
+                // endpoint for the exact-fenced registry removal.
+                List<DecodeEndpoint.ReservationHandle> releasable =
+                        new ArrayList<>(claims.size());
+                for (ClaimedVictim owned : claims) {
+                    if (owned.disposition == ClaimDisposition.RELEASABLE) {
+                        releasable.add(new DecodeEndpoint.ReservationHandle(
+                                command.endpoint().getStatus()
+                                        .getGenerationId(),
+                                owned.victim().requestId(),
+                                owned.victim().reservationToken()));
+                    }
+                }
                 try {
                     command.endpoint().abortPriorityPreemption(
-                            attempt.token());
+                            attempt.token(), releasable);
                 } catch (RuntimeException | Error failure) {
                     recordCleanupFailure("endpoint_abort", failure);
                 }
