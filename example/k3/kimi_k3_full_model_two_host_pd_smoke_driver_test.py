@@ -126,12 +126,19 @@ class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
             os.environ,
             {
                 "SMOKE_DECODE_KV_CACHE_MEM_MB": "26000",
+                "SMOKE_DECODE_ROLE_ADDRS": (
+                    "10.0.0.2:28188:28189,10.0.0.2:28197:28198"
+                ),
                 "SMOKE_RDMA_PREWARM_TIMEOUT_S": "300",
             },
             clear=True,
         ):
             _, _, _, command = driver.role_launch_parts(args, "decode")
         self.assertIn("SMOKE_DECODE_KV_CACHE_MEM_MB=26000", command)
+        self.assertIn(
+            "SMOKE_DECODE_ROLE_ADDRS=10.0.0.2:28188:28189,10.0.0.2:28197:28198",
+            command,
+        )
         self.assertIn("SMOKE_RDMA_PREWARM_TIMEOUT_S=300", command)
 
     def test_start_remote_roles_launches_prefill_without_decode_health_gate(self):

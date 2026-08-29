@@ -119,6 +119,9 @@ Important optional variables:
                             Projection-KTP replicates DP-local KDA/O-proj
                             weights, so the older 42000 MiB budget can OOM
                             before CUDA Graph capture on a 93-layer model.
+  SMOKE_DECODE_ROLE_ADDRS   optional comma-separated ordered
+                            IP:HTTP_PORT:GRPC_PORT list. The DP8 default is
+                            derived from DECODE_ENDPOINT using the rank stride.
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
@@ -240,10 +243,7 @@ done
 smoke_block_size="${SMOKE_BLOCK_SIZE:-4096}"
 smoke_kernel_block_size="${SMOKE_KERNEL_BLOCK_SIZE:-128}"
 smoke_chunk_tokens="${SMOKE_CHUNK_TOKENS:-65536}"
-# A 93-layer Projection-KTP Decode block is about 578 MiB.  The formal
-# two-request >64K case needs at least 46 blocks on one DP owner, so keep
-# enough room for 48 blocks while staying below the measured B300 headroom.
-smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-26000}"
+smoke_decode_kv_cache_mem_mb="${SMOKE_DECODE_KV_CACHE_MEM_MB:-20000}"
 smoke_linear_step="${SMOKE_LINEAR_STEP:-1}"
 smoke_chunkwise_rdma="${SMOKE_CHUNKWISE_RDMA:-1}"
 smoke_rdma_prewarm_attempts="${SMOKE_RDMA_PREWARM_ATTEMPTS:-3}"
@@ -721,9 +721,31 @@ case "${smoke_suite}" in
     *) die "SMOKE_SUITE must be flow or all" ;;
 esac
 
+decode_role_addrs=()
+if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
+    IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
+else
+    for ((rank = 0; rank < 8; ++rank)); do
+        rank_http_port="$((decode_port + rank * 9))"
+        rank_grpc_port="$((rank_http_port + 1))"
+        decode_role_addrs+=(
+            "${decode_host}:${rank_http_port}:${rank_grpc_port}"
+        )
+    done
+fi
+[[ "${#decode_role_addrs[@]}" -eq 8 ]] \
+    || die "DP8 formal smoke requires exactly 8 ordered Decode role addresses"
+decode_role_addr_args=()
+for addr in "${decode_role_addrs[@]}"; do
+    [[ "${addr}" =~ ^[^:]+:[1-9][0-9]*:[1-9][0-9]*$ ]] \
+        || die "invalid Decode role address: ${addr}"
+    decode_role_addr_args+=(--decode-role-addr "${addr}")
+done
+
 python3 "${case_runner}" \
     --base-url "http://127.0.0.1:${prefill_port}" \
     --decode-health-url "http://${decode_host}:${decode_port}/health" \
+    "${decode_role_addr_args[@]}" \
     --output "${accuracy_file}" \
     --suite "${smoke_suite}" \
     --namespace "${SMOKE_RUN_ID}" \

@@ -191,6 +191,7 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_SINGLE_EXACT_MAX_TOKENS",
         "SMOKE_MTP_CHUNK_MAX_TOKENS",
         "SMOKE_DECODE_KV_CACHE_MEM_MB",
+        "SMOKE_DECODE_ROLE_ADDRS",
         "SMOKE_RDMA_PREWARM_ATTEMPTS",
         "SMOKE_RDMA_PREWARM_TIMEOUT_S",
         "SMOKE_RDMA_PREWARM_BACKOFF_S",

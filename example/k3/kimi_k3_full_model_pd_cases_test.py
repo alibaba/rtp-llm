@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import unittest
 from unittest import mock
 
@@ -16,6 +17,15 @@ def make_args() -> argparse.Namespace:
     return argparse.Namespace(
         base_url="http://prefill:27188",
         decode_health_url="http://decode:29188/health",
+        decode_role_addrs=[
+            {
+                "role": "DECODE",
+                "ip": "10.0.0.2",
+                "http_port": 28188 + rank * 9,
+                "grpc_port": 28189 + rank * 9,
+            }
+            for rank in range(8)
+        ],
         output=None,
         suite="all",
         namespace="unit-test",
@@ -36,6 +46,38 @@ def make_args() -> argparse.Namespace:
 
 
 class KimiK3FullModelPdCasesTest(unittest.TestCase):
+    def test_request_pins_the_selected_decode_dp_owner(self) -> None:
+        runner = Runner(make_args())
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200
+        response.read.return_value = b"{}"
+        runner.opener.open = mock.Mock(return_value=response)
+        case = Case("owner-3", "prompt", r".", "miss", decode_owner_rank=3)
+
+        with mock.patch.object(runner, "validate", return_value={"name": case.name}):
+            runner.request(case)
+
+        request = runner.opener.open.call_args.args[0]
+        payload = json.loads(request.data)
+        self.assertEqual(
+            payload["role_addrs"],
+            [
+                {
+                    "role": "DECODE",
+                    "ip": "10.0.0.2",
+                    "http_port": 28215,
+                    "grpc_port": 28216,
+                }
+            ],
+        )
+
+    def test_request_rejects_decode_owner_outside_world(self) -> None:
+        runner = Runner(make_args())
+        case = Case("bad-owner", "prompt", r".", "miss", decode_owner_rank=8)
+        with self.assertRaisesRegex(SmokeFailure, "outside the configured world size"):
+            runner.request(case)
+
     def test_rdma_prewarm_retries_then_fills_batch_sized_pool(self) -> None:
         args = make_args()
         args.rdma_prewarm_attempts = 2
@@ -129,6 +171,18 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 stage_name,
             )
         self.assertEqual(runner.args.max_tokens, 128)
+        self.assertEqual(
+            [case.decode_owner_rank for case in stages["dp_uneven_local_batch"]],
+            [0, 0, 0, 0, 1, 1, 1, 2, 2, 3],
+        )
+        self.assertEqual(
+            [case.decode_owner_rank for case in stages["cuda_graph_bucket_8"]],
+            [0] * 8,
+        )
+        self.assertEqual(
+            [case.decode_owner_rank for case in stages["whole_chunk_batch_miss"]],
+            [0, 1],
+        )
 
     def test_mtp_chunk_case_requires_an_accepted_draft_token(self) -> None:
         runner = Runner(make_args())
@@ -157,6 +211,7 @@ class KimiK3FullModelPdCasesTest(unittest.TestCase):
                 "iter_count": 9,
                 "reuse_len": 0,
                 "prefill_total_reuse_len": 0,
+                "role_addrs": [runner.decode_role_addrs[0]],
             },
             "debug_info": {"output_ids": [[1, 2, 3]]},
         }

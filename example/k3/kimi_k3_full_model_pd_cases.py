@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -26,10 +26,37 @@ class Case:
     require_mtp: bool = False
     max_tokens: int | None = None
     timeout_s: int | None = None
+    decode_owner_rank: int = 0
 
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+def parse_decode_role_addr(value: str) -> dict[str, Any]:
+    parts = value.rsplit(":", 2)
+    if len(parts) != 3 or not parts[0]:
+        raise argparse.ArgumentTypeError(
+            "Decode role address must have IP:HTTP_PORT:GRPC_PORT form"
+        )
+    ip, http_port_text, grpc_port_text = parts
+    try:
+        http_port = int(http_port_text)
+        grpc_port = int(grpc_port_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "Decode role address ports must be integers"
+        ) from exc
+    if not (1 <= http_port <= 65535 and 1 <= grpc_port <= 65535):
+        raise argparse.ArgumentTypeError(
+            "Decode role address ports must be in [1, 65535]"
+        )
+    return {
+        "role": "DECODE",
+        "ip": ip,
+        "http_port": http_port,
+        "grpc_port": grpc_port,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,6 +65,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--decode-health-url", required=True)
+    parser.add_argument(
+        "--decode-role-addr",
+        dest="decode_role_addrs",
+        action="append",
+        type=parse_decode_role_addr,
+        default=[],
+        help=(
+            "ordered Decode DP owner endpoint in IP:HTTP_PORT:GRPC_PORT form; "
+            "repeat once per DP rank"
+        ),
+    )
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument(
         "--suite",
@@ -92,6 +130,10 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{key.replace('_', '-')} must be positive")
     if args.rdma_prewarm_attempts < 0:
         parser.error("--rdma-prewarm-attempts must be non-negative")
+    if args.suite == "all" and len(args.decode_role_addrs) not in (8, 16):
+        parser.error(
+            "--suite=all requires exactly 8 or 16 ordered --decode-role-addr values"
+        )
     for key in ("rdma_prewarm_backoff_s", "rdma_prewarm_settle_s"):
         if getattr(args, key) < 0:
             parser.error(f"--{key.replace('_', '-')} must be non-negative")
@@ -145,6 +187,7 @@ class Runner:
         self.endpoint = args.base_url.rstrip("/") + "/v1/chat/completions"
         self.health_endpoint = args.base_url.rstrip("/") + "/health"
         self.decode_health_endpoint = args.decode_health_url
+        self.decode_role_addrs = list(getattr(args, "decode_role_addrs", []))
         # The service is local to the Prefill host; never route smoke traffic
         # through inherited HTTP proxy settings.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -162,13 +205,16 @@ class Runner:
             "block_size": self.args.block_size,
             "chunk_tokens": self.args.chunk_tokens,
             "batch_size": self.args.batch_size,
+            "decode_role_addrs": self.decode_role_addrs,
             "max_tokens": self.args.max_tokens,
             "identity_max_tokens": self.args.identity_max_tokens,
             "single_exact_max_tokens": self.args.single_exact_max_tokens,
             "mtp_chunk_max_tokens": self.args.mtp_chunk_max_tokens,
             "rdma_prewarm": {
                 "enabled": self.args.rdma_prewarm_attempts > 0,
-                "target_logical_connections_per_rank": self.args.batch_size,
+                "target_decode_owners": min(
+                    self.args.batch_size, len(self.decode_role_addrs)
+                ),
                 "request_timeout_s": self.args.rdma_prewarm_timeout,
                 "attempts": self.rdma_prewarm_attempts,
             },
@@ -227,6 +273,15 @@ class Runner:
             "stream": False,
             "debug_info": True,
         }
+        if self.decode_role_addrs:
+            if not 0 <= case.decode_owner_rank < len(self.decode_role_addrs):
+                raise SmokeFailure(
+                    f"{case.name}: decode owner rank {case.decode_owner_rank} is outside "
+                    f"the configured world size {len(self.decode_role_addrs)}"
+                )
+            payload["role_addrs"] = [
+                self.decode_role_addrs[case.decode_owner_rank]
+            ]
         request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(),
@@ -338,6 +393,19 @@ class Runner:
                 f"output_len={output_len}, iter_count={iter_count}"
             )
 
+        selected_decode_role_addr = None
+        observed_decode_role_addrs = aux.get("role_addrs") or []
+        if self.decode_role_addrs:
+            selected_decode_role_addr = self.decode_role_addrs[
+                case.decode_owner_rank
+            ]
+            if selected_decode_role_addr not in observed_decode_role_addrs:
+                raise SmokeFailure(
+                    f"{case.name}: Decode owner route was not preserved: "
+                    f"expected={selected_decode_role_addr!r}, "
+                    f"observed={observed_decode_role_addrs!r}"
+                )
+
         return {
             "name": case.name,
             "expected_reuse": case.reuse,
@@ -355,6 +423,9 @@ class Runner:
             "content": content,
             "reasoning_content": reasoning_content,
             "output_ids": output_ids,
+            "decode_owner_rank": case.decode_owner_rank,
+            "selected_decode_role_addr": selected_decode_role_addr,
+            "observed_decode_role_addrs": observed_decode_role_addrs,
         }
 
     def request_cases(self, cases: list[Case], concurrent: bool) -> list[dict[str, Any]]:
@@ -386,6 +457,7 @@ class Runner:
                     timeout_s=min(
                         self.args.timeout, self.args.rdma_prewarm_timeout
                     ),
+                    decode_owner_rank=idx,
                 )
                 for idx in range(self.args.batch_size)
             ]
@@ -426,7 +498,7 @@ class Runner:
             )
             print(
                 f"rdma_prewarm attempt={attempt} passed=true "
-                f"logical_connections_per_rank={len(records)} elapsed_s={elapsed_s}"
+                f"decode_owners={len(records)} elapsed_s={elapsed_s}"
             )
             if self.args.rdma_prewarm_settle_s:
                 time.sleep(self.args.rdma_prewarm_settle_s)
@@ -442,11 +514,13 @@ class Runner:
                 "name": name,
                 "concurrent": concurrent,
                 "case_names": [case.name for case in cases],
+                "decode_owner_ranks": [case.decode_owner_rank for case in cases],
                 "elapsed_s": round(time.time() - started, 3),
             }
         )
         print(
             f"stage={name} concurrent={str(concurrent).lower()} "
+            f"owners={[case.decode_owner_rank for case in cases]} "
             f"reuse={[record['effective_reuse_len'] for record in records]}"
         )
 
@@ -466,6 +540,7 @@ class Runner:
 
     def run_all(self) -> None:
         self.prewarm_rdma_pool()
+        batch_owner_ranks = [0, 0] + list(range(1, self.args.batch_size - 1))
         self.run_stage(
             "identity_miss",
             [
@@ -536,7 +611,8 @@ class Runner:
             [
                 Case(
                     f"batch_all_miss_{idx}", prompt,
-                    numbered_answer_pattern((40 + idx) ** 2), "miss"
+                    numbered_answer_pattern((40 + idx) ** 2), "miss",
+                    decode_owner_rank=batch_owner_ranks[idx],
                 )
                 for idx, prompt in enumerate(cold_prompts)
             ],
@@ -547,7 +623,8 @@ class Runner:
             [
                 Case(
                     f"batch_all_hit_{idx}", prompt,
-                    numbered_answer_pattern((40 + idx) ** 2), "hit"
+                    numbered_answer_pattern((40 + idx) ** 2), "hit",
+                    decode_owner_rank=batch_owner_ranks[idx],
                 )
                 for idx, prompt in enumerate(cold_prompts)
             ],
@@ -586,7 +663,8 @@ class Runner:
             [
                 Case(
                     f"mixed_seed_{idx}", mixed_prompts[idx],
-                    numbered_answer_pattern((50 + idx) ** 2), "miss"
+                    numbered_answer_pattern((50 + idx) ** 2), "miss",
+                    decode_owner_rank=batch_owner_ranks[idx],
                 )
                 for idx in range(exact_hit_count)
             ]
@@ -596,6 +674,7 @@ class Runner:
                     mixed_partial_seed,
                     numbered_answer_pattern(4489),
                     "miss",
+                    decode_owner_rank=batch_owner_ranks[partial_idx],
                 )
             ],
         )
@@ -612,6 +691,7 @@ class Runner:
                         if idx == partial_idx
                         else "miss"
                     ),
+                    decode_owner_rank=batch_owner_ranks[idx],
                 )
                 for idx, prompt in enumerate(mixed_prompts)
             ],
@@ -622,9 +702,51 @@ class Runner:
             [
                 Case(
                     f"batch_mixed_all_hit_{idx}", prompt,
-                    numbered_answer_pattern((50 + idx) ** 2), "hit"
+                    numbered_answer_pattern((50 + idx) ** 2), "hit",
+                    decode_owner_rank=batch_owner_ranks[idx],
                 )
                 for idx, prompt in enumerate(mixed_prompts)
+            ],
+            concurrent=True,
+        )
+
+        uneven_owner_ranks = [0] * 4 + [1] * 3 + [2] * 2 + [3]
+        self.run_stage(
+            "dp_uneven_local_batch",
+            [
+                Case(
+                    f"dp_uneven_local_batch_{idx}",
+                    make_cache_prompt(
+                        self.args.namespace,
+                        f"dp-uneven-{idx}",
+                        90 + idx,
+                        repeats=8,
+                    ),
+                    numbered_answer_pattern((90 + idx) ** 2),
+                    "miss",
+                    decode_owner_rank=owner_rank,
+                )
+                for idx, owner_rank in enumerate(uneven_owner_ranks)
+            ],
+            concurrent=True,
+        )
+
+        self.run_stage(
+            "cuda_graph_bucket_8",
+            [
+                Case(
+                    f"cuda_graph_bucket_8_{idx}",
+                    make_cache_prompt(
+                        self.args.namespace,
+                        f"cuda-graph-8-{idx}",
+                        110 + idx,
+                        repeats=8,
+                    ),
+                    numbered_answer_pattern((110 + idx) ** 2),
+                    "miss",
+                    decode_owner_rank=0,
+                )
+                for idx in range(8)
             ],
             concurrent=True,
         )
@@ -681,7 +803,8 @@ class Runner:
             [
                 Case(
                     f"whole_chunk_batch_miss_{idx}", prompt,
-                    numbered_answer_pattern((70 + idx) ** 2), "miss", require_chunk=True
+                    numbered_answer_pattern((70 + idx) ** 2), "miss", require_chunk=True,
+                    decode_owner_rank=idx,
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
@@ -692,7 +815,8 @@ class Runner:
             [
                 Case(
                     f"whole_chunk_batch_hit_{idx}", prompt,
-                    numbered_answer_pattern((70 + idx) ** 2), "hit", require_chunk=True
+                    numbered_answer_pattern((70 + idx) ** 2), "hit", require_chunk=True,
+                    decode_owner_rank=idx,
                 )
                 for idx, prompt in enumerate(chunk_prompts)
             ],
