@@ -3,10 +3,12 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test_wrapper(
     name = "storage_backend_test",
+    testonly = True,
     srcs = ["StorageBackendTest.cc"],
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

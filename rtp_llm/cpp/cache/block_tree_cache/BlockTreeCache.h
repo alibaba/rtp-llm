@@ -37,6 +37,10 @@ struct BlockTreeCacheConfig {
     bool enable_host_cache{false};
     bool enable_disk_cache{false};
     bool enable_remote_cache{false};
+    // Compatibility-only settlement barrier. Remote writes wait for their
+    // exact backend task; HOST/DISK inserts additionally wait for the entire
+    // shared BlockTree task pool. Keep disabled for normal concurrent traffic.
+    bool write_cache_sync{false};
 
     // ---- Per-tier watermark ----
     struct TierWatermark {
@@ -121,7 +125,8 @@ public:
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
-                                Tier                                              target_tier);
+                                Tier                                              target_tier,
+                                bool                                              write_remote = true);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(size_t group_id, size_t num_blocks);
