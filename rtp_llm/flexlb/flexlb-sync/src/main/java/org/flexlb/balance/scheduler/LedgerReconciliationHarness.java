@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillWorkLedger;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.scheduler.RequestSlot.SlotDecodeAdmission;
 import org.flexlb.balance.scheduler.RequestSlot.SlotPlacement;
 import org.flexlb.balance.scheduler.RequestSlot.SlotResourceRow;
 import org.flexlb.util.Logger;
@@ -254,6 +255,7 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
         List<LedgerDiff> raw = new ArrayList<>();
         compareSlotsAgainstDecode(slots, decode, raw);
         compareDecodeAgainstSlots(slots, decode, raw);
+        compareDecodeAdmissionMirror(slots, decode, raw);
         compareDecodeDomainsAgainstSlots(slots, decode, raw);
         compareDecodeInternalConsistency(decode, raw);
         comparePrefillAgainstSlots(slots, prefill, raw);
@@ -388,7 +390,8 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                         slot.prefillRow(),
                         slot.decodeRow(),
                         slot.preemptionOwnerView(),
-                        slot.hasEngineFenceRegistration()));
+                        slot.hasEngineFenceRegistration(),
+                        slot.decodeAdmissionAuthorityView()));
             }
         }
         return audits;
@@ -664,6 +667,158 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                     + " but no slot pRow numeric mirror"
                                     + " (the publication bind installs both"
                                     + " atomically)"));
+                }
+            }
+        }
+    }
+
+    /**
+     * Stage-2 T7 S3 (placement-domain migration): bidirectional mirror
+     * audit between the slot-side decode-admission authority and the
+     * layer-1 entry mirrors (see the
+     * {@link Rule#DECODE_ADMISSION_MIRROR_MISMATCH} note).  The capture
+     * order — slots first, decode second — makes the wrapper tear
+     * direction deterministic (the install path stages the slot
+     * authority before the admission body commits the entry, so a
+     * mid-wrapper capture sees the staged authority and the pre-commit
+     * mirror), and both directions run on the same pass, so a
+     * single-interleave tear is a one-pass diff the confirm window
+     * absorbs.
+     */
+    private void compareDecodeAdmissionMirror(
+            List<SlotAudit> slots,
+            IdentityHashMap<DecodeEndpoint, DecodeLedgerAuditView> decode,
+            List<LedgerDiff> diffs) {
+        // slot→layer-1 direction: the authority must find its mirror.
+        for (SlotAudit audit : slots) {
+            SlotDecodeAdmission authority = audit.decodeAdmission;
+            if (authority == null || audit.terminalTrack()) {
+                continue;
+            }
+            DecodeLedgerAuditView view = decode.get(authority.endpoint());
+            if (view == null) {
+                // The authority's endpoint left the reconciliation
+                // surface (generation replacement / retirement): the
+                // fence died with the generation — the same legal
+                // failover window the placement-direction
+                // ENDPOINT_LEFT_RECONCILIATION_SURFACE rule classifies.
+                continue;
+            }
+            RequestInflight mirror = view.inflight().get(audit.requestId);
+            if (mirror == null) {
+                if (view.confirmedReservationTokens()
+                        .containsKey(audit.requestId)) {
+                    // KV_ALLOCATED handover in flight: the calibrate
+                    // in-pass removal already retired the mirror into
+                    // the confirmed projection while the slot death
+                    // path has not cleared the authority yet — the
+                    // DECODE_CONFIRMED_AHEAD_OF_SLOT transient already
+                    // classifies that same-tick window.
+                    continue;
+                }
+                diffs.add(new LedgerDiff(
+                        Rule.DECODE_ADMISSION_MIRROR_MISMATCH,
+                        audit.requestId,
+                        "slot decode-admission authority has no layer-1"
+                                + " mirror entry under its own endpoint"
+                                + " (projection-lag clear tear, or a lost"
+                                + " wrapper delivery if it recurs)"));
+                continue;
+            }
+            if (mirror.reservationToken()
+                    != authority.reservationToken()) {
+                diffs.add(new LedgerDiff(
+                        Rule.DECODE_ADMISSION_MIRROR_MISMATCH,
+                        audit.requestId,
+                        "slot decode-admission authority token "
+                                + authority.reservationToken()
+                                + " != layer-1 mirror token "
+                                + mirror.reservationToken()
+                                + " (request-id reuse tear across the"
+                                + " two-phase flip)"));
+                continue;
+            }
+            if (mirror.masterQueued() != authority.masterQueued()
+                    || mirror.dispatchPermitToken()
+                            != authority.dispatchPermitToken()
+                    || mirror.isEngineLifecycleOwned()
+                            != authority.engineLifecycleOwned()) {
+                diffs.add(new LedgerDiff(
+                        Rule.DECODE_ADMISSION_MIRROR_MISMATCH,
+                        audit.requestId,
+                        "slot decode-admission sub-state (queued="
+                                + authority.masterQueued()
+                                + ", permit="
+                                + authority.dispatchPermitToken()
+                                + ", lifecycle="
+                                + authority.engineLifecycleOwned()
+                                + ") != layer-1 mirror (queued="
+                                + mirror.masterQueued()
+                                + ", permit="
+                                + mirror.dispatchPermitToken()
+                                + ", lifecycle="
+                                + mirror.isEngineLifecycleOwned()
+                                + ") — two-phase flip / post-commit"
+                                + " delivery tear if single-pass"));
+            }
+        }
+        // layer-1→slot direction: a bound, fence-matched mirror entry
+        // must carry the authority — the wrapper stages the install
+        // inside the slot monitor before the admission body commits the
+        // entry, so "entry without authority" has no legal interleaving
+        // on the wrapper paths.
+        Map<Long, SlotAudit> byRequest = new java.util.HashMap<>();
+        for (SlotAudit audit : slots) {
+            byRequest.put(audit.requestId, audit);
+        }
+        for (Map.Entry<DecodeEndpoint, DecodeLedgerAuditView> entry
+                : decode.entrySet()) {
+            DecodeLedgerAuditView view = entry.getValue();
+            for (Long requestId : view.inflight().keySet()) {
+                SlotAudit audit = byRequest.get(requestId);
+                if (audit == null || audit.terminalTrack()) {
+                    continue;
+                }
+                // Attempt-incoming shadows install their authority by a
+                // transaction-after-commit delivery — the short
+                // attempt-removal window keeps the S1 exemption.
+                if (view.preemptionAttemptIncomingRequestIds()
+                        .contains(requestId)) {
+                    continue;
+                }
+                if (audit.placement == null
+                        || audit.placement.decodeEndpoint()
+                                != entry.getKey()) {
+                    // Publication-bind window or a foreign endpoint:
+                    // the placement direction rules own those splits.
+                    continue;
+                }
+                if (audit.decodeRow != null) {
+                    // B-road handover already happened: the admission
+                    // domain ended (the slot death path cleared the
+                    // authority with the pRow), so a surviving layer-1
+                    // shadow is the INFLIGHT_PROW_CROSSCHECK writer
+                    // regression, not a mirror split.
+                    continue;
+                }
+                RequestInflight mirror = view.inflight().get(requestId);
+                if (mirror.reservationToken()
+                        != audit.placement.decodeReservationToken()) {
+                    // Request-id reuse window: the placement still hosts
+                    // the previous fence — RESERVATION_TOKEN_MISMATCH
+                    // already reports it on the placement direction.
+                    continue;
+                }
+                if (audit.decodeAdmission == null) {
+                    diffs.add(new LedgerDiff(
+                            Rule.DECODE_ADMISSION_MIRROR_MISMATCH,
+                            requestId,
+                            "layer-1 mirror entry with a bound,"
+                                    + " fence-matched placement carries no"
+                                    + " slot decode-admission authority"
+                                    + " (the wrapper stages the install"
+                                    + " before the admission body"
+                                    + " commits)"));
                 }
             }
         }
@@ -1369,6 +1524,36 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * engine→slot direction rules.
          */
         INFLIGHT_PROW_CROSSCHECK(true),
+        /**
+         * Stage-2 T7 S3 (placement-domain migration): the decode
+         * admission sub-state authority lives on the slot (fence triple
+         * + preloaded numeric row + the three layer-1 sub-state bits),
+         * and the layer-1 entry flags stay mirrors until the S2
+         * read-source switch.  The rule is the bidirectional mirror
+         * audit backing that migration:
+         *
+         * <ul>
+         * <li>slot→layer-1: an ACTIVE slot's authority must find its
+         * layer-1 mirror entry under the authority's own endpoint, with
+         * the same fence token and the same three sub-state bits.  The
+         * two-phase flip (slot monitor first, admissionLock second) and
+         * the projection-lag clears (post-commit deliveries run outside
+         * both locks) each open single-interleave tears the confirm
+         * window absorbs; a persistent split is a lost wrapper
+         * delivery.</li>
+         * <li>layer-1→slot: a mirror entry whose ACTIVE slot already
+         * carries a bound placement on this endpoint with the matching
+         * reservation token must carry the slot authority — the wrapper
+         * stages the install inside the slot monitor before the
+         * admission body commits the entry, so "entry without
+         * authority" has no legal interleaving on the wrapper paths.
+         * The attempt-incoming shadows keep their post-commit delivery
+         * exemption (transaction-after-commit install), and bind-window
+         * / terminal-track / no-slot entries keep the shared skip
+         * semantics of the engine→slot direction rules.</li>
+         * </ul>
+         */
+        DECODE_ADMISSION_MIRROR_MISMATCH(true),
         /** Engine confirmed before the slot applied the handover. */
         DECODE_CONFIRMED_AHEAD_OF_SLOT(false),
         /** Decode reservation inside the admission bind window. */
@@ -1411,14 +1596,15 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
             SlotResourceRow prefillRow,
             SlotResourceRow decodeRow,
             PreemptionRegistration preemptionOwner,
-            boolean engineFenceInstalled) {
+            boolean engineFenceInstalled,
+            SlotDecodeAdmission decodeAdmission) {
 
         /** Fully derived tombstone audit for the lock-free fast path. */
         static SlotAudit tombstone(long requestId) {
             return new SlotAudit(
                     requestId,
                     SlotPhaseAdjudicator.CoarsePhase.TOMBSTONE,
-                    null, null, null, null, null, false);
+                    null, null, null, null, null, false, null);
         }
 
         /** Terminal-track exemption: TERMINALIZING or TOMBSTONE. */

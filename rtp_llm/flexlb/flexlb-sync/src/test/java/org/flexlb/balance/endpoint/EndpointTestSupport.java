@@ -275,6 +275,31 @@ final class EndpointTestSupport {
             return completedClaims.get();
         }
 
+        // Stage-2 T7 S3: legacy bare-flip semantics — this test runtime
+        // hosts no slot-side placement-authority projection.
+        @Override
+        public <T> T executeUnderDecodeAdmission(
+                long requestId,
+                DecodePlacementAuthorityPort.Projection projection,
+                DecodePlacementAuthorityPort.AdmissionFlipBody<T> body,
+                DecodePlacementAuthorityPort.EntryReader entryReader) {
+            return body.run();
+        }
+
+        @Override
+        public void clearDecodeAdmission(
+                long requestId,
+                DecodeEndpoint endpoint,
+                long endpointGeneration,
+                long reservationToken) {
+        }
+
+        @Override
+        public void deliverDecodeAdmissionAfterCommit(
+                long requestId,
+                DecodePlacementAuthorityPort.Projection projection) {
+        }
+
         @Override
         public <T> Optional<T> prepareIfOwned(
                 DeliveryItem exactItem,

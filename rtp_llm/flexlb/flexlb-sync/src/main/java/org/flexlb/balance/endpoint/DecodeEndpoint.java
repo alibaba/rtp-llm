@@ -51,6 +51,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     .thenComparingLong(ReservationHandle::reservationToken);
 
     private final EndpointEventSink endpointEventSink;
+
+    /**
+     * Stage-2 T7 S3 placement-authority port (ruling 1): discovered on the
+     * same injected runtime (an {@code EndpointRequestRuntime} implements
+     * it); null when the endpoint was composed without one (unit tests) —
+     * then every flip keeps the legacy bare semantics. Ruling 3 lock
+     * discipline: the port wrapper takes the slot monitor first and this
+     * endpoint's admissionLock second, one-way; nothing may take a slot
+     * monitor while holding the admissionLock.
+     */
+    private final DecodePlacementAuthorityPort authorityPort;
     private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
     private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
@@ -214,10 +225,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private Set<Long> retiredEngineDispatchPermitTokens = new HashSet<>();
     /** Mutated under admissionLock; volatile for the lock-free waiter predicate. */
     private volatile int activeEngineDispatchPermitCount;
-    /** Guarded by {@link #admissionLock}; zero is never issued. */
-    private long nextReservationToken = 1L;
-    /** Guarded by {@link #admissionLock}; zero is never issued. */
-    private long nextEngineDispatchPermitToken = 1L;
+    /**
+     * Stage-2 T7 S3 (ruling 3): AtomicLong so a wrapper can pre-allocate
+     * the full reservation fence before the admission body opens; the
+     * in-transaction variant keeps mutating it inside admissionLock
+     * transactions. Monotonic per endpoint generation; zero is never
+     * issued; a flip that never commits merely burns a gap.
+     */
+    private final AtomicLong nextReservationToken = new AtomicLong(1L);
+    /** Same S3 pre-allocation as {@link #nextReservationToken}. */
+    private final AtomicLong nextEngineDispatchPermitToken =
+            new AtomicLong(1L);
     /**
      * Prefill workers currently routing to this Decode endpoint. Listeners are
      * invoked only after dropping {@link #admissionLock}.
@@ -265,6 +283,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         super(status);
         this.endpointEventSink = java.util.Objects.requireNonNull(
                 endpointEventSink, "endpointEventSink");
+        this.authorityPort =
+                endpointEventSink instanceof DecodePlacementAuthorityPort port
+                        ? port : null;
         this.requestEvictor = TtlEvictor.withKeyCallback(
                 inflightRequests, (requestId, req) -> {
                     // Stage-2 L2: the engine-lifecycle marker lives on the
@@ -440,6 +461,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         try {
+            // Stage-2 T7 S3 (ruling 3): retire every projected placement
+            // authority of this generation's owners — fence-guarded and
+            // idempotent, strictly outside the admissionLock. The
+            // projection-lag window until each slot's own terminal tick
+            // is the confirm-window class.
+            if (authorityPort != null) {
+                for (ReservationHandle owner :
+                        retirementEvent.ownedReservations()) {
+                    clearAuthorityAfterCommit(owner);
+                }
+            }
             endpointEventSink.onEndpointEvent(retirementEvent);
         } finally {
             notifyEngineDispatchCapacityListeners();
@@ -549,21 +581,48 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return isGenerationRetiringOrRetired();
     }
 
-    /** Reserve through the exact route pin captured before endpoint detach. */
+    /**
+     * Reserve through the exact route pin captured before endpoint detach.
+     *
+     * <p>Stage-2 T7 S3 (ruling 3): with a placement-authority port the
+     * reservation fence is pre-allocated, the install projection (fence
+     * plus the preloaded numeric row, ruling 2(a)) is staged under the
+     * slot monitor first, then the admission body flips the layer-1
+     * mirror plus the counters — slot monitor → admissionLock, one-way.
+     */
     public ReservationHandle reservePinned(
             GenerationPin pin,
             long requestId,
             long kvTokens,
             long expectedKvTokens,
             int priority) {
-        admissionLock.lock();
-        try {
-            requirePinnedGeneration(pin);
-            return reserveLocked(
-                    requestId, kvTokens, expectedKvTokens, priority);
-        } finally {
-            admissionLock.unlock();
+        if (authorityPort == null) {
+            admissionLock.lock();
+            try {
+                requirePinnedGeneration(pin);
+                return reserveLocked(
+                        requestId, kvTokens, expectedKvTokens, priority);
+            } finally {
+                admissionLock.unlock();
+            }
         }
+        long reservationToken = preallocateReservationToken();
+        return executeAdmissionFlip(
+                requestId,
+                DecodePlacementAuthorityPort.Projection.install(
+                        this, getStatus().getGenerationId(), reservationToken,
+                        kvTokens, expectedKvTokens, priority, false),
+                () -> {
+                    admissionLock.lock();
+                    try {
+                        requirePinnedGeneration(pin);
+                        return reserveLockedWithToken(
+                                requestId, kvTokens, expectedKvTokens,
+                                priority, reservationToken);
+                    } finally {
+                        admissionLock.unlock();
+                    }
+                });
     }
 
     /** Caller holds admissionLock. */
@@ -571,12 +630,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                             long kvTokens,
                                             long expectedKvTokens,
                                             int priority) {
+        return reserveLockedWithToken(
+                requestId, kvTokens, expectedKvTokens, priority,
+                nextReservationTokenLocked());
+    }
+
+    /**
+     * Caller holds admissionLock. Stage-2 T7 S3 variant: the token was
+     * pre-allocated outside the admission body (the wrapper fence needs
+     * the full triple before the body opens); a body that rejects merely
+     * burns the gap.
+     */
+    private ReservationHandle reserveLockedWithToken(long requestId,
+                                            long kvTokens,
+                                            long expectedKvTokens,
+                                            int priority,
+                                            long reservationToken) {
         if (!requestIdAvailableForReservationLocked(requestId)) {
             throw new IllegalStateException(
                     "Decode request id is still owned by this endpoint generation: "
                             + requestId);
         }
-        long reservationToken = nextReservationTokenLocked();
         RequestInflight newReservation =
                 new RequestInflight(
                         kvTokens, expectedKvTokens, priority, reservationToken);
@@ -592,23 +666,51 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 getStatus().getGenerationId(), requestId, reservationToken);
     }
 
-    /** Reserve queued ownership through the exact route pin. */
+    /**
+     * Reserve queued ownership through the exact route pin.
+     *
+     * <p>Stage-2 T7 S3: same wrapper as {@link #reservePinned} with the
+     * queued bit already set in the install projection (the queued
+     * entry phase begins in the same admission body).
+     */
     public ReservationHandle reserveQueuedPinned(
             GenerationPin pin,
             long requestId,
             long kvTokens,
             long expectedKvTokens,
             int priority) {
-        admissionLock.lock();
-        try {
-            requirePinnedGeneration(pin);
-            ReservationHandle reservation = reserveLocked(
-                    requestId, kvTokens, expectedKvTokens, priority);
-            addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
-            return reservation;
-        } finally {
-            admissionLock.unlock();
+        if (authorityPort == null) {
+            admissionLock.lock();
+            try {
+                requirePinnedGeneration(pin);
+                ReservationHandle reservation = reserveLocked(
+                        requestId, kvTokens, expectedKvTokens, priority);
+                addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
+                return reservation;
+            } finally {
+                admissionLock.unlock();
+            }
         }
+        long reservationToken = preallocateReservationToken();
+        return executeAdmissionFlip(
+                requestId,
+                DecodePlacementAuthorityPort.Projection.install(
+                        this, getStatus().getGenerationId(), reservationToken,
+                        kvTokens, expectedKvTokens, priority, true),
+                () -> {
+                    admissionLock.lock();
+                    try {
+                        requirePinnedGeneration(pin);
+                        ReservationHandle reservation = reserveLockedWithToken(
+                                requestId, kvTokens, expectedKvTokens,
+                                priority, reservationToken);
+                        addQueuedPhaseLocked(
+                                requestId, inflightRequests.get(requestId));
+                        return reservation;
+                    } finally {
+                        admissionLock.unlock();
+                    }
+                });
     }
 
     /** Remove every local owner for one request. Caller holds admissionLock. */
@@ -656,6 +758,59 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    // ========== Stage-2 T7 S3: placement-authority projections ==========
+
+    /**
+     * S3 authority wrapper (ruling 3): stage the projection under the slot
+     * monitor, run the admission body, then refresh or restore. The lock
+     * order is strictly slot monitor → admissionLock, one-way; the body
+     * must not notify capacity listeners and must not take any other slot
+     * monitor (both stay outside this critical section, method-level).
+     */
+    private <T> T executeAdmissionFlip(
+            long requestId,
+            DecodePlacementAuthorityPort.Projection projection,
+            DecodePlacementAuthorityPort.AdmissionFlipBody<T> body) {
+        if (authorityPort == null) {
+            return body.run();
+        }
+        return authorityPort.executeUnderDecodeAdmission(
+                requestId, projection, body,
+                () -> readAdmissionEntry(requestId));
+    }
+
+    /** Lock-free layer-1 entry sub-state read for the wrapper refresh. */
+    private DecodePlacementAuthorityPort.DecodeAdmissionEntry
+            readAdmissionEntry(long requestId) {
+        RequestInflight entry = inflightRequests.get(requestId);
+        return entry == null
+                ? null
+                : new DecodePlacementAuthorityPort.DecodeAdmissionEntry(
+                        entry.reservationToken(), entry.masterQueued(),
+                        entry.dispatchPermitToken(),
+                        entry.isEngineLifecycleOwned());
+    }
+
+    /** Post-commit projection delivery (projection-lag; see the port). */
+    private void deliverAdmissionAfterCommit(
+            long requestId,
+            DecodePlacementAuthorityPort.Projection projection) {
+        if (authorityPort != null) {
+            authorityPort.deliverDecodeAdmissionAfterCommit(
+                    requestId, projection);
+        }
+    }
+
+    /** Post-commit fence-guarded authority clear (projection-lag). */
+    private void clearAuthorityAfterCommit(ReservationHandle reservation) {
+        if (authorityPort != null && reservation != null) {
+            authorityPort.clearDecodeAdmission(
+                    reservation.requestId(), this,
+                    reservation.endpointGenerationId(),
+                    reservation.reservationToken());
+        }
+    }
+
     /**
      * Roll back one exact reservation that never crossed into Engine ownership.
      *
@@ -674,6 +829,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return;
         }
         boolean capacityChanged = false;
+        boolean removedExact = false;
         admissionLock.lock();
         try {
             long requestId = reservation.requestId();
@@ -728,11 +884,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     -current.expectedKvTokens());
             admissionVersion.incrementAndGet();
             capacityChanged = true;
+            removedExact = true;
         } finally {
             admissionLock.unlock();
         }
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
+        }
+        // Stage-2 T7 S3 (ruling 3): the layer-1 removal committed — deliver
+        // the fence-guarded authority clear strictly outside the
+        // admissionLock (projection-lag; the confirm window absorbs the µs
+        // gap, and a newer reservation's install simply fences it out).
+        if (removedExact) {
+            clearAuthorityAfterCommit(reservation);
         }
     }
 
@@ -791,6 +955,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         if (released) {
             notifyEngineDispatchCapacityListeners();
+        }
+        // Stage-2 T7 S3 (ruling 3): same post-commit fence-guarded clear as
+        // rollbackExact — projection-lag delivery outside the admissionLock.
+        if (released) {
+            clearAuthorityAfterCommit(reservation);
         }
         return released;
     }
@@ -1308,6 +1477,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int priority,
             AdmissionCapacity capacity) {
         boolean committed = false;
+        ReservationHandle incomingReservation = null;
         admissionLock.lock();
         try {
             if (victims == null || victims.isEmpty()
@@ -1366,7 +1536,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 inflightExpectedKvReservedTotal.addAndGet(
                         -exact.expectedKvTokens());
             }
-            reserveLocked(
+            incomingReservation = reserveLocked(
                     incomingRequestId,
                     kvTokens,
                     expectedKvTokens,
@@ -1376,6 +1546,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
             if (committed) {
+                // Stage-2 T7 S3 (ruling 3): post-commit projection delivery
+                // — the victims' authority clears (fence-guarded) and the
+                // incoming install (ruling 2(a) preloaded numeric row),
+                // strictly outside the admissionLock.
+                if (authorityPort != null) {
+                    for (ReservationHandle victim : victims) {
+                        clearAuthorityAfterCommit(victim);
+                    }
+                    deliverAdmissionAfterCommit(
+                            incomingReservation.requestId(),
+                            DecodePlacementAuthorityPort.Projection.install(
+                                    this,
+                                    incomingReservation.endpointGenerationId(),
+                                    incomingReservation.reservationToken(),
+                                    kvTokens, expectedKvTokens, priority,
+                                    false));
+                }
                 notifyEngineDispatchCapacityListeners();
             }
         }
@@ -1995,6 +2182,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long incomingExpectedKvTokens,
             int incomingPriority,
             AdmissionCapacity capacity) {
+        ReservationHandle incomingReservation = null;
         admissionLock.lock();
         try {
             if (preemptionAttempts.containsKey(attemptToken)) {
@@ -2076,7 +2264,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
             // Provisional incoming ownership closes the free-pool race while
             // Cancel runs.  It is not visible to the prefill queue yet.
-            ReservationHandle incomingReservation = reserveLocked(
+            incomingReservation = reserveLocked(
                     incomingRequestId, incomingKvTokens,
                     incomingExpectedKvTokens, incomingPriority);
             for (ReservationHandle victim : victims) {
@@ -2101,6 +2289,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return PreemptionBeginResult.SUCCESS;
         } finally {
             admissionLock.unlock();
+            // Stage-2 T7 S3 (ruling 3): post-commit install delivery for
+            // the embedded provisional incoming reservation (ruling 2(a)
+            // preloaded numeric row) — projection-lag, strictly outside
+            // the admissionLock.
+            if (incomingReservation != null) {
+                deliverAdmissionAfterCommit(
+                        incomingReservation.requestId(),
+                        DecodePlacementAuthorityPort.Projection.install(
+                                this,
+                                incomingReservation.endpointGenerationId(),
+                                incomingReservation.reservationToken(),
+                                incomingKvTokens, incomingExpectedKvTokens,
+                                incomingPriority, false));
+            }
         }
     }
 
@@ -2402,12 +2604,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long attemptToken,
             List<ReservationHandle> releasableVictims) {
         boolean capacityChanged = false;
+        ReservationHandle incomingCleared = null;
         admissionLock.lock();
         try {
             EndpointPreemptionAttempt attempt = preemptionAttempts.remove(attemptToken);
             if (attempt == null) {
                 return;
             }
+            incomingCleared = new ReservationHandle(
+                    getStatus().getGenerationId(),
+                    attempt.incomingRequestId,
+                    attempt.incomingReservationToken);
             releaseLocked(attempt.incomingRequestId);
             if (releasableVictims != null) {
                 for (ReservationHandle victim : releasableVictims) {
@@ -2430,6 +2637,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
+        }
+        // Stage-2 T7 S3 (ruling 3): post-commit fence-guarded clear for the
+        // aborted provisional incoming reservation — projection-lag,
+        // strictly outside the admissionLock.
+        if (incomingCleared != null) {
+            clearAuthorityAfterCommit(incomingCleared);
         }
     }
 
@@ -3149,8 +3362,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
             throw new IllegalArgumentException(
                     "Decode reservation is required for queued transition");
         }
-        boolean capacityChanged = false;
-        MarkQueuedResult result;
+        if (authorityPort == null) {
+            return finishMarkQueued(
+                    markQueuedTransaction(generationPin, reservation));
+        }
+        // Stage-2 T7 S3 (ruling 3): the queued-bit flip projection is
+        // staged under the slot monitor first; the refresh after the body
+        // takes the entry truth (which also clears any stale permit bit
+        // the re-queue invalidates).
+        return finishMarkQueued(executeAdmissionFlip(
+                reservation.requestId(),
+                DecodePlacementAuthorityPort.Projection.flip(
+                        this, reservation.endpointGenerationId(),
+                        reservation.reservationToken(),
+                        true, 0L, false),
+                () -> markQueuedTransaction(generationPin, reservation)));
+    }
+
+    /** Pure admissionLock transaction (no capacity notification). */
+    private MarkQueuedResult markQueuedTransaction(
+            GenerationPin generationPin,
+            ReservationHandle reservation) {
         admissionLock.lock();
         try {
             requirePinnedGeneration(generationPin);
@@ -3172,12 +3404,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // transition (Stage-2 L8: the entry token is the authority).
             removeEngineDispatchPermitLocked(current);
             admissionVersion.incrementAndGet();
-            capacityChanged = true;
-            result = MarkQueuedResult.MARKED;
+            return MarkQueuedResult.MARKED;
         } finally {
             admissionLock.unlock();
         }
-        if (capacityChanged) {
+    }
+
+    /** Capacity notification stays outside both monitors (ruling 3). */
+    private MarkQueuedResult finishMarkQueued(MarkQueuedResult result) {
+        if (result == MarkQueuedResult.MARKED) {
             notifyEngineDispatchCapacityListeners();
         }
         return result;
@@ -3288,6 +3523,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return requestId;
         }
 
+        /** Reservation fence token of the entry this permit was acquired on. */
+        long reservationToken() {
+            return reservation.reservationToken();
+        }
+
+        /** Dispatch-permit token of this permit (S3 projection input). */
+        long token() {
+            return token;
+        }
+
         /**
          * Transfer this acquired slot without a second capacity check.
          *
@@ -3366,6 +3611,31 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long requestId,
             long concurrencyLimit,
             long maxKvUsagePercent) {
+        EngineDispatchPermitAcquisition acquisition =
+                acquireEngineDispatchPermitTransaction(
+                        requestId, concurrencyLimit, maxKvUsagePercent);
+        if (acquisition.status()
+                == EngineDispatchPermitAcquireStatus.ACQUIRED) {
+            // Stage-2 T7 S3 (ruling 3): the reservation fence is only
+            // known inside the transaction (the entry's token), so the
+            // permit flip is delivered post-commit — projection-lag, the
+            // confirm-window class; never a slot monitor under the
+            // admissionLock.
+            deliverAdmissionAfterCommit(
+                    requestId,
+                    DecodePlacementAuthorityPort.Projection.flip(
+                            this, getStatus().getGenerationId(),
+                            acquisition.permit().reservationToken(),
+                            true, acquisition.permit().token(), false));
+        }
+        return acquisition;
+    }
+
+    private EngineDispatchPermitAcquisition
+            acquireEngineDispatchPermitTransaction(
+            long requestId,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
         admissionLock.lock();
         try {
             RequestInflight reservation = inflightRequests.get(requestId);
@@ -3432,17 +3702,40 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private EngineDispatchPermitTransferStatus
             transferEngineDispatchPermitToLifecyclePinned(
             EngineDispatchPermit permit) {
-        EngineDispatchPermitTransferStatus transferStatus;
-        boolean capacityIncreased;
+        if (authorityPort == null) {
+            return finishPermitTransfer(
+                    transferPermitTransaction(permit));
+        }
+        // Stage-2 T7 S3 (ruling 3): the permit captured its reservation at
+        // acquire time, so the full fence is known before the body opens;
+        // the lifecycle flip projection stages under the slot monitor
+        // first (queued/permit bits off, engine-lifecycle bit on).
+        return finishPermitTransfer(executeAdmissionFlip(
+                permit.requestId(),
+                DecodePlacementAuthorityPort.Projection.flip(
+                        this, getStatus().getGenerationId(),
+                        permit.reservationToken(),
+                        false, 0L, true),
+                () -> transferPermitTransaction(permit)));
+    }
+
+    /** Pure admissionLock transaction (no capacity notification). */
+    private PermitTransferOutcome transferPermitTransaction(
+            EngineDispatchPermit permit) {
         admissionLock.lock();
         try {
             int usageBefore = engineDispatchHardGateUsageLocked();
             if (retiredEngineDispatchPermitTokens.remove(permit.token)) {
-                return EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED;
+                return new PermitTransferOutcome(
+                        EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED,
+                        false);
             }
             if (!isCurrentEngineDispatchPermitLocked(permit)) {
-                return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
+                return new PermitTransferOutcome(
+                        EngineDispatchPermitTransferStatus.OWNERSHIP_LOST,
+                        false);
             }
+            EngineDispatchPermitTransferStatus transferStatus;
             if (inflightRequests.get(permit.requestId) != permit.reservation
                     || !permit.reservation.masterQueued()
                     || preemptionClaims.containsKey(permit.requestId)) {
@@ -3462,16 +3755,32 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 admissionVersion.incrementAndGet();
                 transferStatus = EngineDispatchPermitTransferStatus.TRANSFERRED;
             }
-            capacityIncreased = engineDispatchHardGateUsageLocked() < usageBefore;
+            boolean capacityIncreased =
+                    engineDispatchHardGateUsageLocked() < usageBefore;
+            return new PermitTransferOutcome(
+                    transferStatus, capacityIncreased);
         } finally {
             admissionLock.unlock();
         }
-        // Capacity listeners may acquire scheduler queue locks. Keep that
-        // one-way notification strictly outside the endpoint admission lock.
-        if (capacityIncreased) {
+    }
+
+    /**
+     * Capacity notification stays outside both monitors (ruling 3):
+     * listeners may acquire scheduler queue locks, so the call runs
+     * strictly after the slot monitor and the admissionLock released.
+     */
+    private EngineDispatchPermitTransferStatus finishPermitTransfer(
+            PermitTransferOutcome outcome) {
+        if (outcome.capacityIncreased()) {
             notifyEngineDispatchCapacityListeners();
         }
-        return transferStatus;
+        return outcome.status();
+    }
+
+    /** Transaction outcome of {@code transferPermitTransaction}. */
+    private record PermitTransferOutcome(
+            EngineDispatchPermitTransferStatus status,
+            boolean capacityIncreased) {
     }
 
     private boolean releaseEngineDispatchPermit(EngineDispatchPermit permit) {
@@ -3532,21 +3841,46 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /** Caller holds {@link #admissionLock} (legacy in-transaction form). */
     private long nextEngineDispatchPermitTokenLocked() {
-        if (nextEngineDispatchPermitToken <= 0L
-                || nextEngineDispatchPermitToken == Long.MAX_VALUE) {
-            throw new IllegalStateException("Decode dispatch permit token space exhausted");
-        }
-        return nextEngineDispatchPermitToken++;
+        return preallocateEngineDispatchPermitToken();
     }
 
+    /** Caller holds {@link #admissionLock} (legacy in-transaction form). */
     private long nextReservationTokenLocked() {
-        if (nextReservationToken <= 0L
-                || nextReservationToken == Long.MAX_VALUE) {
-            throw new IllegalStateException(
-                    "Decode reservation token space exhausted");
+        return preallocateReservationToken();
+    }
+
+    /**
+     * Stage-2 T7 S3: pre-allocate one dispatch-permit token — usable both
+     * inside admissionLock transactions and, through the wrapper fences,
+     * before the admission body opens.
+     */
+    private long preallocateEngineDispatchPermitToken() {
+        long current = nextEngineDispatchPermitToken.get();
+        while (current > 0L && current != Long.MAX_VALUE) {
+            if (nextEngineDispatchPermitToken.compareAndSet(
+                    current, current + 1L)) {
+                return current;
+            }
+            current = nextEngineDispatchPermitToken.get();
         }
-        return nextReservationToken++;
+        throw new IllegalStateException(
+                "Decode dispatch permit token space exhausted");
+    }
+
+    /** Same S3 pre-allocation as {@link #preallocateEngineDispatchPermitToken()}. */
+    private long preallocateReservationToken() {
+        long current = nextReservationToken.get();
+        while (current > 0L && current != Long.MAX_VALUE) {
+            if (nextReservationToken.compareAndSet(
+                    current, current + 1L)) {
+                return current;
+            }
+            current = nextReservationToken.get();
+        }
+        throw new IllegalStateException(
+                "Decode reservation token space exhausted");
     }
 
     private int engineDispatchHardGateUsageLocked() {

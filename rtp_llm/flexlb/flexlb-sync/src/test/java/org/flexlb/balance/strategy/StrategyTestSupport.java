@@ -8,6 +8,8 @@ import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTelemetry;
 import org.flexlb.balance.delivery.PrefillAdmissionPort;
 import org.flexlb.balance.delivery.RouteDeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodePlacementAuthorityPort;
 import org.flexlb.balance.endpoint.EndpointEvent;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointRequestRuntime;
@@ -184,6 +186,31 @@ final class StrategyTestSupport {
 
     private static final class TestRequestRuntime
             implements EndpointRequestRuntime {
+
+        // Stage-2 T7 S3: legacy bare-flip semantics — this test runtime
+        // hosts no slot-side placement-authority projection.
+        @Override
+        public <T> T executeUnderDecodeAdmission(
+                long requestId,
+                DecodePlacementAuthorityPort.Projection projection,
+                DecodePlacementAuthorityPort.AdmissionFlipBody<T> body,
+                DecodePlacementAuthorityPort.EntryReader entryReader) {
+            return body.run();
+        }
+
+        @Override
+        public void clearDecodeAdmission(
+                long requestId,
+                DecodeEndpoint endpoint,
+                long endpointGeneration,
+                long reservationToken) {
+        }
+
+        @Override
+        public void deliverDecodeAdmissionAfterCommit(
+                long requestId,
+                DecodePlacementAuthorityPort.Projection projection) {
+        }
 
         @Override
         public <T> Optional<T> prepareIfOwned(

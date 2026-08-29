@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeLedgerAuditView;
 import org.flexlb.balance.endpoint.DecodeEndpoint.ReservationHandle;
+import org.flexlb.balance.endpoint.DecodePlacementAuthorityPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
 import org.flexlb.balance.eviction.EngineCancelChannel;
@@ -150,10 +151,17 @@ class LedgerReconciliationHarnessTest {
         List<LedgerReconciliationHarness.LedgerDiff> real =
                 harness.reconcileOnce().realDiffs();
 
-        assertEquals(1, real.size());
+        // Stage-2 T7 S3: the wrapper-simulating bind stages the slot
+        // authority, so the empty engine view is a double miss on both
+        // directions — the placement rule and the mirror rule.
+        assertEquals(2, real.size());
         assertEquals(
                 LedgerReconciliationHarness.Rule.SLOT_RESERVATION_UNBACKED,
                 real.get(0).rule());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_ADMISSION_MIRROR_MISMATCH,
+                real.get(1).rule());
         harness.close();
     }
 
@@ -176,10 +184,17 @@ class LedgerReconciliationHarnessTest {
         List<LedgerReconciliationHarness.LedgerDiff> real =
                 harness.reconcileOnce().realDiffs();
 
-        assertEquals(1, real.size());
+        // Stage-2 T7 S3: the request-id reuse tear now reports on both
+        // directions — the placement rule (slot placement vs layer-1)
+        // and the mirror rule (slot authority vs layer-1).
+        assertEquals(2, real.size());
         assertEquals(
                 LedgerReconciliationHarness.Rule.RESERVATION_TOKEN_MISMATCH,
                 real.get(0).rule());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_ADMISSION_MIRROR_MISMATCH,
+                real.get(1).rule());
         harness.close();
     }
 
@@ -336,10 +351,16 @@ class LedgerReconciliationHarnessTest {
         List<LedgerReconciliationHarness.LedgerDiff> real =
                 harness.reconcileOnce().realDiffs();
 
-        assertEquals(1, real.size());
+        // Stage-2 T7 S3: same double miss as the unbacked case — the
+        // settled-layer retirement rule and the mirror rule both fire.
+        assertEquals(2, real.size());
         assertEquals(
                 LedgerReconciliationHarness.Rule.SLOT_RESERVATION_UNBACKED,
                 real.get(0).rule());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_ADMISSION_MIRROR_MISMATCH,
+                real.get(1).rule());
         harness.close();
     }
 
@@ -382,6 +403,142 @@ class LedgerReconciliationHarnessTest {
         assertEquals(
                 LedgerReconciliationHarness.Rule.INFLIGHT_PROW_CROSSCHECK,
                 real.get(0).rule());
+        harness.close();
+    }
+
+    // ==================== stage-2 T7 S3: decode admission mirror ====================
+
+    @Test
+    void admissionSubStateMismatchIsARealMirrorDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+
+        // The wrapper-simulating bind staged the authority with the
+        // clean sub-state bits; freeze the layer-1 mirror one flip
+        // ahead (masterQueued on) — the two-phase flip tear the rule
+        // must surface.  The queued aggregate counters stay coherent
+        // with the entry-derived projection so the L7/L8 aggregate
+        // rules stay quiet and the mirror rule is the only signal.
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight queued = inflightEntry(16L, 24L, 3, 77L);
+        queued.enterMasterQueued();
+        inflight.put(REQUEST_ID, queued);
+        stubDecodeView(decode, auditView(
+                inflight, Map.of(), Set.of(), Set.of(), Set.of(),
+                Set.of(REQUEST_ID), Set.of(), 1, 16L, 24L));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size(),
+                () -> "real diffs: " + real);
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_ADMISSION_MIRROR_MISMATCH,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void mirrorEntryWithoutAuthorityIsARealMirrorDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        // Negative path: publication without the reserve wrapper's
+        // authority install — the "entry without authority" writer
+        // regression the layer-1→slot direction guards (the wrapper
+        // stages the install before the admission body commits).
+        assertTrue(bindBare(registered));
+
+        stubDecodeView(decode,
+                auditView(cleanARoadway(reservation), Map.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size(),
+                () -> "real diffs: " + real);
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DECODE_ADMISSION_MIRROR_MISMATCH,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void incomingAttemptShadowKeepsTheMirrorExemption() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bindBare(registered));
+
+        // The attempt-incoming shadow installs its authority by a
+        // transaction-after-commit delivery: the attempt window keeps
+        // the S1 exemption on the layer-1→slot direction — no real
+        // diff while the protocol round trip is in flight.
+        stubDecodeView(decode, auditView(
+                cleanARoadway(reservation), Map.of(),
+                Set.of(), Set.of(REQUEST_ID), Set.of(),
+                Set.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                () -> "real diffs: " + report.realDiffs());
+        harness.close();
+    }
+
+    @Test
+    void wrapperFlipProjectionTracksTheMirrorSubState() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+        // Simulate the markQueuedExact wrapper: the slot authority
+        // flips to queued first, the layer-1 mirror follows — the
+        // settled state must reconcile clean on both sides.
+        lifecycle.executeUnderDecodeAdmission(
+                REQUEST_ID,
+                DecodePlacementAuthorityPort.Projection.flip(
+                        decode, 5L, 77L, true, 0L, false),
+                () -> null,
+                () -> new DecodePlacementAuthorityPort
+                        .DecodeAdmissionEntry(77L, true, 0L, false));
+
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight queued = inflightEntry(16L, 24L, 3, 77L);
+        queued.enterMasterQueued();
+        inflight.put(REQUEST_ID, queued);
+        stubDecodeView(decode, auditView(
+                inflight, Map.of(), Set.of(), Set.of(), Set.of(),
+                Set.of(REQUEST_ID), Set.of(), 1, 16L, 24L));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                () -> "real diffs: " + report.realDiffs());
+        assertTrue(report.transientDiffs().isEmpty(),
+                () -> "transient diffs: " + report.transientDiffs());
         harness.close();
     }
 
@@ -1898,6 +2055,44 @@ class LedgerReconciliationHarnessTest {
     }
 
     private boolean bind(Registered registered) {
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             registered.item().requestId(),
+                             registered.future())) {
+            assertNotNull(admission);
+            // Stage-2 T7 S3: mock endpoints bypass the real admission
+            // path, so simulate the reserve wrapper's stage-before-body
+            // install — the slot authority exists exactly while the
+            // layer-1 mirror entry does, and the DECODE_ADMISSION_MIRROR
+            // bidirectional rule audits the pair.  The numerics are
+            // preload-row only (cleared at the publication bind inside
+            // the body); the refresh entry keeps the clean sub-state
+            // bits of the mock mirror.
+            ReservationHandle reservation =
+                    registered.item().decodeReservation();
+            return lifecycle.executeUnderDecodeAdmission(
+                    registered.item().requestId(),
+                    DecodePlacementAuthorityPort.Projection.install(
+                            registered.item().decodeEp(),
+                            reservation.endpointGenerationId(),
+                            reservation.reservationToken(),
+                            16L, 24L, 3, false),
+                    () -> lifecycle.commitInflight(
+                            registered.item(), false, () -> true),
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(
+                            reservation.reservationToken(),
+                            false, 0L, false));
+        }
+    }
+
+    /**
+     * Stage-2 T7 S3 negative-path bind: publication without the reserve
+     * wrapper's authority install — the "entry without authority"
+     * writer regression the mirror rule's layer-1→slot direction
+     * guards.
+     */
+    private boolean bindBare(Registered registered) {
         try (RequestLifecycleCoordinator.AdmissionScope admission =
                      lifecycle.beginAdmission(
                              registered.item().requestId(),

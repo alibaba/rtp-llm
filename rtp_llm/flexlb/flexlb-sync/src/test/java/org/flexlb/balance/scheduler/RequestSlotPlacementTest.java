@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodePlacementAuthorityPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
@@ -186,6 +187,172 @@ class RequestSlotPlacementTest {
             assertTrue(slot.ownsDecodeFact(decode, reservation));
             assertFalse(slot.ownsDecodeFact(other, reservation));
             assertFalse(slot.ownsDecodeFact(decode, staleToken));
+        }
+    }
+
+    // ==================== stage-2 T7 S3: decode admission authority ====================
+
+    @Test
+    void authorityPreloadRowLivesOnlyInThePreBindWindow() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 301L, 11L);
+        Registered registered =
+                registerItem(301L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             301L, registered.future())) {
+            assertNotNull(admission);
+            // Reserve-wrapper stage: the authority carries the fence
+            // plus the preloaded numeric row before any publication
+            // bind (the admission body commits nothing here).
+            lifecycle.executeUnderDecodeAdmission(
+                    301L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 11L, 16L, 24L, 50, false),
+                    () -> null,
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(11L, false, 0L, false));
+
+            RequestSlot slot = lifecycle.requestSlot(301L);
+            synchronized (slot) {
+                RequestSlot.SlotDecodeAdmission authority =
+                        slot.decodeAdmissionAuthorityView();
+                assertNotNull(authority);
+                assertEquals(16L, authority.preloadedKvTokens());
+                assertEquals(24L, authority.preloadedExpectedKvTokens());
+                assertEquals(50, authority.preloadedPriority());
+                assertFalse(authority.masterQueued());
+            }
+
+            // Publication bind: the real pRow takes over as the
+            // numeric carrier — the preload row must clear inside the
+            // same tick (ruling 2(a) lifecycle point one).
+            assertTrue(lifecycle.commitInflight(
+                    registered.item(), false, () -> true));
+            synchronized (slot) {
+                RequestSlot.SlotDecodeAdmission authority =
+                        slot.decodeAdmissionAuthorityView();
+                assertNotNull(authority);
+                assertEquals(0L, authority.preloadedKvTokens());
+                assertEquals(0L, authority.preloadedExpectedKvTokens());
+                assertEquals(0, authority.preloadedPriority());
+                assertNotNull(slot.prefillRow());
+            }
+        }
+    }
+
+    @Test
+    void publicationRollbackRestoresThePreloadedRow() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 311L, 12L);
+        Registered registered =
+                registerItem(311L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             311L, registered.future())) {
+            assertNotNull(admission);
+            lifecycle.executeUnderDecodeAdmission(
+                    311L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 12L, 16L, 24L, 50, false),
+                    () -> null,
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(12L, false, 0L, false));
+            RequestSlot slot = lifecycle.requestSlot(311L);
+            synchronized (slot) {
+                assertTrue(slot.tryBindItemForPublication(
+                        registered.item(), false));
+                assertEquals(0L,
+                        slot.decodeAdmissionAuthorityView()
+                                .preloadedKvTokens());
+                // Publication did not commit: roll the bind back — the
+                // preloaded numeric row regains charge, re-derived from
+                // the exact item (ruling 2(a) lifecycle point two).
+                slot.rollbackItemPublication(registered.item());
+                RequestSlot.SlotDecodeAdmission authority =
+                        slot.decodeAdmissionAuthorityView();
+                assertNotNull(authority);
+                assertEquals(16L, authority.preloadedKvTokens());
+                assertEquals(0L, authority.preloadedExpectedKvTokens());
+                assertEquals(50, authority.preloadedPriority());
+                assertNull(slot.activeItem());
+            }
+        }
+    }
+
+    @Test
+    void terminalizingClearsTheAuthorityUnconditionally() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 321L, 13L);
+        Registered registered =
+                registerItem(321L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             321L, registered.future())) {
+            assertNotNull(admission);
+            lifecycle.executeUnderDecodeAdmission(
+                    321L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 13L, 16L, 24L, 50, false),
+                    () -> lifecycle.commitInflight(
+                            registered.item(), false, () -> true),
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(13L, false, 0L, false));
+            RequestSlot slot = lifecycle.requestSlot(321L);
+            synchronized (slot) {
+                assertNotNull(slot.decodeAdmissionAuthorityView());
+                assertTrue(slot.markDecodeAccepted()
+                        .acceptedBeforeCancel());
+                // The decode-accepted death path force-clears the
+                // authority inside its own monitor tick (ruling 2(a)
+                // lifecycle point three) — a stale authority can never
+                // outlive its slot.
+                assertNull(slot.decodeAdmissionAuthorityView());
+            }
+        }
+    }
+
+    @Test
+    void authorityClearIsFenceGuarded() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(7L, 331L, 14L);
+        Registered registered =
+                registerItem(331L, null, decode, reservation);
+
+        try (RequestLifecycleCoordinator.AdmissionScope admission =
+                     lifecycle.beginAdmission(
+                             331L, registered.future())) {
+            assertNotNull(admission);
+            lifecycle.executeUnderDecodeAdmission(
+                    331L,
+                    DecodePlacementAuthorityPort.Projection.install(
+                            decode, 7L, 14L, 16L, 24L, 50, false),
+                    () -> null,
+                    () -> new DecodePlacementAuthorityPort
+                            .DecodeAdmissionEntry(14L, false, 0L, false));
+            // A foreign fence (a stale clear delivery after
+            // request-id reuse) must not remove the newer authority.
+            lifecycle.clearDecodeAdmission(331L, decode, 7L, 999L);
+            RequestSlot slot = lifecycle.requestSlot(331L);
+            synchronized (slot) {
+                assertNotNull(slot.decodeAdmissionAuthorityView());
+            }
+            // The exact fence clears idempotently.
+            lifecycle.clearDecodeAdmission(331L, decode, 7L, 14L);
+            synchronized (slot) {
+                assertNull(slot.decodeAdmissionAuthorityView());
+            }
+            lifecycle.clearDecodeAdmission(331L, decode, 7L, 14L);
+            synchronized (slot) {
+                assertNull(slot.decodeAdmissionAuthorityView());
+            }
         }
     }
 

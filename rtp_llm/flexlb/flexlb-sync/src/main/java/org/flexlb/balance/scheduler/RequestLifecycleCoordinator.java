@@ -8,6 +8,7 @@ import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodePlacementAuthorityPort;
 import org.flexlb.balance.endpoint.EndpointEvent;
 import org.flexlb.balance.endpoint.EndpointRequestRuntime;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -2145,6 +2146,109 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         String message = cause.getMessage();
         return message == null || message.isBlank()
                 ? cause.getClass().getSimpleName() : message;
+    }
+
+    // ==================== Decode admission authority (stage-2 T7 S3) ====================
+
+    /**
+     * Stage-2 T7 S3 authority wrapper (plan ruling 3): run one decode
+     * admission flip under the slot monitor so the slot-side authority
+     * projection serializes with its layer-1 commit.
+     *
+     * <p>Lock order: slot monitor → endpoint admissionLock, one-way.
+     * The body takes the admissionLock itself and must not notify
+     * capacity listeners or take any other slot monitor (both belong
+     * strictly outside this critical section). When no current ACTIVE
+     * slot hosts the request the body runs bare — legacy semantics,
+     * and terminal-track slots force-clear their authority at their
+     * own monitor ticks anyway, so staging a projection there would
+     * violate the tombstone invariant.
+     */
+    @Override
+    public <T> T executeUnderDecodeAdmission(
+            long requestId,
+            DecodePlacementAuthorityPort.Projection projection,
+            DecodePlacementAuthorityPort.AdmissionFlipBody<T> body,
+            DecodePlacementAuthorityPort.EntryReader entryReader) {
+        Objects.requireNonNull(projection, "projection");
+        Objects.requireNonNull(body, "body");
+        Objects.requireNonNull(entryReader, "entryReader");
+        RequestSlot slot = requestSlot(requestId);
+        if (slot == null) {
+            return body.run();
+        }
+        synchronized (slot) {
+            if (!slot.ownsActiveGeneration()) {
+                return body.run();
+            }
+            RequestSlot.SlotDecodeAdmission prior =
+                    slot.stageDecodeAdmission(projection);
+            T result;
+            try {
+                result = body.run();
+            } catch (Throwable failure) {
+                slot.restoreDecodeAdmission(prior, projection);
+                throw failure;
+            }
+            DecodePlacementAuthorityPort.DecodeAdmissionEntry entry =
+                    entryReader.read();
+            if (entry != null
+                    && entry.reservationToken()
+                            != projection.reservationToken()) {
+                // Foreign fence: another reservation owns the layer-1
+                // entry — undo this projection's own installation only.
+                slot.restoreDecodeAdmission(prior, projection);
+            } else {
+                slot.refreshDecodeAdmissionFromEntry(entry, projection);
+            }
+            return result;
+        }
+    }
+
+    /**
+     * Stage-2 T7 S3 projection-lag clear: fence-guarded idempotent
+     * removal delivery for layer-1 removal sites (rollback, local
+     * shadow release, settle, abort, calibration, TTL and local
+     * eviction victims) — always after the removal transaction
+     * committed.
+     */
+    @Override
+    public void clearDecodeAdmission(
+            long requestId,
+            DecodeEndpoint endpoint,
+            long endpointGeneration,
+            long reservationToken) {
+        RequestSlot slot = requestSlot(requestId);
+        if (slot == null) {
+            return;
+        }
+        synchronized (slot) {
+            slot.clearDecodeAdmissionExact(
+                    endpoint, endpointGeneration, reservationToken);
+        }
+    }
+
+    /**
+     * Stage-2 T7 S3 post-commit projection delivery (projection-lag):
+     * the admission transaction already committed; stage the projection
+     * under the slot monitor now. Fence-guarded inside the slot staging;
+     * no-op for terminal-track slots (their own ticks force-clear the
+     * authority).
+     */
+    @Override
+    public void deliverDecodeAdmissionAfterCommit(
+            long requestId,
+            DecodePlacementAuthorityPort.Projection projection) {
+        Objects.requireNonNull(projection, "projection");
+        RequestSlot slot = requestSlot(requestId);
+        if (slot == null) {
+            return;
+        }
+        synchronized (slot) {
+            if (slot.ownsActiveGeneration()) {
+                slot.stageDecodeAdmission(projection);
+            }
+        }
     }
 
     // ==================== Internal: resource rollback ====================

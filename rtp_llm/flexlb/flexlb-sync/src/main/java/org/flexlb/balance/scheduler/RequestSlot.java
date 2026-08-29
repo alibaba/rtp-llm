@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodePlacementAuthorityPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillWorkLedger;
 import org.flexlb.balance.admission.AdmissionMutation;
@@ -62,6 +63,22 @@ final class RequestSlot extends RequestLifecycle {
      * mirrors the handover identity for reconciliation.
      */
     private SlotResourceRow decodeRow;
+
+    /**
+     * Slot-side authority of the decode admission sub-state (stage-2 T7
+     * S3, placement-domain migration; plan ruling 1): the reservation
+     * fence triple, the preloaded numeric row (ruling 2(a): an
+     * independent authority field, never the pRow) and the queued /
+     * dispatch-permit / engine-lifecycle bits.
+     *
+     * <p>Lock discipline (ruling 3): every flip runs through a
+     * {@link DecodePlacementAuthorityPort} projection inside
+     * {@code synchronized (slot)}; when the two monitors nest the order
+     * is strictly slot monitor → endpoint admissionLock, one-way. The
+     * layer-1 entry flags and the endpoint's O(1) aggregate counters
+     * stay mirrors (S3 scope) until the S2 read-source switch.
+     */
+    private SlotDecodeAdmission decodeAdmission;
 
     private StrategyErrorType deadlineErrorType =
             StrategyErrorType.BATCH_SLO_EXPIRED;
@@ -169,6 +186,16 @@ final class RequestSlot extends RequestLifecycle {
         placement = SlotPlacement.fromItem(candidate);
         prefillRow = SlotResourceRow.masterReservation(candidate);
         priorityAdmission = priority;
+        // Ruling-2(a) handover: the preloaded numeric row ends here —
+        // the publication bind installs the real pRow, which is the
+        // numeric carrier for this fence until the KV_ALLOCATED
+        // critical point; the authority keeps the fence plus the
+        // sub-state bits. Fence-guarded so a foreign (newer)
+        // reservation's row is never collateral damage.
+        if (decodeAdmissionMatches(
+                candidate.decodeEp(), candidate.decodeReservation())) {
+            decodeAdmission = decodeAdmission.withPreloadRowCleared();
+        }
         assertInvariant();
         return true;
     }
@@ -189,6 +216,18 @@ final class RequestSlot extends RequestLifecycle {
         // future divergence here a tombstone leak, so roll it back too.
         decodeRow = null;
         priorityAdmission = false;
+        // Mirror of the ruling-2(a) handover: the publication rollback
+        // puts the preloaded numeric row back in charge (re-derived from
+        // the exact item — the admission parameters were item-derived in
+        // the first place), so the pre-bind window regains its numeric
+        // carrier. Fence-guarded for the same reason as the bind.
+        if (decodeAdmissionMatches(
+                exact.decodeEp(), exact.decodeReservation())) {
+            decodeAdmission = decodeAdmission.withPreloadRow(
+                    Math.max(0L, exact.seqLen()),
+                    Math.max(0L, exact.decodeExpectedKvTokens()),
+                    exact.priority());
+        }
         assertInvariant();
     }
 
@@ -229,6 +268,132 @@ final class RequestSlot extends RequestLifecycle {
     SlotResourceRow decodeRow() {
         requireSlotLock("decode resource row lookup");
         return decodeRow;
+    }
+
+    /**
+     * Slot-side decode-admission authority view (stage-2 T7 S3).
+     * Read-only reconciliation view; the harness reads it inside
+     * {@code synchronized (slot)}.
+     */
+    SlotDecodeAdmission decodeAdmissionAuthorityView() {
+        requireSlotLock("decode admission authority view");
+        return decodeAdmission;
+    }
+
+    /**
+     * Stage one decode-admission projection (ruling 3: slot monitor
+     * held; the admission body takes the endpoint admissionLock after
+     * this returns, so the nested order is slot monitor →
+     * admissionLock, one-way).
+     *
+     * <p>Install projections (a fresh reservation) overwrite
+     * unconditionally: a newer reservation is the newer fact, and the
+     * older fence's lagging clear arrives later as a fence-guarded
+     * no-op. Flip projections install only when the slot hosts the
+     * exact same fence (a stale projection leaves the authority
+     * untouched; its admission body rejects on the fence check
+     * anyway). Returns the prior authority snapshot for the wrapper's
+     * failure restore.
+     */
+    SlotDecodeAdmission stageDecodeAdmission(
+            DecodePlacementAuthorityPort.Projection projection) {
+        requireSlotLock("decode admission authority stage");
+        Objects.requireNonNull(projection, "projection");
+        SlotDecodeAdmission prior = decodeAdmission;
+        if (projection.install()
+                || prior == null
+                || prior.matchesFence(projection)) {
+            decodeAdmission =
+                    SlotDecodeAdmission.fromProjection(projection, prior);
+        }
+        assertInvariant();
+        return prior;
+    }
+
+    /**
+     * Restore the prior authority snapshot after a failed admission
+     * body (ruling 3: slot monitor held). Fence-guarded: only the
+     * projection's own installation is undone — a fence mismatch means
+     * a newer reservation's authority already replaced it and stays.
+     */
+    void restoreDecodeAdmission(
+            SlotDecodeAdmission prior,
+            DecodePlacementAuthorityPort.Projection projection) {
+        requireSlotLock("decode admission authority restore");
+        if (decodeAdmission != null
+                && decodeAdmission.matchesFence(projection)) {
+            decodeAdmission = prior;
+        }
+        assertInvariant();
+    }
+
+    /**
+     * Refresh the authority from the layer-1 entry the wrapper's
+     * entryReader captured after the admission body committed (ruling
+     * 3: slot monitor held). The entry is the post-commit fact: an
+     * absent entry clears the authority unconditionally (no layer-1
+     * reservation survives for this request, whatever fence the slot
+     * hosted), a same-fence entry refreshes the sub-state bits while
+     * preserving the preloaded numeric row, and a lagging same-fence
+     * commit installs the minimal row (numerics are install-projection
+     * only). A foreign-fence entry leaves the authority untouched —
+     * the wrapper restores the prior snapshot instead.
+     */
+    void refreshDecodeAdmissionFromEntry(
+            DecodePlacementAuthorityPort.DecodeAdmissionEntry entry,
+            DecodePlacementAuthorityPort.Projection projection) {
+        requireSlotLock("decode admission authority refresh");
+        if (entry == null) {
+            decodeAdmission = null;
+        } else if (entry.reservationToken()
+                != projection.reservationToken()) {
+            // Foreign fence: nothing to do here.
+        } else if (decodeAdmission != null
+                && decodeAdmission.matchesFence(projection)) {
+            decodeAdmission = decodeAdmission.withSubState(
+                    entry.masterQueued(),
+                    entry.dispatchPermitToken(),
+                    entry.engineLifecycleOwned());
+        } else {
+            decodeAdmission = SlotDecodeAdmission.fromEntry(
+                    projection, entry);
+        }
+        assertInvariant();
+    }
+
+    /**
+     * Fence-guarded idempotent clear of the decode-admission authority
+     * (projection-lag delivery from layer-1 removal sites; ruling 3:
+     * slot monitor held). No-op when the slot hosts no authority or a
+     * different (newer) fence.
+     */
+    void clearDecodeAdmissionExact(
+            DecodeEndpoint endpoint,
+            long endpointGeneration,
+            long reservationToken) {
+        requireSlotLock("decode admission authority clear");
+        if (decodeAdmission != null
+                && decodeAdmission.endpoint() == endpoint
+                && decodeAdmission.endpointGeneration()
+                        == endpointGeneration
+                && decodeAdmission.reservationToken()
+                        == reservationToken) {
+            decodeAdmission = null;
+        }
+        assertInvariant();
+    }
+
+    /** Fence match of the authority against one item's reservation. */
+    private boolean decodeAdmissionMatches(
+            DecodeEndpoint endpoint,
+            DecodeEndpoint.ReservationHandle reservation) {
+        return decodeAdmission != null
+                && reservation != null
+                && decodeAdmission.endpoint() == endpoint
+                && decodeAdmission.endpointGeneration()
+                        == reservation.endpointGenerationId()
+                && decodeAdmission.reservationToken()
+                        == reservation.reservationToken();
     }
 
     boolean ownsActiveGeneration() {
@@ -1666,6 +1831,12 @@ final class RequestSlot extends RequestLifecycle {
         // (with its engine-lifecycle / dispatch-permit / queued sub-state
         // flags) retires and the confirmed projection installs. Repeated
         // accepted facts keep the first handover identity.
+        //
+        // S3: engine acceptance terminates the decode-admission sub-state
+        // domain — the layer-1 shadow entry retires in the same protocol
+        // step, so the slot-side authority clears unconditionally in this
+        // monitor tick and cannot outlive the handover.
+        decodeAdmission = null;
         prefillRow = null;
         if (decodeRow == null) {
             decodeRow = SlotResourceRow.engineProjection(
@@ -1807,6 +1978,12 @@ final class RequestSlot extends RequestLifecycle {
         try {
             slotPhase = SlotPhase.TERMINALIZING;
             admissionOpen = false;
+            // S3 (approval point 2): terminalizing force-clears the
+            // decode-admission authority — a stale authority must never
+            // outlive its slot's lifecycle, and any layer-1 removal
+            // transaction racing this tick delivers a fence-guarded
+            // no-op clear afterwards.
+            decodeAdmission = null;
 
             EngineFenceRegistration claimedFence = engineFence;
             if (claimedFence != null) {
@@ -1885,6 +2062,7 @@ final class RequestSlot extends RequestLifecycle {
         placement = null;
         prefillRow = null;
         decodeRow = null;
+        decodeAdmission = null;
         priorityAdmission = false;
         preemption = null;
         engineFence = null;
@@ -1972,15 +2150,42 @@ final class RequestSlot extends RequestLifecycle {
                     "acceptance deadline has no admission resources for "
                             + requestId);
         }
+        // S3 (ruling 2(a) approval point 2): the preloaded numeric row
+        // lives only in the pre-bind window — once the publication bind
+        // installs the real pRow it is the numeric carrier, and the
+        // authority keeps only the fence plus the sub-state bits until
+        // its lifecycle end.
+        if (item != null && decodeAdmission != null
+                && (decodeAdmission.preloadedKvTokens() != 0L
+                || decodeAdmission.preloadedExpectedKvTokens() != 0L
+                || decodeAdmission.preloadedPriority() != 0)) {
+            throw new IllegalStateException(
+                    "decode admission preloaded row outlived the publication"
+                            + " bind for " + requestId);
+        }
+        // S3 (approval point 2): terminalizing force-clears the
+        // decode-admission authority in its own monitor tick; a
+        // non-null authority past that point is a lifecycle leak.
+        if (slotPhase == SlotPhase.TERMINALIZING
+                && decodeAdmission != null) {
+            throw new IllegalStateException(
+                    "terminalizing request still owns the decode admission"
+                            + " authority for " + requestId);
+        }
         if (slotPhase != SlotPhase.TOMBSTONE) {
             return;
         }
         RequestLifecycleSnapshot lifecycle = snapshot();
+        // Tombstone invariant (S3 extension, approval point 2): the
+        // decode-admission authority joins every other request-owned
+        // field — tombstone retention is a leak of the placement-domain
+        // authority exactly like a surviving placement or resource row.
         if (admissionOpen
                 || item != null
                 || placement != null
                 || prefillRow != null
                 || decodeRow != null
+                || decodeAdmission != null
                 || priorityAdmission
                 || cancellationReason != null
                 || preemption != null
@@ -2163,6 +2368,107 @@ final class RequestSlot extends RequestLifecycle {
         enum RowAuthority {
             MASTER_RESERVATION,
             ENGINE_PROJECTION
+        }
+    }
+
+    /**
+     * Slot-side authority of the decode admission sub-state (stage-2 T7
+     * S3, placement-domain migration; plan ruling 1).
+     *
+     * <p>Immutable snapshot: the reservation fence triple (endpoint
+     * identity, endpoint generation, generation-local monotonic
+     * token), the preloaded numeric row (ruling 2(a): an independent
+     * authority field, never the slot's pRow — it lives only in the
+     * pre-bind window and the publication bind replaces it with the
+     * real pRow, so {@code item == null ⇒ rows null} stays intact) and
+     * the three layer-1 sub-state bits (masterQueued /
+     * dispatchPermitToken / engineLifecycleOwned). Every mutation
+     * returns a new instance under the slot monitor; the layer-1
+     * {@code RequestInflight} entry flags and the endpoint's O(1)
+     * aggregate counters remain mirrors (S3 scope) until the S2
+     * read-source switch.</p>
+     */
+    record SlotDecodeAdmission(
+            DecodeEndpoint endpoint,
+            long endpointGeneration,
+            long reservationToken,
+            long preloadedKvTokens,
+            long preloadedExpectedKvTokens,
+            int preloadedPriority,
+            boolean masterQueued,
+            long dispatchPermitToken,
+            boolean engineLifecycleOwned) {
+
+        boolean matchesFence(
+                DecodePlacementAuthorityPort.Projection projection) {
+            return endpoint == projection.endpoint()
+                    && endpointGeneration == projection.endpointGeneration()
+                    && reservationToken == projection.reservationToken();
+        }
+
+        /** Flip view: keep fence + preload row, replace the bits. */
+        SlotDecodeAdmission withSubState(
+                boolean queued,
+                long permitToken,
+                boolean lifecycleOwned) {
+            return new SlotDecodeAdmission(
+                    endpoint, endpointGeneration, reservationToken,
+                    preloadedKvTokens, preloadedExpectedKvTokens,
+                    preloadedPriority, queued, permitToken, lifecycleOwned);
+        }
+
+        /** Ruling-2(a) handover at the publication bind: numerics → pRow. */
+        SlotDecodeAdmission withPreloadRowCleared() {
+            return new SlotDecodeAdmission(
+                    endpoint, endpointGeneration, reservationToken,
+                    0L, 0L, 0,
+                    masterQueued, dispatchPermitToken, engineLifecycleOwned);
+        }
+
+        /** Publication-rollback mirror: the preload row is numeric again. */
+        SlotDecodeAdmission withPreloadRow(
+                long kvTokens,
+                long expectedKvTokens,
+                int priority) {
+            return new SlotDecodeAdmission(
+                    endpoint, endpointGeneration, reservationToken,
+                    kvTokens, expectedKvTokens, priority,
+                    masterQueued, dispatchPermitToken, engineLifecycleOwned);
+        }
+
+        static SlotDecodeAdmission fromProjection(
+                DecodePlacementAuthorityPort.Projection projection,
+                SlotDecodeAdmission prior) {
+            long kvTokens = 0L;
+            long expectedKvTokens = 0L;
+            int priority = 0;
+            if (projection.install()) {
+                kvTokens = projection.kvTokens();
+                expectedKvTokens = projection.expectedKvTokens();
+                priority = projection.priority();
+            } else if (prior != null && prior.matchesFence(projection)) {
+                kvTokens = prior.preloadedKvTokens();
+                expectedKvTokens = prior.preloadedExpectedKvTokens();
+                priority = prior.preloadedPriority();
+            }
+            return new SlotDecodeAdmission(
+                    projection.endpoint(), projection.endpointGeneration(),
+                    projection.reservationToken(),
+                    kvTokens, expectedKvTokens, priority,
+                    projection.masterQueued(),
+                    projection.dispatchPermitToken(),
+                    projection.engineLifecycleOwned());
+        }
+
+        static SlotDecodeAdmission fromEntry(
+                DecodePlacementAuthorityPort.Projection projection,
+                DecodePlacementAuthorityPort.DecodeAdmissionEntry entry) {
+            return new SlotDecodeAdmission(
+                    projection.endpoint(), projection.endpointGeneration(),
+                    projection.reservationToken(),
+                    0L, 0L, 0,
+                    entry.masterQueued(), entry.dispatchPermitToken(),
+                    entry.engineLifecycleOwned());
         }
     }
 
