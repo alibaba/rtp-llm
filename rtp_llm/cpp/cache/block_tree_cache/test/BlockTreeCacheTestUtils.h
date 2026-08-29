@@ -145,14 +145,14 @@ public:
         bool            armed_{false};
     };
 
-    static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
-                                                     PerRankBlockTransferEnginePtr per_rank_transfer_engine);
+    static void   setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
+                                                       PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void   setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio);
     static void   refreshCandidateForTest(BlockTreeCache& cache, TreeNode* node, size_t group_set_id);
     static void   markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path);
     static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
-    static void runMaintenanceForTest(BlockTreeCache& cache);
-    static void beginStoreShutdownForTest(BlockTreeCache& cache);
+    static void   runMaintenanceForTest(BlockTreeCache& cache);
+    static void   beginStoreShutdownForTest(BlockTreeCache& cache);
     static bool
     demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
@@ -167,13 +167,14 @@ private:
 class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
-                                                bool perform_successful_transfers = true);
+                                                bool                            perform_successful_transfers = true);
 
     std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 
     // Scripts the outcome of upcoming submits. Successful submits delegate to
     // the real engine unless perform_successful_transfers is false.
     void enqueue(bool success);
+    void enqueueForGroupSet(size_t group_set_id, bool success);
     void clear();
 
     std::vector<TransferDescriptor> descriptors() const;
@@ -183,6 +184,7 @@ public:
 private:
     mutable std::mutex              mutex_;
     std::deque<bool>                results_;
+    std::vector<std::deque<bool>>   group_set_results_;
     std::vector<TransferDescriptor> descriptors_;
     size_t                          submitted_batch_count_{0};
     bool                            perform_successful_transfers_{true};

@@ -418,6 +418,69 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
 }
 
+TEST_F(BlockTreeCacheTest, EvictionMetricsReportSettledTransferTarget) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    EvictionTransferTask task;
+    task.desc.group_set_id = 0;
+    task.desc.source_tier  = Tier::DEVICE;
+    task.desc.target_tier  = Tier::HOST;
+
+    reporter.reportEvictionFinished(task, Tier::NONE, cache_->groupSets());
+
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    kmonitor::MetricsTags transfer_tags("source_tier", tierName(Tier::DEVICE));
+    transfer_tags.AddTag("target_tier", tierName(Tier::HOST));
+    transfer_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, transfer_tags), 0);
+
+    kmonitor::MetricsTags drop_tags("source_tier", tierName(Tier::DEVICE));
+    drop_tags.AddTag("target_tier", tierName(Tier::NONE));
+    drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, drop_tags), 1);
+}
+
+TEST_F(BlockTreeCacheTest, EvictionMetricsReportEveryCompletedDropDescriptor) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    EvictionDropTask task;
+    task.primary_desc.group_set_id = 0;
+    task.primary_desc.source_tier  = Tier::HOST;
+    task.primary_desc.target_tier  = Tier::NONE;
+
+    TransferDescriptor dependent_desc;
+    dependent_desc.group_set_id = 0;
+    dependent_desc.source_tier  = Tier::HOST;
+    dependent_desc.target_tier  = Tier::NONE;
+    task.dependent_prune_descs.push_back(dependent_desc);
+    task.dependent_prune_timings.emplace_back();
+
+    TransferDescriptor cascade_desc;
+    cascade_desc.group_set_id = 0;
+    cascade_desc.source_tier  = Tier::HOST;
+    cascade_desc.target_tier  = Tier::NONE;
+    task.cascade_descs.push_back(cascade_desc);
+    task.cascade_timings.emplace_back();
+
+    reporter.reportEvictionFinished(task, cache_->groupSets());
+
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    kmonitor::MetricsTags eviction_tags("source_tier", tierName(Tier::HOST));
+    eviction_tags.AddTag("target_tier", tierName(Tier::NONE));
+    eviction_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, eviction_tags), 3);
+}
+
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndLimit) {
     const auto empty = cache_->getKeySnapshot(/*limit=*/10);
     EXPECT_EQ(empty.version, 0u);
@@ -2286,7 +2349,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsRootAndLiveTreeHoldsAcrossAllPhysicalTi
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> lower_tier_resources(2, std::vector<GroupSetResource>(1));
     lower_tier_resources[0][0].host_block = host_block;
-    lower_tier_resources[1][0].disk_block  = disk_block;
+    lower_tier_resources[1][0].disk_block = disk_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, lower_tier_resources));
 
     EXPECT_EQ(device_pools[0]->freeBlocksNum(), device_free_before[0] - 1);

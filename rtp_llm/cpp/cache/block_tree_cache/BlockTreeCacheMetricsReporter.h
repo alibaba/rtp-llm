@@ -67,7 +67,7 @@ struct BlockTreeCacheReuseTimeMetricsSnapshot {
 };
 
 struct BlockTreeTransferBytesKey {
-    std::string pool_name;
+    std::string    pool_name;
     CacheGroupType group_type{CacheGroupType::FULL};
 
     bool operator==(const BlockTreeTransferBytesKey& other) const {
@@ -96,9 +96,10 @@ public:
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
          collectCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeSample>& samples) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
-    void reportEvictionFinished(const EvictionTask&             task,
-                                const EvictionTaskResult&       task_result,
+    void reportEvictionFinished(const EvictionTransferTask&     task,
+                                Tier                            settled_target_tier,
                                 const std::vector<GroupSetPtr>& group_sets) const;
+    void reportEvictionFinished(const EvictionDropTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
@@ -122,17 +123,15 @@ private:
                                       const std::vector<GroupSetPtr>& group_sets,
                                       int64_t                         finish_time_us,
                                       bool                            report_candidate_times) const;
-    void       reportEvictionTrigger(Tier           source_tier,
-                                     CacheGroupType group_type,
-                                     const char*    trigger_type,
-                                     int64_t        count) const;
-    void       reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
-    void       accumulateTransferBytes(const TransferDescriptor& desc,
-                                       const GroupSetPtr&        group_set,
-                                       BlockTreeTransferBytes&   transfer_bytes) const;
-    void       accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
-                                       const std::vector<GroupSetPtr>&        group_sets,
-                                       BlockTreeTransferBytes&                transfer_bytes) const;
+    void
+    reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
+    void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
+    void accumulateTransferBytes(const TransferDescriptor& desc,
+                                 const GroupSetPtr&        group_set,
+                                 BlockTreeTransferBytes&   transfer_bytes) const;
+    void accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
+                                 const std::vector<GroupSetPtr>&        group_sets,
+                                 BlockTreeTransferBytes&                transfer_bytes) const;
 
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};

@@ -273,10 +273,10 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
-    const std::vector<bool>&               joined_loads        = context->joinedLoads();
-    const uint64_t                         context_id          = context->contextId();
-    size_t                                 prepared_desc_count = 0;
+    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
+    const std::vector<bool>&               joined_loads             = context->joinedLoads();
+    const uint64_t                         context_id               = context->contextId();
+    size_t                                 prepared_desc_count      = 0;
     bool                                   business_credit_acquired = false;
     block_tree_cache_detail::ScopeRollback rollback_guard(
         [this, &load_descs, &joined_loads, &prepared_desc_count, &business_credit_acquired, context_id]() {
@@ -389,28 +389,26 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
     try {
-        load_task_runner_.runTransfer(task,
-                                      *transfer_dispatcher_,
-                                      metrics_reporter_,
-                                      disk_timeout_ms_,
-                                      host_timeout_ms_,
-                                      [this, task](ErrorInfo error) {
-                                          scheduleLoadSettlement(task, std::move(error));
-                                      });
+        load_task_runner_.runTransfer(
+            task,
+            *transfer_dispatcher_,
+            metrics_reporter_,
+            disk_timeout_ms_,
+            host_timeout_ms_,
+            [this, task](ErrorInfo error) { scheduleLoadSettlement(task, std::move(error)); });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("load task runner failed with exception: %s", error.what());
         scheduleLoadSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     } catch (...) {
         RTP_LLM_LOG_ERROR("load task runner failed with unknown exception");
-        scheduleLoadSettlement(
-            task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load task runner exception"));
+        scheduleLoadSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load task runner exception"));
     }
 }
 
 void BlockTreeLoader::scheduleLoadSettlement(const LoadTaskRunner::TaskPtr& task, ErrorInfo error) {
     auto settle = [this, task, error = std::move(error)]() mutable {
         block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex>            lock(mutex_);
         if (!settleLoadLocked(*task, error.ok())) {
             RTP_LLM_LOG_DEBUG("load task settled unsuccessfully");
         }
@@ -472,7 +470,6 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             state_settled = true;
             if (enable_device_cache_) {
                 evictor_.onLoaded(desc.node, desc.group_set_id);
-                evictor_.onTierChanged(desc.node, desc.group_set_id);
             } else {
                 evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
             }
