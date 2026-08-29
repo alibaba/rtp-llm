@@ -16,7 +16,7 @@ py_test(
     name = "kvcache_store_test",
     srcs = ["kvcache_store_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "L20D_DEV"},
+    exec_properties = {"gpu": "L20A_DEV"},
 )
 
 py_test (
@@ -25,4 +25,11 @@ py_test (
     deps = py_test_deps,
     env = test_envs,
     exec_properties = {'gpu':'H20'},
+)
+
+py_test(
+    name = "mtp_multimodal_embedding_test",
+    srcs = ["mtp_multimodal_embedding_test.py"],
+    deps = py_test_deps,
+    exec_properties = {"gpu": "L20A_DEV"},
 )

@@ -9,7 +9,22 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
+from rtp_llm.models_py.modules import (
+    Embedding,
+    LinearFactory,
+    MultimodalEmbeddingInjector,
+    RMSNorm,
+    RMSResNorm,
+)
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    prepare_mtp_multimodal_inputs,
+)
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    write_typed_aux_cache_regions,
+)
+from rtp_llm.models_py.modules.factory.attention.common import (
+    create_write_cache_store_impl,
+)
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
@@ -70,6 +85,7 @@ class GenericMoeMTPModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.pre_fc_norm_embedding = RMSNorm(
             weights.global_weights[W.multi_tokens_predict_enorm],
             eps=model_config.layernorm_eps,
@@ -144,6 +160,7 @@ class GenericMoeMTPModel(GptModelBase):
         clone.device_resource_config = self.device_resource_config
 
         clone.embed_tokens = self.embed_tokens
+        clone.multimodal_embedding_injector = self.multimodal_embedding_injector
         clone.pre_fc_norm_embedding = self.pre_fc_norm_embedding
         clone.pre_fc_norm_hidden = self.pre_fc_norm_hidden
         clone.fc = self.fc
@@ -273,7 +290,24 @@ class GenericMoeMTPModel(GptModelBase):
         input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        inputs_embeds = self.embed_tokens(input_ids)
+        typed_aux_cache_store = create_write_cache_store_impl(
+            inputs.attention_inputs, self.kv_cache
+        )
+        multimodal_features = inputs.multimodal_inputs.multimodal_features
+        if multimodal_features:
+            input_ids, shifted_features, shifted_locs = prepare_mtp_multimodal_inputs(
+                input_ids,
+                multimodal_features,
+                inputs.multimodal_inputs.mm_features_locs,
+                inputs.attention_inputs.cu_seqlens,
+                getattr(inputs.attention_inputs, "cu_seqlens_host", None),
+            )
+            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = self.multimodal_embedding_injector(
+                inputs_embeds, shifted_features, shifted_locs
+            )
+        else:
+            inputs_embeds = self.embed_tokens(input_ids)
         inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
         last_hidden_states = inputs.input_hiddens
 
@@ -323,6 +357,9 @@ class GenericMoeMTPModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
             prev_topk_indices = output.topk_indices
+            write_typed_aux_cache_regions(
+                typed_aux_cache_store, self.kv_cache, i
+            )
 
         if (
             self._mtp_indexer_share_enabled

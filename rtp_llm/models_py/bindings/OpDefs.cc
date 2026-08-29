@@ -26,7 +26,10 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
-        .def_readonly("group_id", &LayerKVCache::group_id, "KV cache group id")
+        .def_readonly("group_id", &LayerKVCache::group_id, "Model-local KV cache group id")
+        .def_readonly("physical_group_id",
+                      &LayerKVCache::physical_group_id,
+                      "Process-wide KV cache pool id used for cache-store publication")
         .def_readonly("region_name", &LayerKVCache::region_name, "KV cache attention type");
 
     pybind11::class_<KVCache>(m, "KVCache")
@@ -153,6 +156,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("kv_cache_kernel_block_id_device", &PyAttentionInputs::kv_cache_kernel_block_id_device)
         .def_readwrite("kv_cache_block_id_host", &PyAttentionInputs::kv_cache_block_id_host)
         .def_readwrite("kv_cache_block_id_device", &PyAttentionInputs::kv_cache_block_id_device)
+        .def_readwrite("kv_cache_block_id_host_by_group", &PyAttentionInputs::kv_cache_block_id_host_by_group)
+        .def_readwrite("kv_cache_kernel_block_id_host_by_group",
+                       &PyAttentionInputs::kv_cache_kernel_block_id_host_by_group)
         .def_readwrite("kv_cache_kernel_block_id_device_by_group",
                        &PyAttentionInputs::kv_cache_kernel_block_id_device_by_group)
         .def_readwrite("kv_cache_layer_to_group", &PyAttentionInputs::kv_cache_layer_to_group)

@@ -592,6 +592,7 @@ class DeepSeekV2(BaseModel):
         with open(config_path) as reader:
             content = reader.read()
             config_json = json.loads(content)
+            config_json = config_json.get("text_config", config_json)
             config.inter_size = config_json["intermediate_size"]
             config.attn_config.head_num = config_json["num_attention_heads"]
             config.attn_config.kv_head_num = config_json.get(
@@ -700,15 +701,25 @@ class DeepSeekV2(BaseModel):
             config.moe_style = 2  # shared + expert
             config.swiglu_limit = float(config_json.get("swiglu_limit", 10.0))
 
-            moe_step = config_json["moe_layer_freq"]
-            first_k_dense_replace = config_json["first_k_dense_replace"]
-            config.moe_layer_index = [
-                i
-                for i in range(config.num_layers)
-                if i >= first_k_dense_replace and i % moe_step == 0
-            ]
+            mlp_layer_types = config_json.get("mlp_layer_types")
+            if mlp_layer_types is not None:
+                config.moe_layer_index = [
+                    i
+                    for i, layer_type in enumerate(mlp_layer_types)
+                    if layer_type == "sparse"
+                ]
+            else:
+                moe_step = config_json["moe_layer_freq"]
+                first_k_dense_replace = config_json["first_k_dense_replace"]
+                config.moe_layer_index = [
+                    i
+                    for i in range(config.num_layers)
+                    if i >= first_k_dense_replace and i % moe_step == 0
+                ]
 
-            config.config_dtype = config_json.get("torch_dtype", None)
+            config.config_dtype = config_json.get(
+                "dtype", config_json.get("torch_dtype")
+            )
 
             if config_json.get("index_topk") is not None:
                 config.attn_config.is_sparse = True
@@ -838,18 +849,44 @@ class Glm5MtpWeight(DeepSeekV2Weight):
     Glm5Mtp._create_config(). offset==0 => Layout A; offset>0 => Layout B.
     """
 
+    checkpoint_prefix = "model."
+
     def _process_meta(self, meta_dict, weight_keys):
+        self.checkpoint_prefix = (
+            "model.language_model."
+            if any(key.startswith("model.language_model.") for key in weight_keys)
+            else "model."
+        )
         # The MTP layer index in the source checkpoint (78 for Layout B, 0 for
         # Layout A). DeepSeekV2Weight._process_meta only inspects layers
         # [0, _num_layers) which would miss the MTP layer in Layout B.
         mtp_layer_idx = int(getattr(self.model_config, "mtp_layer_offset", 0) or 0)
-        if f"model.layers.{mtp_layer_idx}.self_attn.q_a_proj.weight" in weight_keys:
+        layer_prefix = f"{self.checkpoint_prefix}layers.{mtp_layer_idx}."
+        if f"{layer_prefix}self_attn.q_a_proj.weight" in weight_keys:
             self.q_use_lora = True
         if (
-            f"model.layers.{mtp_layer_idx}.mlp.gate.e_score_correction_bias"
+            f"{layer_prefix}mlp.gate.e_score_correction_bias"
             in weight_keys
         ):
             self.has_e_score_correction_bias = True
+
+    @staticmethod
+    def _prefix_checkpoint_names(weight: WeightModule, prefix: str) -> None:
+        if prefix == "model.":
+            return
+        from rtp_llm.models.glm5_3_flash import Glm53FlashWeight
+
+        Glm53FlashWeight._prefix_checkpoint_names(weight)
+
+    def _get_hf_layer_weight_info(self, layer_id: int):
+        weights = super()._get_hf_layer_weight_info(layer_id)
+        if self.checkpoint_prefix == "model.language_model.":
+            from rtp_llm.models.glm5_3_flash import (
+                _glm53_indexer_compressor_weight_info,
+            )
+
+            weights.extend(_glm53_indexer_compressor_weight_info())
+        return weights
 
     def _get_weight_info(self):
         mtp_layer_idx = int(getattr(self.model_config, "mtp_layer_offset", 0) or 0)
@@ -927,7 +964,13 @@ class Glm5MtpWeight(DeepSeekV2Weight):
                 self._remap_layer_ckpt_names(per_layer, mtp_layer_idx)
             layer_weights.append(per_layer)
 
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+        weight_info = ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+        for weight in weight_info.weights:
+            self._prefix_checkpoint_names(weight, self.checkpoint_prefix)
+        for layer in weight_info.layer_weights:
+            for weight in layer:
+                self._prefix_checkpoint_names(weight, self.checkpoint_prefix)
+        return weight_info
 
     @staticmethod
     def _remap_layer_ckpt_names(layer_weights, target_layer_idx: int) -> None:
@@ -953,8 +996,17 @@ class Glm5Mtp(DeepSeekV2):
         if os.path.exists(config_path):
             with open(config_path) as reader:
                 config_json = json.loads(reader.read())
-            num_main_layers = int(config_json.get("num_hidden_layers", num_main_layers))
-            num_mtp_layers = int(config_json.get("num_nextn_predict_layers", 1)) or 1
+            text_config = config_json.get("text_config", config_json)
+            num_main_layers = int(text_config.get("num_hidden_layers", num_main_layers))
+            num_mtp_layers = int(text_config.get("num_nextn_predict_layers", 1)) or 1
+            if "text_config" in config_json:
+                from rtp_llm.models.glm5_3_flash import (
+                    _configure_glm53_mtp_attention_layout,
+                )
+
+                _configure_glm53_mtp_attention_layout(
+                    config, text_config, num_mtp_layers
+                )
         # Layout A: standalone extracted MTP checkpoint (single layer only).
         # Layout B: full checkpoint where MTP layer is at index num_hidden_layers.
         if num_main_layers <= 1:

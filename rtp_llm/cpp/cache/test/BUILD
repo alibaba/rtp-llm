@@ -403,7 +403,7 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "L20A_DEV"},
 )
 
 cc_test(

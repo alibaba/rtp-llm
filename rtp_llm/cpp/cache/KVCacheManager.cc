@@ -415,23 +415,12 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    RTP_LLM_CHECK_WITH_INFO(
-        !mtp_sub_config->global_layer_ids.empty(), "mtp_sub_configs[%d]->global_layer_ids is empty", mtp_module_id);
-
-    // Flatten across all groups: SWA-only DSV4 propose configs put the
-    // single MTP layer in the SWA group (gid=6), not FULL[0], so reading
-    // group 0 alone would be empty.  Walk every group and collect any
-    // global_layer_ids it contributed so this layout is independent of
-    // which pool the propose layer lives in.
-    std::vector<int> mtp_global_layer_ids;
-    for (const auto& group_ids : mtp_sub_config->global_layer_ids) {
-        for (int lid : group_ids) {
-            mtp_global_layer_ids.push_back(lid);
-        }
-    }
-    RTP_LLM_CHECK_WITH_INFO(
-        !mtp_global_layer_ids.empty(), "mtp_sub_configs[%d] has no layers across any group", mtp_module_id);
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
+    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->local_to_global_layer_ids.size() == mtp_layer_num,
+                            "mtp_sub_configs[%d] local-to-global mapping size %zu != layer_num %u",
+                            mtp_module_id,
+                            mtp_sub_config->local_to_global_layer_ids.size(),
+                            mtp_layer_num);
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
@@ -452,6 +441,12 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     layout.group_region_names       = mtp_sub_config->group_region_names;
     layout.group_types              = mtp_sub_config->group_types;
     layout.group_seq_size_per_block = mtp_sub_config->group_seq_size_per_block;
+    layout.local_layer_region_to_group_id = mtp_sub_config->layer_region_to_group_id;
+    RTP_LLM_CHECK_WITH_INFO(layout.local_layer_region_to_group_id.size() == mtp_layer_num,
+                            "mtp_sub_configs[%d] local region-to-group mapping size %zu != layer_num %u",
+                            mtp_module_id,
+                            layout.local_layer_region_to_group_id.size(),
+                            mtp_layer_num);
     // Typed-pool views are indexed by LOCAL layer id from the MTP model's
     // attention modules (self.layer_id ∈ [0, mtp_layer_num)).  The full
     // layout's by_attn arrays are indexed by GLOBAL layer id (main + MTP
@@ -465,8 +460,8 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
     layout.layer_region_to_group_id.assign(mtp_layer_num, std::vector<int>(region_name_count, -1));
 
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
-        if (local_layer_id < mtp_global_layer_ids.size()) {
-            const int global_layer_id = mtp_global_layer_ids[local_layer_id];
+        if (local_layer_id < mtp_sub_config->local_to_global_layer_ids.size()) {
+            const int global_layer_id = mtp_sub_config->local_to_global_layer_ids[local_layer_id];
 
             if (global_layer_id >= 0 && static_cast<size_t>(global_layer_id) < all_layer_tensors.size()) {
                 layout.layer_to_groups[local_layer_id]          = all_layout.layer_to_groups[global_layer_id];

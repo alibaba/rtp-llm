@@ -247,12 +247,23 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
                             mm_locs.numel(),
                             mm_features.size(),
                             stream->streamId());
-    for (int i = reuse_mm_count; i < mm_locs.numel(); ++i) {
-        ctx.mm_features_locs[ctx.mm_feature_index] = mm_locs_data[i] + ctx.token_idx - stream->reuseLength();
-        ctx.mm_feature_index++;
-    }
     for (int i = reuse_mm_count; i < static_cast<int>(mm_features.size()); ++i) {
-        auto& mm_feature = mm_features[i];
+        auto mm_feature = mm_features[i];
+        int  local_loc  = mm_locs_data[i] - stream->reuseLength();
+        if (local_loc < 0) {
+            // Crop in request-local coordinates before adding the packed
+            // offset. Otherwise a later request's offset reduces the crop and
+            // its remaining image rows overwrite earlier packed requests.
+            const int reused_feature_rows = -local_loc;
+            RTP_LLM_CHECK_WITH_INFO(reused_feature_rows < mm_feature.size(0),
+                                    "partially reused multimodal feature has invalid crop: reused=%d rows=%ld",
+                                    reused_feature_rows,
+                                    mm_feature.size(0));
+            mm_feature = mm_feature.slice(0, reused_feature_rows).contiguous();
+            local_loc  = 0;
+        }
+        ctx.mm_features_locs[ctx.mm_feature_index] = ctx.token_idx + local_loc;
+        ctx.mm_feature_index++;
         if (!mm_feature.is_cuda()) {
             host_holder.hold_host(mm_feature);
             gathered_mm_features.emplace_back(mm_feature.to(getTorchCudaDevice(), /*non_blocking=*/true));

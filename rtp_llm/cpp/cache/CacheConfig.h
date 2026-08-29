@@ -18,6 +18,7 @@ struct CacheConfig {
     // Cache specification and layer mapping
     std::vector<KVCacheSpecPtr>    cache_specs;
     std::vector<std::vector<int>>  global_layer_ids;  // including mtp module layers
+    std::vector<int>               local_to_global_layer_ids;  // MTP sub-config local layer -> global layer
     std::vector<std::vector<int>>  layer_ids;
     std::vector<std::vector<int>>  linear_groups;  // for hybrid attention
     std::vector<std::vector<int>>  full_groups;    // for hybrid attention
@@ -219,6 +220,9 @@ struct CacheConfig {
         os << indent1 << "# Layer Mapping:\n";
         OUTPUT_FIELD_EXPR("global_layer_ids.size()", global_layer_ids.size());
         os << indent1 << "global_layer_ids=" << rtp_llm::vectorsToString(global_layer_ids) << "\n";
+        OUTPUT_FIELD_EXPR("local_to_global_layer_ids.size()", local_to_global_layer_ids.size());
+        os << indent1 << "local_to_global_layer_ids="
+           << rtp_llm::vectorToString(local_to_global_layer_ids) << "\n";
         OUTPUT_FIELD_EXPR("layer_ids.size()", layer_ids.size());
         os << indent1 << "layer_ids=" << rtp_llm::vectorsToString(layer_ids) << "\n";
         OUTPUT_FIELD_EXPR("group_types.size()", group_types.size());

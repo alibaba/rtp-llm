@@ -130,6 +130,14 @@ class GridRunner:
                     query_variants=query_variants,
                     target_reuse_len=target_reuse_len,
                 ).run()
+                if (
+                    os.environ.get("PERF_REQUIRE_ALL_SUCCESS", "0") == "1"
+                    and metric.success_requests != metric.total_requests
+                ):
+                    raise RuntimeError(
+                        f"perf case bs={batch_size}, input_len={input_len} "
+                        f"succeeded {metric.success_requests}/{metric.total_requests} requests"
+                    )
                 metrics_list.append(MetricState(input_len, batch_size, metric))
 
                 pbar.update(1)

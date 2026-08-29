@@ -14,7 +14,7 @@ py_test(
     ],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
-        'gpu': 'L20D_DEV',
+        'gpu': 'L20A_DEV',
         'gpu_count': '1',
     },
     tags = ["manual"],

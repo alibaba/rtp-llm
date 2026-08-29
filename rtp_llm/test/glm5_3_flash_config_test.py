@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -14,13 +15,15 @@ from rtp_llm.model_loader.linear_attn_weight import (
     split_kda_qkv,
     split_kda_tp_dim1,
 )
-from rtp_llm.model_loader.weight_module import CompositeWeight
+from rtp_llm.model_loader.weight_module import AtomicWeight, CompositeWeight
+from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight, Glm5Mtp, Glm5MtpWeight
 from rtp_llm.models.glm5_3_flash import (
     Glm53Flash,
     Glm53FlashWeight,
     parse_glm53_flash_config,
 )
 from rtp_llm.models_py.model_desc import generic_moe, kimi_linear
+from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.modules.base.cuda import indexer_op
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _requires_prefill_cp_support,
@@ -38,7 +41,7 @@ from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
 from rtp_llm.ops import DataType, HWKernelConfig, HybridAttentionType, ParallelismConfig
-from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 def _test_config():
@@ -82,6 +85,8 @@ def _test_config():
             "n_routed_experts": 288,
             "n_shared_experts": 1,
             "num_experts_per_tok": 8,
+            "first_k_dense_replace": 3,
+            "num_nextn_predict_layers": 1,
             "n_group": 1,
             "topk_group": 1,
             "norm_topk_prob": True,
@@ -97,6 +102,102 @@ def _test_config():
 
 
 class Glm53FlashConfigTest(unittest.TestCase):
+    def test_hybrid_block_map_selects_host_and_device_group_together(self):
+        kernel_device = [torch.tensor([10]), torch.tensor([20])]
+        kernel_host = [torch.tensor([11]), torch.tensor([21])]
+        physical_host = [torch.tensor([12]), torch.tensor([22])]
+        attention_inputs = SimpleNamespace(
+            kv_cache_layer_to_group=torch.tensor([1, 0], dtype=torch.int32),
+            kv_cache_kernel_block_id_device_by_group=kernel_device,
+            kv_cache_kernel_block_id_host_by_group=kernel_host,
+            kv_cache_block_id_host_by_group=physical_host,
+            kv_cache_kernel_block_id_device=None,
+            kv_cache_kernel_block_id_host=None,
+            kv_cache_block_id_host=None,
+        )
+
+        self.assertEqual(select_block_map_for_layer(attention_inputs, 0), 1)
+        self.assertIs(attention_inputs.kv_cache_kernel_block_id_device, kernel_device[1])
+        self.assertIs(attention_inputs.kv_cache_kernel_block_id_host, kernel_host[1])
+        self.assertIs(attention_inputs.kv_cache_block_id_host, physical_host[1])
+
+    def test_mtp_reads_nested_text_config(self):
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            with open(os.path.join(ckpt_path, "config.json"), "w") as config_file:
+                json.dump(_test_config(), config_file)
+
+            config = Glm5Mtp._create_config(ckpt_path)
+
+        self.assertEqual(config.hidden_size, 4096)
+        self.assertEqual(config.mtp_layer_offset, 45)
+        self.assertEqual(config.num_layers, 1)
+        self.assertEqual(config.attn_config.indexer_topk, 512)
+        self.assertEqual(config.attn_config.indexer_compress_ratio, 4)
+        self.assertEqual(config.attn_config.sparse_attention_topk, 2051)
+        self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
+        self.assertTrue(
+            config.hybrid_attention_config.enable_independent_kv_cache_pools
+        )
+        self.assertEqual(
+            config.hybrid_attention_config.hybrid_attention_types,
+            [HybridAttentionType.NONE],
+        )
+        self.assertEqual(config.attn_config.indexer_layer_ids, [0])
+        self.assertEqual(config.indexer_types, ["full"])
+        # The target contracts its four Hyper-Connection streams before the
+        # MTP handoff.  The GLM draft consumes the resulting [T, hidden_size]
+        # tensor; unlike DSv4 MTP, it must not inherit the target hc_mult.
+        self.assertEqual(config.hc_mult, 1)
+
+    def test_mtp_loads_glm53_indexer_compressor_weights(self):
+        loader = object.__new__(Glm5MtpWeight)
+        loader.checkpoint_prefix = "model.language_model."
+        with mock.patch.object(
+            DeepSeekV2Weight, "_get_hf_layer_weight_info", return_value=[]
+        ):
+            weights = loader._get_hf_layer_weight_info(0)
+
+        self.assertEqual(
+            {weight.name for weight in weights},
+            {W.v4_indexer_compressor_wgate, W.v4_indexer_compressor_ape},
+        )
+        self.assertEqual(
+            {weight.weights[0].name for weight in weights},
+            {
+                "model.layers.{i}.self_attn.indexer.index_kpool_compress_gate",
+                "model.layers.{i}.self_attn.indexer.index_kpool_compress_ape",
+            },
+        )
+
+    def test_mtp_prefixes_only_language_model_weights(self):
+        layer_weight = AtomicWeight(
+            W.pre_ln_gamma,
+            [CkptWeightInfo("model.layers.45.input_layernorm.weight", identity)],
+        )
+        lm_head = AtomicWeight(
+            W.lm_head,
+            [CkptWeightInfo("lm_head.weight", identity)],
+        )
+        unquantized_weight = AtomicWeight(
+            W.mla_kv_b_w,
+            [CkptWeightInfo("model.layers.45.self_attn.kv_b_proj.weight")],
+        )
+
+        Glm5MtpWeight._prefix_checkpoint_names(
+            layer_weight, "model.language_model."
+        )
+        Glm5MtpWeight._prefix_checkpoint_names(lm_head, "model.language_model.")
+        Glm5MtpWeight._prefix_checkpoint_names(
+            unquantized_weight, "model.language_model."
+        )
+
+        self.assertEqual(
+            layer_weight.weights[0].name,
+            "model.language_model.layers.45.input_layernorm.weight",
+        )
+        self.assertEqual(lm_head.weights[0].name, "lm_head.weight")
+        self.assertTrue(unquantized_weight.quantization_disabled)
+
     def test_mega_moe_activation_clamp_is_opt_in(self):
         self.assertEqual(_activation_clamp(SimpleNamespace(swiglu_limit=10.0)), 10.0)
         self.assertIsNone(_activation_clamp(SimpleNamespace(swiglu_limit=0.0)))

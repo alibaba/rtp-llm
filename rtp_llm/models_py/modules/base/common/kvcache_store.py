@@ -7,10 +7,28 @@ from torch import nn
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.ops.compute_ops import (
     KVCache,
+    KVCacheRegionName,
     LayerKVCache,
     PyAttentionInputs,
     PyCacheStoreInputs,
 )
+
+
+def write_typed_aux_cache_regions(
+    write_cache_store_impl: Optional[nn.Module],
+    kv_cache: Optional[KVCache],
+    layer_idx: int,
+) -> None:
+    """Publish non-default typed regions after a layer finishes prefill."""
+    if write_cache_store_impl is None or kv_cache is None:
+        return
+    aux_regions = [
+        layer_cache
+        for layer_cache in kv_cache.get_layer_caches(layer_idx)
+        if layer_cache.region_name != KVCacheRegionName.DEFAULT
+    ]
+    if aux_regions:
+        write_cache_store_impl(aux_regions)
 
 
 def _cache_store_host_i32(tensor: torch.Tensor, name: str) -> torch.Tensor:
@@ -63,7 +81,11 @@ class WriteCacheStoreOp(nn.Module):
     ) -> Optional[torch.Tensor]:
         if self._block_ids_by_group is None:
             return self.kv_cache_block_id_host
-        gid = getattr(kv_cache, "group_id", -1)
+        gid = getattr(
+            kv_cache,
+            "physical_group_id",
+            getattr(kv_cache, "group_id", -1),
+        )
         layer_id = getattr(kv_cache, "layer_id", -1)
         region_name = getattr(kv_cache, "region_name", None)
         if gid < 0 or gid >= len(self._block_ids_by_group):

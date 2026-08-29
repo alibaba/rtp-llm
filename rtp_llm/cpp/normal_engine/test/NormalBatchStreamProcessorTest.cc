@@ -986,4 +986,73 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testPartiallyReusedMultimodalGatherUsesPackedRequestOffsets) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::INT8;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto text_query             = make_shared<GenerateInput>();
+    text_query->input_ids       = hostIntBuffer({9, 10});
+    text_query->generate_config = make_shared<GenerateConfig>();
+    GenerateStreamPtr text_stream =
+        make_shared<NormalGenerateStream>(text_query, model_config, runtime_config, resource_context, nullptr);
+    text_stream->setIsContextStream(true);
+
+    auto make_vl_stream = [&](int feature_base) -> GenerateStreamPtr {
+        auto query                 = make_shared<GenerateInput>();
+        query->input_ids           = hostIntBuffer({11, -1, -1, -1, -1, 12});
+        query->generate_config     = make_shared<GenerateConfig>();
+        query->mm_locs             = torch::tensor({1}, torch::kInt32);
+        query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 0, 1}, torch::kInt32);
+        query->multimodal_features = {
+            torch::tensor({{feature_base + 0, feature_base + 1},
+                           {feature_base + 2, feature_base + 3},
+                           {feature_base + 4, feature_base + 5},
+                           {feature_base + 6, feature_base + 7}},
+                          torch::kFloat16)};
+        GenerateStreamPtr stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(true);
+        // The prefix covers input rows [0, 3), including the first two rows
+        // of the feature span [1, 5). Only feature rows [2, 4) are recomputed.
+        stream->setReuseLength(3);
+        return stream;
+    };
+
+    auto vl_stream_0 = make_vl_stream(100);
+    auto vl_stream_1 = make_vl_stream(200);
+    std::list<GenerateStreamPtr> streams{text_stream, vl_stream_0, vl_stream_1};
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    StreamGroups stream_groups(streams);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(merge_input_status.ok()) << merge_input_status.status();
+
+    auto& model_input = merge_input_status.value();
+    EXPECT_EQ((vector<int>{9, 10, -1, -1, 12, -1, -1, 12}), toVec<int>(model_input.combo_tokens));
+    EXPECT_EQ((vector<int>{2, 3, 3}), toVec<int>(model_input.input_lengths));
+    EXPECT_EQ((vector<int>{0, 3, 3}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ((vector<int>{2, 5}), toVec<int>(model_input.mm_features_locs));
+    ASSERT_TRUE(model_input.multimodal_features.has_value());
+    ASSERT_EQ(model_input.multimodal_features->size(), 2);
+    EXPECT_TRUE(torch::equal(model_input.multimodal_features.value()[0].cpu(),
+                             torch::tensor({{104, 105}, {106, 107}}, torch::kFloat16)));
+    EXPECT_TRUE(torch::equal(model_input.multimodal_features.value()[1].cpu(),
+                             torch::tensor({{204, 205}, {206, 207}}, torch::kFloat16)));
+}
+
 }  // namespace rtp_llm

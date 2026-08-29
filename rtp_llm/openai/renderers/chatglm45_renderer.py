@@ -125,10 +125,11 @@ class Glm53FlashRenderer(ChatGlm45Renderer):
 
     @override
     def in_think_mode(self, request: ChatCompletionRequest) -> bool:
-        # This checkpoint's chat template always opens the assistant turn with
-        # ``<think>``. Always install the reasoning parser so the preamble is
-        # not returned as ordinary response content when THINK_MODE is unset.
-        return True
+        # The checkpoint template opens the assistant turn with ``<think>`` by
+        # default, so omitted settings still require the reasoning parser.
+        # An explicit disable must win, matching the shared renderer contract
+        # and vLLM's non-thinking response semantics.
+        return not request.disable_thinking()
 
     @staticmethod
     def _preprocess_config(content_part, media_url):

@@ -4,7 +4,10 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.models_py.model_desc.kimi_linear import _write_typed_aux_cache_regions
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    WriteCacheStoreOp,
+    write_typed_aux_cache_regions,
+)
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _sparse_prefill_fast_path_limit,
 )
@@ -40,13 +43,32 @@ class Glm53PdCacheStoreTest(unittest.TestCase):
         )
         published = []
 
-        _write_typed_aux_cache_regions(published.append, cache, 1)
-        _write_typed_aux_cache_regions(published.append, cache, 0)
+        write_typed_aux_cache_regions(published.append, cache, 1)
+        write_typed_aux_cache_regions(published.append, cache, 0)
 
         self.assertEqual(published, [[indexer_kv, indexer_state]])
 
     def test_missing_writer_or_cache_is_a_noop(self) -> None:
-        _write_typed_aux_cache_regions(None, None, 0)
+        write_typed_aux_cache_regions(None, None, 0)
+
+    def test_mtp_publication_uses_physical_not_local_group(self) -> None:
+        block_ids = [torch.tensor([gid], dtype=torch.int32) for gid in range(7)]
+        writer = WriteCacheStoreOp(
+            torch.tensor([1], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            block_ids,
+            None,
+        )
+        mtp_indexer_state = SimpleNamespace(
+            layer_id=0,
+            region_name=KVCacheRegionName.INDEXER_STATE,
+            group_id=2,
+            physical_group_id=6,
+        )
+
+        selected = writer._block_ids_for_layer_cache(mtp_indexer_state)
+
+        self.assertIs(selected, block_ids[6])
 
 
 class Glm53IndexerGroupingTest(unittest.TestCase):

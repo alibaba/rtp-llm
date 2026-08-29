@@ -29,6 +29,7 @@ struct LayerKVCache {
     int                        seq_size_per_block = 0;
     int                        layer_id           = -1;
     int                        group_id           = -1;
+    int                        physical_group_id  = -1;
     rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
 };
 
@@ -51,6 +52,7 @@ struct KVCache {
     std::vector<rtp_llm::KVCacheRegionName> group_region_names;
     std::vector<int>                        group_seq_size_per_block;
     std::vector<std::vector<int>>           layer_region_to_group_id;
+    std::vector<std::vector<int>>           layer_region_to_physical_group_id;
     std::vector<std::vector<torch::Tensor>> kv_cache_base_by_layer_region;
     std::vector<std::vector<torch::Tensor>> kv_scale_base_by_layer_region;
 
@@ -58,6 +60,17 @@ struct KVCache {
     // Layout: [layer_0_type_0, layer_0_type_1, ..., layer_0_type_7, layer_1_type_0, ...]
     // Size = layer_num * REGION_COUNT (8). Use region_name_count=8 to index.
     std::vector<torch::Tensor> kv_cache_base_by_layer_region_flat;
+
+    int physicalGroupId(size_t layer, size_t region, int local_group_id) const {
+        if (layer < layer_region_to_physical_group_id.size()
+            && region < layer_region_to_physical_group_id[layer].size()) {
+            const int physical_group_id = layer_region_to_physical_group_id[layer][region];
+            if (physical_group_id >= 0) {
+                return physical_group_id;
+            }
+        }
+        return local_group_id;
+    }
 
     LayerKVCache getLayerCache(int idx) {
         LayerKVCache layer_cache;
@@ -136,6 +149,7 @@ struct KVCache {
         } else {
             layer_cache.group_id = 0;
         }
+        layer_cache.physical_group_id = physicalGroupId(layer, region, layer_cache.group_id);
         return layer_cache;
     }
 
@@ -178,6 +192,7 @@ struct KVCache {
         LayerKVCache layer_cache;
         layer_cache.layer_id           = idx;
         layer_cache.group_id           = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
+        layer_cache.physical_group_id  = physicalGroupId(layer, attn, layer_cache.group_id);
         layer_cache.region_name        = region_name;
         const bool is_full_region      = !rtp_llm::isDsv4FixedRegion(region_name);
         layer_cache.seq_size_per_block = is_full_region && kernel_seq_size_per_block > 0 ?
@@ -306,9 +321,10 @@ struct PyAttentionInputs {
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
-    // Hybrid cache support: per-group CUDA kernel block tables.
-    // Legacy CPU consumers still use singular kv_cache_kernel_block_id_host,
-    // which aliases group 0.
+    // Hybrid cache support: per-group host/device block tables. The singular
+    // fields remain aliases selected for the current layer by block_map.py.
+    std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
+    std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;

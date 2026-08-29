@@ -1030,33 +1030,24 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                          "mtp_model_params_[" + std::to_string(mtp_model_id) + "] is nullptr");
                     }
 
-                    const auto&  mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
-                    const size_t layer_num     = mtp_engine_init_params->model_config_.num_layers;
+                    const auto& mtp_cache_cfg = cache_manager->getMTPModuleCacheConfig(static_cast<int>(mtp_model_id));
+                    const auto  mtp_cache_layout =
+                        cache_manager->getMTPModuleCacheLayerLayout(static_cast<int>(mtp_model_id));
+                    const size_t layer_num = mtp_engine_init_params->model_config_.num_layers;
 
                     RTP_LLM_CHECK_WITH_INFO(layer_num == mtp_cache_cfg.layer_num,
                                             "mtp layer_num mismatch: engine=" + std::to_string(layer_num)
                                                 + " cache_cfg=" + std::to_string(mtp_cache_cfg.layer_num)
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-                    RTP_LLM_CHECK_WITH_INFO(
-                        !mtp_cache_cfg.global_layer_ids.empty(),
-                        "mtp_cache_cfg.global_layer_ids is empty (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
-
-                    // Flatten per-group global_layer_ids into a local-layer-id indexed
-                    // table. SWA-only DSV4 propose configs place the single MTP layer
-                    // in the SWA group (gid=6), NOT in FULL[0], so reading
-                    // ``global_layer_ids[0][layer_id]`` returned garbage (empty vector
-                    // out-of-bounds) and crashed loadCache with SIGSEGV during
-                    // convertIndexToBuffer. Mirrors the flatten pattern already used
-                    // in ``KVCacheManager::getMTPModuleCacheLayerLayout``.
-                    std::vector<int> mtp_local_to_global_layer_id;
-                    for (const auto& group_ids : mtp_cache_cfg.global_layer_ids) {
-                        for (int lid : group_ids) {
-                            mtp_local_to_global_layer_id.push_back(lid);
-                        }
-                    }
-                    RTP_LLM_CHECK_WITH_INFO(mtp_local_to_global_layer_id.size() == layer_num,
-                                            "mtp flat global_layer_ids size %zu != layer_num %zu (mtp_model_id=%zu)",
-                                            mtp_local_to_global_layer_id.size(),
+                    RTP_LLM_CHECK_WITH_INFO(mtp_cache_cfg.local_to_global_layer_ids.size() == layer_num,
+                                            "mtp local-to-global mapping size %zu != layer_num %zu (mtp_model_id=%zu)",
+                                            mtp_cache_cfg.local_to_global_layer_ids.size(),
+                                            layer_num,
+                                            mtp_model_id);
+                    RTP_LLM_CHECK_WITH_INFO(mtp_cache_layout.layer_to_groups.size() == layer_num,
+                                            "mtp cache layout group mapping size %zu != layer_num %zu "
+                                            "(mtp_model_id=%zu)",
+                                            mtp_cache_layout.layer_to_groups.size(),
                                             layer_num,
                                             mtp_model_id);
 
@@ -1068,7 +1059,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         // Same multi-group iteration as the main path.
                         std::vector<int> mtp_layer_gids = layerGroupIds(mtp_cache_cfg, mtp_use_hybrid, layer_id);
 
-                        const int global_layer_id = mtp_local_to_global_layer_id[layer_id];
+                        const int global_layer_id = mtp_cache_cfg.local_to_global_layer_ids[layer_id];
 
                         for (int gid_int : mtp_layer_gids) {
                             const size_t gid = static_cast<size_t>(gid_int);
@@ -1077,20 +1068,35 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
                                 std::to_string(load_context.request_id), request_key);
 
-                            RTP_LLM_CHECK_WITH_INFO(gid < load_context.block_ids_by_group.size(),
-                                                    "mtp group id out of range: gid=%zu group_num=%zu",
-                                                    gid,
-                                                    load_context.block_ids_by_group.size());
-                            RTP_LLM_CHECK_WITH_INFO(
-                                load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
-                            const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                            auto        block_num = block_ids.size();
-                            size_t      model_id  = mtp_base_model_id;
-
                             KVCacheRegionName region_name = KVCacheRegionName::DEFAULT;
                             if (mtp_use_typed_regions && gid < mtp_cache_cfg.group_region_names.size()) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
+                            const auto physical_gid_opt = mtp_cache_layout.resolvePhysicalGroupId(
+                                layer_id, mtp_use_typed_regions ? region_name : KVCacheRegionName::DEFAULT);
+                            RTP_LLM_CHECK_WITH_INFO(physical_gid_opt.has_value(),
+                                                    "missing MTP physical cache group mapping: local_layer=%zu "
+                                                    "local_gid=%zu region=%d",
+                                                    layer_id,
+                                                    gid,
+                                                    static_cast<int>(region_name));
+                            const int physical_gid = *physical_gid_opt;
+                            RTP_LLM_CHECK_WITH_INFO(physical_gid >= 0
+                                                        && static_cast<size_t>(physical_gid)
+                                                               < load_context.block_ids_by_group.size(),
+                                                    "mtp physical group id out of range: local_gid=%zu "
+                                                    "physical_gid=%d group_num=%zu",
+                                                    gid,
+                                                    physical_gid,
+                                                    load_context.block_ids_by_group.size());
+                            RTP_LLM_CHECK_WITH_INFO(load_context.block_ids_by_group[physical_gid] != nullptr,
+                                                    "null mtp group_block: local_gid=%zu physical_gid=%d",
+                                                    gid,
+                                                    physical_gid);
+                            const auto& block_ids = load_context.block_ids_by_group[physical_gid]->blocks();
+                            auto        block_num = block_ids.size();
+                            size_t      model_id  = mtp_base_model_id;
+
                             CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
                             auto           block_pos_list = blockPositionsForLoad(
                                 block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);

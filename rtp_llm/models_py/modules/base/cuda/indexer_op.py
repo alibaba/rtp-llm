@@ -142,12 +142,19 @@ def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         Rotated activation tensor
     """
     assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
-
     hidden_size = x.size(-1)
     assert (
         hidden_size & (hidden_size - 1)
     ) == 0, "Hidden size must be a power of 2 for Hadamard transform."
+
+    if hidden_size == 128:
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
+            hadamard_transform_128,
+        )
+
+        return hadamard_transform_128(x)
+
+    from fast_hadamard_transform import hadamard_transform
 
     return hadamard_transform(x, scale=hidden_size**-0.5)
 

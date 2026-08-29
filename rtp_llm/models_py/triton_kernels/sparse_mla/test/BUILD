@@ -43,6 +43,17 @@ py_test(
 )
 
 py_test(
+    name = "test_hadamard_transform_128",
+    srcs = ["test_hadamard_transform_128.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20A_DEV"],
+    exec_properties = {'gpu': 'L20A_DEV', 'gpu_count': '1'},
+)
+
+py_test(
     name = "test_fused_indexer_cp_assemble",
     srcs = ["test_fused_indexer_cp_assemble.py"],
     deps = [

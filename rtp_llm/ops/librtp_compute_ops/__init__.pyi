@@ -188,6 +188,18 @@ class LayerKVCache:
         """
 
     @property
+    def group_id(self) -> int:
+        """
+        Model-local KV cache group id
+        """
+
+    @property
+    def physical_group_id(self) -> int:
+        """
+        Process-wide KV cache pool id used for cache-store publication
+        """
+
+    @property
     def region_name(self) -> KVCacheRegionName:
         """
         KV cache attention type
@@ -255,6 +267,7 @@ class PyAttentionInputs:
     is_s_padded: bool
     kv_cache_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
+    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor
     kv_cache_kernel_block_id_device: torch.Tensor
     kv_cache_kernel_block_id_host: torch.Tensor

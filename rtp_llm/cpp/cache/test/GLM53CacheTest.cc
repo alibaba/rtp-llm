@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
@@ -113,6 +114,94 @@ TEST(GLM53CacheConfigTest, KPoolIsAlwaysFp8AndStateIncludesMtpSlack) {
     auto* indexer_state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[3].get());
     ASSERT_NE(indexer_state, nullptr);
     EXPECT_EQ(indexer_state->entries_per_block, 8u);
+}
+
+TEST(GLM53CacheConfigTest, AllMlaMtpDoesNotRequireUnusedLinearConfig) {
+    ParallelismConfig pc;
+    auto              model = makeGlm53Config();
+    model.num_layers        = 1;
+    model.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    model.attn_config.indexer_layer_ids                   = {0};
+    model.linear_attention_config                         = {};
+
+    auto config = HybridPoolConfigCreator::createConfig(model, pc, makeKvConfig(), true, 3);
+
+    ASSERT_EQ(config.cache_specs.size(), 3u);
+    EXPECT_NE(dynamic_cast<MLAKVCacheSpec*>(config.cache_specs[0].get()), nullptr);
+    EXPECT_NE(dynamic_cast<DSV4KVSpec*>(config.cache_specs[1].get()), nullptr);
+    EXPECT_NE(dynamic_cast<DSV4StateSpec*>(config.cache_specs[2].get()), nullptr);
+    for (const auto& spec : config.cache_specs) {
+        EXPECT_EQ(dynamic_cast<LinearKVCacheSpec*>(spec.get()), nullptr);
+    }
+}
+
+TEST(GLM53CacheConfigTest, EagleMtpOwnsIndependentTypedPools) {
+    auto score_model   = makeGlm53Config();
+    auto propose_model = makeGlm53Config();
+    propose_model.num_layers = 1;
+    propose_model.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    propose_model.attn_config.indexer_layer_ids                   = {0};
+    propose_model.linear_attention_config                         = {};
+
+    ParallelismConfig parallelism_config;
+    RuntimeConfig     runtime_config;
+    KVCacheConfig     kv_config = makeKvConfig();
+    kv_config.test_block_num    = 8;
+
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_EAGLE;
+    sp_config.gen_num_per_cycle = 3;
+
+    auto config = CacheConfigCreator::createSpConfig(score_model,
+                                                     propose_model,
+                                                     parallelism_config,
+                                                     runtime_config,
+                                                     kv_config,
+                                                     sp_config,
+                                                     std::nullopt,
+                                                     true,
+                                                     true);
+
+    ASSERT_EQ(config.layer_all_num, 7u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    const int mtp_layer = 6;
+    const auto default_region = static_cast<size_t>(KVCacheRegionName::DEFAULT);
+    const auto kv_region    = static_cast<size_t>(KVCacheRegionName::INDEXER_KV);
+    const auto state_region = static_cast<size_t>(KVCacheRegionName::INDEXER_STATE);
+    const int default_group = config.layer_region_to_group_id[mtp_layer][default_region];
+    const int kv_group      = config.layer_region_to_group_id[mtp_layer][kv_region];
+    const int state_group   = config.layer_region_to_group_id[mtp_layer][state_region];
+
+    EXPECT_GE(default_group, 0);
+    EXPECT_GE(kv_group, 0);
+    EXPECT_GE(state_group, 0);
+    EXPECT_EQ(config.layer_to_group_id[mtp_layer], default_group);
+    EXPECT_EQ(config.group_region_names[default_group], KVCacheRegionName::DEFAULT);
+    EXPECT_NE(kv_group, state_group);
+    EXPECT_EQ(config.group_region_names[kv_group], KVCacheRegionName::INDEXER_KV);
+    EXPECT_EQ(config.group_region_names[state_group], KVCacheRegionName::INDEXER_STATE);
+    EXPECT_EQ(config.global_layer_ids[kv_group], std::vector<int>({mtp_layer}));
+    EXPECT_EQ(config.global_layer_ids[state_group], std::vector<int>({mtp_layer}));
+    EXPECT_GT(static_cast<size_t>(kv_group), 3u);
+    EXPECT_GT(static_cast<size_t>(state_group), 3u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->layer_to_group_id, std::vector<int>({0}));
+    EXPECT_EQ(config.mtp_sub_configs[0]->local_to_global_layer_ids, std::vector<int>({mtp_layer}));
+    const auto& mtp_config         = *config.mtp_sub_configs[0];
+    const int   local_default_group = mtp_config.layer_region_to_group_id[0][default_region];
+    const int   local_kv_group      = mtp_config.layer_region_to_group_id[0][kv_region];
+    const int   local_state_group   = mtp_config.layer_region_to_group_id[0][state_region];
+    ASSERT_GE(local_default_group, 0);
+    ASSERT_GE(local_kv_group, 0);
+    ASSERT_GE(local_state_group, 0);
+    ASSERT_LT(static_cast<size_t>(local_default_group), mtp_config.group_region_names.size());
+    ASSERT_LT(static_cast<size_t>(local_kv_group), mtp_config.group_region_names.size());
+    ASSERT_LT(static_cast<size_t>(local_state_group), mtp_config.group_region_names.size());
+    EXPECT_EQ(mtp_config.group_region_names[local_default_group], KVCacheRegionName::DEFAULT);
+    EXPECT_EQ(mtp_config.group_region_names[local_kv_group], KVCacheRegionName::INDEXER_KV);
+    EXPECT_EQ(mtp_config.group_region_names[local_state_group], KVCacheRegionName::INDEXER_STATE);
+    EXPECT_NE(local_default_group, default_group);
+    EXPECT_NE(local_kv_group, kv_group);
+    EXPECT_NE(local_state_group, state_group);
 }
 
 TEST(GLM53CacheConfigTest, SplitPhysicalBlocksScaleOnlyPagedKPool) {

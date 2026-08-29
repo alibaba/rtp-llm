@@ -52,6 +52,95 @@ _UNQUANTIZED_WEIGHT_NAMES = {
 }
 
 
+def _configure_glm53_indexer_compression(
+    attn_config: Any, text_config: Dict[str, Any]
+) -> None:
+    """Apply the checkpoint-mandated KPool geometry to an MLA config."""
+    raw_indexer_topk = int(text_config["index_topk"])
+    indexer_compress_ratio = int(text_config.get("index_kpool", 0))
+    if not bool(text_config.get("index_kpool_compress", False)):
+        raise ValueError("GLM-5.3-Flash requires index_kpool_compress=true")
+    if indexer_compress_ratio != 4:
+        raise ValueError(
+            f"GLM-5.3-Flash requires index_kpool=4, got {indexer_compress_ratio}"
+        )
+    if raw_indexer_topk <= 0 or raw_indexer_topk % indexer_compress_ratio != 0:
+        raise ValueError(
+            "GLM-5.3-Flash index_topk must be positive and divisible by "
+            f"index_kpool: topk={raw_indexer_topk}, "
+            f"index_kpool={indexer_compress_ratio}"
+        )
+    if not bool(text_config.get("index_kpool_always_select_tail", False)):
+        raise ValueError("GLM-5.3-Flash requires index_kpool_always_select_tail=true")
+    attn_config.indexer_topk = raw_indexer_topk // indexer_compress_ratio
+    attn_config.indexer_compress_ratio = indexer_compress_ratio
+    attn_config.indexer_compressor_overlap = 0
+    attn_config.sparse_attention_topk = raw_indexer_topk + indexer_compress_ratio - 1
+
+
+def _configure_glm53_hyper_connections(
+    config: ModelConfig, text_config: Dict[str, Any]
+) -> None:
+    """Configure the target model's Hyper-Connection residual geometry."""
+    config.hc_mult = int(text_config.get("hc_mult", 1))
+    if config.hc_mult <= 0:
+        raise ValueError(f"GLM-5.3-Flash requires hc_mult > 0, got {config.hc_mult}")
+    config.hc_sinkhorn_iters = int(text_config.get("hc_sinkhorn_iters", 0))
+    config.hc_eps = float(text_config.get("hc_eps", 1e-6))
+
+
+def _configure_glm53_mtp_attention_layout(
+    config: ModelConfig, text_config: Dict[str, Any], num_mtp_layers: int
+) -> None:
+    """Remap full-checkpoint MTP layers to their local MLA cache layout."""
+    if num_mtp_layers <= 0:
+        raise ValueError(
+            f"GLM-5.3-Flash requires at least one MTP layer, got {num_mtp_layers}"
+        )
+    _configure_glm53_indexer_compression(config.attn_config, text_config)
+
+    # MTP layers live after ``layer_types`` in the checkpoint.  The reference
+    # implementation classifies every such out-of-range layer as MLA, while
+    # RTP remaps them to local layer ids [0, num_mtp_layers).  Keep the cache
+    # schedule and KPool owners in that same local coordinate system.
+    config.hybrid_attention_config.enable_hybrid_attention = True
+    config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+    config.hybrid_attention_config.hybrid_attention_types = [
+        HybridAttentionType.NONE
+    ] * num_mtp_layers
+    config.attn_config.indexer_layer_ids = list(range(num_mtp_layers))
+    config.indexer_types = ["full"] * num_mtp_layers
+    config.index_share_for_mtp_iteration = bool(
+        text_config.get("index_share_for_mtp_iteration", False)
+    )
+
+
+def _glm53_indexer_compressor_weight_info() -> List[WeightModule]:
+    """Checkpoint manifest shared by target and MTP sparse-attention layers."""
+    return [
+        AtomicWeight(
+            W.v4_indexer_compressor_wgate,
+            [
+                CkptWeightInfo(
+                    "model.layers.{i}.self_attn.indexer.index_kpool_compress_gate",
+                    identity,
+                )
+            ],
+            identity,
+        ),
+        AtomicWeight(
+            W.v4_indexer_compressor_ape,
+            [
+                CkptWeightInfo(
+                    "model.layers.{i}.self_attn.indexer.index_kpool_compress_ape",
+                    identity,
+                )
+            ],
+            identity,
+        ),
+    ]
+
+
 class Glm53FlashModelConfig(ModelConfig):
     """Model config with checkpoint-mandated KDA cache precision."""
 
@@ -152,26 +241,7 @@ def parse_glm53_flash_config(
     attn_config.is_sparse = True
     attn_config.indexer_head_dim = int(text_config["index_head_dim"])
     attn_config.indexer_head_num = int(text_config["index_n_heads"])
-    raw_indexer_topk = int(text_config["index_topk"])
-    indexer_compress_ratio = int(text_config.get("index_kpool", 0))
-    if not bool(text_config.get("index_kpool_compress", False)):
-        raise ValueError("GLM-5.3-Flash requires index_kpool_compress=true")
-    if indexer_compress_ratio != 4:
-        raise ValueError(
-            "GLM-5.3-Flash requires index_kpool=4, got " f"{indexer_compress_ratio}"
-        )
-    if raw_indexer_topk <= 0 or raw_indexer_topk % indexer_compress_ratio != 0:
-        raise ValueError(
-            "GLM-5.3-Flash index_topk must be positive and divisible by "
-            f"index_kpool: topk={raw_indexer_topk}, "
-            f"index_kpool={indexer_compress_ratio}"
-        )
-    if not bool(text_config.get("index_kpool_always_select_tail", False)):
-        raise ValueError("GLM-5.3-Flash requires index_kpool_always_select_tail=true")
-    attn_config.indexer_topk = raw_indexer_topk // indexer_compress_ratio
-    attn_config.indexer_compress_ratio = indexer_compress_ratio
-    attn_config.indexer_compressor_overlap = 0
-    attn_config.sparse_attention_topk = raw_indexer_topk + indexer_compress_ratio - 1
+    _configure_glm53_indexer_compression(attn_config, text_config)
     config.indexer_types = list(text_config.get("indexer_types", []))
     config.index_share_for_mtp_iteration = bool(
         text_config.get("index_share_for_mtp_iteration", False)
@@ -216,9 +286,7 @@ def parse_glm53_flash_config(
     config.moe_layer_index = [
         i for i, layer_type in enumerate(mlp_layer_types) if layer_type == "sparse"
     ]
-    config.hc_mult = int(text_config.get("hc_mult", 1))
-    config.hc_sinkhorn_iters = int(text_config.get("hc_sinkhorn_iters", 0))
-    config.hc_eps = float(text_config.get("hc_eps", 1e-6))
+    _configure_glm53_hyper_connections(config, text_config)
     config.swiglu_limit = float(text_config.get("swiglu_limit", 0.0))
     vision_config = config_json.get("vision_config")
     if vision_config:
@@ -312,32 +380,7 @@ class Glm53FlashWeight(DeepSeekV2Weight):
             weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         else:
             weights = super()._get_hf_layer_weight_info(layer_id)
-            weights.extend(
-                [
-                    AtomicWeight(
-                        W.v4_indexer_compressor_wgate,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.self_attn.indexer."
-                                "index_kpool_compress_gate",
-                                identity,
-                            )
-                        ],
-                        identity,
-                    ),
-                    AtomicWeight(
-                        W.v4_indexer_compressor_ape,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.self_attn.indexer."
-                                "index_kpool_compress_ape",
-                                identity,
-                            )
-                        ],
-                        identity,
-                    ),
-                ]
-            )
+            weights.extend(_glm53_indexer_compressor_weight_info())
         weights.extend(self._get_hc_weight_info())
         return weights
 

@@ -1,7 +1,82 @@
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
+
+
+def _sequence_offsets(
+    cu_seqlens: torch.Tensor,
+    token_count: int,
+    cu_seqlens_host: Optional[torch.Tensor] = None,
+) -> List[Tuple[int, int]]:
+    """Return validated packed-request ranges without assuming CUDA metadata."""
+    if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
+        raise ValueError("cu_seqlens must be a one-dimensional [batch + 1] tensor")
+    if cu_seqlens.dtype not in (torch.int32, torch.int64):
+        raise ValueError("cu_seqlens must use an integer dtype")
+    source = (
+        cu_seqlens_host
+        if cu_seqlens_host is not None and cu_seqlens_host.numel()
+        else cu_seqlens
+    )
+    offsets = [int(value) for value in source.detach().cpu().tolist()]
+    if offsets[0] != 0 or offsets[-1] != token_count:
+        raise ValueError(
+            f"cu_seqlens must start at 0 and end at {token_count}, got {offsets}"
+        )
+    if any(left > right for left, right in zip(offsets, offsets[1:])):
+        raise ValueError("cu_seqlens must be non-decreasing")
+    return list(zip(offsets, offsets[1:]))
+
+
+def prepare_mtp_multimodal_inputs(
+    input_ids: torch.Tensor,
+    multimodal_features: Sequence[torch.Tensor],
+    multimodal_locs: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_host: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, List[torch.Tensor], torch.Tensor]:
+    """Shift multimodal spans with MTP prefill and mask feature-hash token IDs.
+
+    MTP prefill shifts each packed request left by one token and appends the
+    target sample. Multimodal feature rows must follow that shift. Their token
+    IDs are cache feature hashes rather than vocab IDs, so rows overwritten by
+    the feature injector are replaced with a safe ID before embedding lookup.
+    """
+    if multimodal_locs.numel() != len(multimodal_features):
+        raise ValueError(
+            f"multimodal_locs has {multimodal_locs.numel()} entries "
+            f"but {len(multimodal_features)} features were provided"
+        )
+    ranges = _sequence_offsets(
+        cu_seqlens,
+        input_ids.numel(),
+        cu_seqlens_host=cu_seqlens_host,
+    )
+    locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+    shifted_features: List[torch.Tensor] = []
+    shifted_locs: List[int] = []
+    for feature, loc in zip(multimodal_features, locs):
+        feature_end = loc + feature.size(0) - 1
+        request_starts = [start for start, _ in ranges if start <= feature_end]
+        if not request_starts:
+            raise ValueError(
+                f"multimodal feature ending at {feature_end} is outside packed requests"
+            )
+        request_start = max(request_starts)
+        dropped_rows = max(0, request_start - loc + 1)
+        shifted_features.append(feature[dropped_rows:])
+        shifted_locs.append(max(loc - 1, request_start))
+
+    shifted_locs_tensor = torch.tensor(shifted_locs, dtype=torch.int32)
+    masked_ids = input_ids.clone()
+    for feature, loc in zip(shifted_features, shifted_locs):
+        if feature.numel() == 0:
+            continue
+        length = min(feature.size(0), masked_ids.size(0) - loc)
+        if length > 0:
+            masked_ids.narrow(0, loc, length).fill_(0)
+    return masked_ids, shifted_features, shifted_locs_tensor
 
 
 def reshape_extra_input_to_deepstack(

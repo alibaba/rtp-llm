@@ -972,8 +972,8 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
         return;
     }
     if (isMTPEagle()) {
-        int propose_step   = sp_config.gen_num_per_cycle;
-        int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        int         propose_step     = sp_config.gen_num_per_cycle;
+        const auto& mtp_model_config = propose_params_->getEngineInitParams().model_config_;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -984,7 +984,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_model_config));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -1003,7 +1003,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_model_config));
                 }
                 break;
             }

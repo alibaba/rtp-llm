@@ -86,7 +86,7 @@ public:
                                                        const ModelConfig&     model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
-                                                       int                    vocab_size);
+                                                       const ModelConfig&     draft_model_config);
 
 protected:
     struct AcceptLenMetricsSnapshot {

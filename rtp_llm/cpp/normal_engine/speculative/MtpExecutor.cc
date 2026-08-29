@@ -1204,16 +1204,16 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
                                                          const ModelConfig&     model_config,
                                                          const RuntimeConfig&   runtime_config,
                                                          const ResourceContext& resource_context,
-                                                         int                    vocab_size) {
+                                                         const ModelConfig&     draft_model_config) {
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    // Fake SP buffer's hidden_states stands in for the target's pre-output
-    // residual that the draft consumes (DSv4: [T, hc_mult*hidden_size];
-    // non-DSv4 keeps hc_mult=1 so the shape is plain [T, hidden_size]).
+    // The buffer models the hidden tensor consumed by the draft.  Its geometry
+    // belongs to the draft contract: DSv4 consumes pre-HC state (hc_mult > 1),
+    // while GLM-5.3 consumes the target's contracted state (hc_mult == 1).
     auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
-                                            model_config.hidden_size * model_config.hc_mult,
-                                            model_config.vocab_size,
+                                            draft_model_config.hidden_size * draft_model_config.hc_mult,
+                                            draft_model_config.vocab_size,
                                             max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
@@ -1295,14 +1295,14 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // profiling state to the worker thread can crash while perf timelines are
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
-    data_type_        = params.model_config_.data_type;
-    hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_     = propose_params->gen_num_per_circle;
-    vocab_size_       = params.model_config_.vocab_size;
-    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
-
     const auto& draft_engine_params    = propose_params->getEngineInitParams();
     const auto& draft_model_config     = draft_engine_params.model_config_;
+    data_type_        = params.model_config_.data_type;
+    hidden_size_      = draft_model_config.hidden_size * draft_model_config.hc_mult;
+    propose_step_     = propose_params->gen_num_per_circle;
+    vocab_size_       = params.model_config_.vocab_size;
+    draft_vocab_size_ = draft_model_config.vocab_size;
+
     const bool  has_python_draft_model = !params.py_sp_model.is_none();
     const bool  python_draft_share_capable =
         kMtpIndexerShareFlag.on && has_python_draft_model && pythonDraftSupportsMtpIndexerShare(params.py_sp_model);

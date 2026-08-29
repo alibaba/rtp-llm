@@ -389,6 +389,7 @@ def main() -> str:
                 is_decode=True,
                 dump_json_path=args.result_dir,
                 decode_test_length=args.decode_test_length,
+                tp_size=int(extract_arg(remaining, "tp_size", "1")),
                 generate_config=generate_config,
                 grid_cases=grid_cases,
             ).run()
@@ -402,6 +403,7 @@ def main() -> str:
                 is_decode=False,
                 dump_json_path=args.result_dir,
                 decode_test_length=args.decode_test_length,
+                tp_size=int(extract_arg(remaining, "tp_size", "1")),
                 generate_config=generate_config,
                 grid_cases=grid_cases,
                 reuse_cache_query_dict=reuse_cache_query_dict,

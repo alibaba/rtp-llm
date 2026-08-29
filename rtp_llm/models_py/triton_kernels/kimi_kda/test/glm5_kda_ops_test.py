@@ -11,7 +11,10 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from rtp_llm.models_py.triton_kernels.fla import store_ssm_state_to_block_map
+from rtp_llm.models_py.triton_kernels.fla import (
+    load_initial_state_from_block_map,
+    store_ssm_state_to_block_map,
+)
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_kda_gate,
@@ -90,6 +93,303 @@ class Glm5KdaOpsTest(unittest.TestCase):
         )
         self.assertGreater(self._cosine(actual, expected), 0.999)
         self.assertTrue((actual <= 0).all())
+
+    def test_packed_varlen_conv_matches_serial_sequences(self):
+        lengths = [5, 9, 3]
+        cu_seqlens = torch.tensor(
+            [0, 5, 14, 17], device="cuda", dtype=torch.int32
+        )
+        channels = 64
+        inputs = torch.randn(
+            sum(lengths), channels, device="cuda", dtype=torch.bfloat16
+        )
+        weight = torch.randn(channels, 4, device="cuda", dtype=torch.bfloat16)
+        prefix_lengths = torch.zeros(len(lengths), device="cuda", dtype=torch.int32)
+
+        packed = causal_conv1d_fn(
+            inputs.transpose(0, 1),
+            weight,
+            None,
+            None,
+            cu_seqlens,
+            None,
+            prefix_lengths,
+            64,
+        ).transpose(0, 1)
+        serial = []
+        offset = 0
+        for length in lengths:
+            serial.append(
+                causal_conv1d_fn(
+                    inputs[offset : offset + length].transpose(0, 1),
+                    weight,
+                    None,
+                    None,
+                    torch.tensor([0, length], device="cuda", dtype=torch.int32),
+                    None,
+                    torch.zeros(1, device="cuda", dtype=torch.int32),
+                    64,
+                ).transpose(0, 1)
+            )
+            offset += length
+        torch.testing.assert_close(packed, torch.cat(serial), rtol=0, atol=0)
+
+    def test_mixed_prefix_shared_block_conv_matches_serial_sequences(self):
+        lengths = [5, 7, 7]
+        cu_seqlens = torch.tensor(
+            [0, 5, 12, 19], device="cuda", dtype=torch.int32
+        )
+        prefix_lengths = torch.tensor(
+            [0, 64, 64], device="cuda", dtype=torch.int32
+        )
+        block_map = torch.tensor(
+            [[1, -1], [2, 3], [2, 4]], device="cuda", dtype=torch.int32
+        )
+        channels = 64
+        inputs = torch.randn(
+            sum(lengths), channels, device="cuda", dtype=torch.bfloat16
+        )
+        weight = torch.randn(channels, 4, device="cuda", dtype=torch.bfloat16)
+        # Production stores [block, state_len, channel] and passes a transposed
+        # view so the feature dimension is contiguous for the Triton kernel.
+        original_cache = torch.randn(
+            5, 3, channels, device="cuda", dtype=torch.bfloat16
+        ).transpose(1, 2)
+        packed_cache = original_cache.clone()
+
+        packed = causal_conv1d_fn(
+            inputs.transpose(0, 1),
+            weight,
+            None,
+            packed_cache,
+            cu_seqlens,
+            block_map,
+            prefix_lengths,
+            64,
+        ).transpose(0, 1)
+        serial_outputs = []
+        serial_caches = []
+        offset = 0
+        for batch_idx, length in enumerate(lengths):
+            cache = original_cache.clone()
+            serial_outputs.append(
+                causal_conv1d_fn(
+                    inputs[offset : offset + length].transpose(0, 1),
+                    weight,
+                    None,
+                    cache,
+                    torch.tensor([0, length], device="cuda", dtype=torch.int32),
+                    block_map[batch_idx : batch_idx + 1],
+                    prefix_lengths[batch_idx : batch_idx + 1],
+                    64,
+                ).transpose(0, 1)
+            )
+            serial_caches.append(cache)
+            offset += length
+
+        torch.testing.assert_close(
+            packed, torch.cat(serial_outputs), rtol=0, atol=0
+        )
+        torch.testing.assert_close(packed_cache[1], serial_caches[0][1])
+        torch.testing.assert_close(packed_cache[3], serial_caches[1][3])
+        torch.testing.assert_close(packed_cache[4], serial_caches[2][4])
+        torch.testing.assert_close(packed_cache[2], original_cache[2])
+
+    def test_packed_varlen_kda_matches_serial_sequences(self):
+        lengths = [5, 9, 3]
+        token_count = sum(lengths)
+        shape = (1, token_count, self.HEADS, self.HEAD_DIM)
+        q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        g = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        beta = torch.randn(
+            shape[:-1], device="cuda", dtype=torch.bfloat16
+        ).sigmoid()
+        cu_seqlens = torch.tensor(
+            [0, 5, 14, 17], device="cuda", dtype=torch.int32
+        )
+        initial_state = torch.zeros(
+            len(lengths),
+            self.HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        common = {
+            "output_final_state": True,
+            "use_qk_l2norm_in_kernel": True,
+            "use_gate_in_kernel": True,
+            "A_log": self.a_log,
+            "dt_bias": self.dt_bias.flatten(),
+            "safe_gate": True,
+            "lower_bound": -5.0,
+        }
+
+        packed_output, packed_state = chunk_kda(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=initial_state.clone(),
+            cu_seqlens=cu_seqlens,
+            **common,
+        )
+        serial_outputs = []
+        serial_states = []
+        offset = 0
+        for batch_idx, length in enumerate(lengths):
+            output, state = chunk_kda(
+                q[:, offset : offset + length],
+                k[:, offset : offset + length],
+                v[:, offset : offset + length],
+                g[:, offset : offset + length],
+                beta[:, offset : offset + length],
+                initial_state=initial_state[batch_idx : batch_idx + 1].clone(),
+                **common,
+            )
+            serial_outputs.append(output)
+            serial_states.append(state)
+            offset += length
+
+        torch.testing.assert_close(
+            packed_output, torch.cat(serial_outputs, dim=1), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            packed_state, torch.cat(serial_states, dim=0), rtol=0, atol=0
+        )
+
+    def test_mixed_prefix_shared_block_kda_cache_matches_serial_sequences(self):
+        lengths = [5, 7, 7]
+        token_count = sum(lengths)
+        cu_seqlens = torch.tensor(
+            [0, 5, 12, 19], device="cuda", dtype=torch.int32
+        )
+        prefix_lengths = torch.tensor(
+            [0, 64, 64], device="cuda", dtype=torch.int32
+        )
+        block_map = torch.tensor(
+            [[1, -1], [2, 3], [2, 4]], device="cuda", dtype=torch.int32
+        )
+        shape = (1, token_count, self.HEADS, self.HEAD_DIM)
+        q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        g = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        beta = torch.randn(
+            shape[:-1], device="cuda", dtype=torch.bfloat16
+        ).sigmoid()
+        original_cache = torch.randn(
+            5,
+            self.HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        common = {
+            "output_final_state": True,
+            "use_qk_l2norm_in_kernel": True,
+            "use_gate_in_kernel": True,
+            "A_log": self.a_log,
+            "dt_bias": self.dt_bias.flatten(),
+            "safe_gate": True,
+            "lower_bound": -5.0,
+            "return_intermediate_states": True,
+        }
+
+        packed_initial = torch.empty(
+            len(lengths),
+            self.HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        load_initial_state_from_block_map(
+            prefix_lengths,
+            block_map,
+            original_cache,
+            packed_initial,
+            64,
+        )
+        packed_output, packed_final, packed_h = chunk_kda(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            initial_state=packed_initial,
+            cu_seqlens=cu_seqlens,
+            **common,
+        )
+        packed_cache = original_cache.clone()
+        store_ssm_state_to_block_map(
+            packed_h.float(),
+            packed_final.float(),
+            prefix_lengths,
+            cu_seqlens,
+            block_map,
+            packed_cache,
+            64,
+            chunk_size=64,
+        )
+
+        serial_outputs = []
+        serial_caches = []
+        offset = 0
+        for batch_idx, length in enumerate(lengths):
+            initial = torch.empty(
+                1,
+                self.HEADS,
+                self.HEAD_DIM,
+                self.HEAD_DIM,
+                device="cuda",
+                dtype=torch.float32,
+            )
+            load_initial_state_from_block_map(
+                prefix_lengths[batch_idx : batch_idx + 1],
+                block_map[batch_idx : batch_idx + 1],
+                original_cache,
+                initial,
+                64,
+            )
+            output, final, intermediate = chunk_kda(
+                q[:, offset : offset + length],
+                k[:, offset : offset + length],
+                v[:, offset : offset + length],
+                g[:, offset : offset + length],
+                beta[:, offset : offset + length],
+                initial_state=initial,
+                **common,
+            )
+            cache = original_cache.clone()
+            local_cu = torch.tensor(
+                [0, length], device="cuda", dtype=torch.int32
+            )
+            store_ssm_state_to_block_map(
+                intermediate.float(),
+                final.float(),
+                prefix_lengths[batch_idx : batch_idx + 1],
+                local_cu,
+                block_map[batch_idx : batch_idx + 1],
+                cache,
+                64,
+                chunk_size=64,
+            )
+            serial_outputs.append(output)
+            serial_caches.append(cache)
+            offset += length
+
+        torch.testing.assert_close(
+            packed_output, torch.cat(serial_outputs, dim=1), rtol=0, atol=0
+        )
+        torch.testing.assert_close(packed_cache[1], serial_caches[0][1])
+        torch.testing.assert_close(packed_cache[3], serial_caches[1][3])
+        torch.testing.assert_close(packed_cache[4], serial_caches[2][4])
+        torch.testing.assert_close(packed_cache[2], original_cache[2])
 
     def test_prefill_and_decode_match_torch(self):
         expected, expected_state = self._reference()

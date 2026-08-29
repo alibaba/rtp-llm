@@ -331,6 +331,47 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
 
+    // EAGLE draft cache has an independent lifetime from the target cache.
+    // Preserve the propose layout as dedicated physical groups instead of
+    // merging groups by position: hybrid target/propose layouts need not have
+    // the same group ordering (for example GLM-5.3 target has MLA, Linear,
+    // INDEXER_KV, INDEXER_STATE while its all-MLA draft has no Linear group).
+    const bool   independent_eagle_pool = is_eagle && config.use_independent_block_pools;
+    const size_t propose_group_offset   = config.group_types.size();
+    if (independent_eagle_pool) {
+        for (size_t g = 0; g < propose_config.group_types.size(); ++g) {
+            config.cache_specs.push_back(propose_config.cache_specs[g]);
+            config.global_layer_ids.emplace_back();
+            config.layer_ids.emplace_back();
+            config.group_types.push_back(propose_config.group_types[g]);
+            config.group_region_names.push_back(
+                g < propose_config.group_region_names.size() ? propose_config.group_region_names[g]
+                                                             : KVCacheRegionName::DEFAULT);
+            config.group_seq_size_per_block.push_back(
+                g < propose_config.group_seq_size_per_block.size() ? propose_config.group_seq_size_per_block[g]
+                                                                   : propose_config.seq_size_per_block);
+            config.group_kv_block_stride_bytes.push_back(
+                g < propose_config.group_kv_block_stride_bytes.size()
+                    ? propose_config.group_kv_block_stride_bytes[g]
+                    : propose_config.kv_block_stride_bytes);
+            config.group_kv_scale_stride_bytes.push_back(
+                g < propose_config.group_kv_scale_stride_bytes.size()
+                    ? propose_config.group_kv_scale_stride_bytes[g]
+                    : propose_config.kv_scale_stride_bytes);
+            config.group_block_size_bytes.push_back(
+                g < propose_config.group_block_size_bytes.size() ? propose_config.group_block_size_bytes[g]
+                                                                 : propose_config.block_size_bytes);
+            config.group_block_nums.push_back(0);
+            if (propose_config.group_types[g] == CacheGroupType::FULL) {
+                ++config.full_group_num;
+            } else if (propose_config.group_types[g] == CacheGroupType::SWA) {
+                ++config.swa_group_num;
+            } else {
+                ++config.linear_group_num;
+            }
+        }
+    }
+
     size_t full_gid = 0;
     if (config.group_types.size() > 1) {
         for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
@@ -380,6 +421,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
         const std::vector<std::vector<int>> propose_per_group = propose_config.global_layer_ids;
         sub_cfg->global_layer_ids.assign(propose_per_group.size(), {});
+        sub_cfg->local_to_global_layer_ids.assign(static_cast<size_t>(mtp_layer_num), -1);
         RTP_LLM_CHECK_WITH_INFO(sub_cfg->layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
                                 "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
                                 sub_cfg->layer_to_block_stride_bytes.size(),
@@ -391,15 +433,34 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 }
                 const int global_layer_id = main_layer_num + m * mtp_layer_num + local_lid;
                 sub_cfg->global_layer_ids[g].push_back(global_layer_id);
+                sub_cfg->local_to_global_layer_ids[static_cast<size_t>(local_lid)] = global_layer_id;
 
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid =
-                    (g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid);
-                config.layer_to_group_id[global_layer_id] = target_gid;
+                const int target_gid = independent_eagle_pool
+                                           ? static_cast<int>(propose_group_offset + g)
+                                           : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
+                                                                                  : static_cast<int>(full_gid));
+                RTP_LLM_CHECK_WITH_INFO(
+                    static_cast<size_t>(local_lid) < propose_config.layer_to_group_id.size(),
+                    "propose layer_to_group_id missing local layer %d (size=%zu)",
+                    local_lid,
+                    propose_config.layer_to_group_id.size());
+                const bool is_primary_group =
+                    propose_config.layer_to_group_id[static_cast<size_t>(local_lid)] == static_cast<int>(g);
+                if (is_primary_group) {
+                    // Keep the legacy single-group view on the propose model's
+                    // primary cache region. Auxiliary typed regions (for
+                    // example INDEXER_KV / INDEXER_STATE) must not overwrite
+                    // the DEFAULT MLA buffer selected by createBasicConfig().
+                    config.layer_to_group_id[global_layer_id] = target_gid;
+                }
                 if (target_gid >= 0 && target_gid < static_cast<int>(config.global_layer_ids.size())) {
                     config.global_layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
+                    if (static_cast<size_t>(target_gid) < config.layer_ids.size()) {
+                        config.layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
+                    }
                 }
                 if (!config.layer_to_group_ids.empty()
                     && static_cast<size_t>(global_layer_id) < config.layer_to_group_ids.size()) {
@@ -413,7 +474,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                         config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
                     }
                 }
-                if (target_gid >= 0 && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
+                if (!independent_eagle_pool && target_gid >= 0
+                    && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
                     size_t stride_bytes = 0;
                     if (g < propose_config.group_kv_block_stride_bytes.size()) {
                         stride_bytes += propose_config.group_kv_block_stride_bytes[g];
@@ -426,21 +488,17 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
                 const int stride_bytes = sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(local_lid)];
                 config.layer_to_block_stride_bytes[static_cast<size_t>(global_layer_id)] = stride_bytes;
-                if (static_cast<size_t>(local_lid) < sub_cfg->layer_group_types.size()) {
+                if (is_primary_group && static_cast<size_t>(local_lid) < sub_cfg->layer_group_types.size()) {
                     config.layer_group_types[static_cast<size_t>(global_layer_id)] =
                         sub_cfg->layer_group_types[static_cast<size_t>(local_lid)];
                 }
             }
         }
-
-        sub_cfg->layer_to_group_id.assign(static_cast<size_t>(sub_cfg->layer_num), -1);
-        for (size_t g = 0; g < propose_per_group.size(); ++g) {
-            for (int local_lid : propose_per_group[g]) {
-                if (local_lid >= 0 && static_cast<size_t>(local_lid) < sub_cfg->layer_to_group_id.size()) {
-                    sub_cfg->layer_to_group_id[static_cast<size_t>(local_lid)] = static_cast<int>(g);
-                }
-            }
-        }
+        RTP_LLM_CHECK_WITH_INFO(std::all_of(sub_cfg->local_to_global_layer_ids.begin(),
+                                            sub_cfg->local_to_global_layer_ids.end(),
+                                            [](int layer_id) { return layer_id >= 0; }),
+                                "MTP sub-config local-to-global layer mapping is incomplete (module=%d)",
+                                m);
         sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
     }

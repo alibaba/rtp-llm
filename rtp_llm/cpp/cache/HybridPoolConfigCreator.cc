@@ -234,21 +234,27 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.group_types.clear();
     config.group_region_names.clear();
 
-    appendGroup(config,
-                layers.full_layers,
-                CacheGroupType::FULL,
-                createFullAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
-    appendGroup(config,
-                layers.swa_layers,
-                CacheGroupType::SWA,
-                createFullAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
-    appendGroup(config,
-                layers.linear_layers,
-                CacheGroupType::LINEAR,
-                createLinearAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
+    if (!layers.full_layers.empty()) {
+        appendGroup(config,
+                    layers.full_layers,
+                    CacheGroupType::FULL,
+                    createFullAttentionSpec(
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
+    }
+    if (!layers.swa_layers.empty()) {
+        appendGroup(config,
+                    layers.swa_layers,
+                    CacheGroupType::SWA,
+                    createFullAttentionSpec(
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
+    }
+    if (!layers.linear_layers.empty()) {
+        appendGroup(config,
+                    layers.linear_layers,
+                    CacheGroupType::LINEAR,
+                    createLinearAttentionSpec(
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
+    }
 }
 
 void setupGroupCounts(CacheConfig& config) {

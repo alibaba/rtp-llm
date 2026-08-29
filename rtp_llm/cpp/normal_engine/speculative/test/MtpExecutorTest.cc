@@ -37,6 +37,9 @@ struct MtpExecutorTestConfig {
     size_t num_layers          = 1;
     size_t gen_num_per_cycle   = 4;
     size_t vocab_size_override = 0;  // 0 means use vocab_size
+    size_t hidden_size         = 2;
+    size_t target_hc_mult      = 1;
+    size_t draft_hc_mult       = 1;
 };
 
 template<typename T>
@@ -395,6 +398,8 @@ public:
         model_config.max_seq_len    = test_config.max_seq_len;
         model_config.vocab_size     = test_config.vocab_size;
         model_config.num_layers     = test_config.num_layers;
+        model_config.hidden_size    = test_config.hidden_size;
+        model_config.hc_mult        = test_config.target_hc_mult;
         sp_config.gen_num_per_cycle = test_config.gen_num_per_cycle;
 
         resource_context.cache_manager =
@@ -429,6 +434,7 @@ public:
         // Create propose model engine init params
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
         auto mtp_params         = std::make_unique<EngineInitParams>(params);
+        mtp_params->model_config_.hc_mult = test_config.draft_hc_mult;
         mtp_params->py_sp_model = py::none();
 
         mtp_model_params->push_back(std::move(mtp_params));
@@ -520,6 +526,39 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
 
+TEST_F(MtpExecutorTest, testDraftHiddenGeometryDoesNotFollowTargetHyperConnections) {
+    MtpExecutorTestConfig test_config;
+    test_config.hidden_size    = 8;
+    test_config.target_hc_mult = 4;
+    test_config.draft_hc_mult  = 1;
+    auto components            = createMtpExecutorComponents(test_config);
+
+    // GLM-5.3 contracts the target's four residual streams before handing the
+    // hidden state to its ordinary (non-HC) MTP block.
+    EXPECT_EQ(components.executor->hidden_size_, 8);
+
+    auto draft_model_config    = components.model_config;
+    draft_model_config.hc_mult = test_config.draft_hc_mult;
+    auto fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                              components.model_config,
+                                                              components.runtime_config,
+                                                              components.resource_context,
+                                                              draft_model_config);
+    ASSERT_NE(fake_stream->getSPOutputBuffer(), nullptr);
+    EXPECT_EQ(fake_stream->getSPOutputBuffer()->hidden_states.sizes(), torch::IntArrayRef({1, 8}));
+
+    // DSv4 keeps its pre-HC handoff; the same draft-owned rule preserves that
+    // wider contract without consulting the target's internal geometry.
+    draft_model_config.hc_mult = 7;
+    auto pre_hc_fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                                     components.model_config,
+                                                                     components.runtime_config,
+                                                                     components.resource_context,
+                                                                     draft_model_config);
+    ASSERT_NE(pre_hc_fake_stream->getSPOutputBuffer(), nullptr);
+    EXPECT_EQ(pre_hc_fake_stream->getSPOutputBuffer()->hidden_states.sizes(), torch::IntArrayRef({1, 56}));
+}
+
 TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdCheck) {
     MtpExecutorTestConfig test_config;
     auto                  components                = createMtpExecutorComponents(test_config);
@@ -530,7 +569,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdChe
                                                               components.model_config,
                                                               components.runtime_config,
                                                               components.resource_context,
-                                                              test_config.vocab_size);
+                                                              components.model_config);
     ASSERT_FALSE(fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.defined());
     std::list<GenerateStreamPtr> streams{fake_stream};
     std::list<GenerateStreamPtr> prefill_streams;
@@ -557,7 +596,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdChe
                                                                    components.model_config,
                                                                    components.runtime_config,
                                                                    components.resource_context,
-                                                                   test_config.vocab_size);
+                                                                   components.model_config);
     std::list<GenerateStreamPtr> next_streams{next_fake_stream};
     prefill_streams.clear();
     decode_streams.clear();
@@ -569,7 +608,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdChe
                                                                        components.model_config,
                                                                        components.runtime_config,
                                                                        components.resource_context,
-                                                                       test_config.vocab_size);
+                                                                       components.model_config);
     std::list<GenerateStreamPtr> disabled_streams{disabled_fake_stream};
     prefill_streams.clear();
     decode_streams.clear();
@@ -588,7 +627,7 @@ TEST_F(MtpExecutorTest, testFakeDecodeStreamSeedsCompressedIndexerCoordinates) {
                                                               components.model_config,
                                                               components.runtime_config,
                                                               components.resource_context,
-                                                              test_config.vocab_size);
+                                                              components.model_config);
     fake_stream->setSeqLength(19);  // four complete KPool groups plus a three-token tail
 
     std::list<GenerateStreamPtr> streams{fake_stream};

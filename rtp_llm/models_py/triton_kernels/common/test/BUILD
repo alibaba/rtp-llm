@@ -17,8 +17,8 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["L20D_DEV"],
-    exec_properties = {'gpu': 'L20D_DEV', 'gpu_count': '1'},
+    tags = ["L20A_DEV"],
+    exec_properties = {'gpu': 'L20A_DEV', 'gpu_count': '1'},
 )
 
 py_test(
