@@ -63,6 +63,10 @@ void CudaGraphRunner::captureDecode() {
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);
+        if (py::hasattr(py_instance_, "cuda_graph_capture_barrier")) {
+            RTP_LLM_LOG_INFO("waiting for distributed capture barrier for batch size: %d", bs);
+            py_instance_.attr("cuda_graph_capture_barrier")();
+        }
         replayAndSyncCheck(bs, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }

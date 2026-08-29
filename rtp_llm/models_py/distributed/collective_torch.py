@@ -303,22 +303,43 @@ def _create_process_groups(
         torch.distributed.barrier()
 
     if use_dedicated_ep:
-        # Multi-host K3 EP uses graph-captured NCCL A2A. Do not alias WORLD:
-        # WORLD also carries graph-external lifecycle/control traffic, and
-        # mixing those launch streams can deadlock replay of a large graph.
-        ep_ranks = list(range(world_size))
-        ep_group = torch.distributed.new_group(
-            ranks=ep_ranks,
-            backend=backend,
-            timeout=timedelta(days=36500),
-        )
-        _group_map[Group.EP] = ep_group
-        logging.info(
-            "[rank: %s] Created dedicated multi-host EP group with ranks: %s",
-            world_rank,
-            ep_ranks,
-        )
-        torch.distributed.barrier()
+        if ktp_size > 1:
+            # Projection-KTP and the multi-host EP fallback execute in one
+            # strictly ordered Decode forward and cover the same full-world
+            # rank set.  A single CUDA Graph containing two full-world NCCL
+            # communicators can deadlock on its first replay even when every
+            # rank captured the same operation order.  Reuse the dedicated
+            # KTP communicator for EP so the graph has one collective launch
+            # sequence.  WORLD remains independent for graph-external control
+            # barriers and request-step coordination.
+            if ktp_size != world_size:
+                raise ValueError(
+                    "multi-host K3 EP can share Projection-KTP only when "
+                    f"KTP == world size, got KTP={ktp_size}, world={world_size}"
+                )
+            _group_map[Group.EP] = _group_map[Group.KTP]
+            logging.info(
+                "[rank: %s] Reusing dedicated KTP communicator for "
+                "multi-host EP ranks: %s",
+                world_rank,
+                list(range(world_size)),
+            )
+        else:
+            # Non-KTP multi-host K3 EP still needs a communicator distinct
+            # from WORLD, which also carries lifecycle/control traffic.
+            ep_ranks = list(range(world_size))
+            ep_group = torch.distributed.new_group(
+                ranks=ep_ranks,
+                backend=backend,
+                timeout=timedelta(days=36500),
+            )
+            _group_map[Group.EP] = ep_group
+            logging.info(
+                "[rank: %s] Created dedicated multi-host EP group with ranks: %s",
+                world_rank,
+                ep_ranks,
+            )
+            torch.distributed.barrier()
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups

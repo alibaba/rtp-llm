@@ -581,6 +581,30 @@ class KimiK3Model(GptModelBase):
             self._gemm_reduce_scatter_configured = True
         return True
 
+    def cuda_graph_capture_barrier(self) -> None:
+        """Rendezvous Projection-KTP ranks before the first graph replay.
+
+        CUDA Graph capture is rank-local and can finish at very different
+        times across hosts. A graph containing NCCL collectives must be
+        launched collectively, so the one-time replay validation waits until
+        every Decode rank has completed capture. Normal request replay remains
+        coordinated by ``coordinate_ktp_step`` and does not call this method.
+        """
+
+        ktp_size = int(getattr(self.parallelism_config, "ktp_size", 1))
+        if self._is_decode_role and ktp_size > 1:
+            logging.info(
+                "[K3_PROJECTION_KTP] waiting at CUDA Graph capture barrier "
+                "rank=%d world=%d",
+                int(getattr(self.parallelism_config, "ktp_rank", 0)),
+                ktp_size,
+            )
+            # Keep graph-external capture synchronization on the same
+            # communicator as Projection-KTP and multi-host EP collectives.
+            # Mixing WORLD here with the graph's dedicated full-world KTP
+            # communicator can form a cross-communicator GPU wait cycle.
+            barrier(Group.KTP)
+
     def coordinate_ktp_step(
         self,
         inputs: PyModelInputs,

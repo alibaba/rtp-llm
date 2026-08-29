@@ -8,6 +8,8 @@ import logging
 import multiprocessing as mp
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,6 +29,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter_padded,
     send,
 )
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -481,6 +484,40 @@ class TestDistributedEnvironment(unittest.TestCase):
     def test_distributed_environment_initialized(self):
         """Test checking if distributed environment is initialized"""
         self.assertFalse(distributed_environment_initialized())
+
+    def test_projection_ktp_reuses_one_full_world_communicator_for_ep(self):
+        config = SimpleNamespace(
+            world_rank=0,
+            world_size=16,
+            tp_size=1,
+            dp_size=16,
+            ktp_size=16,
+            ep_size=16,
+            local_world_size=8,
+        )
+        ktp_group = object()
+        old_group_map = collective_torch._group_map
+        collective_torch._group_map = {}
+        try:
+            with patch.object(
+                collective_torch.torch.distributed,
+                "new_group",
+                return_value=ktp_group,
+            ) as new_group, patch.object(
+                collective_torch.torch.distributed,
+                "barrier",
+            ) as barrier:
+                collective_torch._create_process_groups(
+                    config,
+                    backend="nccl",
+                    timeout=None,
+                )
+            self.assertIs(collective_torch._group_map[Group.KTP], ktp_group)
+            self.assertIs(collective_torch._group_map[Group.EP], ktp_group)
+            new_group.assert_called_once()
+            barrier.assert_called_once()
+        finally:
+            collective_torch._group_map = old_group_map
 
 
 if __name__ == "__main__":
