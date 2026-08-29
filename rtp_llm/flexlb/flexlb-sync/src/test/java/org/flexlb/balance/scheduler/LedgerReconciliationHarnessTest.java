@@ -343,6 +343,170 @@ class LedgerReconciliationHarnessTest {
         harness.close();
     }
 
+    // ==================== stage-2 T7 S1: inflight pRow cross-check ====================
+
+    @Test
+    void inflightShadowSurvivingHandoverIsARealProwCrosscheckDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+        // Stage-2 T7 (S1): the A→B handover through the real API clears
+        // the pRow and installs the dRow, and the engine-side layer-1
+        // shadow must retire in the same status-pump tick (the in-pass
+        // removal inside calibrate).  Freeze the shadow as still present
+        // — the writer regression the rule guards — with the confirmed
+        // projection installed and the token matching, so the cross-check
+        // is the only real diff on the report.
+        RequestSlot slot = lifecycle.requestSlot(REQUEST_ID);
+        synchronized (slot) {
+            assertTrue(slot.markDecodeAccepted().acceptedBeforeCancel());
+        }
+
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        inflight.put(REQUEST_ID,
+                inflightEntry(16L, 24L, 3, 77L));
+        Map<Long, Long> confirmed = new HashMap<>();
+        confirmed.put(REQUEST_ID, 77L);
+        stubDecodeView(decode, auditView(inflight, confirmed));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size(),
+                () -> "real diffs: " + real);
+        assertEquals(
+                LedgerReconciliationHarness.Rule.INFLIGHT_PROW_CROSSCHECK,
+                real.get(0).rule());
+        harness.close();
+    }
+
+    @Test
+    void incomingAttemptShadowBeforePlacementIsTransientWithProtocolClassification() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        // No bind: the incoming shadow of a priority / local-eviction
+        // protocol owns its layer-1 entry before any slot publication
+        // bind (the W3/W4 window) — the transient must classify the
+        // protocol round trip instead of the ordinary bind window.
+        registerItem(REQUEST_ID, 16L, 24L, 3, reservation, decode);
+
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        inflight.put(REQUEST_ID,
+                inflightEntry(16L, 24L, 3, 77L));
+        stubDecodeView(decode, auditView(
+                inflight, Map.of(),
+                Set.of(), Set.of(REQUEST_ID), Set.of(), Set.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                () -> "real diffs: " + report.realDiffs());
+        assertEquals(1, report.transientDiffs().size());
+        LedgerReconciliationHarness.LedgerDiff diff =
+                report.transientDiffs().get(0);
+        assertEquals(
+                LedgerReconciliationHarness.Rule.DECODE_INFLIGHT_AHEAD_OF_SLOT,
+                diff.rule());
+        assertTrue(diff.detail().contains("priority protocol in flight"),
+                "the transient must classify the incoming-shadow window: "
+                        + diff.detail());
+        harness.close();
+    }
+
+    @Test
+    void incomingAttemptShadowSurvivingHandoverStaysExempt() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+        RequestSlot slot = lifecycle.requestSlot(REQUEST_ID);
+        synchronized (slot) {
+            assertTrue(slot.markDecodeAccepted().acceptedBeforeCancel());
+        }
+
+        // The attempt set still carries the request while its layer-1
+        // shadow survives the handover: the protocol-committed incoming
+        // shadow keeps its short attempt-removal exemption — the same
+        // frozen state that would otherwise be the cross-check REAL diff
+        // stays diff-free here because the attempt id set owns the
+        // window (the empirical signal for the incoming-shadow hosting
+        // ruling).
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        inflight.put(REQUEST_ID,
+                inflightEntry(16L, 24L, 3, 77L));
+        Map<Long, Long> confirmed = new HashMap<>();
+        confirmed.put(REQUEST_ID, 77L);
+        stubDecodeView(decode, auditView(
+                inflight, confirmed,
+                Set.of(), Set.of(REQUEST_ID), Set.of(), Set.of(), Set.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                () -> "real diffs: " + report.realDiffs());
+        assertTrue(report.transientDiffs().isEmpty(),
+                () -> "transient diffs: " + report.transientDiffs());
+        harness.close();
+    }
+
+    @Test
+    void terminalTrackInflightShadowIsSkippedFromProwCrosscheck() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        ReservationHandle reservation =
+                new ReservationHandle(5L, REQUEST_ID, 77L);
+        Registered registered = registerItem(
+                REQUEST_ID, 16L, 24L, 3, reservation, decode);
+        assertTrue(bind(registered));
+        RequestSlot slot = lifecycle.requestSlot(REQUEST_ID);
+        synchronized (slot) {
+            assertTrue(slot.markDecodeAccepted().acceptedBeforeCancel());
+            assertNotNull(RequestLifecycleCoordinator
+                    .beginWorkerStatusTerminalLocked(
+                            slot, null,
+                            s -> s.complete("decode completed"),
+                            null));
+            assertTrue(slot.isTerminalizingOrLater(),
+                    "the terminal claim must flip the slot onto the"
+                            + " terminal track synchronously");
+        }
+
+        // A layer-1 shadow outliving its terminal-track slot keeps the
+        // shared engine→slot skip semantics — no rule direction may
+        // fire on the terminal track.
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        inflight.put(REQUEST_ID,
+                inflightEntry(16L, 24L, 3, 77L));
+        stubDecodeView(decode, auditView(inflight, Map.of()));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                () -> "real diffs: " + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                () -> "pending diffs: " + report.pendingRealDiffs());
+        assertTrue(report.transientDiffs().isEmpty(),
+                () -> "transient diffs: " + report.transientDiffs());
+        assertEquals(1, report.slotCount());
+        harness.close();
+    }
+
     @Test
     void prefillOrphanActiveItemIsARealDiff() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);

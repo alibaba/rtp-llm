@@ -617,13 +617,53 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                 if (audit == null || audit.terminalTrack()) {
                     continue;
                 }
+                // Stage-2 T7 (S1): the incoming shadow of a priority /
+                // local-eviction protocol owns its layer-1 entry before any
+                // slot publication bind.  Classify the transient window so
+                // soak / E2E runs can tell the protocol-round-trip shadow
+                // from the ordinary reserve-to-bind admission window apart —
+                // the classification is the empirical signal for the
+                // incoming-shadow hosting ruling (T7 plan, S1 survey).
+                boolean incomingShadow =
+                        view.preemptionAttemptIncomingRequestIds()
+                                .contains(requestId);
                 if (audit.item == null || audit.placement == null
-                        || audit.placement.decodeEndpoint() != entry.getKey()) {
+                        || audit.placement.decodeEndpoint()
+                                != entry.getKey()) {
                     diffs.add(new LedgerDiff(
                             Rule.DECODE_INFLIGHT_AHEAD_OF_SLOT,
                             requestId,
-                            "decode layer-1 reservation has no bound slot on"
-                                    + " this endpoint (admission window)"));
+                            incomingShadow
+                                    ? "decode layer-1 incoming shadow"
+                                            + " (priority protocol in flight)"
+                                            + " has no bound slot placement"
+                                            + " yet"
+                                    : "decode layer-1 reservation has no"
+                                            + " bound slot on this endpoint"
+                                            + " (publication bind window)"));
+                    continue;
+                }
+                // Stage-2 T7 (S1 cross-check pre-embed): the publication
+                // bind installs the placement and the pRow inside one
+                // slot-monitor tick, so a layer-1 shadow whose ACTIVE slot
+                // is already bound to this endpoint must carry its numeric
+                // mirror.  A missing pRow here has no legal interleaving
+                // — the rule is the writer-protocol regression guard
+                // backing the S2 read-source switch (the L1 numeric
+                // queries move onto the pRow) and the S4 layer-1
+                // retirement.  Numeric-value drift between an installed
+                // pRow and its layer-1 shadow stays with the
+                // slot-direction KV_MIRROR_MISMATCH rule, and a
+                // protocol-committed incoming shadow keeps its short
+                // attempt-removal exemption.
+                if (!incomingShadow && audit.prefillRow == null) {
+                    diffs.add(new LedgerDiff(
+                            Rule.INFLIGHT_PROW_CROSSCHECK,
+                            requestId,
+                            "decode layer-1 shadow with a bound placement"
+                                    + " but no slot pRow numeric mirror"
+                                    + " (the publication bind installs both"
+                                    + " atomically)"));
                 }
             }
         }
@@ -1312,6 +1352,23 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * fallback captures carry no cross-phase aggregate signal).
          */
         ENGINE_LIFECYCLE_SUBSTATE_MISMATCH(true),
+        /**
+         * Stage-2 T7 (S1 pre-embed): a layer-1 inflight shadow whose ACTIVE
+         * slot is already bound to the same Decode endpoint carries no slot
+         * pRow numeric mirror.  The publication bind installs the placement
+         * and the pRow inside one slot-monitor tick, so this state has no
+         * legal interleaving — the rule is the writer-protocol regression
+         * guard backing the S2 read-source switch (the L1 numeric queries
+         * move onto the pRow) and the S4 layer-1 retirement (where the
+         * rule flips to asserting the layer is empty).  Numeric-value drift
+         * between an installed pRow and its layer-1 shadow stays with the
+         * slot-direction {@link #KV_MIRROR_MISMATCH} rule; the
+         * protocol-committed incoming shadow keeps its short
+         * attempt-removal exemption (attempt id set), and terminal-track /
+         * no-current-slot entries keep the shared skip semantics of the
+         * engine→slot direction rules.
+         */
+        INFLIGHT_PROW_CROSSCHECK(true),
         /** Engine confirmed before the slot applied the handover. */
         DECODE_CONFIRMED_AHEAD_OF_SLOT(false),
         /** Decode reservation inside the admission bind window. */
