@@ -101,6 +101,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final Map<Long, EngineFenceProtection> engineFenceProtections = new HashMap<>();
     private final AtomicLong engineFenceHeldKv = new AtomicLong();
     private final AtomicLong engineFenceHeldExpectedKv = new AtomicLong();
+    /**
+     * Engine-fact projection (stage-2 L5): the request ids the last
+     * calibration pass observed as confirmed — the fresh half of the
+     * absent-pass hold predicate. Written under {@link #admissionLock};
+     * captured into audit views inside the same locked window.
+     */
+    private volatile Set<Long> lastObservedConfirmedRequestIds = Set.of();
+    /**
+     * Admission version stamped when the fence-held projection was last
+     * recomputed (stage-2 L5). An out-of-band registry mutation bumps the
+     * admission version without recomputing the projection, so an audit
+     * capture whose version still differs carries a conservatively stale
+     * aggregate — the harness gates its aggregate rule on this stamp.
+     */
+    private volatile long fenceProjectionVersion;
 
     /**
      * Reserved entries whose request is still sitting in a prefill queue —
@@ -483,6 +498,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         engineFenceProtections.clear();
         engineFenceHeldKv.set(0L);
         engineFenceHeldExpectedKv.set(0L);
+        lastObservedConfirmedRequestIds = Set.of();
+        fenceProjectionVersion = admissionVersion.get();
 
         return retirementEvent;
     }
@@ -1446,6 +1463,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         final Set<Long> claimRequestIds;
         final Set<Long> attemptIncomingRequestIds;
         final Set<Long> fenceProtectedRequestIds;
+        final Map<Long, Long> fenceProtectedReservationTokens;
+        final Map<Long, Long> fenceProtectedHardKvTokens;
+        final Map<Long, Long> fenceProtectedExpectedKvTokens;
+        final Map<Long, Long> claimReservationTokens;
+        final Set<Long> observedConfirmedRequestIds;
+        final long fenceHeldKvValue;
+        final long fenceHeldExpectedKvValue;
+        final long fenceProjectionVersionValue;
         admissionLock.lock();
         try {
             version = admissionVersion.get();
@@ -1466,6 +1491,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             permitExpectedKvValue =
                     engineDispatchPermitExpectedKvReservedTotal.get();
             claimRequestIds = Set.copyOf(preemptionClaims.keySet());
+            Map<Long, Long> claimTokens = new HashMap<>();
+            preemptionClaims.forEach((requestId, claim) ->
+                    claimTokens.put(requestId, claim.reservationToken));
+            claimReservationTokens = Map.copyOf(claimTokens);
             Set<Long> attemptIncoming = new HashSet<>();
             for (EndpointPreemptionAttempt attempt
                     : preemptionAttempts.values()) {
@@ -1474,6 +1503,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
             attemptIncomingRequestIds = Set.copyOf(attemptIncoming);
             fenceProtectedRequestIds =
                     Set.copyOf(engineFenceProtections.keySet());
+            // Stage-2 L5: the registration facts (tokens plus per-entry KV)
+            // join the locked window so the certified version revalidation
+            // covers the harness hold-predicate derivation end to end.
+            Map<Long, Long> fenceTokens = new HashMap<>();
+            Map<Long, Long> fenceHardKv = new HashMap<>();
+            Map<Long, Long> fenceExpectedKv = new HashMap<>();
+            engineFenceProtections.forEach((requestId, protection) -> {
+                fenceTokens.put(requestId, protection.reservationToken);
+                fenceHardKv.put(requestId, protection.hardKvTokens);
+                fenceExpectedKv.put(requestId, protection.expectedKvTokens);
+            });
+            fenceProtectedReservationTokens = Map.copyOf(fenceTokens);
+            fenceProtectedHardKvTokens = Map.copyOf(fenceHardKv);
+            fenceProtectedExpectedKvTokens = Map.copyOf(fenceExpectedKv);
+            observedConfirmedRequestIds = lastObservedConfirmedRequestIds;
+            fenceHeldKvValue = engineFenceHeldKv.get();
+            fenceHeldExpectedKvValue = engineFenceHeldExpectedKv.get();
+            fenceProjectionVersionValue = fenceProjectionVersion;
         } finally {
             admissionLock.unlock();
         }
@@ -1520,6 +1567,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 permitCountValue,
                 permitHardKvValue,
                 permitExpectedKvValue,
+                fenceProtectedReservationTokens,
+                fenceProtectedHardKvTokens,
+                fenceProtectedExpectedKvTokens,
+                claimReservationTokens,
+                observedConfirmedRequestIds,
+                fenceHeldKvValue,
+                fenceHeldExpectedKvValue,
+                fenceProjectionVersionValue,
                 false);
         // Phase 3 — admission lock: version revalidation.  Acquiring the
         // lock proves any prior writer finished its full critical section
@@ -1615,6 +1670,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int engineDispatchPermitCount,
             long engineDispatchPermitHardKvReservedTotal,
             long engineDispatchPermitExpectedKvReservedTotal,
+            Map<Long, Long> engineFenceProtectedReservationTokens,
+            Map<Long, Long> engineFenceProtectedHardKvTokens,
+            Map<Long, Long> engineFenceProtectedExpectedKvTokens,
+            Map<Long, Long> preemptionClaimReservationTokens,
+            Set<Long> observedConfirmedRequestIds,
+            long engineFenceHeldKv,
+            long engineFenceHeldExpectedKv,
+            long fenceProjectionVersion,
             boolean certified) {
 
         /**
@@ -1640,6 +1703,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     engineDispatchPermitCount,
                     engineDispatchPermitHardKvReservedTotal,
                     engineDispatchPermitExpectedKvReservedTotal,
+                    engineFenceProtectedReservationTokens,
+                    engineFenceProtectedHardKvTokens,
+                    engineFenceProtectedExpectedKvTokens,
+                    preemptionClaimReservationTokens,
+                    observedConfirmedRequestIds,
+                    engineFenceHeldKv,
+                    engineFenceHeldExpectedKv,
+                    fenceProjectionVersion,
                     true);
         }
     }
@@ -2550,6 +2621,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
 
+        // Stage-2 L5: freeze the fresh half of the engine-fact projection.
+        // The absent-pass below and the harness hold predicate both read it,
+        // so one shared definition of "absent" backs both derivations.
+        this.lastObservedConfirmedRequestIds = Set.copyOf(confirmedNow);
         // Preserve one union accounting owner for a confirmed request that
         // temporarily vanished. Priority claims take precedence while live;
         // the generic fence takes over only when no priority owner exists.
@@ -2597,6 +2672,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         engineFenceHeldExpectedKv.set(fenceHeldExpectedKv);
         this.confirmedRunningCount = actualConfirmed + syntheticallyHeldSlots
                 + fenceHeldSlots;
+        this.fenceProjectionVersion = admissionVersion.get();
 
         return facts;
     }

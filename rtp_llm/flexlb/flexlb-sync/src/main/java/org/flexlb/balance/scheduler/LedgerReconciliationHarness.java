@@ -462,7 +462,7 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                             Rule.ENGINE_FENCE_UNBACKED,
                             audit.requestId,
                             "slot holds an engine fence registration the"
-                                    + " decode layer-5 protection ledger"
+                                    + " decode fence registration table"
                                     + " does not back"));
                 }
             }
@@ -675,8 +675,9 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                     diffs.add(new LedgerDiff(
                             Rule.DECODE_FENCE_PROTECTION_ORPHAN,
                             requestId,
-                            "decode layer-5 holds a fence protection whose slot"
-                                    + " carries neither fence nor preemption"
+                            "decode fence registration table holds a"
+                                    + " registration whose slot carries"
+                                    + " neither fence nor preemption"
                                     + " registration"));
                 }
             }
@@ -836,6 +837,67 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                     + ")"));
                 }
             }
+            // Stage-2 L5 source switch: the fence-held aggregate is a
+            // projection recomputed from registry facts on every calibration
+            // pass (the synthetic-hold state machine is deleted). The rule
+            // mirrors the L7/L8 aggregate treatment with one extra gate: the
+            // projection identity is endpoint-level (request id 0), the
+            // derivation reads only capture-frozen maps (registration tokens
+            // and per-entry KV, claim tokens, the observed-confirmed engine
+            // fact — never a live re-read), and — specific to the L5
+            // projection semantics — a capture whose admission version still
+            // differs from the fence projection stamp was taken inside an
+            // out-of-band registry mutation window (lease close,
+            // authoritative or claim settlement, full release): those bump
+            // the version without recomputing the aggregate, so the capture
+            // carries no valid aggregate signal until the next calibration
+            // pass re-derives it.
+            if (view.certified()
+                    && view.fenceProjectionVersion()
+                            == view.admissionVersion()) {
+                long derivedHeldKv = 0L;
+                long derivedHeldExpectedKv = 0L;
+                for (java.util.Map.Entry<Long, Long> confirmedToken
+                        : view.confirmedReservationTokens().entrySet()) {
+                    Long requestId = confirmedToken.getKey();
+                    if (view.observedConfirmedRequestIds()
+                            .contains(requestId)) {
+                        continue;
+                    }
+                    Long fenceToken = view.engineFenceProtectedReservationTokens()
+                            .get(requestId);
+                    if (fenceToken == null
+                            || !fenceToken.equals(confirmedToken.getValue())) {
+                        continue;
+                    }
+                    Long claimToken = view.preemptionClaimReservationTokens()
+                            .get(requestId);
+                    if (claimToken != null
+                            && claimToken.equals(confirmedToken.getValue())) {
+                        continue;
+                    }
+                    derivedHeldKv += view.engineFenceProtectedHardKvTokens()
+                            .getOrDefault(requestId, 0L);
+                    derivedHeldExpectedKv +=
+                            view.engineFenceProtectedExpectedKvTokens()
+                                    .getOrDefault(requestId, 0L);
+                }
+                if (view.engineFenceHeldKv() != derivedHeldKv
+                        || view.engineFenceHeldExpectedKv()
+                                != derivedHeldExpectedKv) {
+                    diffs.add(new LedgerDiff(
+                            Rule.ENGINE_FENCE_AGGREGATE_MISMATCH,
+                            0L,
+                            "decode fence-held aggregate projection drift:"
+                                    + " projection (hard="
+                                    + view.engineFenceHeldKv()
+                                    + ", expected="
+                                    + view.engineFenceHeldExpectedKv()
+                                    + ") != registration-derived hold (hard="
+                                    + derivedHeldKv + ", expected="
+                                    + derivedHeldExpectedKv + ")"));
+                }
+            }
         }
     }
 
@@ -978,15 +1040,44 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
         /**
          * Stage-1 fix C: slot engine-fence registration with no decode
          * layer-5 protection backing (removal window engine-ahead —
-         * confirm-window territory).
+         * confirm-window territory).  Stage-2 L5 source switch: the
+         * endpoint-side table is a pure registration ledger; the slot-side
+         * registration is the stage-3 exemption authority (design §6), and
+         * this rule is the slot→engine direction of their bidirectional
+         * audit.
          */
         ENGINE_FENCE_UNBACKED(true),
         /**
          * Stage-1 fix C: decode layer-5 fence protection on an ACTIVE
          * slot with neither fence nor preemption registration (no
-         * single-interleave legal window).
+         * single-interleave legal window).  Stage-2 L5 source switch: the
+         * endpoint side is a pure registration table; this rule is the
+         * engine→slot direction of the bidirectional audit against the
+         * slot-side registration authority.
          */
         DECODE_FENCE_PROTECTION_ORPHAN(true),
+        /**
+         * Stage-2 L5 source switch: the fence-held accounting is a
+         * projection recomputed from registry facts (absent confirmed
+         * entry + exact-match registration + no exact priority owner) on
+         * every calibration pass — the synthetic-hold state machine is
+         * deleted.  The rule cross-checks the two O(1) fence-held
+         * aggregate totals against the capture-frozen registration-derived
+         * hold (engine-internal invariant; request id 0 marks the
+         * endpoint-level aggregate identity).  Four gates make the signal
+         * trustworthy: seqlock-certified captures only (torn fallback
+         * captures carry no cross-phase aggregate signal), the fence
+         * projection stamp must equal the captured admission version (an
+         * out-of-band registry mutation — lease close, authoritative or
+         * claim settlement, full release — bumps the version without
+         * recomputing the aggregate, and that window carries no aggregate
+         * signal until the next calibration pass), the derivation reads
+         * the capture-frozen registration/claim/observed-confirmed maps
+         * rather than live re-reads, and the endpoint-level identity is
+         * request id 0 (the confirm window cannot absorb it by request-id
+         * rotation).
+         */
+        ENGINE_FENCE_AGGREGATE_MISMATCH(true),
         /**
          * Stage-1 fix C originally guarded the layer-7 set against members
          * outside the layer-1 inflight set.  Stage-2 L7 retirement rewrote
