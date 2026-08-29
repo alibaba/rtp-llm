@@ -1111,6 +1111,216 @@ class LedgerReconciliationHarnessTest {
         harness.close();
     }
 
+    @Test
+    void confirmedSlotAggregateProjectionDriftIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L3 retirement: the confirmed-slot aggregate is a
+        // projection derived from registry facts — one absent confirmed
+        // entry with an exact-match fence registration and no priority
+        // owner here, so the registry-derived hold is 1, but the projection
+        // counter drifted to zero.
+        stubDecodeView(decode, confirmedSlotAuditView(
+                Map.of(707L, 9L),
+                Map.of(707L, 9L),
+                Map.of(),
+                Set.of(),
+                Set.of(),
+                0, 1L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .CONFIRMED_SLOT_AGGREGATE_MISMATCH,
+                real.get(0).rule());
+        assertEquals(0L, real.get(0).requestId(),
+                "the rule reports the endpoint-level aggregate");
+        harness.close();
+    }
+
+    /**
+     * Stage-2 L3 soak-fix form: an uncertified (torn fallback) capture read
+     * its Phase-1 confirmed-slot projection and its Phase-2 registry layers
+     * in different admission quiet windows — the aggregate drift is a
+     * capture tear, and the endpoint-level identity (request id 0) defeats
+     * the confirm-window rotation. The identical drift as
+     * confirmedSlotAggregateProjectionDriftIsARealDiff, but certified=false,
+     * must produce no diff at all.
+     */
+    @Test
+    void tornCaptureConfirmedSlotAggregateDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        stubDecodeView(decode, confirmedSlotAuditView(
+                Map.of(707L, 9L),
+                Map.of(707L, 9L),
+                Map.of(),
+                Set.of(),
+                Set.of(),
+                0, 1L, false));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "torn captures carry no confirmed-slot aggregate signal: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "torn captures must not even surface as tear candidates: "
+                        + report.pendingRealDiffs());
+        harness.close();
+    }
+
+    @Test
+    void staleProjectionWindowConfirmedSlotAggregateDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L3 projection-fresh gate: an out-of-band registry mutation
+        // (settlement, eviction, full release, retirement) bumps the
+        // admission version without recomputing the projection, so a
+        // capture from inside that window (certified, but its captured
+        // admission version 1 no longer matches the confirmed projection
+        // stamp 0) carries a conservatively stale aggregate — no valid
+        // aggregate signal until the next calibration pass re-derives it.
+        stubDecodeView(decode, confirmedSlotAuditView(
+                Map.of(707L, 9L),
+                Map.of(707L, 9L),
+                Map.of(),
+                Set.of(),
+                Set.of(),
+                0, 0L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "the out-of-band mutation window carries no confirmed-slot"
+                        + " aggregate signal: " + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "no tear candidates either: " + report.pendingRealDiffs());
+        harness.close();
+    }
+
+    @Test
+    void confirmedSlotProjectionMatchesFreshAndHeldExemptions() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L3: the projection counts fresh observed confirmed (708),
+        // an absent ENGINE_CONFIRMED claim survivor (710) and an
+        // exact-token fence-held absent survivor (707 — no claim owner) —
+        // the projection agrees with all three roads, no diff.
+        stubDecodeView(decode, confirmedSlotAuditView(
+                Map.of(707L, 9L, 708L, 10L),
+                Map.of(707L, 9L),
+                Map.of(710L, 12L),
+                Set.of(710L),
+                Set.of(708L),
+                3, 1L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "a faithful confirmed-slot projection produces no diff: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "no tear candidates either: " + report.pendingRealDiffs());
+        harness.close();
+    }
+
+    @Test
+    void engineLifecycleOwnerOutsideInflightIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L2 retirement: the engine-lifecycle ownership lives on
+        // the layer-1 entry itself, so a frozen lifecycle id outside the
+        // frozen inflight map is a writer split — every leave path removes
+        // the entry, and the flag disappears with it.
+        stubDecodeView(decode, lifecycleAuditView(
+                Map.of(), Set.of(707L), 1, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .ENGINE_LIFECYCLE_SUBSTATE_MISMATCH,
+                real.get(0).rule());
+        assertEquals(707L, real.get(0).requestId(),
+                "the membership half reports the request-level identity");
+        harness.close();
+    }
+
+    @Test
+    void engineLifecycleAggregateProjectionDriftIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L2 retirement: the lifecycle count projection mirrors the
+        // entry-derived id set — one engine-lifecycle owner here, but the
+        // count drifted (count=2 vs derived 1).
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight owner = inflightEntry(16L, 24L, 3, 7L);
+        assertTrue(owner.enterEngineLifecycle());
+        inflight.put(708L, owner);
+        stubDecodeView(decode, lifecycleAuditView(
+                inflight, Set.of(708L), 2, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .ENGINE_LIFECYCLE_SUBSTATE_MISMATCH,
+                real.get(0).rule());
+        assertEquals(0L, real.get(0).requestId(),
+                "the aggregate half reports the endpoint-level identity");
+        harness.close();
+    }
+
+    /**
+     * Stage-2 L2 soak-fix form: an uncertified (torn fallback) capture read
+     * its lifecycle count projection and its entry-derived id set in
+     * different admission quiet windows — the aggregate drift is a capture
+     * tear, and the endpoint-level identity (request id 0) defeats the
+     * confirm-window rotation. The identical drift as
+     * engineLifecycleAggregateProjectionDriftIsARealDiff, but
+     * certified=false, must produce no diff at all.
+     */
+    @Test
+    void tornCaptureLifecycleAggregateDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight owner = inflightEntry(16L, 24L, 3, 7L);
+        assertTrue(owner.enterEngineLifecycle());
+        inflight.put(709L, owner);
+        stubDecodeView(decode, lifecycleAuditView(
+                inflight, Set.of(709L), 2, false));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "torn captures carry no lifecycle aggregate signal: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "torn captures must not even surface as tear candidates: "
+                        + report.pendingRealDiffs());
+        harness.close();
+    }
+
     // ==================== fixtures ====================
 
     private Map<Long, RequestInflight> cleanARoadway(
@@ -1285,6 +1495,17 @@ class LedgerReconciliationHarnessTest {
                 fenceHeldKv,
                 fenceHeldExpectedKv,
                 fenceProjectionVersion,
+                // Stage-2 L3: the confirmed-slot projection defaults to the
+                // registry-derived value (fresh observed confirmed + the
+                // fence-held absent survivors; the engine-confirmed claim set
+                // is empty in this fixture) with a fresh stamp, so the L3
+                // aggregate rule observes a consistent projection. The
+                // engine-lifecycle sub-state set is empty in this fixture.
+                derivedConfirmedCount(confirmed, observedConfirmed,
+                        fenceReservationTokens, claimReservationTokens,
+                        Set.of()),
+                1L,
+                Set.of(),
                 certified);
     }
 
@@ -1331,6 +1552,15 @@ class LedgerReconciliationHarnessTest {
                 priorityProjectionVersion,
                 Set.copyOf(observedConfirmed),
                 0L, 0L, 1L,
+                // Stage-2 L3: the confirmed-slot projection defaults to the
+                // registry-derived value (fresh observed confirmed + the
+                // absent ENGINE_CONFIRMED claim survivors; the fence layers
+                // are empty in this fixture) with a fresh stamp. The
+                // engine-lifecycle sub-state set is empty in this fixture.
+                derivedConfirmedCount(Map.of(), observedConfirmed,
+                        Map.of(), Map.of(), engineConfirmedClaims),
+                1L,
+                Set.of(),
                 certified);
     }
 
@@ -1368,6 +1598,130 @@ class LedgerReconciliationHarnessTest {
     private static void stubDecodeView(
             DecodeEndpoint decode, DecodeLedgerAuditView view) {
         when(decode.ledgerAuditView()).thenReturn(view);
+    }
+
+    /**
+     * The stage-2 L3 confirmed-slot derivation the harness rule replays:
+     * fresh observed confirmed + absent ENGINE_CONFIRMED claim survivors +
+     * exact-token fence-held absent survivors (claim token match takes
+     * precedence, mirroring the doCalibrate absent pass).
+     */
+    private static int derivedConfirmedCount(
+            Map<Long, Long> confirmed,
+            Set<Long> observedConfirmed,
+            Map<Long, Long> fenceReservationTokens,
+            Map<Long, Long> claimReservationTokens,
+            Set<Long> engineConfirmedClaims) {
+        int derived = observedConfirmed.size();
+        for (Long requestId : engineConfirmedClaims) {
+            if (!observedConfirmed.contains(requestId)) {
+                derived++;
+            }
+        }
+        for (Map.Entry<Long, Long> confirmedToken : confirmed.entrySet()) {
+            Long requestId = confirmedToken.getKey();
+            if (observedConfirmed.contains(requestId)) {
+                continue;
+            }
+            Long fenceToken = fenceReservationTokens.get(requestId);
+            if (fenceToken == null
+                    || !fenceToken.equals(confirmedToken.getValue())) {
+                continue;
+            }
+            Long claimToken = claimReservationTokens.get(requestId);
+            if (claimToken != null
+                    && claimToken.equals(confirmedToken.getValue())) {
+                continue;
+            }
+            derived++;
+        }
+        return derived;
+    }
+
+    /**
+     * Stage-2 L3 confirmed-slot-projection fixture: only the
+     * confirmed/claim/fence registry layers are populated; the trailing
+     * triple overrides the confirmed-slot projection (count + stamp) so
+     * drift fixtures pin the projection explicitly. The claim and fence id
+     * sets derive from their token maps so the request-level rules stay
+     * consistent with the aggregate derivation; the claim/fence KV maps
+     * stay empty so the L4/L5 aggregate rules observe consistent zero
+     * holds; the engine-lifecycle sub-state set stays empty.
+     */
+    private static DecodeLedgerAuditView confirmedSlotAuditView(
+            Map<Long, Long> confirmed,
+            Map<Long, Long> fenceReservationTokens,
+            Map<Long, Long> claimReservationTokens,
+            Set<Long> engineConfirmedClaims,
+            Set<Long> observedConfirmed,
+            int confirmedRunningCount,
+            long confirmedProjectionVersion,
+            boolean certified) {
+        return new DecodeLedgerAuditView(
+                1L,
+                Map.of(),
+                0,
+                Map.copyOf(confirmed),
+                Set.copyOf(claimReservationTokens.keySet()),
+                Set.of(),
+                Set.copyOf(fenceReservationTokens.keySet()),
+                Set.of(),
+                Set.of(),
+                0L,
+                0L,
+                0, 0L, 0L,
+                0, 0L, 0L,
+                Map.copyOf(fenceReservationTokens),
+                Map.of(), Map.of(),
+                Map.copyOf(claimReservationTokens),
+                Map.of(), Map.of(),
+                Set.copyOf(engineConfirmedClaims),
+                0L, 0L, 1L,
+                Set.copyOf(observedConfirmed),
+                0L, 0L, 1L,
+                confirmedRunningCount,
+                confirmedProjectionVersion,
+                Set.of(),
+                certified);
+    }
+
+    /**
+     * Stage-2 L2 engine-lifecycle sub-state fixture: the inflight layer
+     * carries the entries; the trailing triple overrides the lifecycle
+     * count projection and the frozen id set so drift fixtures pin the
+     * mismatch explicitly. Every other layer stays empty — the L3
+     * confirmed-slot projection keeps the registry-derived zero with a
+     * fresh stamp.
+     */
+    private static DecodeLedgerAuditView lifecycleAuditView(
+            Map<Long, RequestInflight> inflight,
+            Set<Long> engineLifecycleRequestIds,
+            int engineLifecycleReservationCount,
+            boolean certified) {
+        return new DecodeLedgerAuditView(
+                1L,
+                Map.copyOf(inflight),
+                engineLifecycleReservationCount,
+                Map.of(),
+                Set.of(),
+                Set.of(),
+                Set.of(),
+                Set.of(),
+                Set.of(),
+                0L,
+                0L,
+                0, 0L, 0L,
+                0, 0L, 0L,
+                Map.of(), Map.of(), Map.of(),
+                Map.of(), Map.of(), Map.of(),
+                Set.of(),
+                0L, 0L, 1L,
+                Set.of(),
+                0L, 0L, 1L,
+                0,
+                1L,
+                Set.copyOf(engineLifecycleRequestIds),
+                certified);
     }
 
     private void enqueueActive(BatchItem item) {

@@ -1497,6 +1497,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         final long fenceHeldKvValue;
         final long fenceHeldExpectedKvValue;
         final long fenceProjectionVersionValue;
+        final int confirmedRunningCountValue;
+        final long confirmedProjectionVersionValue;
         admissionLock.lock();
         try {
             version = admissionVersion.get();
@@ -1567,6 +1569,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             fenceHeldKvValue = engineFenceHeldKv.get();
             fenceHeldExpectedKvValue = engineFenceHeldExpectedKv.get();
             fenceProjectionVersionValue = fenceProjectionVersion;
+            // Stage-2 L3: the confirmed-slot projection and its stamp join
+            // the locked window (O(1) reads) so the certified version
+            // revalidation covers the harness confirmed-slot derivation end
+            // to end.
+            confirmedRunningCountValue = confirmedRunningCount;
+            confirmedProjectionVersionValue = confirmedProjectionVersion;
         } finally {
             admissionLock.unlock();
         }
@@ -1579,11 +1587,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Stage-2 L2 retirement complete: the engine-lifecycle projection
         // derives from the entry sub-state flag on the same inflight
         // snapshot — the sole engine-lifecycle authority (the former
-        // identity-set storage is deleted).
-        int lifecycleProjectionCount = 0;
-        for (RequestInflight entry : inflightSnapshot.values()) {
-            if (entry.isEngineLifecycleOwned()) {
-                lifecycleProjectionCount++;
+        // identity-set storage is deleted). The frozen id set feeds the
+        // harness sub-state cross-checks without a live re-read of the
+        // mutable flag (soak round-2 lesson).
+        Set<Long> lifecycleProjection = new HashSet<>();
+        for (Map.Entry<Long, RequestInflight> entry
+                : inflightSnapshot.entrySet()) {
+            if (entry.getValue().isEngineLifecycleOwned()) {
+                lifecycleProjection.add(entry.getKey());
             }
         }
         // Stage-2 L7 retirement complete: the queued projection derives
@@ -1608,7 +1619,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         captured = new DecodeLedgerAuditView(
                 version,
                 inflightSnapshot,
-                lifecycleProjectionCount,
+                lifecycleProjection.size(),
                 Map.copyOf(confirmedTokens),
                 claimRequestIds,
                 attemptIncomingRequestIds,
@@ -1637,6 +1648,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 fenceHeldKvValue,
                 fenceHeldExpectedKvValue,
                 fenceProjectionVersionValue,
+                confirmedRunningCountValue,
+                confirmedProjectionVersionValue,
+                Set.copyOf(lifecycleProjection),
                 false);
         // Phase 3 — admission lock: version revalidation.  Acquiring the
         // lock proves any prior writer finished its full critical section
@@ -1763,6 +1777,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long engineFenceHeldKv,
             long engineFenceHeldExpectedKv,
             long fenceProjectionVersion,
+            int confirmedRunningCount,
+            long confirmedProjectionVersion,
+            Set<Long> engineLifecycleRequestIds,
             boolean certified) {
 
         /**
@@ -1802,6 +1819,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     engineFenceHeldKv,
                     engineFenceHeldExpectedKv,
                     fenceProjectionVersion,
+                    confirmedRunningCount,
+                    confirmedProjectionVersion,
+                    engineLifecycleRequestIds,
                     true);
         }
     }

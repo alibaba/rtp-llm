@@ -946,6 +946,99 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                     + derivedPriorityHeldExpectedKv + ")"));
                 }
             }
+            // Stage-2 L3 source switch: the confirmed-slot aggregate is a
+            // projection recomputed from registry facts on every calibration
+            // pass (fresh observed confirmed + absent ENGINE_CONFIRMED claim
+            // survivors + exact-token fence-held absent survivors, claim
+            // precedence) — the four out-of-band decrement sites are
+            // deleted. The rule mirrors the L4/L5 aggregate treatment with
+            // the same four gates: seqlock-certified captures only (torn
+            // fallback captures carry no cross-phase aggregate signal), the
+            // confirmed projection stamp must equal the captured admission
+            // version (an out-of-band registry mutation — settlement,
+            // eviction, full release, retirement — bumps the version without
+            // recomputing the aggregate, and that window carries no
+            // aggregate signal until the next calibration pass), the
+            // derivation reads the capture-frozen confirmed/claim/fence/
+            // observed-confirmed maps rather than live re-reads, and the
+            // endpoint-level identity is request id 0 (the confirm window
+            // cannot absorb it by request-id rotation).
+            if (view.certified()
+                    && view.confirmedProjectionVersion()
+                            == view.admissionVersion()) {
+                int derivedConfirmedSlots =
+                        view.observedConfirmedRequestIds().size();
+                for (Long requestId : view.engineConfirmedClaimRequestIds()) {
+                    if (!view.observedConfirmedRequestIds()
+                            .contains(requestId)) {
+                        derivedConfirmedSlots++;
+                    }
+                }
+                for (java.util.Map.Entry<Long, Long> confirmedToken
+                        : view.confirmedReservationTokens().entrySet()) {
+                    Long requestId = confirmedToken.getKey();
+                    if (view.observedConfirmedRequestIds()
+                            .contains(requestId)) {
+                        continue;
+                    }
+                    Long fenceToken = view.engineFenceProtectedReservationTokens()
+                            .get(requestId);
+                    if (fenceToken == null
+                            || !fenceToken.equals(confirmedToken.getValue())) {
+                        continue;
+                    }
+                    Long claimToken = view.preemptionClaimReservationTokens()
+                            .get(requestId);
+                    if (claimToken != null
+                            && claimToken.equals(confirmedToken.getValue())) {
+                        continue;
+                    }
+                    derivedConfirmedSlots++;
+                }
+                if (view.confirmedRunningCount() != derivedConfirmedSlots) {
+                    diffs.add(new LedgerDiff(
+                            Rule.CONFIRMED_SLOT_AGGREGATE_MISMATCH,
+                            0L,
+                            "decode confirmed-slot aggregate projection"
+                                    + " drift: projection (count="
+                                    + view.confirmedRunningCount()
+                                    + ") != registry-derived hold (count="
+                                    + derivedConfirmedSlots + ")"));
+                }
+            }
+            // Stage-2 L2 source switch: the engine-lifecycle ownership lives
+            // as the entry sub-state flag on each layer-1 inflight entry (the
+            // identity-set storage is deleted — count projection, identities
+            // stay engine-side). The rule mirrors the L8 treatment: the
+            // per-request membership invariant (an engine-lifecycle owner
+            // must sit in the inflight layer — every leave path removes the
+            // entry itself, so a frozen lifecycle id outside the frozen
+            // inflight map is a writer split) checks two capture-frozen
+            // sides and needs no certified gate, while the count-vs-id-set
+            // aggregate half carries the endpoint-level identity (request
+            // id 0) and therefore runs on seqlock-certified captures only.
+            for (Long requestId : view.engineLifecycleRequestIds()) {
+                if (!view.inflight().containsKey(requestId)) {
+                    diffs.add(new LedgerDiff(
+                            Rule.ENGINE_LIFECYCLE_SUBSTATE_MISMATCH,
+                            requestId,
+                            "decode layer-2 engine-lifecycle owner left the"
+                                    + " layer-1 inflight layer"));
+                }
+            }
+            if (view.certified()
+                    && view.engineLifecycleReservationCount()
+                            != view.engineLifecycleRequestIds().size()) {
+                diffs.add(new LedgerDiff(
+                        Rule.ENGINE_LIFECYCLE_SUBSTATE_MISMATCH,
+                        0L,
+                        "decode engine-lifecycle aggregate projection drift:"
+                                + " count projection ("
+                                + view.engineLifecycleReservationCount()
+                                + ") != entry-derived ids ("
+                                + view.engineLifecycleRequestIds().size()
+                                + ")"));
+            }
         }
     }
 
@@ -1181,6 +1274,44 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          * endpoint-level aggregate identity, request id 0).
          */
         DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE(true),
+        /**
+         * Stage-2 L3 source switch: the confirmed-slot counter is a
+         * projection recomputed from registry facts (fresh observed
+         * confirmed + absent ENGINE_CONFIRMED claim survivors +
+         * exact-token fence-held absent survivors, claim precedence) on
+         * every calibration pass — the four out-of-band decrement sites
+         * are deleted.  The rule cross-checks the O(1) confirmed-slot
+         * projection against the capture-frozen registry-derived hold
+         * (engine-internal invariant; request id 0 marks the
+         * endpoint-level aggregate identity).  Four gates make the signal
+         * trustworthy, mirroring the L5/L4 aggregates: seqlock-certified
+         * captures only (torn fallback captures carry no cross-phase
+         * aggregate signal), the confirmed projection stamp must equal
+         * the captured admission version (an out-of-band registry
+         * mutation — settlement, eviction, full release, retirement —
+         * bumps the version without recomputing the projection, and that
+         * window carries no aggregate signal until the next calibration
+         * pass), the derivation reads the capture-frozen
+         * confirmed/claim/fence/observed-confirmed maps rather than live
+         * re-reads, and the endpoint-level identity is request id 0 (the
+         * confirm window cannot absorb it by request-id rotation).
+         */
+        CONFIRMED_SLOT_AGGREGATE_MISMATCH(true),
+        /**
+         * Stage-2 L2 source switch: the engine-lifecycle ownership lives
+         * as the entry-level sub-state flag on each layer-1 inflight
+         * entry — the identity-set storage is deleted (count projection,
+         * identities stay engine-side).  The rule mirrors the L8
+         * treatment: the per-request membership invariant (an
+         * engine-lifecycle owner must sit in the layer-1 inflight layer —
+         * every leave path removes the entry itself, so the flag
+         * disappears with it) checks two capture-frozen sides and needs
+         * no certified gate, while the count-vs-id-set aggregate half
+         * carries the endpoint-level identity (request id 0) and
+         * therefore runs on seqlock-certified captures only (torn
+         * fallback captures carry no cross-phase aggregate signal).
+         */
+        ENGINE_LIFECYCLE_SUBSTATE_MISMATCH(true),
         /** Engine confirmed before the slot applied the handover. */
         DECODE_CONFIRMED_AHEAD_OF_SLOT(false),
         /** Decode reservation inside the admission bind window. */
