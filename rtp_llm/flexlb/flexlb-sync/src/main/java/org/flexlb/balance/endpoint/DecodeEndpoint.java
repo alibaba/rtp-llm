@@ -2566,9 +2566,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         List<WorkerStatusFact> facts = new ArrayList<>();
 
         // Build one authoritative Decode view. Claimed victims that merely
-        // disappear are held synthetically. An explicit Decode finished task
-        // is a separate authoritative terminal outcome: it settles the exact
-        // claim without reclassifying that outcome as priority CANCELED.
+        // disappear stay held in the priority-held projection. An explicit
+        // Decode finished task is a separate authoritative terminal outcome:
+        // it settles the exact claim without reclassifying that outcome as
+        // priority CANCELED.
         Set<Long> confirmedNow = new HashSet<>();
         Set<Long> terminalNow = new HashSet<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {

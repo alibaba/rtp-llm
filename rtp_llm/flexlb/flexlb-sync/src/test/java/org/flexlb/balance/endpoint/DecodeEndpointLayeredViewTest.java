@@ -332,7 +332,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void activeAfterNotFoundReleasesSyntheticHeldKvWithClaim() {
+    void activeAfterNotFoundReleasesProjectedHeldKvWithClaim() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
@@ -351,7 +351,7 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.reconcilePriorityVictimActive(
                 101L, reservations.get(1L)));
         // Stage-2 L4 retirement: active reconciliation removes the registry
-        // entry only; the held-KV projection and the synthetic confirmed
+        // entry only; the held-KV projection and the projected confirmed
         // entry drain on the next calibration pass (conservative window —
         // availability under-reported, never over-reported).
         assertEquals(9_500, endpoint.realKvAvailable());
@@ -364,7 +364,7 @@ class DecodeEndpointLayeredViewTest {
     }
 
     @Test
-    void notFoundTransferRetainsSyntheticKvUntilExactEngineFenceSettlement() {
+    void notFoundTransferRetainsProjectedKvUntilExactEngineFenceSettlement() {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 500)), null, 10_000);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
@@ -372,9 +372,10 @@ class DecodeEndpointLayeredViewTest {
                         9L, 700, 708, 70));
         assertTrue(endpoint.markPriorityCancelNotFound(104L, 1L));
 
-        // Decode disappearance moves the victim's 500-token charge into a
-        // synthetic hold. The 700-token provisional incoming reservation is
-        // still independently owned by the live preemption attempt.
+        // Decode disappearance moves the victim's 500-token charge into
+        // the priority-held projection. The 700-token provisional incoming
+        // reservation is still independently owned by the live preemption
+        // attempt.
         updateStatus(Map.of(), null, 10_000);
         assertEquals(700, endpoint.inflightHardKvReserved());
         assertEquals(2, endpoint.getTotalLoad(),
@@ -397,9 +398,9 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(0, endpoint.inflightHardKvReserved(),
                 "aborting the attempt releases only its provisional incoming reservation");
         assertEquals(9_500, endpoint.realKvAvailable(),
-                "control-owner transfer must not release the synthetic KV hold");
+                "control-owner transfer must not release the projected KV hold");
         assertEquals(1, endpoint.getTotalLoad(),
-                "the disappeared confirmed victim remains a synthetic slot");
+                "the disappeared confirmed victim remains a projected confirmed slot");
 
         assertTrue(endpoint.settleEngineFenceClaim(
                 104L, reservations.get(1L)));
