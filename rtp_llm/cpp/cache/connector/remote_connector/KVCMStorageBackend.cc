@@ -295,7 +295,7 @@ public:
                     if (!client_wrapper_->finishWrite("",
                                                       nextTraceId("abort_write"),
                                                       write_location.write_session_id,
-                                                      /*block_mask=*/0,
+                                                      /*block_mask=*/kv_cache_manager::BlockMaskOffset{0},
                                                       empty_locations)) {
                         RTP_LLM_LOG_WARNING("KVCM failed to abort write session [%s]",
                                             write_location.write_session_id.c_str());
