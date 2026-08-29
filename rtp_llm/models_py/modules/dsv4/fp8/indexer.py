@@ -655,8 +655,9 @@ class IndexerFP8(PoolBackedModule):
             # scalar read: that would synchronize the device and is
             # illegal during CUDA graph capture.
             T_cache = self._kv_block_table.shape[1] * self._kv_eb
-            T_static = self._kv_cache_t if self._kv_cache_t > 0 else T_cache
-            T_max = max(32, min(T_cache, T_static))
+            # Cloned EAGLE draft metadata can be smaller than the engine graph.
+            # The block table is the only capture-stable bound for all replays.
+            T_max = max(32, T_cache)
 
             q_fp8, w_fold = indexer_q_fp8_quant_fold(
                 _as_bf16_contig(q), _as_bf16_contig(weights)
