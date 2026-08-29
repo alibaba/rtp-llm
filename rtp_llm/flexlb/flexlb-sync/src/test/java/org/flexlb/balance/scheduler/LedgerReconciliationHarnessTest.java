@@ -633,11 +633,22 @@ class LedgerReconciliationHarnessTest {
     }
 
     @Test
-    void queuedPhaseOutsideInflightIsARealDiff() {
+    void queuedAggregateMirrorDriftIsARealDiff() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L7 retirement: the queued projection derives from the
+        // layer-1 entry sub-state flags, so a queued member outside the
+        // inflight set is structurally impossible. The rewritten rule
+        // cross-checks the three O(1) queued counters against the
+        // entry-derived projection — one master-queued entry here, but the
+        // counters drifted (count=2 vs derived 1).
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight queuedEntry = inflightEntry(16L, 24L, 3, 7L);
+        assertTrue(queuedEntry.enterMasterQueued());
+        inflight.put(702L, queuedEntry);
         stubDecodeView(decode, auditView(
-                Map.of(), Map.of(), Set.of(),
-                Set.of(), Set.of(), Set.of(), Set.of(702L), Set.of()));
+                inflight, Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of(702L), Set.of(),
+                2, 16L, 24L));
 
         LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
                 lifecycle, List.of(decode), List.of(registry), null);
@@ -649,7 +660,8 @@ class LedgerReconciliationHarnessTest {
                 LedgerReconciliationHarness.Rule
                         .QUEUED_PHASE_OUTSIDE_INFLIGHT,
                 real.get(0).rule());
-        assertEquals(702L, real.get(0).requestId());
+        assertEquals(0L, real.get(0).requestId(),
+                "the rewritten rule reports the endpoint-level aggregate");
         harness.close();
     }
 
@@ -713,6 +725,26 @@ class LedgerReconciliationHarnessTest {
             Set<Long> fenceProtected,
             Set<Long> queuedPhase,
             Set<Long> dispatchPermits) {
+        // Stage-2 L7: aggregate counters default to the empty projection;
+        // queued-state tests pass the drift values explicitly.
+        return auditView(inflight, confirmed, settledTombstones,
+                preemptionClaims, preemptionAttemptIncoming, fenceProtected,
+                queuedPhase, dispatchPermits, 0, 0L, 0L);
+    }
+
+    /** Stage-2 L7 full-layer view constructor with queued aggregates. */
+    private static DecodeLedgerAuditView auditView(
+            Map<Long, RequestInflight> inflight,
+            Map<Long, Long> confirmed,
+            Set<Long> settledTombstones,
+            Set<Long> preemptionClaims,
+            Set<Long> preemptionAttemptIncoming,
+            Set<Long> fenceProtected,
+            Set<Long> queuedPhase,
+            Set<Long> dispatchPermits,
+            int queuedPhaseCount,
+            long queuedKvReservedTotal,
+            long queuedExpectedKvReservedTotal) {
         return new DecodeLedgerAuditView(
                 1L,
                 Map.copyOf(inflight),
@@ -725,7 +757,10 @@ class LedgerReconciliationHarnessTest {
                 Set.copyOf(queuedPhase),
                 Set.copyOf(dispatchPermits),
                 0L,
-                0L);
+                0L,
+                queuedPhaseCount,
+                queuedKvReservedTotal,
+                queuedExpectedKvReservedTotal);
     }
 
     private static void stubDecodeView(

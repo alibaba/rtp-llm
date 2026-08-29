@@ -712,14 +712,40 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                     + " not backed by a layer-1 shadow"));
                 }
             }
-            for (Long requestId : view.queuedPhaseRequestIds()) {
-                if (!view.inflight().containsKey(requestId)) {
-                    diffs.add(new LedgerDiff(
-                            Rule.QUEUED_PHASE_OUTSIDE_INFLIGHT,
-                            requestId,
-                            "decode layer-7 queued-phase member is not a"
-                                    + " layer-1 inflight reservation"));
+            // Stage-2 L7 retarget: the queued projection derives from the
+            // layer-1 entry sub-state flags, so a queued member outside the
+            // inflight set is structurally impossible. The rule is
+            // rewritten (not merely retargeted — same treatment as the
+            // KV_MIRROR_MISMATCH stage-2 note) into an aggregate-mirror
+            // check: the three O(1) queued counters must match the
+            // entry-derived projection. Request id 0 marks the
+            // endpoint-level aggregate identity of this diff.
+            int queuedEntries = 0;
+            long queuedHardKv = 0L;
+            long queuedExpectedKv = 0L;
+            for (Map.Entry<Long, RequestInflight> inflight
+                    : view.inflight().entrySet()) {
+                RequestInflight reservation = inflight.getValue();
+                if (reservation.masterQueued()) {
+                    queuedEntries++;
+                    queuedHardKv += reservation.kvTokens();
+                    queuedExpectedKv += reservation.expectedKvTokens();
                 }
+            }
+            if (view.queuedPhaseCount() != queuedEntries
+                    || view.queuedKvReservedTotal() != queuedHardKv
+                    || view.queuedExpectedKvReservedTotal() != queuedExpectedKv) {
+                diffs.add(new LedgerDiff(
+                        Rule.QUEUED_PHASE_OUTSIDE_INFLIGHT,
+                        0L,
+                        "decode queued aggregate mirror drift: counters"
+                                + " (count=" + view.queuedPhaseCount()
+                                + ", hard=" + view.queuedKvReservedTotal()
+                                + ", expected="
+                                + view.queuedExpectedKvReservedTotal()
+                                + ") != entry-derived projection (count="
+                                + queuedEntries + ", hard=" + queuedHardKv
+                                + ", expected=" + queuedExpectedKv + ")"));
             }
             for (Long requestId : view.engineDispatchPermitRequestIds()) {
                 if (!view.queuedPhaseRequestIds().contains(requestId)
@@ -883,8 +909,14 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          */
         DECODE_FENCE_PROTECTION_ORPHAN(true),
         /**
-         * Stage-1 fix C: decode layer-7 queued-phase member outside the
-         * layer-1 inflight set (engine-internal invariant).
+         * Stage-1 fix C originally guarded the layer-7 set against members
+         * outside the layer-1 inflight set.  Stage-2 L7 retirement rewrote
+         * it (not merely retargeted): the queued projection now derives
+         * from the layer-1 entry sub-state flags, so membership outside
+         * inflight is structurally impossible — the rule instead
+         * cross-checks the three O(1) queued aggregate counters against
+         * the entry-derived projection (engine-internal invariant;
+         * request id 0 marks the endpoint-level aggregate identity).
          */
         QUEUED_PHASE_OUTSIDE_INFLIGHT(true),
         /**

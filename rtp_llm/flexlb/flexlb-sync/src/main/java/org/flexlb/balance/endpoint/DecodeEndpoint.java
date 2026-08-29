@@ -127,6 +127,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * {@link EngineDispatchPermit}; release/calibrate prune it
      * alongside {@code inflightRequests}. DIRECT paths never mark, so their
      * accounting is unchanged.
+     *
+     * <p><b>Stage-2 L7 dual-write transition (plan section 6):</b> the queued
+     * sub-state now also lives on each {@link RequestInflight} entry
+     * ({@code masterQueued}) — the entry flag is the incoming authority
+     * (L7 → "L1 sub-state projection"); this set remains as the
+     * transitional mirror until the reconciliation harness retargets onto
+     * the entry-derived projection and the set storage is deleted.
      */
     private final java.util.Set<Long> queuedPhase = ConcurrentHashMap.newKeySet();
 
@@ -136,6 +143,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * it is dispatched / released / calibrated out, so {@link #getEngineLoad}
      * avoids the per-call O(n) scan of the former full-scan formula. Read lock-free;
      * written under {@link #admissionLock}.
+     *
+     * <p>Stage-2 L7: with the entry sub-state flag as the incoming
+     * authority, this counter becomes the aggregate mirror of the
+     * {@code masterQueued} entry sub-state (kept O(1) for the hot gate
+     * path); the reconciliation harness cross-checks it against the
+     * entry-derived projection.
      */
     private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
 
@@ -1446,6 +1459,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // by the running-request population).
         final long version;
         final int lifecycleReservationCount;
+        final int queuedPhaseCountValue;
+        final long queuedHardKvValue;
+        final long queuedExpectedKvValue;
         final Set<Long> claimRequestIds;
         final Set<Long> attemptIncomingRequestIds;
         final Set<Long> fenceProtectedRequestIds;
@@ -1454,6 +1470,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             version = admissionVersion.get();
             lifecycleReservationCount = engineLifecycleReservations.size();
+            // Stage-2 L7: capture the queued aggregate counters inside the
+            // locked window so the version revalidation certifies them
+            // against the lock-free entry-derived projection below (O(1)
+            // reads — the lock budget stays request-count independent).
+            queuedPhaseCountValue = queuedPhaseCount.get();
+            queuedHardKvValue = queuedHardKvReservedTotal.get();
+            queuedExpectedKvValue = queuedExpectedKvReservedTotal.get();
             claimRequestIds = Set.copyOf(preemptionClaims.keySet());
             Set<Long> attemptIncoming = new HashSet<>();
             for (EndpointPreemptionAttempt attempt
@@ -1472,19 +1495,33 @@ public class DecodeEndpoint extends WorkerEndpoint {
         Map<Long, Long> confirmedTokens = new HashMap<>();
         trackedConfirmed.forEach((requestId, task) ->
                 confirmedTokens.put(requestId, task.reservationToken()));
+        Map<Long, RequestInflight> inflightSnapshot = Map.copyOf(inflightRequests);
+        // Stage-2 L7 retarget: the queued projection derives from the
+        // entry sub-state flags on the same inflight snapshot (the
+        // incoming authority); the separate layer-7 set is only the
+        // transitional dual-write mirror and is no longer read here.
+        Set<Long> queuedProjection = new HashSet<>();
+        inflightSnapshot.forEach((requestId, entry) -> {
+            if (entry.masterQueued()) {
+                queuedProjection.add(requestId);
+            }
+        });
         captured = new DecodeLedgerAuditView(
                 version,
-                Map.copyOf(inflightRequests),
+                inflightSnapshot,
                 lifecycleReservationCount,
                 Map.copyOf(confirmedTokens),
                 claimRequestIds,
                 attemptIncomingRequestIds,
                 fenceProtectedRequestIds,
                 settledRequestIds,
-                Set.copyOf(queuedPhase),
+                Set.copyOf(queuedProjection),
                 Set.copyOf(engineDispatchPermits.keySet()),
                 inflightKvReservedTotal.get(),
-                inflightExpectedKvReservedTotal.get());
+                inflightExpectedKvReservedTotal.get(),
+                queuedPhaseCountValue,
+                queuedHardKvValue,
+                queuedExpectedKvValue);
         // Phase 3 — admission lock: version revalidation.  Acquiring the
         // lock proves any prior writer finished its full critical section
         // (layer mutations plus the version bump happen together under
@@ -1529,7 +1566,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *   <li>L5 {@code engineFenceProtections} — engine fence registrations.</li>
      *   <li>L6 {@code settledTombstones} — settled request tombstones
      *       (retention window).</li>
-     *   <li>L7 {@code queuedPhase} — queued-ownership sub-state of L1.</li>
+     *   <li>L7 queued sub-state — the entry-level {@code masterQueued}
+     *       flag on each L1 entry (stage-2 retirement: the separate
+     *       layer-7 set is the transitional mirror; this view's
+     *       {@code queuedPhaseRequestIds} derives from the entry flags);
+     *       {@code queuedPhaseCount} / {@code queuedKvReservedTotal} /
+     *       {@code queuedExpectedKvReservedTotal} carry the O(1) aggregate
+     *       mirrors of the entry sub-state for the harness cross-check.</li>
      *   <li>L8 {@code engineDispatchPermits} — dispatch permit holders.</li>
      * </ol>
      */
@@ -1545,7 +1588,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             Set<Long> queuedPhaseRequestIds,
             Set<Long> engineDispatchPermitRequestIds,
             long inflightKvReservedTotal,
-            long inflightExpectedKvReservedTotal) {
+            long inflightExpectedKvReservedTotal,
+            int queuedPhaseCount,
+            long queuedKvReservedTotal,
+            long queuedExpectedKvReservedTotal) {
     }
 
     /**
@@ -3017,6 +3063,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (reservation == null || !queuedPhase.add(requestId)) {
             return false;
         }
+        // Stage-2 L7 dual-write: the entry sub-state is the incoming
+        // authority; the set stays as the transitional mirror until the
+        // reconciliation harness retargets and the set is deleted.
+        reservation.enterMasterQueued();
         queuedPhaseCount.incrementAndGet();
         queuedHardKvReservedTotal.addAndGet(reservation.kvTokens());
         queuedExpectedKvReservedTotal.addAndGet(reservation.expectedKvTokens());
@@ -3032,6 +3082,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             throw new IllegalStateException(
                     "queued Decode reservation missing for request " + requestId);
         }
+        // Stage-2 L7 dual-write: the entry sub-state is the incoming
+        // authority; the set stays as the transitional mirror.
+        reservation.leaveMasterQueued();
         queuedHardKvReservedTotal.addAndGet(-reservation.kvTokens());
         queuedExpectedKvReservedTotal.addAndGet(-reservation.expectedKvTokens());
         return true;
