@@ -160,6 +160,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * monotonic token. The pair fences request-id reuse while the slot is
      * reserved. A successful commit removes the lease permanently: committed
      * Decode ownership is never rolled back by a delivery token.
+     *
+     * <p><b>Stage-2 L8 dual-write transition (plan section 6):</b> the permit
+     * sub-state now also lives on each {@link RequestInflight} entry
+     * ({@code dispatchPermitToken}) — the entry token is the incoming
+     * authority (L8 → "permit resource row"); this map remains as the
+     * transitional mirror holding the token-identity checks until the
+     * reconciliation harness retargets onto the entry-derived projection
+     * and the map storage is deleted.</p>
      */
     private final Map<Long, EngineDispatchPermitLease> engineDispatchPermits =
             new ConcurrentHashMap<>();
@@ -1466,6 +1474,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         final int queuedPhaseCountValue;
         final long queuedHardKvValue;
         final long queuedExpectedKvValue;
+        final int permitCountValue;
+        final long permitHardKvValue;
+        final long permitExpectedKvValue;
         final Set<Long> claimRequestIds;
         final Set<Long> attemptIncomingRequestIds;
         final Set<Long> fenceProtectedRequestIds;
@@ -1481,6 +1492,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             queuedPhaseCountValue = queuedPhaseCount.get();
             queuedHardKvValue = queuedHardKvReservedTotal.get();
             queuedExpectedKvValue = queuedExpectedKvReservedTotal.get();
+            // Stage-2 L8: capture the permit aggregate counters inside the
+            // same locked window (O(1) reads — the lock budget stays
+            // request-count independent), certified against the lock-free
+            // entry-derived projection below.
+            permitCountValue = activeEngineDispatchPermitCount;
+            permitHardKvValue = engineDispatchPermitHardKvReservedTotal.get();
+            permitExpectedKvValue =
+                    engineDispatchPermitExpectedKvReservedTotal.get();
             claimRequestIds = Set.copyOf(preemptionClaims.keySet());
             Set<Long> attemptIncoming = new HashSet<>();
             for (EndpointPreemptionAttempt attempt
@@ -1509,6 +1528,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 queuedProjection.add(requestId);
             }
         });
+        // Stage-2 L8 retarget: the permit projection derives from the entry
+        // tokens on the same inflight snapshot (the incoming authority);
+        // the layer-8 map is only the transitional dual-write mirror and is
+        // no longer read here.
+        Set<Long> permitProjection = new HashSet<>();
+        inflightSnapshot.forEach((requestId, entry) -> {
+            if (entry.dispatchPermitToken() != 0L) {
+                permitProjection.add(requestId);
+            }
+        });
         captured = new DecodeLedgerAuditView(
                 version,
                 inflightSnapshot,
@@ -1519,12 +1548,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 fenceProtectedRequestIds,
                 settledRequestIds,
                 Set.copyOf(queuedProjection),
-                Set.copyOf(engineDispatchPermits.keySet()),
+                Set.copyOf(permitProjection),
                 inflightKvReservedTotal.get(),
                 inflightExpectedKvReservedTotal.get(),
                 queuedPhaseCountValue,
                 queuedHardKvValue,
                 queuedExpectedKvValue,
+                permitCountValue,
+                permitHardKvValue,
+                permitExpectedKvValue,
                 false);
         // Phase 3 — admission lock: version revalidation.  Acquiring the
         // lock proves any prior writer finished its full critical section
@@ -1577,21 +1609,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       {@code queuedPhaseCount} / {@code queuedKvReservedTotal} /
      *       {@code queuedExpectedKvReservedTotal} carry the O(1) aggregate
      *       mirrors of the entry sub-state for the harness cross-check.</li>
-     *   <li>L8 {@code engineDispatchPermits} — dispatch permit holders.</li>
+     *   <li>L8 dispatch-permit sub-state — the entry-level
+     *       {@code dispatchPermitToken} on each L1 entry (stage-2
+     *       retirement: this view's {@code engineDispatchPermitRequestIds}
+     *       derives from the entry tokens; the layer-8 map remains the
+     *       transitional dual-write mirror for the token-identity checks);
+     *       {@code engineDispatchPermitCount} and the two permit KV totals
+     *       carry the O(1) aggregate mirrors for the harness cross-check.</li>
      * </ol>
      *
      * <p><b>Capture certification (stage-2 L7 fix):</b> the Phase-1
-     * components (version, lifecycle count, the three queued counters,
-     * the four HashMap-backed key sets) and the Phase-2 components
-     * (inflight map, confirmed tokens, entry-derived queued projection,
-     * permit holders, inflight KV totals) are mutually consistent only
-     * when the seqlock version recheck passed — {@code certified} is
-     * {@code true} exactly then.  The torn fallback (bounded retries
-     * exhausted under extreme admission contention) returns
-     * {@code certified = false}; cross-phase aggregate derivations
-     * (queued counters vs entry projection) are valid on certified
-     * captures only.  Request-level consumers keep relying on the
-     * confirm-window tear absorption regardless of the flag.</p>
+     * components (version, lifecycle count, the three queued counters, the
+     * three permit counters, the four HashMap-backed key sets) and the
+     * Phase-2 components (inflight map, confirmed tokens, entry-derived
+     * queued projection, entry-derived permit projection, inflight KV
+     * totals) are mutually consistent only when the seqlock version
+     * recheck passed — {@code certified} is {@code true} exactly then.
+     * The torn fallback (bounded retries exhausted under extreme admission
+     * contention) returns {@code certified = false}; cross-phase aggregate
+     * derivations (queued / permit counters vs their entry projections)
+     * are valid on certified captures only.  Request-level consumers keep
+     * relying on the confirm-window tear absorption regardless of the
+     * flag.</p>
      */
     public record DecodeLedgerAuditView(
             long admissionVersion,
@@ -1609,6 +1648,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             int queuedPhaseCount,
             long queuedKvReservedTotal,
             long queuedExpectedKvReservedTotal,
+            int engineDispatchPermitCount,
+            long engineDispatchPermitHardKvReservedTotal,
+            long engineDispatchPermitExpectedKvReservedTotal,
             boolean certified) {
 
         /**
@@ -1632,6 +1674,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     queuedPhaseCount,
                     queuedKvReservedTotal,
                     queuedExpectedKvReservedTotal,
+                    engineDispatchPermitCount,
+                    engineDispatchPermitHardKvReservedTotal,
+                    engineDispatchPermitExpectedKvReservedTotal,
                     true);
         }
     }
@@ -3316,6 +3361,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     this, requestId, token, reservation);
             engineDispatchPermits.put(
                     requestId, new EngineDispatchPermitLease(token, reservation));
+            // Stage-2 L8 dual-write: the entry token is the incoming
+            // authority; the map stays as the transitional mirror. Both
+            // change under one admission tick, so a certified capture never
+            // observes the split.
+            if (!reservation.installDispatchPermitToken(token)) {
+                throw new IllegalStateException(
+                        "Decode dispatch permit mirror diverged: entry already"
+                                + " holds a permit token for request "
+                                + requestId);
+            }
             activeEngineDispatchPermitCount++;
             engineDispatchPermitHardKvReservedTotal.addAndGet(
                     reservation.kvTokens());
@@ -3419,6 +3474,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
         EngineDispatchPermitLease removed = engineDispatchPermits.remove(requestId);
         if (removed == null) {
             return false;
+        }
+        // Stage-2 L8 dual-write: clear the entry token through the lease's
+        // exact reservation — the map entry and the entry token change under
+        // one admission tick, so a certified capture never observes the
+        // split.
+        if (!removed.reservation().clearDispatchPermitToken()) {
+            throw new IllegalStateException(
+                    "Decode dispatch permit mirror diverged: map held a permit"
+                    + " whose entry token was already clear for request "
+                    + requestId);
         }
         engineDispatchPermitHardKvReservedTotal.addAndGet(
                 -removed.reservation().kvTokens());

@@ -702,6 +702,13 @@ class LedgerReconciliationHarnessTest {
     @Test
     void dispatchPermitOutsideQueuedPhaseIsARealDiff() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L8 retirement: the permit projection derives from the
+        // layer-1 entry tokens, so a holder outside inflight is
+        // structurally impossible. The rewritten rule keeps the
+        // per-request queued-membership half: a frozen permit holder that
+        // the frozen queued projection does not carry is a writer-ordering
+        // split (permit cleared later than the queued flag is legal, but
+        // queued cleared while the permit lives is not).
         stubDecodeView(decode, auditView(
                 Map.of(), Map.of(), Set.of(),
                 Set.of(), Set.of(), Set.of(), Set.of(), Set.of(703L)));
@@ -717,6 +724,73 @@ class LedgerReconciliationHarnessTest {
                         .DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE,
                 real.get(0).rule());
         assertEquals(703L, real.get(0).requestId());
+        harness.close();
+    }
+
+    @Test
+    void dispatchPermitAggregateMirrorDriftIsARealDiff() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L8 retirement: the permit aggregate counters mirror the
+        // entry token sub-state — one permit-holding entry here, but the
+        // counters drifted (count=2 vs derived 1).
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight permitHolder = inflightEntry(16L, 24L, 3, 7L);
+        assertTrue(permitHolder.enterMasterQueued());
+        assertTrue(permitHolder.installDispatchPermitToken(9L));
+        inflight.put(705L, permitHolder);
+        stubDecodeView(decode, auditView(
+                inflight, Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of(705L), Set.of(705L),
+                1, 16L, 24L,
+                2, 16L, 24L, true));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        List<LedgerReconciliationHarness.LedgerDiff> real =
+                harness.reconcileOnce().realDiffs();
+
+        assertEquals(1, real.size());
+        assertEquals(
+                LedgerReconciliationHarness.Rule
+                        .DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE,
+                real.get(0).rule());
+        assertEquals(0L, real.get(0).requestId(),
+                "the aggregate half reports the endpoint-level identity");
+        harness.close();
+    }
+
+    @Test
+    void tornCapturePermitAggregateDriftIsExemptFromTheRule() {
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        // Stage-2 L8 soak-fix form: an uncertified (torn fallback) capture
+        // read its Phase-1 permit counters and its Phase-2 entry projection
+        // in different admission quiet windows — the aggregate drift is a
+        // capture tear, and the endpoint-level identity (request id 0)
+        // defeats the confirm-window rotation. The identical drift as
+        // dispatchPermitAggregateMirrorDriftIsARealDiff, but
+        // certified=false, must produce no diff at all.
+        Map<Long, RequestInflight> inflight = new HashMap<>();
+        RequestInflight permitHolder = inflightEntry(16L, 24L, 3, 7L);
+        assertTrue(permitHolder.enterMasterQueued());
+        assertTrue(permitHolder.installDispatchPermitToken(9L));
+        inflight.put(706L, permitHolder);
+        stubDecodeView(decode, auditView(
+                inflight, Map.of(), Set.of(),
+                Set.of(), Set.of(), Set.of(), Set.of(706L), Set.of(706L),
+                1, 16L, 24L,
+                2, 16L, 24L, false));
+
+        LedgerReconciliationHarness harness = new LedgerReconciliationHarness(
+                lifecycle, List.of(decode), List.of(registry), null);
+        LedgerReconciliationHarness.ReconciliationReport report =
+                harness.reconcileOnce();
+
+        assertTrue(report.realDiffs().isEmpty(),
+                "torn captures carry no permit aggregate-mirror signal: "
+                        + report.realDiffs());
+        assertTrue(report.pendingRealDiffs().isEmpty(),
+                "torn captures must not even surface as tear candidates: "
+                        + report.pendingRealDiffs());
         harness.close();
     }
 
@@ -788,7 +862,7 @@ class LedgerReconciliationHarnessTest {
     /**
      * Stage-2 L7 soak-fix form: the trailing {@code certified} flag mirrors
      * the seqlock capture contract (torn fallback captures carry false and
-     * are exempt from the cross-phase aggregate mirror rule).
+     * are exempt from the cross-phase aggregate mirror rules).
      */
     private static DecodeLedgerAuditView auditView(
             Map<Long, RequestInflight> inflight,
@@ -802,6 +876,30 @@ class LedgerReconciliationHarnessTest {
             int queuedPhaseCount,
             long queuedKvReservedTotal,
             long queuedExpectedKvReservedTotal,
+            boolean certified) {
+        return auditView(inflight, confirmed, settledTombstones,
+                preemptionClaims, preemptionAttemptIncoming, fenceProtected,
+                queuedPhase, dispatchPermits, queuedPhaseCount,
+                queuedKvReservedTotal, queuedExpectedKvReservedTotal,
+                0, 0L, 0L, certified);
+    }
+
+    /** Stage-2 L8 full-layer view constructor with permit aggregates. */
+    private static DecodeLedgerAuditView auditView(
+            Map<Long, RequestInflight> inflight,
+            Map<Long, Long> confirmed,
+            Set<Long> settledTombstones,
+            Set<Long> preemptionClaims,
+            Set<Long> preemptionAttemptIncoming,
+            Set<Long> fenceProtected,
+            Set<Long> queuedPhase,
+            Set<Long> dispatchPermits,
+            int queuedPhaseCount,
+            long queuedKvReservedTotal,
+            long queuedExpectedKvReservedTotal,
+            int permitPhaseCount,
+            long permitKvReservedTotal,
+            long permitExpectedKvReservedTotal,
             boolean certified) {
         return new DecodeLedgerAuditView(
                 1L,
@@ -819,6 +917,9 @@ class LedgerReconciliationHarnessTest {
                 queuedPhaseCount,
                 queuedKvReservedTotal,
                 queuedExpectedKvReservedTotal,
+                permitPhaseCount,
+                permitKvReservedTotal,
+                permitExpectedKvReservedTotal,
                 certified);
     }
 

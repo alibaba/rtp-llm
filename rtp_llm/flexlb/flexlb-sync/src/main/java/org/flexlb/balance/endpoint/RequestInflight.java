@@ -61,6 +61,21 @@ public final class RequestInflight implements TtlEvictor.TtlTracked {
      */
     private volatile boolean masterQueued;
 
+    /**
+     * Stage-2 L8 retirement: pre-delivery dispatch-permit sub-state — the
+     * request holds one token-fenced Decode concurrency slot between queue
+     * publication and the engine handover. The entry token is the incoming
+     * authority over the old layer-8 map (which remains as the transitional
+     * dual-write mirror until the harness retargets and the map storage is
+     * deleted); the permit identity semantics (monotonic issuance,
+     * retirement fencing) stay with the endpoint.
+     *
+     * <p>Mutated only inside the endpoint admission lock; read lock-free by
+     * the audit capture (weakly consistent — confirm-window territory).
+     * Zero means no permit is held.
+     */
+    private volatile long dispatchPermitToken;
+
     public RequestInflight(
             long kvTokens,
             long expectedKvTokens,
@@ -146,6 +161,44 @@ public final class RequestInflight implements TtlEvictor.TtlTracked {
             return false;
         }
         masterQueued = false;
+        return true;
+    }
+
+    /** Token of the currently held dispatch permit, or 0 when none is held. */
+    public long dispatchPermitToken() {
+        return dispatchPermitToken;
+    }
+
+    /**
+     * Install the dispatch-permit token.  Returns false when another token
+     * is already held (idempotent no-op mirroring the old layer-8 map
+     * put-if-absent semantics).  Production callers hold the endpoint
+     * admission lock; public so reconciliation tests can construct the
+     * sub-state (the stage-2 audit projection reads it lock-free).
+     */
+    public boolean installDispatchPermitToken(long token) {
+        if (token <= 0L) {
+            throw new IllegalArgumentException(
+                    "dispatch permit token must be positive");
+        }
+        if (dispatchPermitToken != 0L) {
+            return false;
+        }
+        dispatchPermitToken = token;
+        return true;
+    }
+
+    /**
+     * Clear the dispatch-permit token.  Returns false when none was held
+     * (idempotent no-op mirroring the old layer-8 map-remove semantics).
+     * Production callers hold the endpoint admission lock; public for
+     * symmetric test construction.
+     */
+    public boolean clearDispatchPermitToken() {
+        if (dispatchPermitToken == 0L) {
+            return false;
+        }
+        dispatchPermitToken = 0L;
         return true;
     }
 

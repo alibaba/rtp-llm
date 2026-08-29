@@ -776,14 +776,66 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
                                     + ")"));
                 }
             }
+            // Stage-2 L8 retarget: the permit projection derives from the
+            // layer-1 entry tokens, so a permit holder outside the inflight
+            // set is structurally impossible. The rule is rewritten (same
+            // treatment as the L7 aggregate mirror) into two checks:
+            // the per-request queued-membership invariant (a permit holder
+            // must still sit in the queued sub-state — the writer protocol
+            // clears the permit no later than the queued flag under one
+            // admission tick) and the certified-gated aggregate mirror
+            // (the three O(1) permit counters vs the entry-derived
+            // projection). Both sides of the membership check are
+            // capture-frozen sets, so a post-capture admission flip can
+            // never fabricate a diff here (soak round-2 lesson).
             for (Long requestId : view.engineDispatchPermitRequestIds()) {
-                if (!view.queuedPhaseRequestIds().contains(requestId)
-                        || !view.inflight().containsKey(requestId)) {
+                if (!view.queuedPhaseRequestIds().contains(requestId)) {
                     diffs.add(new LedgerDiff(
                             Rule.DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE,
                             requestId,
-                            "decode layer-8 dispatch-permit holder is not a"
-                                    + " queued layer-1 inflight reservation"));
+                            "decode layer-8 dispatch-permit holder left the"
+                                    + " queued layer-1 sub-state"));
+                }
+            }
+            // Stage-2 L8 fix (soak lessons, same as the L7 aggregate): the
+            // aggregate identity is endpoint-level (request id 0), so the
+            // confirm window cannot absorb a recurring torn-capture drift
+            // by request-id rotation — the cross-phase aggregate runs on
+            // certified captures only, and the projection side reads the
+            // capture-frozen permit id set, never a live re-read of the
+            // mutable entry token.
+            if (view.certified()) {
+                int permitEntries = 0;
+                long permitHardKv = 0L;
+                long permitExpectedKv = 0L;
+                for (Long requestId : view.engineDispatchPermitRequestIds()) {
+                    RequestInflight reservation =
+                            view.inflight().get(requestId);
+                    if (reservation != null) {
+                        permitEntries++;
+                        permitHardKv += reservation.kvTokens();
+                        permitExpectedKv += reservation.expectedKvTokens();
+                    }
+                }
+                if (view.engineDispatchPermitCount() != permitEntries
+                        || view.engineDispatchPermitHardKvReservedTotal()
+                                != permitHardKv
+                        || view.engineDispatchPermitExpectedKvReservedTotal()
+                                != permitExpectedKv) {
+                    diffs.add(new LedgerDiff(
+                            Rule.DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE,
+                            0L,
+                            "decode dispatch-permit aggregate mirror drift:"
+                                    + " counters (count="
+                                    + view.engineDispatchPermitCount()
+                                    + ", hard="
+                                    + view.engineDispatchPermitHardKvReservedTotal()
+                                    + ", expected="
+                                    + view.engineDispatchPermitExpectedKvReservedTotal()
+                                    + ") != entry-derived projection (count="
+                                    + permitEntries + ", hard=" + permitHardKv
+                                    + ", expected=" + permitExpectedKv
+                                    + ")"));
                 }
             }
         }
@@ -957,8 +1009,17 @@ public final class LedgerReconciliationHarness implements AutoCloseable {
          */
         QUEUED_PHASE_OUTSIDE_INFLIGHT(true),
         /**
-         * Stage-1 fix C: decode layer-8 dispatch-permit holder outside the
-         * queued layer-1 inflight set (engine-internal invariant).
+         * Stage-1 fix C originally guarded layer-8 permit holders against
+         * sitting outside the queued layer-1 inflight set.  Stage-2 L8
+         * retirement rewrote it (same treatment as the L7 aggregate
+         * mirror): the permit projection derives from the layer-1 entry
+         * tokens, so membership outside inflight is structurally
+         * impossible — the rule now cross-checks the per-request queued
+         * membership (capture-frozen sets on both sides) plus the three
+         * O(1) permit aggregate counters against the entry-derived
+         * projection (engine-internal invariant; the aggregate half runs
+         * on seqlock-certified captures only and reports under the
+         * endpoint-level aggregate identity, request id 0).
          */
         DISPATCH_PERMIT_OUTSIDE_QUEUED_PHASE(true),
         /** Engine confirmed before the slot applied the handover. */
