@@ -2,9 +2,9 @@ package org.flexlb.consistency;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConsistencyConfig;
+import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
@@ -35,16 +35,19 @@ public class LBStatusConsistencyService implements MasterElectService {
     private final ZookeeperMasterElectService zookeeperMasterElectService;
     private final Environment environment;
     private final ConsistencyConfig consistencyConfig;
+    private final DeploymentIdentity deploymentIdentity;
     private String serverPort;
     private String roleId;
     private String localHostIp;
 
     public LBStatusConsistencyService(ZookeeperMasterElectService zookeeperMasterElectService,
                                       Environment environment,
-                                      ConfigService configService) {
+                                      ConfigService configService,
+                                      DeploymentIdentity deploymentIdentity) {
         this.zookeeperMasterElectService = zookeeperMasterElectService;
         this.environment = environment;
         this.consistencyConfig = configService.loadBalanceConfig().getConsistency();
+        this.deploymentIdentity = deploymentIdentity;
         this.init();
     }
 
@@ -62,10 +65,7 @@ public class LBStatusConsistencyService implements MasterElectService {
             serverPort = System.getProperty("server.port", "7001");
         }
         log.info("hostIp:{}, serverPort:{}.", localHostIp, serverPort);
-        roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("HIPPO_ROLE env is blank");
-        }
+        roleId = deploymentIdentity.getDeploymentId();
         if (!isNeedConsistency()) {
             log.warn("LBStatusConsistencyService is not need.");
             return;

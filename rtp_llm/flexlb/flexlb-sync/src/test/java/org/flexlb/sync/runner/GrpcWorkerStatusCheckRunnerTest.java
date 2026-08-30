@@ -78,6 +78,23 @@ class GrpcWorkerStatusCheckRunnerTest {
     }
 
     @Test
+    void should_use_configured_worker_status_port() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus workerStatus = status(8080);
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(new CompletableFuture<>());
+
+        new GrpcWorkerStatusRunner(
+                "test-model", ipPort, 18081, "test-site", RoleType.PREFILL, "test-group",
+                workerStatus, Map.of(ipPort, workerStatus), engineHealthReporter,
+                engineGrpcService, 20L, null, null, Runnable::run, null).run();
+
+        verify(engineGrpcService).getWorkerStatusAsync(
+                "127.0.0.1", 18081, -1L, 20L, RoleType.PREFILL);
+    }
+
+    @Test
     void should_refresh_task_lifecycle_when_status_version_is_unchanged() {
         String ipPort = "127.0.0.1:8080";
         WorkerStatus workerStatus = status(8080);

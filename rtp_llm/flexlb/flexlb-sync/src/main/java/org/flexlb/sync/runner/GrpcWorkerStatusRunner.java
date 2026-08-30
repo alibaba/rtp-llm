@@ -46,7 +46,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final EngineGrpcService engineGrpcService;
     private final PriorityScheduler priorityScheduler;
     private final String ip;
-    private final int grpcPort;
+    private final int workerStatusPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
@@ -64,12 +64,12 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   PriorityScheduler priorityScheduler,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
-        this(modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap,
+        this(modelName, ipPort, defaultWorkerStatusPort(ipPort), site, roleType, group, workerStatus, workerStatusMap,
                 engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
                 priorityScheduler, endpointRegistry, callbackExecutor, null);
     }
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType,
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, int workerStatusPort, String site, RoleType roleType,
                                   String group, WorkerStatus workerStatus,
                                   Map<String, WorkerStatus> workerStatusMap,
                                   EngineHealthReporter engineHealthReporter,
@@ -82,7 +82,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        this.workerStatusPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.workerStatusMap = workerStatusMap;
@@ -98,6 +98,26 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.cacheAwareService = cacheAwareService;
     }
 
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType,
+                                  String group, WorkerStatus workerStatus,
+                                  Map<String, WorkerStatus> workerStatusMap,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  PriorityScheduler priorityScheduler,
+                                  EndpointRegistry endpointRegistry,
+                                  Executor callbackExecutor,
+                                  CacheAwareService cacheAwareService) {
+        this(modelName, ipPort, defaultWorkerStatusPort(ipPort), site, roleType, group, workerStatus,
+                workerStatusMap, engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                priorityScheduler, endpointRegistry, callbackExecutor, cacheAwareService);
+    }
+
+    private static int defaultWorkerStatusPort(String ipPort) {
+        String[] split = ipPort.split(":");
+        return CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+    }
+
     @Override
     public void run() {
         boolean asyncInitiated = false;
@@ -107,7 +127,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
-            engineGrpcService.getWorkerStatusAsync(ip, grpcPort, latestFinishedTaskVersion,
+            engineGrpcService.getWorkerStatusAsync(ip, workerStatusPort, latestFinishedTaskVersion,
                             syncRequestTimeoutMs, roleType)
                     .thenApply(EngineStatusConverter::convertToWorkerStatusResponse)
                     .whenCompleteAsync((response, ex) -> {
@@ -319,7 +339,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             event.put("requestId", task.getRequestId());
             event.put("model", modelName);
             event.put("workerIp", ip);
-            event.put("workerPort", grpcPort);
+            event.put("workerPort", workerStatusPort);
             event.put("role", roleType.getCode());
             event.put("group", group);
             event.put("inputQueueEnqueueTimeMs", task.getInputQueueEnqueueTimeMs());
