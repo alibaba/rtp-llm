@@ -23,7 +23,10 @@ from rtp_llm.models_py.modules.kimi_k3.mega_se_buf import (
     get_or_create_kimi_k3_mega_moe_se_buf,
     get_or_create_kimi_k3_mega_moe_se_storages,
 )
-from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
+from rtp_llm.models_py.modules.kimi_k3.moe import (
+    KimiK3LatentMoE,
+    _requires_nccl_ep,
+)
 from rtp_llm.ops import ParallelismConfig
 
 if TYPE_CHECKING:
@@ -103,15 +106,31 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
                 "on every rank; set KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=0"
             )
 
-        import deep_gemm
         import torch.distributed as dist
+
+        self._validate_mega_preconditions("K3 DeepGEMM MegaMoE SE")
+        world_size = int(dist.get_world_size())
+        local_world_size = int(self.parallelism_config.local_world_size)
+        if _requires_nccl_ep(world_size, local_world_size):
+            # Fused-SE MegaMoE owns a CUDA-IPC symmetric buffer and therefore
+            # cannot span Decode hosts. Reuse the routed NCCL EP fallback from
+            # the base implementation and keep full shared-expert weights for
+            # the ordinary DP-local shared MLP.
+            logging.info(
+                "[KimiK3 NCCL EP] mega_moe_se falling back to routed NCCL EP "
+                "plus DP-local shared expert: world=%d local_world=%d",
+                world_size,
+                local_world_size,
+            )
+            return KimiK3LatentMoE._setup_deep_gemm_mega(self)
+
+        import deep_gemm
 
         from rtp_llm.models_py.modules.dsv4.quant_layouts import (
             FP4_BLOCK,
             prepare_fp4_weight_scale_for_deepgemm,
         )
 
-        self._validate_mega_preconditions("K3 DeepGEMM MegaMoE SE")
         if self.top_k > 32:
             raise RuntimeError(
                 f"K3 DeepGEMM MegaMoE SE requires topk <= 32, got {self.top_k}"
@@ -375,6 +394,15 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         valid_token_count: Optional[int] = None,
         valid_token_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if getattr(self, "_use_nccl_ep", False):
+            return KimiK3LatentMoE.forward(
+                self,
+                hidden_states,
+                sequence_parallel=sequence_parallel,
+                valid_token_count=valid_token_count,
+                valid_token_mask=valid_token_mask,
+            )
+
         sp_active = (
             sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
         )

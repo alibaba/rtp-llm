@@ -134,6 +134,51 @@ class KimiK3MegaMoeSeUnitTest(unittest.TestCase):
                 FusedKimiK3MegaMoeSeInputPacker,
             )
 
+    def test_multi_host_se_setup_delegates_to_nccl_ep_base(self) -> None:
+        module = KimiK3LatentMoESE.__new__(KimiK3LatentMoESE)
+        nn.Module.__init__(module)
+        module.shared_expert_weight_shard = False
+        module.parallelism_config = SimpleNamespace(local_world_size=8)
+        with (
+            patch.object(module, "_validate_mega_preconditions"),
+            patch("torch.distributed.get_world_size", return_value=16),
+            patch.object(
+                KimiK3LatentMoE,
+                "_setup_deep_gemm_mega",
+                autospec=True,
+            ) as base_setup,
+        ):
+            module._setup_deep_gemm_mega()
+        base_setup.assert_called_once_with(module)
+
+    def test_multi_host_se_forward_uses_base_nccl_ep_path(self) -> None:
+        module = KimiK3LatentMoESE.__new__(KimiK3LatentMoESE)
+        nn.Module.__init__(module)
+        module._use_nccl_ep = True
+        hidden_states = torch.randn((2, 4), dtype=torch.bfloat16)
+        expected = torch.randn_like(hidden_states)
+        valid_token_mask = torch.tensor([True, False])
+        with patch.object(
+            KimiK3LatentMoE,
+            "forward",
+            autospec=True,
+            return_value=expected,
+        ) as base_forward:
+            actual = module.forward(
+                hidden_states,
+                sequence_parallel=False,
+                valid_token_count=1,
+                valid_token_mask=valid_token_mask,
+            )
+        self.assertIs(actual, expected)
+        base_forward.assert_called_once_with(
+            module,
+            hidden_states,
+            sequence_parallel=False,
+            valid_token_count=1,
+            valid_token_mask=valid_token_mask,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
