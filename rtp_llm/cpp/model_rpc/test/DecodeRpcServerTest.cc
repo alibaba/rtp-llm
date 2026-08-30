@@ -121,8 +121,8 @@ CacheConfig makeDsv4RpcTopology(bool reversed) {
 
 class DecodeBoundaryTestEngine final: public EngineBase {
 public:
-    explicit DecodeBoundaryTestEngine(const CacheConfig& config): EngineBase(EngineInitParams()) {
-        resource_context_.cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true);
+    explicit DecodeBoundaryTestEngine(CacheConfig&& config): EngineBase(EngineInitParams()) {
+        resource_context_.cache_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true);
     }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
@@ -171,7 +171,7 @@ class DecodeRpcResourceBoundaryTest: public ::testing::Test {
 protected:
     void SetUp() override {
         config_                   = makeRpcCacheConfig();
-        server_.engine_           = std::make_shared<DecodeBoundaryTestEngine>(config_);
+        server_.engine_           = std::make_shared<DecodeBoundaryTestEngine>(makeRpcCacheConfig());
         server_.resource_.workers = {"decode-0", "decode-1"};
 
         stream_  = std::make_shared<DecodeBoundaryTestStream>();

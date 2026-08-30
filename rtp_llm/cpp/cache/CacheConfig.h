@@ -70,6 +70,8 @@ private:
     std::unordered_map<std::string, size_t>           tag_to_idx_;
     std::unordered_map<std::string, std::vector<int>> tag_to_layer_ids_;
 
+    void assignTopology(std::vector<CacheGroup> new_groups, std::vector<CacheLayer> new_layers);
+
     static void validateAndBuildIndex(std::vector<CacheGroup>&                           groups,
                                       const std::vector<CacheLayer>&                     layers,
                                       std::unordered_map<std::string, size_t>&           tag_to_idx,

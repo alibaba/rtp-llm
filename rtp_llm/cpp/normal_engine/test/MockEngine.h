@@ -91,15 +91,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.special_tokens.eos_token_id = -1;  // never eos
     setDefaultMhaKVCacheSpecDescs(model_config);
     if (config.hybrid_attention) {
-        model_config.hybrid_attention_config.enable_hybrid_attention           = true;
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-        model_config.hybrid_attention_config.hybrid_attention_types            = {HybridAttentionType::LINEAR,
-                                                                                  HybridAttentionType::NONE};
-        model_config.linear_attention_config.linear_conv_kernel_dim            = 4;
-        model_config.linear_attention_config.linear_key_head_dim               = 16;
-        model_config.linear_attention_config.linear_value_head_dim             = 16;
-        model_config.linear_attention_config.linear_num_key_heads              = 2;
-        model_config.linear_attention_config.linear_num_value_heads            = 2;
+        model_config.hybrid_attention_config.enable_hybrid_attention = true;
+        model_config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
+                                                                        HybridAttentionType::NONE};
+        model_config.linear_attention_config.linear_conv_kernel_dim  = 4;
+        model_config.linear_attention_config.linear_key_head_dim     = 16;
+        model_config.linear_attention_config.linear_value_head_dim   = 16;
+        model_config.linear_attention_config.linear_num_key_heads    = 2;
+        model_config.linear_attention_config.linear_num_value_heads  = 2;
         KVCacheSpecDesc linear_desc{"linear", KVCacheSpecType::LinearAttention};
         linear_desc.group_type = CacheGroupType::LINEAR;
 

@@ -588,7 +588,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, EagleMapsSoleDefaultFullDraftGr
     const std::string linear_tag = "linear";
     EXPECT_TRUE(sub_config->groupLayerIds(linear_tag).empty());
 
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
     auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
     ASSERT_NE(allocator, nullptr);
@@ -615,7 +615,7 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpMapsDefaultFullDraftGroupFor
         EXPECT_EQ(config.groupForLayer(static_cast<int>(4 + module_index), "full").tag, full_tag);
     }
 
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
     auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
     ASSERT_NE(allocator, nullptr);
@@ -1000,11 +1000,11 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpPhysicalSlotsDoNotAliasMainS
 
 TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, MtpLayoutProjectionRecountsActiveLayersAndKeepsEmptyPlaceholder) {
     auto config  = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
 
     const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
-    ASSERT_EQ(layout.topology().layers().size(), 1u);
+    ASSERT_EQ(manager->getMTPModuleCacheConfig(0).layers().size(), 1u);
     EXPECT_EQ(layout.group("full").activeLayerCount(), 1u);
     EXPECT_FALSE(layout.group("full").empty());
     EXPECT_EQ(layout.group("linear").activeLayerCount(), 0u);
@@ -1572,9 +1572,9 @@ TEST_F(HybridPoolKVCacheAllocatorHybridPathTest, ConvertIndexToBufferAndAllLayer
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
-    ASSERT_EQ(layout.topology().layers().size(), static_cast<size_t>(config.layer_num));
-    for (size_t i = 0; i < layout.topology().layers().size(); ++i) {
-        for (const auto& tag : layout.topology().groupsForLayer(static_cast<int>(i))) {
+    ASSERT_EQ(config.layers().size(), static_cast<size_t>(config.layer_num));
+    for (size_t i = 0; i < config.layers().size(); ++i) {
+        for (const auto& tag : config.groupsForLayer(static_cast<int>(i))) {
             EXPECT_TRUE(layout.group(tag).hasLayer(i));
         }
     }

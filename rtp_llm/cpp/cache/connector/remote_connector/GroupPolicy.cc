@@ -92,8 +92,7 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto  layer_layout       = allocator_->allLayerCacheBase();
-    const auto& topology           = layer_layout.topology();
+    const auto& topology           = allocator_->cacheConfig();
     uint64_t    group_name_bithash = 1;
     const auto& layers             = topology.layers();
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
@@ -119,7 +118,8 @@ bool DefaultLayerGroupPolicy::init() {
                 const size_t      block_size_bytes =
                     topology.groupLayerIds(cache_tag).size()
                     * (topology_group.kv_block_stride_bytes + topology_group.kv_scale_stride_bytes);
-                groups_[cache_tag] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
+                groups_[cache_tag] =
+                    Group{is_full_group, group_name_bithash, group_name, std::string(cache_tag), block_size_bytes};
                 tag_to_layer_ids_[cache_tag] = {};
                 if (groups_.size() < 64) {
                     group_name_bithash <<= 1;

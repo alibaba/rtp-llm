@@ -446,7 +446,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -496,7 +496,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -595,7 +595,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -695,7 +695,7 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -966,7 +966,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -1063,7 +1063,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -1178,7 +1178,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInputCompactsC
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -1326,7 +1326,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -1383,7 +1383,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -1452,7 +1452,7 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
                                                           rtp_llm::TYPE_INT8,
                                                           /*local_head_num_kv=*/128,
                                                           /*size_per_head=*/256);
-    auto cache_manager   = std::make_shared<KVCacheManager>(kv_cache_config,
+    auto cache_manager   = std::make_shared<KVCacheManager>(std::move(kv_cache_config),
 
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,

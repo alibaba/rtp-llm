@@ -559,7 +559,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EagleMapsSoleDefaultFullDraftGroupToUniqu
     const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
     EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
 
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
     const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
     EXPECT_TRUE(layout.at("full", 0).kv_addr.defined());
@@ -925,7 +925,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MtpPhysicalSlotsDoNotAliasMainSlots) {
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MtpLayoutProjectionRecountsActiveLayersAndKeepsEmptyPlaceholder) {
     auto config  = makeTinyHybridMtpConfigByCreateSpConfig();
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
 
     const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);

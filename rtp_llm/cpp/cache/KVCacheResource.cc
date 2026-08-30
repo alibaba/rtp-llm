@@ -6,6 +6,28 @@
 
 namespace rtp_llm {
 
+namespace {
+
+BlockIndicesType projectKernelBlockIds(const BlockIndicesType& block_ids, size_t kernel_blocks_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(kernel_blocks_per_block > 0, "kernel blocks per block must be positive");
+    BlockIndicesType kernel_block_ids;
+    kernel_block_ids.reserve(block_ids.size() * kernel_blocks_per_block);
+    for (const auto block_id : block_ids) {
+        if (isNullBlockIdx(block_id)) {
+            kernel_block_ids.insert(kernel_block_ids.end(), kernel_blocks_per_block, 0);
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(block_id >= 0, "invalid physical block id=%d", block_id);
+        const BlockIdxType base = block_id * static_cast<BlockIdxType>(kernel_blocks_per_block);
+        for (size_t i = 0; i < kernel_blocks_per_block; ++i) {
+            kernel_block_ids.push_back(base + static_cast<BlockIdxType>(i));
+        }
+    }
+    return kernel_block_ids;
+}
+
+}  // namespace
+
 void KVCacheResource::initGroups(const CacheConfig& config) {
 
     layer_group_tags_.clear();
@@ -16,9 +38,10 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
     for (const auto& group : groups) {
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "KVCacheResource requires a non-empty cache group tag");
 
-        RTP_LLM_CHECK_WITH_INFO(blocks_by_group_.emplace(group.tag, PoolBlockIds()).second,
-                                "KVCacheResource has duplicate tag=%s",
-                                group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            blocks_by_group_.emplace(group.tag, BlockIds(group.storedKernelBlocksPerKvBlock())).second,
+            "KVCacheResource has duplicate tag=%s",
+            group.tag.c_str());
     }
 
     const auto& layers = config.layers();
@@ -32,40 +55,76 @@ void KVCacheResource::initGroups(const CacheConfig& config) {
     }
 }
 
-size_t PoolBlockIds::blocksNum() const {
-    return block_ids_.size();
+BlockIds::BlockIds(size_t kernel_blocks_per_block): kernel_blocks_per_block_(kernel_blocks_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(kernel_blocks_per_block_ > 0, "kernel blocks per block must be positive");
 }
 
-const std::vector<BlockIdxType>& PoolBlockIds::blocks() const {
+size_t BlockIds::blocksNum() const {
+    return block_ids_.size();
+}
+size_t BlockIds::kernelBlocksNum() const {
+    return block_ids_.size() * kernel_blocks_per_block_;
+}
+
+const BlockIndicesType& BlockIds::blocks() const {
     return block_ids_;
 }
 
-BlockIdxType PoolBlockIds::popBack() {
+BlockIndicesType BlockIds::kernelBlocks() const {
+    return projectKernelBlockIds(block_ids_, kernel_blocks_per_block_);
+}
+
+size_t BlockIds::writeKernelBlocks(BlockIdxType* data, size_t num) const {
+    const size_t required = block_ids_.size() * kernel_blocks_per_block_;
+    RTP_LLM_CHECK_WITH_INFO(
+        num >= required, "kernel block table capacity is insufficient: capacity=%zu required=%zu", num, required);
+    if (required == 0) {
+        return 0;
+    }
+    RTP_LLM_CHECK_WITH_INFO(data != nullptr, "kernel block table output buffer must not be null");
+
+    size_t output_index = 0;
+    for (const auto block_id : block_ids_) {
+        if (isNullBlockIdx(block_id)) {
+            std::fill_n(data + output_index, kernel_blocks_per_block_, 0);
+            output_index += kernel_blocks_per_block_;
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(block_id >= 0, "invalid physical block id=%d", block_id);
+        const BlockIdxType base = block_id * static_cast<BlockIdxType>(kernel_blocks_per_block_);
+        for (size_t i = 0; i < kernel_blocks_per_block_; ++i) {
+            data[output_index++] = base + static_cast<BlockIdxType>(i);
+        }
+    }
+    return output_index;
+}
+
+BlockIdxType BlockIds::popBack() {
     RTP_LLM_CHECK(!block_ids_.empty());
     const BlockIdxType val = block_ids_.back();
     block_ids_.pop_back();
     return val;
 }
 
-void PoolBlockIds::add(const std::vector<BlockIdxType>& ids) {
+void BlockIds::add(const BlockIndicesType& ids) {
     block_ids_.insert(block_ids_.end(), ids.begin(), ids.end());
 }
 
-void PoolBlockIds::remove(const std::vector<size_t>& indices) {
-    for (auto idx : indices) {
-        RTP_LLM_CHECK(idx < block_ids_.size());
-        block_ids_[idx] = NULL_BLOCK_IDX;
+void BlockIds::remove(const std::vector<size_t>& positions) {
+    for (auto pos : positions) {
+        RTP_LLM_CHECK(pos < block_ids_.size());
+        block_ids_[pos] = NULL_BLOCK_IDX;
     }
 }
 
-void PoolBlockIds::swap(size_t pos_a, size_t pos_b) {
+void BlockIds::swap(size_t pos_a, size_t pos_b) {
     if (pos_a >= block_ids_.size() || pos_b >= block_ids_.size()) {
-        RTP_LLM_LOG_ERROR("PoolBlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_ids.size()=%zu",
+        RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_ids.size()=%zu",
                           pos_a,
                           pos_b,
                           block_ids_.size());
         RTP_LLM_CHECK_WITH_INFO(false,
-                                "PoolBlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_ids.size()=%zu",
+                                "BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_ids.size()=%zu",
                                 pos_a,
                                 pos_b,
                                 block_ids_.size());
@@ -77,51 +136,21 @@ void PoolBlockIds::swap(size_t pos_a, size_t pos_b) {
     std::swap(block_ids_[pos_a], block_ids_[pos_b]);
 }
 
-void PoolBlockIds::assign(const std::vector<BlockIdxType>& new_block_indices) {
-    block_ids_ = new_block_indices;
+void BlockIds::assign(const BlockIndicesType& new_block_ids) {
+    block_ids_ = new_block_ids;
 }
 
-void PoolBlockIds::assign(std::vector<BlockIdxType>&& new_block_indices) {
-    block_ids_ = std::move(new_block_indices);
+void BlockIds::assign(BlockIndicesType&& new_block_ids) {
+    block_ids_ = std::move(new_block_ids);
 }
 
-void PoolBlockIds::setAt(size_t pos, BlockIdxType val) {
+void BlockIds::setAt(size_t pos, BlockIdxType val) {
     RTP_LLM_CHECK(pos < block_ids_.size());
     block_ids_[pos] = val;
 }
 
-void PoolBlockIds::resize(size_t new_size, BlockIdxType value) {
+void BlockIds::resize(size_t new_size, BlockIdxType value) {
     block_ids_.resize(new_size, value);
-}
-
-PoolBlockToKernelBlockProjection::PoolBlockToKernelBlockProjection(size_t kernel_blocks_per_pool_block):
-    kernel_blocks_per_pool_block_(kernel_blocks_per_pool_block) {
-    RTP_LLM_CHECK_WITH_INFO(kernel_blocks_per_pool_block_ > 0, "kernel blocks per pool block must be positive");
-}
-
-size_t PoolBlockToKernelBlockProjection::projectedSize(size_t pool_block_count) const {
-    return pool_block_count * kernel_blocks_per_pool_block_;
-}
-
-void PoolBlockToKernelBlockProjection::append(BlockIdxType source, std::vector<BlockIdxType>& destination) const {
-    if (isNullBlockIdx(source)) {
-        destination.insert(destination.end(), kernel_blocks_per_pool_block_, 0);
-        return;
-    }
-    RTP_LLM_CHECK_WITH_INFO(source >= 0, "invalid physical block id=%d", source);
-    const BlockIdxType base = source * static_cast<BlockIdxType>(kernel_blocks_per_pool_block_);
-    for (size_t i = 0; i < kernel_blocks_per_pool_block_; ++i) {
-        destination.push_back(base + static_cast<BlockIdxType>(i));
-    }
-}
-
-void PoolBlockToKernelBlockProjection::project(const std::vector<BlockIdxType>& source,
-                                               std::vector<BlockIdxType>&       destination) const {
-    destination.clear();
-    destination.reserve(projectedSize(source.size()));
-    for (const auto block_id : source) {
-        append(block_id, destination);
-    }
 }
 
 void KVCacheResource::resizeBlocks(int reserver_blocks, int value) {
@@ -143,14 +172,14 @@ const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::strin
     return mutableBlockIdsForLayer(layer_id, tag).blocks();
 }
 
-PoolBlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
+BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
     const auto value = std::string(tag);
     const auto it    = blocks_by_group_.find(value);
     RTP_LLM_CHECK_WITH_INFO(it != blocks_by_group_.end(), "KVCacheResource missing tag=%s", value.c_str());
     return it->second;
 }
 
-PoolBlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
+BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
     RTP_LLM_CHECK_WITH_INFO(layerContainsTag(layer_id, tag),
                             "KVCacheResource layer=%d does not own tag=%s",
                             layer_id,
@@ -158,11 +187,11 @@ PoolBlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string
     return mutableBlockIds(tag);
 }
 
-const PoolBlockIds& KVCacheResource::blockIds(std::string_view tag) const {
+const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
     return mutableBlockIds(tag);
 }
 
-const PoolBlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
+const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
     return mutableBlockIdsForLayer(layer_id, tag);
 }
 
@@ -195,7 +224,7 @@ int KVCacheResource::groupNums() const {
     return static_cast<int>(blocks_by_group_.size());
 }
 
-const std::map<std::string, PoolBlockIds>& KVCacheResource::blocksByGroup() const {
+const std::map<std::string, BlockIds>& KVCacheResource::blocksByGroup() const {
     return blocks_by_group_;
 }
 

@@ -16,7 +16,7 @@ HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 
 
-class TaggedBlockTableModel:
+class GroupBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -30,8 +30,8 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedSequenceLengthModel:
-    """Expose the cumulative lengths used by a tagged captured graph."""
+class GroupSequenceLengthModel:
+    """Expose the cumulative lengths used by a multi-group captured graph."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         return None
@@ -49,7 +49,7 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedPaddingModel:
+class GroupPaddingModel:
     """Expose the untouched tail column after replay copies shorter live rows."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -63,10 +63,10 @@ class TaggedPaddingModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-def _tag_attention_inputs(
+def _group_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
-    tagged = {}
+    inputs_by_group = {}
     for tag in tags:
         tag_inputs = copy.copy(common)
         host_blocks = torch.full_like(
@@ -77,8 +77,8 @@ def _tag_attention_inputs(
         tag_inputs.kv_cache_kernel_block_id_device = device_blocks
         tag_inputs.kv_cache_block_id = host_blocks
         tag_inputs.kv_cache_block_id_device = device_blocks
-        tagged[tag] = tag_inputs
-    return tagged
+        inputs_by_group[tag] = tag_inputs
+    return inputs_by_group
 
 
 def _build_common_inputs(
@@ -110,7 +110,7 @@ def _build_common_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
-    inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
+    inputs.attention_inputs = _group_attention_inputs(attention_inputs, tags, values)
     return inputs
 
 
@@ -118,6 +118,7 @@ def _build_decode_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 2,
+    block_count: int = 1,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
@@ -149,7 +150,7 @@ def _build_decode_inputs(
         values,
         batch_size=batch_size,
         token_count=batch_size,
-        block_count=1,
+        block_count=block_count,
     )
 
 
@@ -233,7 +234,7 @@ def _build_target_verify_inputs(
     )
 
 
-class TestCudaGraphTaggedCache(unittest.TestCase):
+class TestCudaGraphGroupCache(unittest.TestCase):
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -246,7 +247,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_decode_tag_validation_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -281,10 +282,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
         )
 
-    def test_prefill_tagged_capture_and_replay_updates(self) -> None:
+    def test_prefill_group_capture_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
         runner.init_prefill(
-            TaggedBlockTableModel(),
+            GroupBlockTableModel(),
             2,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -305,10 +306,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             52,
         )
 
-    def test_decode_replay_clears_tagged_tail_to_safe_kernel_block(self) -> None:
+    def test_decode_replay_clears_group_tail_to_safe_kernel_block(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedPaddingModel(),
+            GroupPaddingModel(),
             HIDDEN_SIZE,
             2 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -317,24 +318,24 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             GROUP_TAGS,
         )
 
-        # Physical block 0 is the graph-safe dummy. The live rows contain one
-        # column, so both untouched tail columns must be reset to kernel block 0.
+        # First populate the full captured width with non-zero values. The next
+        # replay narrows the source table; stale tail columns must be reset.
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}),
-            0,
+            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=2),
+            101,
         )
         self._assert_replay_signature(
             runner,
-            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=1),
             0,
         )
 
-    def test_duplicate_capture_tag_is_rejected(self) -> None:
+    def test_cache_config_rejects_duplicate_group_tag(self) -> None:
         runner = CudaGraphRunner()
         with self.assertRaisesRegex(RuntimeError, "duplicate group tag=full"):
             runner.init_decode(
-                TaggedBlockTableModel(),
+                GroupBlockTableModel(),
                 HIDDEN_SIZE,
                 TOKENS_PER_BLOCK,
                 TOKENS_PER_BLOCK,
@@ -343,11 +344,11 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 ["full", "full"],
             )
 
-    def test_empty_capture_tag_is_rejected(self) -> None:
+    def test_cache_config_rejects_empty_group_tag(self) -> None:
         runner = CudaGraphRunner()
         with self.assertRaisesRegex(RuntimeError, "requires tag for group 1"):
             runner.init_decode(
-                TaggedBlockTableModel(),
+                GroupBlockTableModel(),
                 HIDDEN_SIZE,
                 TOKENS_PER_BLOCK,
                 TOKENS_PER_BLOCK,
@@ -357,14 +358,13 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
 
     def test_capture_tag_declaration_order_does_not_change_replay(self) -> None:
-        # Capture buffers are addressed by an adapter-local group_ordinal taken
-        # from the sorted tag order, so declaring the same tags in the reverse
-        # order must replay to exactly the same per-tag values.
+        # Capture buffers use group_index in sorted tag order, so declaring the
+        # same tags in reverse order must replay to the same per-tag values.
         for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
             with self.subTest(tags=tags):
                 runner = CudaGraphRunner()
                 runner.init_decode(
-                    TaggedBlockTableModel(),
+                    GroupBlockTableModel(),
                     HIDDEN_SIZE,
                     TOKENS_PER_BLOCK,
                     TOKENS_PER_BLOCK,
@@ -381,7 +381,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -429,7 +429,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         prefix_len = 11
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedSequenceLengthModel(),
+            GroupSequenceLengthModel(),
             HIDDEN_SIZE,
             64,
             TOKENS_PER_BLOCK,

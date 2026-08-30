@@ -35,8 +35,8 @@ CacheConfig makeResourceConfig(std::vector<CacheGroup> groups, std::vector<Cache
 
 }  // namespace
 
-TEST(PoolBlockIdsTest, MutationsPreservePositionsAndHoles) {
-    PoolBlockIds ids;
+TEST(BlockIdsTest, MutationsPreservePositionsAndHoles) {
+    BlockIds ids;
 
     ids.add(BlockIndicesType{1, 2, 3});
     ASSERT_EQ(ids.blocks(), (BlockIndicesType{1, 2, 3}));
@@ -51,8 +51,8 @@ TEST(PoolBlockIdsTest, MutationsPreservePositionsAndHoles) {
     ASSERT_EQ(ids.blocks(), (BlockIndicesType{3, 9, 1}));
 }
 
-TEST(PoolBlockIdsTest, ResizeAndPopPreserveSafeDummyZeroAndRemainingPositions) {
-    PoolBlockIds ids;
+TEST(BlockIdsTest, ResizeAndPopPreserveSafeDummyZeroAndRemainingPositions) {
+    BlockIds ids;
     ids.assign(BlockIndicesType{0, 7});
 
     ids.resize(4);
@@ -70,18 +70,34 @@ TEST(PoolBlockIdsTest, ResizeAndPopPreserveSafeDummyZeroAndRemainingPositions) {
     EXPECT_TRUE(ids.blocks().empty());
 }
 
-TEST(PoolBlockToKernelBlockProjectionTest, ExpandsPhysicalIdsAndProjectsNullHolesToLegacyZero) {
-    const PoolBlockToKernelBlockProjection projection(/*kernel_blocks_per_pool_block=*/2);
-    BlockIndicesType                       projected;
+TEST(BlockIdsTest, KernelBlocksAreProjectedWithoutPersistentKernelStorage) {
+    BlockIds ids(/*kernel_blocks_per_block=*/2);
 
-    projection.project(BlockIndicesType{5, 7}, projected);
-    ASSERT_EQ(projected, (BlockIndicesType{10, 11, 14, 15}));
+    ids.assign(BlockIndicesType{5, 7});
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{10, 11, 14, 15}));
 
-    projection.project(BlockIndicesType{NULL_BLOCK_IDX, 3}, projected);
-    ASSERT_EQ(projected, (BlockIndicesType{0, 0, 6, 7}));
-    projection.project(BlockIndicesType{0}, projected);
-    ASSERT_EQ(projected, (BlockIndicesType{0, 1}));
-    ASSERT_EQ(projection.projectedSize(2), 4u);
+    ids.assign(BlockIndicesType{NULL_BLOCK_IDX, 3});
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{0, 0, 6, 7}));
+    ids.assign(BlockIndicesType{0});
+    ASSERT_EQ(ids.kernelBlocks(), (BlockIndicesType{0, 1}));
+}
+
+TEST(BlockIdsTest, WriteKernelBlocksUsesCallerBufferAndPreservesProjectionSemantics) {
+    BlockIds ids(/*kernel_blocks_per_block=*/2);
+    ids.assign(BlockIndicesType{5, NULL_BLOCK_IDX, 7});
+
+    BlockIdxType output[6] = {};
+    EXPECT_EQ(ids.writeKernelBlocks(output, 6u), 6u);
+    EXPECT_EQ(BlockIndicesType(output, output + 6), (BlockIndicesType{10, 11, 0, 0, 14, 15}));
+
+    EXPECT_THROW(ids.writeKernelBlocks(output, 5u), std::exception);
+}
+
+TEST(BlockIdsTest, WriteKernelBlocksRejectsInvalidPhysicalBlock) {
+    BlockIds ids(/*kernel_blocks_per_block=*/2);
+    ids.assign(BlockIndicesType{-2});
+    BlockIdxType output[2] = {};
+    EXPECT_THROW(ids.writeKernelBlocks(output, 2u), std::exception);
 }
 
 TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
@@ -113,6 +129,8 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
 
     ASSERT_EQ(resource.blocks("group0"), (BlockIndicesType{1}));
     ASSERT_EQ(resource.blocks("group1"), (BlockIndicesType{1}));
+    ASSERT_EQ(resource.blockIds("group0").kernelBlocks(), (BlockIndicesType{4, 5, 6, 7}));
+    ASSERT_EQ(resource.blockIds("group1").kernelBlocks(), (BlockIndicesType{1}));
 }
 
 TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
@@ -386,6 +404,7 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
 
 TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateStayIntact) {
     auto config = makeResourceConfig({makeResourceGroup("full", CacheGroupType::FULL)}, {{"full"}});
+    ASSERT_EQ(config.group("full").storedKernelBlocksPerKvBlock(), 4u);
 
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);
@@ -400,6 +419,10 @@ TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateS
     BatchKVCacheResource copied = batch;
     copied.mutableBlockIds(0, "full").setAt(1, 8);
     EXPECT_EQ(batch.blocks(0, "full"), (BlockIndicesType{3, 4}));
+    EXPECT_EQ(batch.cacheResource(0).blockIds("full").kernelBlocks(),
+              (BlockIndicesType{12, 13, 14, 15, 16, 17, 18, 19}));
+    EXPECT_EQ(copied.cacheResource(0).blockIds("full").kernelBlocks(),
+              (BlockIndicesType{12, 13, 14, 15, 32, 33, 34, 35}));
     EXPECT_EQ(copied.cacheKeys(0), (CacheKeysType{101, 202}));
     ASSERT_EQ(copied.cacheResource(0).blockDependencies().size(), 2u);
     EXPECT_EQ(copied.cacheResource(0).blockDependencies()[0].parent_key, 7);
@@ -410,11 +433,16 @@ TEST(BatchKVCacheResourceTest, CopyOwnsTagMappedBlocksWhileMoveAndTimelineStateS
 
     std::vector<KVCacheResource> old_resources;
     copied.resetAndReturnOldResources(/*new_batch_size=*/3, old_resources);
+    ASSERT_EQ(old_resources.size(), 2u);
+    EXPECT_EQ(old_resources[0].blockIds("full").kernelBlocks(), (BlockIndicesType{12, 13, 14, 15, 32, 33, 34, 35}));
     copied.initGroups(config);
+    EXPECT_TRUE(copied.cacheResource(0).blockIds("full").kernelBlocks().empty());
     copied.moveBatchResource(2, std::move(old_resources[0]));
 
     EXPECT_EQ(copied.batchSize(), 3);
     EXPECT_EQ(copied.blocks(2, "full"), (BlockIndicesType{3, 8}));
+    EXPECT_EQ(copied.cacheResource(2).blockIds("full").kernelBlocks(),
+              (BlockIndicesType{12, 13, 14, 15, 32, 33, 34, 35}));
     EXPECT_EQ(copied.cacheKeys(2), (CacheKeysType{101, 202}));
     ASSERT_EQ(copied.cacheResource(2).blockDependencies().size(), 2u);
     EXPECT_EQ(copied.cacheResource(2).blockDependencies()[0].ordinal, 9u);

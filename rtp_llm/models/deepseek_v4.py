@@ -543,10 +543,6 @@ class DeepSeekV4(DeepSeekV2):
 
         hybrid_config = model_config.hybrid_attention_config
         hybrid_config.hybrid_attention_types = [HybridAttentionType.NONE] * layer_num
-        # Without this the C++ side never dispatches into CacheConfigCreator
-        # and falls back to a single homogeneous pool.
-        hybrid_config.enable_independent_kv_cache_pools = True
-
         model_config.kv_cache_spec_descs = build_dsv4_kv_cache_spec_descs(
             layer_num=layer_num,
             layer_compress_ratios=list(attn_config.layer_compress_ratios),

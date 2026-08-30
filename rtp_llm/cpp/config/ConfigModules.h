@@ -631,8 +631,7 @@ enum class HybridAttentionType {
 };
 
 struct HybridAttentionConfig {
-    bool                             enable_hybrid_attention           = false;
-    bool                             enable_independent_kv_cache_pools = false;
+    bool                             enable_hybrid_attention = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
     std::string                      to_string() const;
 };

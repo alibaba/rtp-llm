@@ -302,10 +302,6 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         config = self._model_config()
 
         DeepSeekV4._post_build_model_config(config)
-
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertEqual(
             list(config.hybrid_attention_config.hybrid_attention_types),
             [HybridAttentionType.NONE] * config.num_layers,

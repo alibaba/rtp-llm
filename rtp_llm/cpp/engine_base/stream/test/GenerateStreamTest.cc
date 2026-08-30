@@ -49,7 +49,7 @@ public:
         autil::EnvGuard perf_scope("PERF_TEST", "1");
 
         auto cache_config  = init_config();
-        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
         cache_manager->init();
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager;
