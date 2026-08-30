@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <functional>
 #include <map>
 
 #include <gtest/gtest.h>
@@ -56,10 +55,10 @@ std::map<std::string, BlockIndicesType> blockIdsByGroupOf(const std::map<std::st
     return rows;
 }
 
-CacheGroup makeRpcGroup(std::string tag) {
+CacheGroup makeRpcGroup(std::string tag, size_t kernel_seq_size_per_block = 8, size_t seq_size_per_block = 8) {
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block        = 8;
-    spec->kernel_seq_size_per_block = 8;
+    spec->seq_size_per_block        = seq_size_per_block;
+    spec->kernel_seq_size_per_block = kernel_seq_size_per_block;
 
     CacheGroup group;
     group.tag       = std::move(tag);
@@ -93,8 +92,32 @@ KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
     return pairs;
 }
 
+CacheGroup makeSizedRpcGroup(std::string tag) {
+    AttentionConfigs attn_config;
+    attn_config.kv_head_num   = 1;
+    attn_config.size_per_head = 1;
+
+    ParallelismConfig parallelism_config;
+    SpecBuildContext  context;
+    context.dtype                     = DataType::TYPE_FP16;
+    context.seq_size_per_block        = 8;
+    context.kernel_seq_size_per_block = 8;
+    context.attn_config               = &attn_config;
+    context.parallelism_config        = &parallelism_config;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+
+    auto group = makeRpcGroup(std::move(tag));
+    group.spec = MHAKVCacheSpec::build(desc, context);
+    return group;
+}
+
 CacheConfig makeRpcCacheConfig() {
-    return CacheConfig({makeRpcGroup("linear"), makeRpcGroup("full")}, {{"linear"}, {"full"}}, 2);
+    auto config = CacheConfig({makeSizedRpcGroup("linear"), makeSizedRpcGroup("full")}, {{"linear"}, {"full"}}, 2);
+    config.seq_size_per_block = 8;
+    return config;
 }
 
 // DeepSeek-V4 shaped identity fixture: one layer owning every semantic group.
@@ -121,8 +144,13 @@ CacheConfig makeDsv4RpcTopology(bool reversed) {
 
 class DecodeBoundaryTestEngine final: public EngineBase {
 public:
-    explicit DecodeBoundaryTestEngine(CacheConfig config): EngineBase(EngineInitParams()) {
-        resource_context_.cache_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true);
+    explicit DecodeBoundaryTestEngine(CacheConfig config, bool initialize_cache_manager = false):
+        EngineBase(EngineInitParams()) {
+        auto cache_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true);
+        if (initialize_cache_manager) {
+            RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "failed to initialize boundary-test cache manager");
+        }
+        resource_context_.cache_manager = std::move(cache_manager);
     }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
@@ -142,13 +170,18 @@ public:
 
 class DecodeBoundaryTestStream final: public GenerateStream {
 public:
-    DecodeBoundaryTestStream():
-        GenerateStream(makeInput(), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
+    explicit DecodeBoundaryTestStream(int num_layers = 0):
+        GenerateStream(makeInput(), makeModelConfig(num_layers), RuntimeConfig{}, ResourceContext{}, nullptr),
+        num_layers_(num_layers) {}
 
     ErrorResult<GenerateOutputs> nextOutput(int64_t = 0) override {
         return ErrorResult<GenerateOutputs>(GenerateOutputs{});
     }
     void updateOutput(const StreamUpdateInfo&) override {}
+
+    int modelLayerNum() const {
+        return num_layers_;
+    }
 
 private:
     static std::shared_ptr<GenerateInput> makeInput() {
@@ -158,11 +191,14 @@ private:
         return input;
     }
 
-    static ModelConfig makeModelConfig() {
+    static ModelConfig makeModelConfig(int num_layers) {
         ModelConfig config;
         config.max_seq_len = 128;
+        config.num_layers  = num_layers;
         return config;
     }
+
+    int num_layers_;
 };
 
 }  // namespace
@@ -170,9 +206,9 @@ private:
 class DecodeRpcResourceBoundaryTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        config_                   = makeRpcCacheConfig();
         server_.engine_           = std::make_shared<DecodeBoundaryTestEngine>(makeRpcCacheConfig());
         server_.resource_.workers = {"decode-0", "decode-1"};
+        ASSERT_EQ(cacheConfig().group("full").block_num, 1u);
 
         stream_  = std::make_shared<DecodeBoundaryTestStream>();
         context_ = std::make_unique<DecodeGenerateContext>(
@@ -187,13 +223,17 @@ protected:
         stream_.reset();
     }
 
+    const CacheConfig& cacheConfig() const {
+        return server_.engine_->resourceContext().cache_manager->cacheConfig();
+    }
+
     BatchKVCacheResource makeBatchResource() const {
         BatchKVCacheResource batch;
         batch.resetBatchSize(1);
-        batch.initGroups(config_);
-        batch.setBatchCacheKeys(0, {101, 102});
-        batch.setBatchBlocks(0, "linear", {20, 21});
-        batch.setBatchBlocks(0, "full", {10, 11, 12});
+        batch.initGroups(cacheConfig());
+        batch.setBatchCacheKeys(0, {101});
+        batch.setBatchBlocks(0, "linear", {0});
+        batch.setBatchBlocks(0, "full", {0});
         return batch;
     }
 
@@ -203,12 +243,30 @@ protected:
     }
 
 protected:
-    CacheConfig                            config_;
     DecodeRpcServer                        server_;
     std::shared_ptr<GenerateStream>        stream_;
     DecodeRpcContext                       rpc_context_{nullptr};
     kmonitor::MetricsReporterPtr           metrics_reporter_;
     std::unique_ptr<DecodeGenerateContext> context_;
+};
+
+class DecodeRpcLayerTransferTest: public DecodeRpcResourceBoundaryTest {
+protected:
+    void SetUp() override {
+        DecodeRpcResourceBoundaryTest::SetUp();
+        server_.engine_ =
+            std::make_shared<DecodeBoundaryTestEngine>(makeRpcCacheConfig(), /*initialize_cache_manager=*/true);
+        server_.maga_init_params_.model_config_.num_layers = 2;
+        auto transfer_stream                               = std::make_shared<DecodeBoundaryTestStream>(2);
+        stream_                                            = transfer_stream;
+        context_->stream_                                  = transfer_stream;
+
+        ASSERT_EQ(transfer_stream->modelLayerNum(), 2);
+        ASSERT_EQ(cacheConfig().layer_all_num, 2u);
+        ASSERT_EQ(server_.maga_init_params_.model_config_.num_layers, cacheConfig().layer_all_num);
+        ASSERT_EQ(cacheConfig().groupsForLayer(0), (std::vector<std::string>{"linear"}));
+        ASSERT_EQ(cacheConfig().groupsForLayer(1), (std::vector<std::string>{"full"}));
+    }
 };
 
 TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
@@ -285,19 +343,28 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(taggedRowsOf(request), blockIdsByGroupOf(block_ids_by_group));
 }
 
-TEST(DecodeRpcServerTest, LoadRequestRowsCarryMapTags) {
+TEST(DecodeRpcServerTest, LoadRequestRowsPreserveNullAndBlockZero) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0"};
 
     const std::vector<std::string>        peer_addrs = {"prefill-0"};
     const std::vector<CacheKeyType>       cache_keys = {101, 102};
-    const std::map<std::string, BlockIds> block_ids_by_group{{"linear", makeBlockIds({7, NULL_BLOCK_IDX})},
-                                                             {"full", makeBlockIds({10, 11})}};
-    const auto context = makeLoadContext("request", peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+    const std::map<std::string, BlockIds> block_ids_by_group{{"linear", makeBlockIds({NULL_BLOCK_IDX, 0, 7})},
+                                                             {"full", makeBlockIds({6, 7})}};
+    const std::string                     request_key = "request";
+    const auto context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
 
-    const auto expected = std::map<std::string, BlockIndicesType>{{"full", {10, 11}}, {"linear", {7, 0}}};
+    const auto expected = blockIdsByGroupOf(block_ids_by_group);
     EXPECT_EQ(taggedRowsOf(server.constructRemoteLoadRequest(context, /*index=*/0, peer_addrs)), expected);
     EXPECT_EQ(taggedRowsOf(server.constructRemoteLoadRequestForMla(context, /*index=*/0, peer_addrs)), expected);
+
+    const auto cache_config =
+        CacheConfig({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"linear", "full"}}, /*main_layer_num=*/1);
+    std::map<std::string, BlockIds> decoded;
+    const auto                      decode_error = DecodeRpcServer::decodeGroupBlockIds(
+        server.constructRemoteLoadRequest(context, /*index=*/0, peer_addrs), cache_config, decoded);
+    EXPECT_TRUE(decode_error.ok());
+    EXPECT_EQ(blockIdsByGroupOf(decoded), expected);
 }
 
 TEST(DecodeRpcServerTest, Dsv4MultiTagRowsRoundTripThroughReversedLocalTopology) {
@@ -310,69 +377,230 @@ TEST(DecodeRpcServerTest, Dsv4MultiTagRowsRoundTripThroughReversedLocalTopology)
     std::map<std::string, BlockIndicesType> expected;
     for (size_t i = 0; i < dsv4RpcTags().size(); ++i) {
         const auto&            tag    = dsv4RpcTags()[i];
-        const BlockIndicesType blocks = {static_cast<BlockIdxType>(100 + i)};
+        const BlockIndicesType blocks = {static_cast<BlockIdxType>(i)};
         block_ids_by_group.emplace(tag, makeBlockIds(blocks));
         expected.emplace(tag, blocks);
     }
-    const auto load_context = makeLoadContext("dsv4", peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
+    const std::string request_key = "dsv4";
+    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/1);
     const auto request      = server.constructRemoteLoadRequestForMla(load_context, /*index=*/0, peer_addrs);
     ASSERT_EQ(request.tagged_group_block_ids_size(), static_cast<int>(dsv4RpcTags().size()));
     EXPECT_EQ(taggedRowsOf(request), expected);
 
     for (const bool reversed_topology : {false, true}) {
-        const auto topology = makeDsv4RpcTopology(reversed_topology);
-        const auto decoded  = DecodeRpcServer::decodeGroupBlockIds(request, topology);
+        const auto                      cache_config = makeDsv4RpcTopology(reversed_topology);
+        std::map<std::string, BlockIds> decoded;
+        const auto decode_error = DecodeRpcServer::decodeGroupBlockIds(request, cache_config, decoded);
+        EXPECT_TRUE(decode_error.ok());
         EXPECT_EQ(blockIdsByGroupOf(decoded), expected) << "reversed_topology=" << reversed_topology;
     }
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByTagNotByLocalGroupOrder) {
-    CacheConfig            topology({makeRpcGroup("linear"), makeRpcGroup("full")}, {{"linear"}, {"full"}}, 2);
+    CacheConfig            cache_config({makeRpcGroup("linear"), makeRpcGroup("full")}, {{"linear"}, {"full"}}, 2);
     BroadcastLoadRequestPB request;
     auto*                  full = request.add_tagged_group_block_ids();
     full->set_tag("full");
-    full->add_block_ids(0);
+    full->add_block_ids(NULL_BLOCK_IDX);
     auto* linear = request.add_tagged_group_block_ids();
     linear->set_tag("linear");
-    linear->add_block_ids(20);
+    linear->add_block_ids(7);
 
-    const auto expected = std::map<std::string, BlockIndicesType>{{"full", {NULL_BLOCK_IDX}}, {"linear", {20}}};
-    EXPECT_EQ(blockIdsByGroupOf(DecodeRpcServer::decodeGroupBlockIds(request, topology)), expected);
+    const auto expected = std::map<std::string, BlockIndicesType>{{"full", {NULL_BLOCK_IDX}}, {"linear", {7}}};
+    std::map<std::string, BlockIds> decoded;
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, cache_config, decoded).ok());
+    EXPECT_EQ(blockIdsByGroupOf(decoded), expected);
 
-    CacheConfig reordered({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"linear"}, {"full"}}, 2);
-    EXPECT_EQ(blockIdsByGroupOf(DecodeRpcServer::decodeGroupBlockIds(request, reordered)), expected);
-    EXPECT_EQ(DecodeRpcServer::makeRequestKeyForGroup(42, 1, topology.group("full").tag),
-              DecodeRpcServer::makeRequestKeyForGroup(42, 1, reordered.group("full").tag));
+    CacheConfig reordered_cache_config({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"linear"}, {"full"}}, 2);
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, reordered_cache_config, decoded).ok());
+    EXPECT_EQ(blockIdsByGroupOf(decoded), expected);
+    EXPECT_EQ(DecodeRpcServer::makeRequestKeyForGroup(42, 1, cache_config.group("full").tag),
+              DecodeRpcServer::makeRequestKeyForGroup(42, 1, reordered_cache_config.group("full").tag));
 }
 
-TEST(DecodeRpcServerTest, TaggedBlockRowsRejectNegativeWireIds) {
-    CacheConfig            topology({makeRpcGroup("full")}, {{"full"}}, 1);
+TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveKernelBlockExpansionRatio) {
+    CacheConfig            cache_config({makeRpcGroup("full", /*kernel_seq_size_per_block=*/2)}, {{"full"}}, 1);
     BroadcastLoadRequestPB request;
     auto*                  row = request.add_tagged_group_block_ids();
     row->set_tag("full");
     row->add_block_ids(NULL_BLOCK_IDX);
+    row->add_block_ids(2);
 
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, topology));
+    std::map<std::string, BlockIds> decoded;
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, cache_config, decoded).ok());
+    ASSERT_EQ(decoded.at("full").blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 2}));
+    EXPECT_EQ(decoded.at("full").kernelBlocks(), (BlockIndicesType{0, 0, 0, 0, 8, 9, 10, 11}));
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsRequireFullPlanButAllowReserveSlots) {
+    CacheConfig cache_config({makeRpcGroup("full")}, {{"full"}}, 1);
+    cache_config.seq_size_per_block = 8;
+
+    for (const auto [row_size, accepted] :
+         std::vector<std::pair<int, bool>>{{0, false}, {2, false}, {3, true}, {4, true}}) {
+        BroadcastLoadRequestPB request;
+        request.add_cache_keys(101);
+        request.add_cache_keys(102);
+        request.add_cache_keys(103);
+        auto* row = request.add_tagged_group_block_ids();
+        row->set_tag("full");
+        for (int i = 0; i < row_size; ++i) {
+            row->add_block_ids(i);
+        }
+
+        std::map<std::string, BlockIds> decoded{{"stale", makeBlockIds({9})}};
+        const auto                      error = DecodeRpcServer::decodeGroupBlockIds(request, cache_config, decoded);
+        EXPECT_EQ(error.ok(), accepted) << "row_size=" << row_size << " error=" << error.ToString();
+        if (accepted) {
+            EXPECT_EQ(decoded.at("full").blocks().size(), static_cast<size_t>(row_size));
+        } else {
+            EXPECT_TRUE(decoded.empty());
+            EXPECT_NE(error.ToString().find("actual=" + std::to_string(row_size)), std::string::npos);
+            EXPECT_NE(error.ToString().find("required=3"), std::string::npos);
+        }
+    }
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsAllowEmptyPlanAfterFullReuse) {
+    CacheConfig cache_config({makeRpcGroup("full")}, {{"full"}}, 1);
+    cache_config.seq_size_per_block = 8;
+
+    BroadcastLoadRequestPB request;
+    request.add_cache_keys(101);
+    request.add_cache_keys(102);
+    request.set_reuse_block_size(2);
+    request.add_tagged_group_block_ids()->set_tag("full");
+
+    std::map<std::string, BlockIds> decoded;
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, cache_config, decoded).ok());
+    EXPECT_TRUE(decoded.at("full").blocks().empty());
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsValidateLinearTailOffset) {
+    auto linear   = makeRpcGroup("linear");
+    linear.policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    CacheConfig config({makeRpcGroup("full"), std::move(linear)}, {{"full", "linear"}}, 1);
+    config.seq_size_per_block = 8;
+
+    auto make_request = [](int linear_row_size) {
+        BroadcastLoadRequestPB request;
+        for (int i = 0; i < 4; ++i) {
+            request.add_cache_keys(101 + i);
+        }
+        auto* full = request.add_tagged_group_block_ids();
+        full->set_tag("full");
+        for (int i = 0; i < 4; ++i) {
+            full->add_block_ids(i);
+        }
+        auto* linear = request.add_tagged_group_block_ids();
+        linear->set_tag("linear");
+        for (int i = 0; i < linear_row_size; ++i) {
+            linear->add_block_ids(10 + i);
+        }
+        return request;
+    };
+
+    std::map<std::string, BlockIds> decoded;
+    auto error = DecodeRpcServer::decodeGroupBlockIds(make_request(/*linear_row_size=*/3), config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("tag=linear"), std::string::npos);
+    EXPECT_NE(error.ToString().find("required=4"), std::string::npos);
+    EXPECT_TRUE(decoded.empty());
+
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(make_request(/*linear_row_size=*/4), config, decoded).ok());
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsValidateCompactCpSlots) {
+    auto compact   = makeRpcGroup("compact", /*kernel_seq_size_per_block=*/8, /*seq_size_per_block=*/16);
+    compact.policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    CacheConfig config({makeRpcGroup("full"), std::move(compact)}, {{"full", "compact"}}, 1);
+    config.seq_size_per_block = 8;
+
+    auto make_request = [](int compact_row_size, int prefill_cp_size = 2) {
+        BroadcastLoadRequestPB request;
+        request.set_prefill_cp_size(prefill_cp_size);
+        for (int i = 0; i < 5; ++i) {
+            request.add_cache_keys(101 + i);
+        }
+        auto* full = request.add_tagged_group_block_ids();
+        full->set_tag("full");
+        for (int i = 0; i < 5; ++i) {
+            full->add_block_ids(i);
+        }
+        auto* compact = request.add_tagged_group_block_ids();
+        compact->set_tag("compact");
+        for (int i = 0; i < compact_row_size; ++i) {
+            compact->add_block_ids(10 + i);
+        }
+        return request;
+    };
+
+    std::map<std::string, BlockIds> decoded;
+    auto error = DecodeRpcServer::decodeGroupBlockIds(make_request(/*compact_row_size=*/2), config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("tag=compact"), std::string::npos);
+    EXPECT_NE(error.ToString().find("required=3"), std::string::npos);
+
+    error = DecodeRpcServer::decodeGroupBlockIds(
+        make_request(/*compact_row_size=*/3, /*prefill_cp_size=*/1), config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("request_prefill_cp_size=1"), std::string::npos);
+    EXPECT_NE(error.ToString().find("local_cp_scale=2"), std::string::npos);
+
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(make_request(/*compact_row_size=*/3), config, decoded).ok());
+}
+
+TEST(DecodeRpcServerTest, TaggedBlockRowsKeepRoundRobinFullTableInGlobalSlots) {
+    CacheConfig config({makeRpcGroup("full")}, {{"full"}}, 1);
+    config.seq_size_per_block = 8;
+
+    BroadcastLoadRequestPB request;
+    request.set_prefill_cp_size(2);
+    for (int i = 0; i < 4; ++i) {
+        request.add_cache_keys(101 + i);
+    }
+    auto* row = request.add_tagged_group_block_ids();
+    row->set_tag("full");
+    for (int i = 0; i < 3; ++i) {
+        row->add_block_ids(i);
+    }
+
+    std::map<std::string, BlockIds> decoded;
+    auto                            error = DecodeRpcServer::decodeGroupBlockIds(request, config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("prefill_cp_size=2"), std::string::npos);
+    EXPECT_NE(error.ToString().find("required=4"), std::string::npos);
+
+    row->add_block_ids(3);
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, config, decoded).ok());
 }
 
 TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
-    CacheConfig            topology({makeRpcGroup("full")}, {{"full"}}, 1);
-    BroadcastLoadRequestPB request;
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, topology));
+    CacheConfig                     cache_config({makeRpcGroup("full")}, {{"full"}}, 1);
+    BroadcastLoadRequestPB          request;
+    std::map<std::string, BlockIds> decoded{{"stale", makeBlockIds({9})}};
+    const auto                      error = DecodeRpcServer::decodeGroupBlockIds(request, cache_config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("empty"), std::string::npos);
+    EXPECT_TRUE(decoded.empty());
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
-    CacheConfig            topology({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"full", "linear"}}, 1);
+    CacheConfig            cache_config({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"full", "linear"}}, 1);
     BroadcastLoadRequestPB missing_tag;
     auto*                  row = missing_tag.add_tagged_group_block_ids();
     row->set_tag("full");
     row->add_block_ids(1);
 
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, topology));
+    std::map<std::string, BlockIds> decoded{{"stale", makeBlockIds({9})}};
+    const auto                      error = DecodeRpcServer::decodeGroupBlockIds(missing_tag, cache_config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("missing tag=linear"), std::string::npos);
+    EXPECT_TRUE(decoded.empty());
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectInvalidTagIdentity) {
-    CacheConfig topology({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"full", "linear"}}, 1);
+    CacheConfig cache_config({makeRpcGroup("full"), makeRpcGroup("linear")}, {{"full", "linear"}}, 1);
 
     BroadcastLoadRequestPB duplicate_tag;
     for (int i = 0; i < 2; ++i) {
@@ -380,14 +608,22 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectInvalidTagIdentity) {
         row->set_tag("full");
         row->add_block_ids(i);
     }
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(duplicate_tag, topology));
+    std::map<std::string, BlockIds> decoded{{"stale", makeBlockIds({9})}};
+    auto                            error = DecodeRpcServer::decodeGroupBlockIds(duplicate_tag, cache_config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("duplicate tag=full"), std::string::npos);
+    EXPECT_TRUE(decoded.empty());
 
     BroadcastLoadRequestPB empty_tag;
     empty_tag.add_tagged_group_block_ids()->add_block_ids(1);
     auto* known = empty_tag.add_tagged_group_block_ids();
     known->set_tag("full");
     known->add_block_ids(2);
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(empty_tag, topology));
+    decoded.emplace("stale", makeBlockIds({9}));
+    error = DecodeRpcServer::decodeGroupBlockIds(empty_tag, cache_config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("must not be empty"), std::string::npos);
+    EXPECT_TRUE(decoded.empty());
 
     BroadcastLoadRequestPB unknown_tag;
     for (const auto* tag : {"full", "unknown"}) {
@@ -395,21 +631,142 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectInvalidTagIdentity) {
         row->set_tag(tag);
         row->add_block_ids(3);
     }
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(unknown_tag, topology));
+    decoded.emplace("stale", makeBlockIds({9}));
+    error = DecodeRpcServer::decodeGroupBlockIds(unknown_tag, cache_config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("unknown/extra tag=unknown"), std::string::npos);
+    EXPECT_TRUE(decoded.empty());
 }
 
-TEST_F(DecodeRpcResourceBoundaryTest, LoadAdapterCarriesTagMappedBlocks) {
+TEST_F(DecodeRpcResourceBoundaryTest, ValidTaggedRemoteLoadReachesLoadCache) {
+    BroadcastLoadRequestPB request;
+    request.set_request_key("tagged");
+    request.add_peer_addrs("invalid-peer");
+    request.add_cache_keys(101);
+    const auto batch = makeBatchResource();
+    for (const auto& [tag, block_ids] : batch.blocksByGroup(0)) {
+        auto* row = request.add_tagged_group_block_ids();
+        row->set_tag(tag);
+        for (const auto block_id : block_ids.blocks()) {
+            row->add_block_ids(block_id);
+        }
+    }
+
+    BroadcastLoadResponsePB response;
+    grpc::ServerContext     server_context;
+    ASSERT_TRUE(server_.RemoteLoad(&server_context, &request, &response).ok());
+    EXPECT_EQ(response.error_info().error_code(), transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED));
+    EXPECT_NE(response.error_info().error_message().find("invalid peer ip"), std::string::npos);
+}
+
+TEST_F(DecodeRpcResourceBoundaryTest, InvalidTaggedRemoteLoadReturnsRequestErrorWithoutLoadingCache) {
+    BroadcastLoadRequestPB request;
+    request.set_request_key("mismatched-tags");
+    request.add_peer_addrs("invalid-peer");
+    request.add_cache_keys(101);
+    auto* row = request.add_tagged_group_block_ids();
+    row->set_tag("full");
+    row->add_block_ids(0);
+
+    BroadcastLoadResponsePB response;
+    grpc::ServerContext     server_context;
+    EXPECT_TRUE(server_.RemoteLoad(&server_context, &request, &response).ok());
+    EXPECT_EQ(response.error_info().error_code(), transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED));
+    EXPECT_NE(response.error_info().error_message().find("missing tag=linear"), std::string::npos);
+    EXPECT_EQ(response.error_info().error_message().find("invalid peer ip"), std::string::npos);
+    EXPECT_GT(response.done_time_us(), 0);
+}
+
+TEST_F(DecodeRpcResourceBoundaryTest, ShortTaggedRemoteLoadFailsBeforeCacheStoreLoad) {
+    test::TestLogCapture   log_capture("short_tagged_remote_load");
+    BroadcastLoadRequestPB request;
+    request.set_request_key("short-row");
+    request.add_peer_addrs("invalid-peer");
+    request.add_cache_keys(101);
+    request.add_cache_keys(102);
+    for (const auto* tag : {"linear", "full"}) {
+        auto* row = request.add_tagged_group_block_ids();
+        row->set_tag(tag);
+        row->add_block_ids(0);
+    }
+
+    BroadcastLoadResponsePB response;
+    grpc::ServerContext     server_context;
+    EXPECT_TRUE(server_.RemoteLoad(&server_context, &request, &response).ok());
+    EXPECT_EQ(response.error_info().error_code(), transErrorCodeToRPC(ErrorCode::LOAD_KV_CACHE_FAILED));
+    EXPECT_NE(response.error_info().error_message().find("block row too short"), std::string::npos);
+    EXPECT_EQ(response.error_info().error_message().find("invalid peer ip"), std::string::npos);
+    EXPECT_EQ(log_capture.content().find("PD_CACHE_KEY_READ_BLOCK"), std::string::npos);
+    EXPECT_GT(response.done_time_us(), 0);
+}
+
+TEST_F(DecodeRpcLayerTransferTest, LoadCacheBuildsEveryLayerTagBuffer) {
+    test::TestLogCapture                  log_capture("decode_layer_tag_buffers");
+    grpc::ServerContext                   server_context;
+    const std::vector<std::string>        peer_addrs = {"invalid-peer"};
+    const std::vector<CacheKeyType>       cache_keys = {101};
+    const std::map<std::string, BlockIds> blocks     = {
+        {"linear", makeBlockIds({0})},
+        {"full", makeBlockIds({0})},
+    };
+    auto load_context           = makeLoadContext("layer-tags", peer_addrs, cache_keys, blocks, /*cp_size=*/1);
+    load_context.server_context = &server_context;
+
+    const auto error = server_.loadCache(load_context);
+
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_EQ(error.ToString(), "invalid peer ip");
+    const auto log_content = log_capture.content();
+    EXPECT_NE(log_content.find("request key: 42-0-tag-linear, blocks count: 1"), std::string::npos);
+    EXPECT_NE(log_content.find("request key: 42-1-tag-full, blocks count: 1"), std::string::npos);
+}
+
+TEST_F(DecodeRpcResourceBoundaryTest, AsymmetricSingleGroupRequiresDivisibleKvBlocks) {
+    server_.engine_ = std::make_shared<DecodeBoundaryTestEngine>(
+        CacheConfig({makeSizedRpcGroup("full")}, {{"full"}}, /*main_layer_num=*/1));
+
+    grpc::ServerContext                   server_context;
+    const std::vector<std::string>        peer_addrs = {"prefill-0", "prefill-1", "prefill-2"};
+    const std::vector<CacheKeyType>       cache_keys = {101};
+    const std::map<std::string, BlockIds> blocks     = {{"full", makeBlockIds({0})}};
+    const auto context         = makeLoadContext("non-divisible-single", peer_addrs, cache_keys, blocks, /*cp_size=*/1);
+    auto       request_context = context;
+    request_context.server_context = &server_context;
+
+    EXPECT_THROW((void)server_.loadCache(request_context), std::runtime_error);
+}
+
+TEST_F(DecodeRpcResourceBoundaryTest, HybridLoadSkipsLegacyDivisibilityCheck) {
+    server_.engine_ =
+        std::make_shared<DecodeBoundaryTestEngine>(CacheConfig({makeSizedRpcGroup("full"), makeSizedRpcGroup("linear")},
+                                                               {{"full", "linear"}},
+                                                               /*main_layer_num=*/1));
+
+    grpc::ServerContext                   server_context;
+    const std::vector<std::string>        peer_addrs = {"invalid-0", "invalid-1", "invalid-2"};
+    const std::vector<CacheKeyType>       cache_keys = {101};
+    const std::map<std::string, BlockIds> blocks     = {{"full", makeBlockIds({0})}, {"linear", makeBlockIds({0})}};
+    const auto context         = makeLoadContext("non-divisible-hybrid", peer_addrs, cache_keys, blocks, /*cp_size=*/1);
+    auto       request_context = context;
+    request_context.server_context = &server_context;
+
+    ErrorInfo error;
+    EXPECT_NO_THROW(error = server_.loadCache(request_context));
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+}
+
+TEST_F(DecodeRpcResourceBoundaryTest, PeerWorkerCountMismatchIsLoadError) {
     auto       batch    = makeBatchResource();
     const auto expected = blockIdsByGroupOf(batch.blocksByGroup(0));
-    ASSERT_EQ(expected, (std::map<std::string, BlockIndicesType>{{"full", {10, 11, 12}}, {"linear", {20, 21}}}));
+    ASSERT_EQ(expected, (std::map<std::string, BlockIndicesType>{{"full", {0}}, {"linear", {0}}}));
 
     const std::vector<std::string> peer_addrs = {"prefill-0"};
     {
-        const auto shuffled_context =
-            makeLoadContext("tagged", peer_addrs, batch.cacheKeys(0), batch.blocksByGroup(0), /*cp_size=*/1);
-        EXPECT_EQ(taggedRowsOf(server_.constructRemoteLoadRequest(shuffled_context, /*index=*/0, peer_addrs)),
-                  expected);
-        EXPECT_EQ(taggedRowsOf(server_.constructRemoteLoadRequestForMla(shuffled_context, /*index=*/0, peer_addrs)),
+        const std::string request_key = "tagged";
+        const auto        load_context =
+            makeLoadContext(request_key, peer_addrs, batch.cacheKeys(0), batch.blocksByGroup(0), /*cp_size=*/1);
+        EXPECT_EQ(taggedRowsOf(server_.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs)), expected);
+        EXPECT_EQ(taggedRowsOf(server_.constructRemoteLoadRequestForMla(load_context, /*index=*/0, peer_addrs)),
                   expected);
     }
 
@@ -604,8 +961,8 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots
 TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
     // The consumer must project exactly like the producer: same (key, offset)
     // pairs, or the decode reads a key the prefill never registered.
-    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+    const auto policy        = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
                                                                  /*local_block_num=*/6,
                                                                  /*cache_key_count=*/11,
                                                                  /*reuse_block_size=*/0,
