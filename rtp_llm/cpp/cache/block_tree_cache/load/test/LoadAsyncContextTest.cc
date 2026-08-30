@@ -208,8 +208,7 @@ void initBackend(ManualBackend& backend, const DeviceBlockPoolPtr& pool) {
 void initBackend(ManualBackend&                         backend,
                  std::shared_ptr<const CacheTopology>   topology,
                  const std::vector<DeviceBlockPoolPtr>& pools) {
-    RTP_LLM_CHECK(
-        backend.init(std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }));
+    RTP_LLM_CHECK(backend.init(std::move(topology), pools, [](int, int, int) { return std::vector<BlockInfo>{}; }));
 }
 
 StorageRequest makeRequest(size_t key_count) {
@@ -261,12 +260,12 @@ TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit
 }
 
 TEST(LoadAsyncContextTest, OnDoneRunsOnceWhenCommittedTransferCompletes) {
-    size_t commits     = 0;
-    size_t aborts      = 0;
-    auto   coordinator = makeCoordinator(commits, aborts);
+    size_t             commits     = 0;
+    size_t             aborts      = 0;
+    auto               coordinator = makeCoordinator(commits, aborts);
     TransferDescriptor descriptor;
     descriptor.source_tier = Tier::HOST;
-    auto context = coordinator->create({descriptor}, {false}, 1);
+    auto context           = coordinator->create({descriptor}, {false}, 1);
     ASSERT_TRUE(coordinator->registerContext(context));
 
     size_t callback_count = 0;
@@ -282,6 +281,74 @@ TEST(LoadAsyncContextTest, OnDoneRunsOnceWhenCommittedTransferCompletes) {
     EXPECT_EQ(callback_count, 1u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, SettlementBarrierDefersTerminalNotificationUntilSettled) {
+    size_t                            ready_count    = 0;
+    size_t                            callback_count = 0;
+    std::shared_ptr<LoadAsyncContext> ready_context;
+    auto                              coordinator = std::make_shared<LoadContextCoordinator>(
+        [&](const std::shared_ptr<LoadAsyncContext>& context) {
+            context->setSettlementReadyCallback([&](const std::shared_ptr<LoadAsyncContext>& ready) {
+                ++ready_count;
+                ready_context = ready;
+            });
+            return true;
+        },
+        [](LoadAsyncContext&) {});
+    TransferDescriptor descriptor;
+    descriptor.source_tier = Tier::HOST;
+    auto context           = coordinator->create({descriptor}, {false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->onDone([&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
+        ++callback_count;
+    });
+
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(context->completeOne(true));
+    EXPECT_EQ(ready_count, 1u);
+    EXPECT_EQ(ready_context, context);
+    EXPECT_TRUE(context->aggregateSuccess());
+    EXPECT_FALSE(context->done());
+    EXPECT_EQ(callback_count, 0u);
+
+    EXPECT_TRUE(context->settle(true));
+    EXPECT_TRUE(context->done());
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_FALSE(context->settle(true));
+    EXPECT_EQ(ready_count, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, BatchTransferCompletionReachesSettlementBarrierOnce) {
+    size_t ready_count = 0;
+    auto   coordinator = std::make_shared<LoadContextCoordinator>(
+        [&](const std::shared_ptr<LoadAsyncContext>& context) {
+            context->setSettlementReadyCallback([&](const std::shared_ptr<LoadAsyncContext>&) { ++ready_count; });
+            return true;
+        },
+        [](LoadAsyncContext&) {});
+    TransferDescriptor first;
+    first.source_tier = Tier::HOST;
+    TransferDescriptor second;
+    second.source_tier = Tier::DISK;
+    auto context       = coordinator->create({first, second}, {false, false}, 1);
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    ASSERT_TRUE(context->commit());
+    EXPECT_FALSE(context->completeTransfers(3, true));
+    EXPECT_EQ(ready_count, 0u);
+    EXPECT_TRUE(context->completeTransfers(2, true));
+    EXPECT_EQ(ready_count, 1u);
+    EXPECT_TRUE(context->aggregateSuccess());
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(context->completeTransfers(1, true));
+    EXPECT_EQ(ready_count, 1u);
+
+    EXPECT_TRUE(context->settle(true));
     coordinator->shutdown();
 }
 
@@ -322,9 +389,8 @@ TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
     initBackend(*backend, pool);
     auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
 
     context->startBackendMatch();
     backend->completeMatch(1);
@@ -338,8 +404,8 @@ TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
 }
 
 TEST(LoadAsyncContextTest, CoordinatorCommitFailurePublishesInternalStatusBeforeTerminalState) {
-    size_t aborts = 0;
-    auto coordinator = std::make_shared<LoadContextCoordinator>(
+    size_t aborts      = 0;
+    auto   coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [&](LoadAsyncContext&) { ++aborts; });
     auto context = coordinator->create({}, {}, 0);
     ASSERT_TRUE(coordinator->registerContext(context));
@@ -357,10 +423,10 @@ TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWi
 
     std::mutex              mutex;
     std::condition_variable cv;
-    bool                    entered  = false;
-    bool                    released = false;
-    size_t                  commits  = 0;
-    auto coordinator = std::make_shared<LoadContextCoordinator>(
+    bool                    entered     = false;
+    bool                    released    = false;
+    size_t                  commits     = 0;
+    auto                    coordinator = std::make_shared<LoadContextCoordinator>(
         [&](const std::shared_ptr<LoadAsyncContext>&) {
             std::unique_lock<std::mutex> lock(mutex);
             ++commits;
@@ -404,8 +470,8 @@ TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWi
 }
 
 TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFallbackStatus) {
-    size_t commits = 0;
-    auto coordinator = std::make_shared<LoadContextCoordinator>(
+    size_t commits     = 0;
+    auto   coordinator = std::make_shared<LoadContextCoordinator>(
         [&](const std::shared_ptr<LoadAsyncContext>& context) {
             ++commits;
             EXPECT_TRUE(context->completeOne(false));
@@ -637,6 +703,41 @@ TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->matchedBlocks(), 1u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, BackendFailureWaitsForLocalTransferBeforePublishingFailure) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+
+    TransferDescriptor local;
+    local.source_tier = Tier::HOST;
+    auto context      = coordinator->create({local}, {false}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 1u);
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    EXPECT_EQ(pool->refCount(block), 2u);
+    backend->failNextRead();
+    backend->completeRead();
+    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->completeOne(true));
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     coordinator->shutdown();
