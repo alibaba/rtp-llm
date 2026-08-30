@@ -589,6 +589,33 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * Acquire a soft queued hold for placement, or report that this request id
+     * is still fenced by the exact endpoint generation. The fence is a
+     * transient placement blocker: WorkerStatus cannot distinguish a reused
+     * request id until its settlement tombstone expires.
+     */
+    public ReservationHandle tryReserveQueuedPinned(
+            GenerationPin pin,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        admissionLock.lock();
+        try {
+            requirePinnedGeneration(pin);
+            if (!requestIdAvailableForReservationLocked(requestId)) {
+                return null;
+            }
+            ReservationHandle reservation = reserveLocked(
+                    requestId, kvTokens, expectedKvTokens, priority);
+            addQueuedPhaseLocked(requestId, inflightRequests.get(requestId));
+            return reservation;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /**
      * Acquire queued ownership only if this exact generation can still accept
      * the request. A null result mutates nothing.
      */
@@ -604,8 +631,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             requirePinnedGeneration(pin);
             if (!requestIdAvailableForReservationLocked(requestId)) {
-                throw new IllegalStateException(
-                        "Decode request already has an owner: " + requestId);
+                return null;
             }
             if (queuedPlacementIsFullLocked(
                     kvTokens, expectedKvTokens, capacity)) {
@@ -2963,12 +2989,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || trackedPurged > 0 || settledTombstonesPurged) {
                 admissionVersion.incrementAndGet();
             }
-            capacityChanged = evicted > 0 || permitsRemoved > 0 || trackedPurged > 0;
+            capacityChanged = evicted > 0 || permitsRemoved > 0
+                    || trackedPurged > 0 || settledTombstonesPurged;
         } finally {
             admissionLock.unlock();
         }
         if (capacityChanged) {
             notifyEngineDispatchCapacityListeners();
+            signalPlacementCapacityChanged();
         }
         return evicted;
     }

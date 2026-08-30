@@ -8,6 +8,7 @@ import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
@@ -76,6 +77,63 @@ class TransientCapacityQueueContractTest {
     private static final int INCIDENT_DECODE_ENGINES = 750;
     private static final int INCIDENT_DECODE_MAX_CONCURRENCY = 128;
     private static final int INCIDENT_WORKER_STATUS_UPDATES = 1_000;
+
+    @Test
+    @Timeout(20)
+    void deferredDecodeRetryWaitsForSettlementFenceToExpire()
+            throws Exception {
+        FlexlbConfig config = config();
+        config.queueScheduler().setOrdering(new FifoOrderingConfig());
+        config.setDispatcher(new NonBatchDispatcherConfig());
+        verifyRetryWaitsForDecodeSettlementFence(config, 880_001L);
+    }
+
+    @Test
+    @Timeout(20)
+    void capacityCheckedDecodeRetryWaitsForSettlementFenceToExpire()
+            throws Exception {
+        FlexlbConfig config = config();
+        ((PriorityOrderingConfig) config.queueScheduler().getOrdering())
+                .setPreemption(new PreemptionConfig());
+        verifyRetryWaitsForDecodeSettlementFence(config, 880_002L);
+    }
+
+    private static void verifyRetryWaitsForDecodeSettlementFence(
+            FlexlbConfig config,
+            long requestId) throws Exception {
+        try (Fixture fixture = new Fixture(null, config)) {
+            DecodeEndpoint.ReservationHandle settled;
+            try (WorkerEndpoint.GenerationPin pin =
+                         fixture.decodeEndpoint.tryPinGeneration()) {
+                settled = fixture.decodeEndpoint.reserveQueuedPinned(
+                        pin, requestId, 128L, 136L, 50);
+            }
+            assertTrue(fixture.decodeEndpoint.releaseLocalShadowIfExact(
+                    settled));
+            assertEquals(0, fixture.totalDecodeReservations());
+
+            fixture.runtime.applyStatus(
+                    fixture.prefillStatus,
+                    statusResponse(RoleType.PREFILL, 2L, true));
+            CompletableFuture<Response> retried =
+                    fixture.runtime.scheduler().submit(
+                            fixture.context(requestId, 50, 128_000L));
+            assertFalse(retried.isDone());
+
+            fixture.runtime.applyStatus(
+                    fixture.prefillStatus,
+                    statusResponse(RoleType.PREFILL, 3L, false));
+
+            Thread.sleep(100L);
+            assertFalse(retried.isDone(),
+                    "a live Decode settlement fence is a wait, not a failure");
+            Thread.sleep(2L);
+            fixture.decodeEndpoint.evictExpiredRequests(
+                    0L, ignored -> false);
+
+            assertTrue(retried.get(5, TimeUnit.SECONDS).isSuccess());
+        }
+    }
 
     @Test
     @Timeout(90)

@@ -315,7 +315,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             // This is a soft queued hold. The WorkerBatcher acquires the exact
             // concurrency/KV permit immediately before engine delivery, so a
             // long Prefill backlog cannot make an idle Decode pool appear full.
-            reservation = route.decodeEndpoint().reserveQueuedPinned(
+            reservation = route.decodeEndpoint().tryReserveQueuedPinned(
                     route.decodePin(),
                     requestId,
                     sequenceLength,
