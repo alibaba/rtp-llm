@@ -322,6 +322,16 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model(
         "glm4_moe", "rtp_llm.models.glm4_moe", support_hf_repos=["Glm4MoeForCausalLM"]
     )
+    # The NextN draft lives in the same module as the target it drafts for, the
+    # way deepseek-v3-mtp shares deepseek_v2. Without this entry --sp_model_type
+    # glm4_moe_nextn cannot be resolved: register_model only runs once the module
+    # is imported, and nothing imports it until the lazy registry says which
+    # module owns the name.
+    register_lazy_model(
+        "glm4_moe_nextn",
+        "rtp_llm.models.glm4_moe",
+        support_hf_repos=["Glm4MoeForCausalLMNextN"],
+    )
     register_lazy_model(
         "glm4_moe_lite", "rtp_llm.models.glm4_moe_lite", ["Glm4MoeLiteForCausalLM"]
     )
