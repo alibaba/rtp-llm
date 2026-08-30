@@ -92,6 +92,7 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
         self._saved_fastsafetensors = sys.modules.get("fastsafetensors")
         self._had_fastsafetensors = "fastsafetensors" in sys.modules
         self._config_env_names = (
+            "FASTSAFETENSORS_CONFIG",
             "FASTSAFETENSORS_CONFIG_JSON",
             "FASTSAFETENSORS_NOGDS",
         )
@@ -139,7 +140,7 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
                 return FakeExpertSlice(expert_id)
 
         class FakeAutoLoader:
-            def __init__(self, pg, files, device) -> None:
+            def __init__(self, pg, files, device, local_copyout_filter=None) -> None:
                 pass
 
             def iterate_weights(self):
@@ -178,6 +179,58 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
         self.assertEqual(result[3], ("plain", "plain-tensor"))
         self.assertEqual(closed, [True])
 
+    def test_rank_local_copyout_filter_is_forwarded_to_auto_loader(self) -> None:
+        observed_filters = []
+
+        class FakeSingleGroup:
+            def rank(self) -> int:
+                return 0
+
+        class FakeAutoLoader:
+            def __init__(self, pg, files, device, local_copyout_filter=None) -> None:
+                observed_filters.append(local_copyout_filter)
+
+            def iterate_weights(self):
+                return iter(())
+
+            def close(self) -> None:
+                pass
+
+        fake_module = types.ModuleType("fastsafetensors")
+        fake_module.SingleGroup = FakeSingleGroup
+        fake_module.AutoLoader = FakeAutoLoader
+        sys.modules["fastsafetensors"] = fake_module
+
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+        required_keys = {"needed"}
+        predicate = required_keys.__contains__
+
+        list(
+            database.fastsafetensors_weights_iterator(
+                "cuda",
+                False,
+                local_copyout_filter=predicate,
+            )
+        )
+
+        self.assertEqual(observed_filters, [predicate])
+
+    def test_wrapper_without_auto_loader_fails_instead_of_legacy_fallback(self) -> None:
+        class FakeSingleGroup:
+            def rank(self) -> int:
+                return 0
+
+        fake_module = types.ModuleType("fastsafetensors")
+        fake_module.SingleGroup = FakeSingleGroup
+        sys.modules["fastsafetensors"] = fake_module
+
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+
+        with self.assertRaisesRegex(ImportError, "AutoLoader"):
+            list(database.fastsafetensors_weights_iterator("cuda", False))
+
     def test_legacy_nogds_overrides_config_json(self) -> None:
         observed_config = []
 
@@ -186,7 +239,7 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
                 return 0
 
         class FakeAutoLoader:
-            def __init__(self, pg, files, device) -> None:
+            def __init__(self, pg, files, device, local_copyout_filter=None) -> None:
                 observed_config.append(
                     json.loads(os.environ["FASTSAFETENSORS_CONFIG_JSON"])
                 )

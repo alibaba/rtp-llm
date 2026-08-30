@@ -299,6 +299,54 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
         result = ModelLoader._build_stacked_key_config([wi])
         self.assertEqual(len(result), 0)
 
+    def test_rank_local_copyout_keys_include_direct_and_stacked_raw_keys(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        result = ModelLoader._build_fastsafetensors_local_copyout_keys(
+            {"direct.weight": object(), "expanded.experts.0": object()},
+            {"stacked.raw": "expanded.experts.{expert_id}"},
+        )
+
+        self.assertEqual(
+            result,
+            frozenset({"direct.weight", "expanded.experts.0", "stacked.raw"}),
+        )
+
+    def test_rank_local_copyout_fails_before_database_fallback_on_missing_key(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        collector = MagicMock()
+        collector.is_collection_complete.return_value = False
+        weight = MagicMock()
+        weight.name = "needed-weight"
+        weight_info = ModelLoader.WeightInfo(weight, 7, collector)
+        database = MagicMock()
+        database.fastsafetensors_weights_iterator.return_value = iter(())
+
+        loader = object.__new__(ModelLoader)
+        loader._load_config = types.SimpleNamespace(database=database)
+        loader._create_model_weights = MagicMock(return_value=MagicMock())
+        loader._generate_weight_info = MagicMock(
+            return_value=({"needed.tensor": weight_info}, [weight_info])
+        )
+        loader._build_stacked_key_config = MagicMock(return_value={})
+        loader._is_online_ptpc = MagicMock(return_value=False)
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"RTP_FASTSAFETENSORS_LOCAL_COPYOUT_ONLY": "1"},
+                clear=False,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "did not complete all RTP collectors.*refusing database fallback",
+            ),
+        ):
+            loader._load_from_fastsafetensor("cuda:0")
+
+        weight.load.assert_not_called()
+
 
 class TestFastsafetensorsTransientBudget(unittest.TestCase):
     def test_uses_configured_bounded_peak(self):

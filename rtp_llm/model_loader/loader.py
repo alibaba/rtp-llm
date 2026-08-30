@@ -1,4 +1,5 @@
 import gc
+import hashlib
 import logging
 import os
 from collections import OrderedDict
@@ -383,6 +384,20 @@ class ModelLoader:
                         stacked_key_config[stacked_key] = template
         return stacked_key_config
 
+    @staticmethod
+    def _build_fastsafetensors_local_copyout_keys(
+        tensor_to_weight_map: Mapping[str, "ModelLoader.WeightInfo"],
+        stacked_key_config: Mapping[str, str],
+    ) -> frozenset[str]:
+        """Return checkpoint keys that the current RTP rank can consume.
+
+        Stacked MoE entries must be retained under their raw checkpoint key;
+        the database adapter expands them to per-expert collector keys only
+        after FastSafeTensors has yielded the copied tensor.
+        """
+
+        return frozenset((*tensor_to_weight_map.keys(), *stacked_key_config.keys()))
+
     def _is_online_ptpc(self) -> bool:
         quant_config = getattr(self._weights_info, "_quant_config", None)
         return (
@@ -425,6 +440,26 @@ class ModelLoader:
                 f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
             )
 
+        local_copyout_only = (
+            os.environ.get("RTP_FASTSAFETENSORS_LOCAL_COPYOUT_ONLY", "0") == "1"
+        )
+        required_checkpoint_keys: frozenset[str] = frozenset()
+        required_key_fingerprint = "disabled"
+        if local_copyout_only:
+            required_checkpoint_keys = self._build_fastsafetensors_local_copyout_keys(
+                tensor_to_weight_map, stacked_key_config
+            )
+            required_key_fingerprint = hashlib.sha256(
+                "\0".join(sorted(required_checkpoint_keys)).encode("utf-8")
+            ).hexdigest()
+        logging.info(
+            "rtp rank-local copyout: enabled=%s keys=%d stacked_keys=%d sha256=%s",
+            local_copyout_only,
+            len(required_checkpoint_keys),
+            len(stacked_key_config),
+            required_key_fingerprint,
+        )
+
         inline_fp8 = self._is_online_ptpc()
         if inline_fp8:
             from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
@@ -441,12 +476,24 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            local_copyout_filter=(
+                required_checkpoint_keys.__contains__ if local_copyout_only else None
+            ),
         )
 
         _inline_count = 0
         _total_count = 0
+        _seen_count = 0
+        _seen_bytes = 0
+        _unused_count = 0
+        _unused_bytes = 0
         for key, loaded_tensor in all_tensors:
+            _tensor_bytes = loaded_tensor.numel() * loaded_tensor.element_size()
+            _seen_count += 1
+            _seen_bytes += _tensor_bytes
             if key not in tensor_to_weight_map:
+                _unused_count += 1
+                _unused_bytes += _tensor_bytes
                 continue
             weight_info = tensor_to_weight_map[key]
             _total_count += 1
@@ -495,6 +542,44 @@ class ModelLoader:
                 if inline_fp8:
                     torch.cuda.empty_cache()
                     gc.collect()
+
+        logging.info(
+            "rtp rank-local copyout accounting: enabled=%s seen_tensors=%d "
+            "seen_bytes=%d unused_tensors=%d unused_bytes=%d unused_ratio=%.6f",
+            local_copyout_only,
+            _seen_count,
+            _seen_bytes,
+            _unused_count,
+            _unused_bytes,
+            (_unused_bytes / _seen_bytes) if _seen_bytes else 0.0,
+        )
+        if local_copyout_only and _unused_count:
+            raise RuntimeError(
+                "rank-local copyout delivered tensors that this RTP rank cannot "
+                f"consume: tensors={_unused_count} bytes={_unused_bytes}"
+            )
+
+        if local_copyout_only:
+            incomplete_weights = [
+                weight_info
+                for weight_info in weight_info_list
+                if not weight_info.collector.is_collection_complete()
+            ]
+            if incomplete_weights:
+                preview = [
+                    {
+                        "weight": getattr(weight_info.weight, "name", "")
+                        or type(weight_info.weight).__name__,
+                        "layer": weight_info.layer_id,
+                    }
+                    for weight_info in incomplete_weights[:20]
+                ]
+                raise RuntimeError(
+                    "rank-local copyout did not complete all RTP collectors; "
+                    "refusing database fallback because it would hide an "
+                    f"incomplete local key set: count={len(incomplete_weights)} "
+                    f"preview={preview}"
+                )
 
         _fallback_count = 0
         for weight_info in weight_info_list:
