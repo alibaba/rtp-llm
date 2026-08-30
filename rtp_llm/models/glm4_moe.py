@@ -395,6 +395,36 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
+def resolve_config_dtype(config: "ModelConfig", ckpt_path: str) -> None:
+    """Fill ``config.config_dtype`` from the checkpoint, accepting either spelling.
+
+    ``_from_hf`` reads ``torch_dtype``, the key transformers has since renamed to
+    ``dtype``. GLM-4.7's W8A8 INT8 checkpoint carries only the new key, so
+    ``config_dtype`` stays None, ``data_type`` silently falls back to FP16, and
+    the PPU W8A8 INT8 MoE executor is then rejected by its own ``is_bf16``
+    condition. The engine dies *after* loading all 42 GiB of weights with
+    "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but no registered MOE
+    compute backend can consume them", which points at the backend rather than at
+    the dtype. Reading both spellings removes that trap.
+    """
+    if config.config_dtype is not None:
+        return
+    config_path = os.path.join(ckpt_path, "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(
+            f"config.json not found at {config_path}, cannot determine model dtype"
+        )
+    with open(config_path) as reader:
+        content = json.load(reader)
+    dtype = content.get("torch_dtype") or content.get("dtype")
+    if dtype is None:
+        raise ValueError(
+            f"Neither 'torch_dtype' nor 'dtype' found in {config_path}; "
+            f"pass --act_type explicitly or add a dtype field to config.json"
+        )
+    config.config_dtype = dtype
+
+
 class Glm4Moe(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
