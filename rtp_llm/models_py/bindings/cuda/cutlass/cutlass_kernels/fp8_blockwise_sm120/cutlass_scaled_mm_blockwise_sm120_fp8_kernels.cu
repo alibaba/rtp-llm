@@ -274,7 +274,7 @@ struct sm120_blockwise_fp8_config_default {
     using ClusterShape     = Shape<_1, _1, _1>;
     using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
                                                            1,
-                                                           128,
+                                                           1,
                                                            128,
                                                            TileShape,
                                                            ClusterShape,
@@ -292,7 +292,7 @@ struct sm120_blockwise_fp8_config_pingpong {
     using ClusterShape     = Shape<_1, _1, _1>;
     using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
                                                            1,
-                                                           128,
+                                                           1,
                                                            128,
                                                            TileShape,
                                                            ClusterShape,
@@ -309,7 +309,7 @@ struct sm120_blockwise_fp8_config_swapab {
     using TileShape        = Shape<_128, _32, _128>;
     using ClusterShape     = Shape<_1, _1, _1>;
     using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
-                                                           128,
+                                                           1,
                                                            1,
                                                            128,
                                                            TileShape,
@@ -511,7 +511,7 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
     }
 
     int64_t scale_k = ceil_div(K, 128);
-    int64_t scale_n = ceil_div(N, 128);
+    int64_t scale_n = N;
     TORCH_CHECK(A_sf.dim() == 2, "A_sf must be 2D, got ", A_sf.dim(), "D");
     TORCH_CHECK(A_sf.size(0) == M && A_sf.size(1) == scale_k,
                 "A_sf shape (",
@@ -535,7 +535,7 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
                 B_sf.size(0),
                 ",",
                 B_sf.size(1),
-                ") must be (ceil_div(N, 128)=",
+                ") must be (N=",
                 scale_n,
                 ", ceil_div(K, 128)=",
                 scale_k,

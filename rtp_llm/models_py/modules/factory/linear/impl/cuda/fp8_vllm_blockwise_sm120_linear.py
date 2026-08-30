@@ -53,9 +53,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     required; its Optional annotation only preserves the LinearBase/factory
     constructor signature.
 
-    Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 128, 128, MN, K>):
+    Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 1, 128, MN, K>):
       - input_scales : (M, K//128), MN-major (M-stride=1, K-group-stride=M)
-      - weight_scales: (N//128, K//128), K-major  (K-stride = 1)
+      - weight_scales: (N, K//128), K-major  (K-stride = 1)
     Input scales use column_major_scales=True, scale_tma_aligned=False
     because CUTLASS tile_atom_to_shape_SFA computes K-group stride as exactly
     M (no alignment padding).  scale_tma_aligned=True would pad to ceil4(M),
@@ -81,16 +81,14 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             raise ValueError("SM120 FP8 blockwise weight scales must be contiguous")
         K, N = weight.shape
         scale_K, scale_N = weight_scales.shape
-        if (N + block_size - 1) // block_size != scale_N or (
-            K + block_size - 1
-        ) // block_size != scale_K:
+        if N != scale_N or (K + block_size - 1) // block_size != scale_K:
             raise ValueError(
                 "SM120 FP8 blockwise weight scale dimension mismatch: "
                 f"N={N}, scale_N={scale_N}, K={K}, scale_K={scale_K}"
             )
         return (
             weight.reshape(N, K),
-            weight_scales.reshape(scale_N, scale_K),
+            weight_scales.reshape(N, scale_K),
             K,
             N,
             scale_K,

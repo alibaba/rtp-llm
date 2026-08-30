@@ -1,6 +1,6 @@
 """sm12x-only numerical sanity tests for CudaFp8VllmBlockwiseLinear.
 
-Quantizes a BF16 weight with per_block_cast_to_fp8 (block 128x128), runs
+Quantizes a BF16 weight with per-output-channel K-block scales (1x128), runs
 the kernel and compares against a fp32 reference matmul (+ optional bias/GELU).
 Catches regressions in the three M-tier dispatch branches
 (swap_ab / pingpong / default) and fused bias/GELU epilogues.
@@ -20,9 +20,10 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120
 )
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.test.sm120_test_utils import (
     make_blockwise_op_inputs,
+    per_output_channel_kblock_cast_to_fp8,
 )
 from rtp_llm.models_py.utils.arch import is_sm120
-from rtp_llm.test.utils.numeric_util import calc_diff, per_block_cast_to_fp8
+from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.sm120_fp8_backend import SM120_FP8_BACKEND_ENV
 
 
@@ -57,13 +58,12 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
         self.weight_bf16 = (
             torch.randn(N, K, dtype=torch.bfloat16, device=self.device) * 0.05
         )
-        weight_fp8, weight_scales = per_block_cast_to_fp8(
-            self.weight_bf16, use_ue8m0=False
+        weight_fp8, weight_scales = per_output_channel_kblock_cast_to_fp8(
+            self.weight_bf16
         )
         scale_K = (K + 127) // 128
-        scale_N = (N + 127) // 128
         self.weight_fp8 = weight_fp8.reshape(K, N)
-        self.weight_scales = weight_scales.reshape(scale_K, scale_N)
+        self.weight_scales = weight_scales.reshape(scale_K, N)
 
     def _run(self, M: int, K: int, N: int, with_bias: bool, use_gelu: bool = False):
         self._make_weight(K, N)
@@ -295,11 +295,9 @@ class CudaFp8VllmBlockwiseSM120BoundaryTest(unittest.TestCase):
         weight_bf16 = torch.randn(
             self.N, self.K, dtype=torch.bfloat16, device=self.device
         )
-        weight, weight_scales = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+        weight, weight_scales = per_output_channel_kblock_cast_to_fp8(weight_bf16)
         weight = weight.reshape(self.K, self.N)
-        weight_scales = weight_scales.reshape(
-            (self.K + 127) // 128, (self.N + 127) // 128
-        )
+        weight_scales = weight_scales.reshape((self.K + 127) // 128, self.N)
         bias = torch.randn(self.N, dtype=torch.bfloat16)
         linear = CudaFp8VllmBlockwiseLinear(weight, weight_scales, bias=bias)
         self.assertEqual(linear.bias.device.type, "cuda")

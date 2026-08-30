@@ -136,6 +136,31 @@ def per_block_cast_to_fp8(
     return x_quantized.contiguous(), scales.contiguous()
 
 
+def per_output_channel_block_cast_to_fp8(
+    x: torch.Tensor, group_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize logical ``(K, N)`` dense weights with ``(128, 1)`` groups.
+
+    CUTLASS SM120 can consume a distinct float scale for every output channel
+    and K block.  This is calibration-free and keeps the GEMM fully FP8 while
+    avoiding the cross-channel outlier coupling of square 128x128 blocks.
+    """
+    if x.dim() != 2:
+        raise ValueError(
+            "per-output-channel FP8 weight quantization requires a 2D tensor, "
+            f"got {tuple(x.shape)}"
+        )
+    k, n = x.shape
+    k_padded = ceil_div(k, group_size) * group_size
+    padded = torch.zeros((k_padded, n), dtype=torch.float32, device=x.device)
+    padded[:k] = x
+    view = padded.view(k_padded // group_size, group_size, n)
+    amax = view.abs().float().amax(dim=1, keepdim=True).clamp(1e-4)
+    quantized = (view * (FP8_E4M3_MAX / amax)).to(torch.float8_e4m3fn)
+    scales = (amax / FP8_E4M3_MAX).to(torch.float32).squeeze(1)
+    return quantized.view(k_padded, n)[:k].contiguous(), scales.contiguous()
+
+
 def gemm_block_fp8_gpt_style_tp_strategy():
     gemm_block_fp8_weight_tp_strategy: Dict[str, Any] = {
         W.attn_o_w: sp_neg1,
@@ -914,7 +939,17 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
                 source_weight.contiguous().to(device)
             )
         elif self.scale:
-            quant_kernel, scale = per_block_cast_to_fp8(
+            use_cutlass_per_channel = (
+                is_dense_weight
+                and is_sm120(None)
+                and resolve_sm120_fp8_backend() == "cutlass"
+            )
+            quantizer = (
+                per_output_channel_block_cast_to_fp8
+                if use_cutlass_per_channel
+                else per_block_cast_to_fp8
+            )
+            quant_kernel, scale = quantizer(
                 kernel.get(self.kernel.name), self.group_size
             )
             if quant_kernel.dim() == 2:
