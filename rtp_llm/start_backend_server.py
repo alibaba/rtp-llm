@@ -401,7 +401,17 @@ def _wait_for_ranks_startup(
                 except EOFError:
                     # Pipe closed unexpectedly (process died)
                     if not ranks_received[i]:
-                        error_msg = f"Rank {i}: Pipe closed unexpectedly (process may have died)"
+                        process = processes[i]
+                        # Give multiprocessing one short chance to publish the
+                        # native exit status after the pipe has closed.  Without
+                        # this, CUDA/native crashes are reported only as an EOF
+                        # and the signal that killed the rank is lost.
+                        process.join(timeout=0.2)
+                        error_msg = (
+                            f"Rank {i}: Pipe closed unexpectedly; "
+                            f"exit_code={process.exitcode} "
+                            f"is_alive={process.is_alive()}"
+                        )
                         logging.error(error_msg)
                         raise Exception(error_msg)
                 except Exception as e:

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Start one side of the validated Kimi K3 PD topology. Both roles are
-# TP8 / DP1 / EP8 and use all eight GPUs on their respective hosts.
+# Start one side of a Kimi K3 PD topology. Prefill is fixed at TP8/DP1/EP8.
+# Decode supports the legacy TP8/DP1/EP8 topology and Projection-KTP at
+# TP1/DP8/KTP8/EP8 or TP1/DP16/KTP16/EP16.
 #
 # The script incrementally builds its Bazel launcher with CUDA13/SM10x.  It
 # does not install or replace a system rtp-llm wheel.
@@ -76,6 +77,8 @@ Role-specific high-performance paths:
   ENABLE_CUDA_GRAPH                      fixed to 0 for Prefill; defaults to 1
                                          for Decode
   DECODE_CAPTURE_CONFIG                  Decode only; defaults to 1
+  KIMI_K3_DECODE_TOPOLOGY               tp8_ep8 (legacy),
+                                         dp8_ktp8_ep8, or dp16_ktp16_ep16
   ENABLE_CUDA_GRAPH_DEBUG_MODE           defaults to 0
 
 Runtime, build and diagnostics:
@@ -99,6 +102,10 @@ Runtime, build and diagnostics:
   RTP_LLM_SERVICE_ID                    defaults to kimi-k3-pd
   OPS_OVERLAY                           optional prebuilt operator overlay
   RTP_LLM_DRY_RUN=1                     print configuration and exit
+
+The launcher reserves nine consecutive TCP ports per local worker rank. The
+complete local block, START_PORT through START_PORT + LOCAL_WORLD_SIZE * 9 - 1,
+must be free before model startup.
 
 The operator implementations and versions are Bazel/runtime dependencies, not
 launcher knobs. cuLA KDA, FlashMLA Prefill, fused AG-GEMM and fused router are
@@ -166,9 +173,13 @@ prefill_port="$(endpoint_port "${PREFILL_ENDPOINT}")"
 decode_port="$(endpoint_port "${DECODE_ENDPOINT}")"
 prefill_host="${PREFILL_ENDPOINT%:*}"
 decode_host="${DECODE_ENDPOINT%:*}"
-decode_topology="tp8_ep8"
-[[ "${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}" == "tp8_ep8" ]] \
-    || die "only TP8/DP1/EP8 Decode is supported"
+decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}"
+case "${decode_topology}" in
+    tp8_ep8 | dp8_ktp8_ep8 | dp16_ktp16_ep16) ;;
+    *)
+        die "KIMI_K3_DECODE_TOPOLOGY must be tp8_ep8, dp8_ktp8_ep8, or dp16_ktp16_ep16"
+        ;;
+esac
 cache_store_rdma_mode="${CACHE_STORE_RDMA_MODE:-0}"
 [[ "${cache_store_rdma_mode}" == "0" || "${cache_store_rdma_mode}" == "1" ]] \
     || die "CACHE_STORE_RDMA_MODE must be 0 or 1"
@@ -319,14 +330,91 @@ if [[ "${role}" == "PREFILL" ]]; then
     remote_port="${decode_port}"
     tp_size=8
     dp_size=1
+    ktp_size=1
+    ep_size=8
+    world_size=8
+    local_world_size=8
 else
     local_endpoint="${DECODE_ENDPOINT}"
     remote_endpoint="${PREFILL_ENDPOINT}"
     start_port="${decode_port}"
     remote_port="${prefill_port}"
-    tp_size=8
-    dp_size=1
+    case "${decode_topology}" in
+        tp8_ep8)
+            tp_size=8
+            dp_size=1
+            ktp_size=1
+            ep_size=8
+            world_size=8
+            local_world_size=8
+            ;;
+        dp8_ktp8_ep8)
+            tp_size=1
+            dp_size=8
+            ktp_size=8
+            ep_size=8
+            world_size=8
+            local_world_size=8
+            ;;
+        dp16_ktp16_ep16)
+            tp_size=1
+            dp_size=16
+            ktp_size=16
+            ep_size=16
+            world_size=16
+            local_world_size=8
+            ;;
+    esac
 fi
+
+world_rank="${WORLD_RANK:-0}"
+[[ "${world_rank}" =~ ^[0-9]+$ ]] \
+    || die "WORLD_RANK must be a non-negative integer, got ${world_rank}"
+if [[ "${role}" == "DECODE" && "${decode_topology}" == "dp16_ktp16_ep16" ]]; then
+    [[ "${world_rank}" == "0" || "${world_rank}" == "8" ]] \
+        || die "DP16 Decode node WORLD_RANK must be 0 or 8, got ${world_rank}"
+    [[ -n "${GANG_CONFIG_STRING:-}" ]] \
+        || die "DP16 Decode requires GANG_CONFIG_STRING with ordered part0/part1 nodes"
+else
+    [[ "${world_rank}" == "0" ]] \
+        || die "${role} ${decode_topology} requires WORLD_RANK=0, got ${world_rank}"
+fi
+
+# ServerConfig allocates offsets 0..8 below each local rank's base and advances
+# the next rank by nine ports. Checking only START_PORT misses failures such as
+# an occupied cache_store_rdma_listen_port (rank * 9 + 4), after weights and
+# CUDA graphs have already spent minutes initializing.
+worker_info_port_num=9
+worker_port_block_end="$((start_port + local_world_size * worker_info_port_num - 1))"
+((worker_port_block_end <= 65535)) \
+    || die "worker port block ${start_port}-${worker_port_block_end} exceeds 65535"
+
+preflight_worker_port_block() {
+    python3 - "${start_port}" "${worker_port_block_end}" <<'PY'
+import socket
+import sys
+
+start = int(sys.argv[1])
+end = int(sys.argv[2])
+held = []
+try:
+    for port in range(start, end + 1):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("0.0.0.0", port))
+        except OSError as exc:
+            sock.close()
+            raise SystemExit(
+                f"worker port block {start}-{end} is unavailable: "
+                f"port {port} cannot bind: {exc}"
+            )
+        held.append(sock)
+finally:
+    for sock in held:
+        sock.close()
+print(f"worker port block preflight passed: {start}-{end}")
+PY
+}
 
 model_service_config="$(
     printf '{"service_id":"%s","role_endpoints":[{"group":"default",' \
@@ -338,6 +426,12 @@ model_service_config="$(
 )"
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+# start_server.py spawns frontend and dash_sc helpers before the backend
+# workers.  Those helper paths read LOCAL_WORLD_SIZE from the environment
+# (rather than from --local_world_size), so a multi-node world must export the
+# node-local value explicitly.  Without this, every DP16 node spawns helpers
+# for all 16 global ranks and collides on the repeated local port block.
+export LOCAL_WORLD_SIZE="${local_world_size}"
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export TMPDIR="${runtime_tmpdir}"
@@ -432,7 +526,8 @@ echo "  local endpoint:  ${local_endpoint}"
 echo "  remote endpoint: ${remote_endpoint}"
 echo "  PD no-proxy:      ${pd_no_proxy_hosts}"
 echo "  checkpoint:      ${CHECKPOINT_PATH}"
-echo "  topology:        TP${tp_size}/DP${dp_size}/EP8"
+echo "  topology:        TP${tp_size}/DP${dp_size}/KTP${ktp_size}/EP${ep_size}"
+echo "  world rank:      ${world_rank} (local world ${local_world_size})"
 if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
     echo "  decode MLA:      ${RTP_MLA_DECODE_KERNEL}"
@@ -469,9 +564,11 @@ server_args=(
     --role_type "${role}"
     --tp_size "${tp_size}"
     --dp_size "${dp_size}"
-    --ep_size 8
-    --world_size 8
-    --local_world_size 8
+    --ktp_size "${ktp_size}"
+    --ep_size "${ep_size}"
+    --world_size "${world_size}"
+    --world_rank "${world_rank}"
+    --local_world_size "${local_world_size}"
     --remote_server_port "${remote_port}"
     --max_seq_len "${max_seq_len}"
     --max_context_batch_size "${max_context_batch_size}"
@@ -516,11 +613,14 @@ if [[ -n "${prefill_capture_config}" ]]; then
 fi
 
 if [[ "${RTP_LLM_DRY_RUN:-0}" == "1" ]]; then
+    printf 'worker_port_block: %s-%s\n' "${start_port}" "${worker_port_block_end}"
     printf 'command:'
     printf ' %q' "${server_binary}" "${server_args[@]}"
     printf '\n'
     exit 0
 fi
+
+preflight_worker_port_block
 
 if [[ "${skip_build}" == "0" ]]; then
     bazel_startup_args=()
@@ -531,8 +631,11 @@ if [[ "${skip_build}" == "0" ]]; then
     (
         cd "${repo_root}"
         bazelisk "${bazel_startup_args[@]}" \
-            build --config=cuda13 --config=sm10x "${server_target}"
+            build --config=cuda13 --config=sm10x --jobs=64 "${server_target}"
     ) || die "failed to build ${server_target}"
+    # A local build may be long; repeat the check immediately before exec so a
+    # port claimed while compiling fails cleanly instead of aborting a worker.
+    preflight_worker_port_block
 fi
 [[ -x "${server_binary}" ]] || die "missing Bazel launcher ${server_binary}"
 
