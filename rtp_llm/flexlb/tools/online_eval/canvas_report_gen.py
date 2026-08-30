@@ -1385,8 +1385,10 @@ def main():
                 ),
             )
         )
-    # 反馈 1：schedule 分位 + master 链路五阶段 p95 合成一张时序图
-    # （master 10s 窗口；schedule 分位重采样为每个窗口内 1s 桶的中值）
+    # 反馈 1：schedule p95 + master 链路五阶段 p95 合成一张时序图
+    # （master 10s 窗口；schedule p95 重采样为每个窗口内 1s 桶的中值。
+    # 20260830 精简：p50/p99 线下线，只留 p95——分位细节已在上方
+    # 「schedule 延迟 p50 / p95 / p99」单独面板覆盖）
     if stage_ts:
         stage_t_vals = [r.get("t", 0) for r in stage_ts]
         STAGE_T = const("STAGE_T", str_arr(sparse_cats(stage_t_vals)))
@@ -1418,26 +1420,10 @@ def main():
 
             stage_series.append(
                 (
-                    "sp50",
-                    "schedule p50（10s 窗口中值）",
-                    stage_resample("sched_p50", "stageSchedP50"),
-                    None,
-                )
-            )
-            stage_series.append(
-                (
                     "sp95",
                     "schedule p95（10s 窗口中值）",
                     stage_resample("sched_p95", "stageSchedP95"),
                     "info",
-                )
-            )
-            stage_series.append(
-                (
-                    "sp99",
-                    "schedule p99（10s 窗口中值）",
-                    stage_resample("sched_p99", "stageSchedP99"),
-                    "warning",
                 )
             )
         stage_defs = [
@@ -1469,18 +1455,18 @@ def main():
             ),
             max((p.get("sched_p99", 0) or 0) for p in per_second) if per_second else 0,
         )
-        # 口径标注：schedule 分位为全终态口径（n=sched_lat_count）；
+        # 口径标注：schedule p95 为全终态口径（n=sched_lat_count）；
         # master 链路各阶段 p95 为幸存者口径（仅完成该阶段的行上报，
         # 样本量见分阶段 BarChart caption）。
         stage_ts_cap = "x = 压测时间（s，master 10s 窗口）；y = 延迟（ms）"
         if sched_lat_count:
-            stage_ts_cap += "；schedule 分位为全终态口径 n=" + fmt_int_trunc(
+            stage_ts_cap += "；schedule p95 为全终态口径 n=" + fmt_int_trunc(
                 sched_lat_count
             )
         stage_ts_cap += "；master 链路阶段 p95 为幸存者口径（仅计完成该阶段的行）"
         latency_containers.append(
             emit_container(
-                "调度延迟：schedule 分位 + master 链路阶段 p95",
+                "调度延迟：schedule p95 + master 链路阶段 p95",
                 stage_ts_cap,
                 emit_chart(
                     "LineChart",
@@ -1949,11 +1935,64 @@ def main():
                         color,
                     )
                 )
+            # avg（混合）线：总入队请求 ÷ 总批数——全部 reason 批混合的
+            # 真实加权平均，非三条 reason 线的算术均值。主口径直接取
+            # queue_timeseries.interval_avg_batch_size（相邻采样窗内
+            # enqueued 增量 ÷ batches 增量，语义完全一致），前向 step
+            # 对齐到 BST 1s 轴（queue 采样窗宽可 >1s，值呈阶梯）；旧
+            # aggregate 无该字段时回退：从 dispatch 数据推导，
+            # Σ(reason 批数 × reason 批大小) ÷ Σ(reason 批数)，批数取
+            # dispatch_reason_ts 前向 step 对齐行。
+            bs_avg_vals = None
+            if queue_ts and any("interval_avg_batch_size" in q for q in queue_ts):
+                bs_avg_vals = ts_step_values(
+                    [
+                        (
+                            q.get("t_offset_s", 0),
+                            q.get("interval_avg_batch_size", 0) or 0,
+                        )
+                        for q in queue_ts
+                    ],
+                    bst_t,
+                )
+            elif dispatch_reason_ts:
+                dr_rows = [(float(r.get("t", 0) or 0), r) for r in dispatch_reason_ts]
+                dr_t_axis = [t for t, _ in dr_rows]
+                bs_avg_vals = []
+                for r in dispatch_batch_size_ts:
+                    i = bisect.bisect_right(dr_t_axis, float(r.get("t", 0) or 0))
+                    dr_row = dr_rows[i - 1][1] if i > 0 else dr_rows[0][1]
+                    num_sum = den_sum = 0.0
+                    for k, cnt in dr_row.items():
+                        if k == "t" or not cnt:
+                            continue
+                        size = r.get(k)
+                        if size:
+                            num_sum += cnt * size
+                            den_sum += cnt
+                    bs_avg_vals.append(
+                        round(num_sum / den_sum, 2) if den_sum > 0 else 0
+                    )
+            if bs_avg_vals is not None and any(bs_avg_vals):
+                bs_lines.append(
+                    (
+                        "bs_avg",
+                        "avg（混合）",
+                        const("bsAvgMix", num_arr(bs_avg_vals)),
+                        "primary",
+                    )
+                )
             if bs_lines:
+                bs_caption = (
+                    "x = 压测时间（s，1s 采样）；y = dispatch 批大小"
+                    "（请求/批，按 reason 的引擎平均）；"
+                    "avg = 总请求 ÷ 总批（加权混合，非三 reason 均值；"
+                    "queue_timeseries 计数器口径，按采样窗 step 对齐）"
+                )
                 queue_containers.append(
                     emit_container(
                         "dispatch 批大小（按 reason，引擎平均）",
-                        "x = 压测时间（s，1s 采样）；y = dispatch 批大小（请求/批，按 reason 的引擎平均）",
+                        bs_caption,
                         emit_chart("LineChart", BST, 230, bs_lines),
                     )
                 )
