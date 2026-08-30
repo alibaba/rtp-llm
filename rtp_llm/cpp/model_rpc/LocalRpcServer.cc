@@ -403,7 +403,7 @@ LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelReque
 grpc::Status
 LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) {
     (void)response;
-    RTP_LLM_LOG_INFO("start_profile from %s start_step=%d num_steps=%d enable_all_rank=%d",
+    RTP_LLM_LOG_INFO("start_profile from %s start_step=%d num_steps=%d enable_all_rank=%ld",
                      context->peer().c_str(),
                      request->start_step(),
                      request->num_steps(),

@@ -27,6 +27,17 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/disaggregate/cache_store",
+        "//rtp_llm/cpp/utils:error_code",
+    ],
+)
+
+cc_library(
+    name = "cache_store_retry_policy",
+    hdrs = ["CacheStoreRetryPolicy.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:error_code",
     ],
 )
 
@@ -58,6 +69,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
+        ":cache_store_retry_policy",
         ":model_rpc_pool",
         ":rpc_error_code",
         ":tensor_pb_convert",
