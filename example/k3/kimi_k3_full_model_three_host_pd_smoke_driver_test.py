@@ -80,6 +80,8 @@ class ThreeHostDriverTest(unittest.TestCase):
         self.assertIn("WORLD_RANK=8", decode1)
         self.assertIn("NCCL_IB_GID_INDEX=3", decode0)
         self.assertIn("NCCL_IB_GID_INDEX=3", decode1)
+        self.assertIn("NCCL_SOCKET_IFNAME=eth0", decode0)
+        self.assertIn("GLOO_SOCKET_IFNAME=eth0", decode1)
         self.assertIn("SMOKE_DECODE_NODE_INDEX=0", decode0)
         self.assertIn("SMOKE_DECODE_NODE_INDEX=1", decode1)
         self.assertIn("SMOKE_DECODE_TOPOLOGY=dp16_ktp16_ep16", joined0)
@@ -90,9 +92,22 @@ class ThreeHostDriverTest(unittest.TestCase):
         self.assertIn("SMOKE_SECONDARY_COMPLETION_FILE=", joined1)
 
     def test_decode_routed_gid_can_be_overridden(self):
-        with mock.patch.dict(os.environ, {"NCCL_IB_GID_INDEX": "5"}, clear=True):
+        with mock.patch.dict(os.environ, {"DECODE0_NCCL_IB_GID_INDEX": "5"}, clear=True):
             _, _, _, decode0 = driver.role_launch_parts(make_args(), "decode0")
         self.assertIn("NCCL_IB_GID_INDEX=5", decode0)
+
+    def test_role_specific_artifact_and_tmp_paths_override_global_values(self):
+        environment = {
+            "SMOKE_ARTIFACT_ROOT": "/global/artifacts",
+            "PREFILL_SMOKE_ARTIFACT_ROOT": "/ssd/prefill/artifacts",
+            "PREFILL_TMPDIR": "/ssd/prefill/tmp",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            _, _, _, prefill = driver.role_launch_parts(make_args(), "prefill")
+            _, _, _, decode0 = driver.role_launch_parts(make_args(), "decode0")
+        self.assertIn("SMOKE_ARTIFACT_ROOT=/ssd/prefill/artifacts", prefill)
+        self.assertIn("TMPDIR=/ssd/prefill/tmp", prefill)
+        self.assertIn("SMOKE_ARTIFACT_ROOT=/global/artifacts", decode0)
 
     def test_prefill_receives_all_sixteen_ordered_role_endpoints(self):
         _, _, _, command = driver.role_launch_parts(make_args(), "prefill")

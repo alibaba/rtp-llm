@@ -175,6 +175,10 @@ def primary_completion_file(args: argparse.Namespace) -> str:
     return handshake_file(args, "decode0.success")
 
 
+def role_env_default(role: str, name: str, default: str | None = None) -> str | None:
+    return env_default(f"{role.upper()}_{name}", env_default(name, default))
+
+
 def forwarded_optional_environment(role: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for name in (
@@ -198,8 +202,11 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_CHUNKWISE_RDMA",
         "FT_CORE_DUMP_ON_EXCEPTION",
         "RTP_LLM_SKIP_BUILD",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
     ):
-        value = env_default(name)
+        value = role_env_default(role, name)
         if value is not None:
             result[name] = value
     binary = env_default(
@@ -240,7 +247,9 @@ def role_launch_parts(args: argparse.Namespace, role: str) -> tuple[str, str, st
                 # not routable between the two Decode hosts. Keep this
                 # overrideable for other fabrics while making the supported
                 # three-host topology select the routed RoCE v2 GID.
-                "NCCL_IB_GID_INDEX": env_default("NCCL_IB_GID_INDEX", "3"),
+                "NCCL_IB_GID_INDEX": role_env_default(role, "NCCL_IB_GID_INDEX", "3"),
+                "NCCL_SOCKET_IFNAME": role_env_default(role, "NCCL_SOCKET_IFNAME", "eth0"),
+                "GLOO_SOCKET_IFNAME": role_env_default(role, "GLOO_SOCKET_IFNAME", "eth0"),
             }
         )
     if role == "decode1":
