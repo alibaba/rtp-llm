@@ -39,7 +39,7 @@ TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
                                                 /*main_layer_num=*/3);
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(3, {0, 1, 2}, 7));
-    GroupedCacheLayerLayout layout(config, std::move(groups));
+    GroupedCacheLayerLayout layout(*config, std::move(groups));
 
     EXPECT_FALSE(layout.group("full").empty());
     EXPECT_EQ(layout.group("full").activeLayerCount(), 3u);
@@ -54,7 +54,7 @@ TEST(CacheLayerLayoutTest, SupportsOneGroupPerLayerAndOneToManyTopology) {
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("a", makeLayerLayout(3, {0, 2}, 1));
     groups.emplace("b", makeLayerLayout(3, {1, 2}, 2));
-    GroupedCacheLayerLayout layout(config, std::move(groups));
+    GroupedCacheLayerLayout layout(*config, std::move(groups));
 
     EXPECT_EQ(layout.group("a").activeLayerCount(), 2u);
     EXPECT_EQ(layout.group("b").activeLayerCount(), 2u);
@@ -73,7 +73,7 @@ TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveL
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("active", makeLayerLayout(2, {0, 1}, 1));
     groups.emplace("mtp", makeLayerLayout(2, {}, 0));
-    GroupedCacheLayerLayout layout(config, std::move(groups));
+    GroupedCacheLayerLayout layout(*config, std::move(groups));
 
     EXPECT_TRUE(layout.group("mtp").empty());
     EXPECT_EQ(layout.group("mtp").activeLayerCount(), 0u);
@@ -92,7 +92,7 @@ TEST(CacheLayerLayoutTest, InvalidTagAndLayerFailFast) {
                                                 /*main_layer_num=*/1);
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(1, {0}, 1));
-    GroupedCacheLayerLayout layout(config, std::move(groups));
+    GroupedCacheLayerLayout layout(*config, std::move(groups));
 
     EXPECT_ANY_THROW(layout.group("missing"));
     // Replaces the pre-tag out-of-range slot check: there is no positional slot to

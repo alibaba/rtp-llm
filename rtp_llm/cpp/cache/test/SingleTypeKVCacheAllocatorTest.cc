@@ -747,7 +747,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LayerCacheBase) {
 TEST_F(SingleTypeKVCacheAllocatorTest, ManagerLayoutsPreserveSingleTypeGroupTensorsForMainAndMtp) {
     auto config = makeMtpCacheConfigByCreateSpConfig(
         /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
 
     const auto all_layout  = manager->allLayerCacheBase();

@@ -178,12 +178,12 @@ protected:
         std::cout << " " << hint << std::endl;
     }
 
-    torch::Tensor allocateKVBlocks(const rtp_llm::CacheConfig& cache_config,
+    torch::Tensor allocateKVBlocks(rtp_llm::CacheConfig        cache_config,
                                    const std::vector<int32_t>& input_lengths,
                                    torch::Tensor&              kvCache,
                                    bool                        need_padding = true) {
         if (!cache_manager_) {
-            cache_manager_ = std::make_shared<rtp_llm::KVCacheManager>(cache_config);
+            cache_manager_ = std::make_shared<rtp_llm::KVCacheManager>(std::move(cache_config));
             bool inited    = cache_manager_->init();
             EXPECT_TRUE(inited);
             if (!inited) {

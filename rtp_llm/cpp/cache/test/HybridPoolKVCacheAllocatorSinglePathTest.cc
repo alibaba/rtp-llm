@@ -645,12 +645,11 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSlicesDescr
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
-    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    config.hybrid_attention_config.hybrid_attention_types            = {};
-    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
-    second_desc.tag                                                  = "layer1_state";
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE, HybridAttentionType::NONE};
+    auto second_desc                                       = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                        = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
@@ -659,7 +658,8 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, SingleLayerMtpConfigSupportsDes
     ASSERT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
     ASSERT_EQ(single_layer.kv_cache_spec_descs[0].size(), 2u);
     EXPECT_EQ(single_layer.kv_cache_spec_descs[0][1].tag, "layer1_state");
-    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
+    ASSERT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types.size(), 1u);
+    EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::NONE);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
@@ -737,13 +737,13 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, LayerCacheBase) {
 
     auto layout = allocator_->allLayerCacheBase();
     ASSERT_EQ(layout.groups().size(), 1u);
-    ASSERT_EQ(layout.topology().layers().size(), 4u);
-    for (size_t layer_id = 0; layer_id < layout.topology().layers().size(); ++layer_id) {
-        EXPECT_EQ(layout.topology().groupsForLayer(static_cast<int>(layer_id)), std::vector<std::string>{"default"})
+    ASSERT_EQ(config.layers().size(), 4u);
+    for (size_t layer_id = 0; layer_id < config.layers().size(); ++layer_id) {
+        EXPECT_EQ(config.groupsForLayer(static_cast<int>(layer_id)), std::vector<std::string>{"default"})
             << "layer " << layer_id;
     }
-    EXPECT_EQ(layout.topology().groups().size(), 1u);
-    EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+    EXPECT_EQ(config.groups().size(), 1u);
+    EXPECT_EQ(config.group("default").policy.group_type, CacheGroupType::FULL);
     const auto& default_layout = layout.group("default");
     EXPECT_EQ(default_layout.size(), config.layer_num);
     EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
@@ -760,7 +760,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, LayerCacheBase) {
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTypeGroupTensorsForMainAndMtp) {
     auto config = makeMtpCacheConfigByCreateSpConfig(
         /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
-    auto manager = std::make_shared<KVCacheManager>(config);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config));
     ASSERT_TRUE(manager->init());
 
     const auto all_layout  = manager->allLayerCacheBase();
@@ -769,9 +769,9 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTyp
 
     auto verify_layout = [](const GroupedCacheLayerLayout& local_layout,
                             const GroupedCacheLayerLayout& all,
+                            const CacheConfig&             local_config,
                             size_t                         global_begin) {
-        ASSERT_EQ(local_layout.topology().groups().size(), 1u);
-        ASSERT_EQ(local_layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
+        ASSERT_EQ(local_layout.groups().size(), 1u);
         const auto& local_group = local_layout.group("default");
         const auto& all_group   = all.group("default");
         for (size_t local_layer = 0; local_layer < local_group.size(); ++local_layer) {
@@ -781,7 +781,8 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTyp
             ASSERT_TRUE(local_group.at(local_layer).kv_scale_addr.defined());
         }
 
-        torch_ext::KVCache kv_cache(local_layout);
+        auto               cache_config = std::shared_ptr<const CacheConfig>(&local_config, [](const CacheConfig*) {});
+        torch_ext::KVCache kv_cache(local_layout, std::move(cache_config));
 
         const auto by_tag        = kv_cache.getLayerCache(/*idx=*/0, "default");
         const auto by_sole_group = kv_cache.getLayerCache(/*idx=*/0);
@@ -791,9 +792,15 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, ManagerLayoutsPreserveSingleTyp
         EXPECT_EQ(by_sole_group.kv_cache_base.data_ptr(), local_group.at(0).kv_addr.data_ptr());
     };
 
-    verify_layout(main_layout, all_layout, /*global_begin=*/0);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(0), all_layout, /*global_begin=*/2);
-    verify_layout(manager->getMTPModuleCacheLayerLayout(1), all_layout, /*global_begin=*/5);
+    verify_layout(main_layout, all_layout, manager->cacheConfig(), /*global_begin=*/0);
+    verify_layout(manager->getMTPModuleCacheLayerLayout(0),
+                  all_layout,
+                  manager->getMTPModuleCacheConfig(0),
+                  /*global_begin=*/2);
+    verify_layout(manager->getMTPModuleCacheLayerLayout(1),
+                  all_layout,
+                  manager->getMTPModuleCacheConfig(1),
+                  /*global_begin=*/5);
     EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(-1), std::runtime_error);
     EXPECT_THROW(manager->getMTPModuleCacheLayerLayout(2), std::runtime_error);
 }

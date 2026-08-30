@@ -16,7 +16,7 @@ C++ turns the resulting per-layer desc lists into the cache topology through
 ``CacheConfigCreator`` (``validateHybridPoolDescs`` ->
 ``buildLayerSpecsFromDescs`` -> ``populateGroupsFromLayerSpecs`` ->
 ``setupIndependentPoolSizes``), which is only reached when
-``hybrid_attention_config.enable_independent_kv_cache_pools`` is set.
+the hybrid attention configuration is enabled.
 
 This module is the production twin of
 ``rtp_llm/cpp/cache/test/CacheConfigTestUtils.h`` (``makeDsv4Desc`` /
