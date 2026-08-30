@@ -18,7 +18,6 @@ from rtp_llm.models_py.distributed.sequence_parallel import (
     TokenShardLayout,
     shard_tokens_with_padding,
 )
-from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
@@ -34,7 +33,6 @@ from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
     KimiKDAPrefillMetadata,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda import kimi_kda_rms_norm_sigmoid_gate
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp8_quant import quantize_forget_latent_fp8
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
@@ -151,60 +149,19 @@ class KimiK3KDA(nn.Module):
         )
         self.cache_store_segment_sizes = self.cache.store_segment_sizes
 
-        quant_config = getattr(config, "k3_attention_quant_config", None)
-        self._fp8_enabled = quant_config is not None
-        self._fp8_projections = {}
-        if getattr(self, "_fp8_enabled", False):
-            for name, scale_name in (
-                (W.linear_attn_qkvg_fa_beta_w, W.linear_attn_qkvg_fa_beta_s),
-                (W.linear_attn_f_b_w, W.linear_attn_f_b_s),
-                (W.linear_attn_out_w, W.linear_attn_out_s),
-            ):
-                self._fp8_projections[name] = LinearFactory.create_linear_from_weights(
-                    weights,
-                    name,
-                    scale_name,
-                    None,
-                    quant_config=quant_config,
-                )
-                self.add_module(
-                    "fp8_" + name.replace(".", "_"), self._fp8_projections[name]
-                )
         fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
-        self.forget_latent_size = (
-            self._fp8_projections[W.linear_attn_f_b_w].K
-            if getattr(self, "_fp8_enabled", False)
-            else int(weights[W.linear_attn_f_b_w].shape[0])
-        )
-        self._fp8_strided_forget = (
-            self._fp8_enabled
-            and self.forget_latent_size == 128
-            and getattr(self._fp8_projections[W.linear_attn_f_b_w], "scale_ue8m0", False)
-        )
-        if self._fp8_strided_forget:
-            logging.info(
-                "K3_FP8_EXECUTION layer=%d projection=f_b "
-                "activation_quant=strided_group128_ue8m0 compute=fp8 output=bf16",
-                layer_idx,
-            )
+        self.forget_latent_size = int(weights[W.linear_attn_f_b_w].shape[0])
         expected_fused_width = (
             4 * self.projection_local_size
             + self.forget_latent_size
             + self.total_heads
         )
-        actual_fused_width = (
-            self._fp8_projections[W.linear_attn_qkvg_fa_beta_w].N
-            if getattr(self, "_fp8_enabled", False)
-            else fused_projection.shape[1]
-        )
-        if actual_fused_width != expected_fused_width:
+        if fused_projection.shape[1] != expected_fused_width:
             raise ValueError(
                 "fused KDA QKVG/F_A/beta width "
-                f"{actual_fused_width} != {expected_fused_width}"
+                f"{fused_projection.shape[1]} != {expected_fused_width}"
             )
-        self.kda_fused_w = self._fp8_projections.get(
-            W.linear_attn_qkvg_fa_beta_w, fused_projection
-        )
+        self.kda_fused_w = fused_projection
 
         fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)
         if fused_conv.shape[0] != 3 * self.projection_size:
@@ -291,11 +248,7 @@ class KimiK3KDA(nn.Module):
                 logical_m=prefill_sp_layout.logical_tokens,
             )[0]
         else:
-            projected_fused = (
-                self.kda_fused_w(hidden_states)
-                if getattr(self, "_fp8_enabled", False)
-                else torch.matmul(hidden_states, self.kda_fused_w)
-            )
+            projected_fused = torch.matmul(hidden_states, self.kda_fused_w)
         (
             q_projected,
             k_projected,
@@ -313,18 +266,7 @@ class KimiK3KDA(nn.Module):
             self.total_heads,
             dim=1,
         )
-        if getattr(self, "_fp8_enabled", False):
-            forget_projection = self._fp8_projections[W.linear_attn_f_b_w]
-            if getattr(self, "_fp8_strided_forget", False):
-                # F_A is a strided slice of the fused output. Read it directly
-                # into FP8 instead of launching a BF16 staging copy first.
-                raw_gate = forget_projection.forward_quantized(
-                    *quantize_forget_latent_fp8(forget_latent)
-                )
-            else:
-                raw_gate = forget_projection(forget_latent.contiguous())
-        else:
-            raw_gate = torch.matmul(forget_latent, self.weights[W.linear_attn_f_b_w])
+        raw_gate = torch.matmul(forget_latent, self.weights[W.linear_attn_f_b_w])
         beta_begin = self.attn_tp_rank * self.local_heads
         raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
         mixed_qkv_projected = projected_fused.narrow(1, 0, 3 * self.projection_size)
@@ -401,14 +343,10 @@ class KimiK3KDA(nn.Module):
             )
 
         projection_input = output.reshape(token_count, self.projection_size)
-        output_weight = getattr(self, "_fp8_projections", {}).get(
-            W.linear_attn_out_w, self.weights[W.linear_attn_out_w]
-        )
         if use_explicit_output:
-            output = (
-                output_weight(projection_input)
-                if getattr(self, "_fp8_enabled", False)
-                else torch.matmul(projection_input, output_weight)
+            output = torch.matmul(
+                projection_input,
+                self.weights[W.linear_attn_out_w],
             )
             if self.attn_tp_size > 1:
                 output = all_reduce(output, group=Group.TP)
@@ -432,7 +370,7 @@ class KimiK3KDA(nn.Module):
         if mode == "prefill" and use_reduce_scatter:
             fused = gemm_reduce_scatter(
                 projection_input,
-                output_weight,
+                self.weights[W.linear_attn_out_w],
                 get_process_group(Group.TP),
                 pad_rows=pad_reduce_scatter,
             )
@@ -440,7 +378,7 @@ class KimiK3KDA(nn.Module):
                 return fused
         return row_parallel_linear(
             projection_input,
-            output_weight,
+            self.weights[W.linear_attn_out_w],
             self.attn_tp_size,
             reduce_scatter_tokens=use_reduce_scatter,
             pad_reduce_scatter_tokens=pad_reduce_scatter,

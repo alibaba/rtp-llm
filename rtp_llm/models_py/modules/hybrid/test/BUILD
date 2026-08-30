@@ -60,6 +60,18 @@ py_test(
     timeout = "short",
 )
 
+py_test(
+    name = "kimi_k3_nccl_ep_unit_test",
+    srcs = ["kimi_k3_nccl_ep_unit_test.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+)
+
 # FlashInfer dependencies (包括 apache-tvm-ffi 用于 JIT 编译)
 flashinfer_deps = [
     "//rtp_llm:apache-tvm-ffi",
