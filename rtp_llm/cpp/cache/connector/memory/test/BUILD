@@ -54,6 +54,8 @@ cc_test(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/cuda:no_block_copy",
         "@com_google_googletest//:gtest",
         "@local_config_cuda//cuda:cuda_headers",

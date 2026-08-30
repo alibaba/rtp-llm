@@ -13,8 +13,6 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -47,6 +45,30 @@ void validateRemoteCacheTopologyBeforeAllocation(const CacheConfig& cache_config
                             "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
                             group_num,
                             static_cast<size_t>(full_group_num));
+}
+
+void validateSharedPoolTopologyBeforeAllocation(const CacheConfig& cache_config) {
+    if (cache_config.use_independent_block_pools) {
+        return;
+    }
+
+    const auto is_full_attention = [](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::FULL && group.spec
+               && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+                   || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+    };
+    if (cache_config.groupNums() == 1) {
+        const auto& group = cache_config.topology().groupById(0);
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache spec[0] is null");
+        RTP_LLM_CHECK_WITH_INFO(is_full_attention(group),
+                                "HybridPoolKVCacheAllocator requires one FULL MHA/MLA cache group");
+        return;
+    }
+
+    const bool has_full_attention = std::any_of(
+        cache_config.topology().groups().begin(), cache_config.topology().groups().end(), is_full_attention);
+    RTP_LLM_CHECK_WITH_INFO(has_full_attention,
+                            "HybridPoolKVCacheAllocator requires at least one FULL MHA/MLA cache group");
 }
 
 GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
@@ -251,20 +273,11 @@ bool KVCacheManager::init() {
                                                    && kv_cache_config_.enable_prefix_tree_memory_cache
                                                    && kv_cache_config_.enable_independent_group_eviction;
 
-    const bool is_hybrid = config_.groupNums() > 1;
-    if (config_.use_independent_block_pools) {
-        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
-                                                                           AllocationType::DEVICE,
-                                                                           metrics_reporter_,
-                                                                           kv_cache_config_.reserve_block_ratio,
-                                                                           pd_sep_config_.role_type);
-    } else if (is_hybrid) {
-        allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-    } else {
-        allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-    }
+    allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
+                                                                       AllocationType::DEVICE,
+                                                                       metrics_reporter_,
+                                                                       kv_cache_config_.reserve_block_ratio,
+                                                                       pd_sep_config_.role_type);
 
     if (use_cuda_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
@@ -273,6 +286,7 @@ bool KVCacheManager::init() {
 
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
+    validateSharedPoolTopologyBeforeAllocation(config_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
                                               allocator_->independentEvictionGroupIds());
