@@ -24,7 +24,10 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 from aiohttp import web
-from online_eval.mock_engine import generate_aggregated_prometheus_metrics
+from online_eval.mock_engine import (
+    build_static_model_service_config,
+    generate_aggregated_prometheus_metrics,
+)
 
 logger = logging.getLogger("shard_launcher")
 
@@ -260,34 +263,20 @@ def merge_endpoints(args: argparse.Namespace, partials: List[dict]) -> Dict[str,
             engine_routes[eng["name"]] = shard_url
 
     # Build env (mirrors MockEngineCluster.service_discovery_env).
-    prefill_addrs = ",".join(
+    prefill_addrs = [
         f"{e['ip']}:{e['http_port']}" for e in all_engines if e["role"] == "prefill"
-    )
-    decode_addrs = ",".join(
+    ]
+    decode_addrs = [
         f"{e['ip']}:{e['http_port']}" for e in all_engines if e["role"] == "decode"
+    ]
+    model_service_config = build_static_model_service_config(
+        args.prefill_domain,
+        args.decode_domain,
+        prefill_addrs,
+        decode_addrs,
     )
-    model_service_config = {
-        "service_id": "aigc.text-generation.generation.engine_service",
-        "role_endpoints": [
-            {
-                "group": "mock",
-                "prefill_endpoint": {
-                    "address": args.prefill_domain,
-                    "protocol": "http",
-                    "path": "/",
-                },
-                "decode_endpoint": {
-                    "address": args.decode_domain,
-                    "protocol": "http",
-                    "path": "/",
-                },
-            }
-        ],
-    }
     env = {
         "MODEL_SERVICE_CONFIG": json.dumps(model_service_config, separators=(",", ":")),
-        f"DOMAIN_ADDRESS:{args.prefill_domain}": prefill_addrs,
-        f"DOMAIN_ADDRESS:{args.decode_domain}": decode_addrs,
     }
 
     # Write endpoints.json
@@ -306,8 +295,6 @@ def merge_endpoints(args: argparse.Namespace, partials: List[dict]) -> Dict[str,
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_lines = [
         "# Start flexlb-api with these environment variables.",
-        "# DOMAIN_ADDRESS:* contains ':' and cannot be exported by bash directly;",
-        "# pass it via env as shown below.",
         "",
         "env \\",
     ]

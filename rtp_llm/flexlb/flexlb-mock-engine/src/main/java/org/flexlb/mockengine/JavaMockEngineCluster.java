@@ -266,30 +266,27 @@ public final class JavaMockEngineCluster {
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
-        String prefillAddresses = addressList(config.host, config.baseGrpcPort, config.nPrefill);
-        String decodeAddresses = addressList(
+        List<String> prefillAddresses = addressList(
+                config.host, config.baseGrpcPort, config.nPrefill);
+        List<String> decodeAddresses = addressList(
                 config.host, config.baseGrpcPort + config.nPrefill, config.nDecode);
 
-        Map<String, Object> prefillEndpoint = new LinkedHashMap<>();
-        prefillEndpoint.put("address", config.prefillDomain);
-        prefillEndpoint.put("protocol", "http");
-        prefillEndpoint.put("path", "/");
-        Map<String, Object> decodeEndpoint = new LinkedHashMap<>();
-        decodeEndpoint.put("address", config.decodeDomain);
-        decodeEndpoint.put("protocol", "http");
-        decodeEndpoint.put("path", "/");
         Map<String, Object> roleEndpoint = new LinkedHashMap<>();
         roleEndpoint.put("group", "mock");
-        roleEndpoint.put("prefill_endpoint", prefillEndpoint);
-        roleEndpoint.put("decode_endpoint", decodeEndpoint);
+        if (!prefillAddresses.isEmpty()) {
+            roleEndpoint.put("prefill_endpoint",
+                    staticEndpoint(config.prefillDomain, prefillAddresses));
+        }
+        if (!decodeAddresses.isEmpty()) {
+            roleEndpoint.put("decode_endpoint",
+                    staticEndpoint(config.decodeDomain, decodeAddresses));
+        }
         Map<String, Object> serviceConfig = new LinkedHashMap<>();
         serviceConfig.put("service_id", "aigc.text-generation.generation.engine_service");
         serviceConfig.put("role_endpoints", List.of(roleEndpoint));
 
         Map<String, String> env = new LinkedHashMap<>();
         env.put("MODEL_SERVICE_CONFIG", OBJECT_MAPPER.writeValueAsString(serviceConfig));
-        env.put("DOMAIN_ADDRESS:" + config.prefillDomain, prefillAddresses);
-        env.put("DOMAIN_ADDRESS:" + config.decodeDomain, decodeAddresses);
 
         List<Map<String, Object>> engines = new ArrayList<>(config.nPrefill + config.nDecode);
         addEngineRecords(engines, config, 0, config.nPrefill, "prefill");
@@ -317,15 +314,25 @@ public final class JavaMockEngineCluster {
         }
     }
 
-    private static String addressList(String host, int firstGrpcPort, int count) {
-        StringBuilder addresses = new StringBuilder(count * 20);
+    private static Map<String, Object> staticEndpoint(String address, List<String> hosts) {
+        Map<String, Object> discovery = new LinkedHashMap<>();
+        discovery.put("type", "static-env");
+        discovery.put("hosts", hosts);
+
+        Map<String, Object> endpoint = new LinkedHashMap<>();
+        endpoint.put("address", address);
+        endpoint.put("protocol", "http");
+        endpoint.put("path", "/");
+        endpoint.put("discovery", discovery);
+        return endpoint;
+    }
+
+    private static List<String> addressList(String host, int firstGrpcPort, int count) {
+        List<String> addresses = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            if (i > 0) {
-                addresses.append(',');
-            }
-            addresses.append(host).append(':').append(firstGrpcPort + i - 1);
+            addresses.add(host + ":" + (firstGrpcPort + i - 1));
         }
-        return addresses.toString();
+        return addresses;
     }
 
     private static void addEngineRecords(List<Map<String, Object>> engines,

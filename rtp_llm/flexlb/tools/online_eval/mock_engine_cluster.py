@@ -269,8 +269,6 @@ async def write_outputs(cluster: MockEngineCluster, args: argparse.Namespace) ->
 
     env_lines = [
         "# Start flexlb-api with these environment variables.",
-        "# DOMAIN_ADDRESS:* contains ':' and cannot be exported by bash directly;",
-        "# pass it via env as shown below.",
         "",
         "env \\",
     ]

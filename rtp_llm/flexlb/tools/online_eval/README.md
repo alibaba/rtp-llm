@@ -81,9 +81,9 @@ The script writes:
 - `rtp_llm/flexlb/tools/online_eval/run/flexlb_env.txt`
 
 Use the `env ... <your-flexlb-api-start-command>` snippet from
-`flexlb_env.txt` when starting `flexlb-api`. The `DOMAIN_ADDRESS:*`
-environment keys contain `:`, so they must be passed through `env`; bash cannot
-`export` them directly.
+`flexlb_env.txt` when starting `flexlb-api`. The generated
+`MODEL_SERVICE_CONFIG` contains a `static-env` discovery object and inline
+`hosts` for each populated role.
 
 ### 2. Start flexlb-api
 

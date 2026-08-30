@@ -14,7 +14,7 @@ set -euo pipefail
 #   To kill a single engine independently, we start the "victim" engine as
 #   a separate process via run_single_engine.py.  The remaining engines
 #   run in the cluster process.  The Master discovers all engines via
-#   static DOMAIN_ADDRESS env vars (no health check, no dynamic removal).
+#   static endpoint hosts (no health check, no dynamic removal).
 #
 # Flow:
 #   1.  Start mock engine cluster (surviving engines)
@@ -106,8 +106,8 @@ fi
 # Cluster allocates ports sequentially: prefill-0, prefill-1, ..., decode-0, ...
 CLUSTER_PREFILL_ADDRS=""
 CLUSTER_DECODE_ADDRS=""
-# DOMAIN_ADDRESS must contain HTTP ports; FlexLB Master computes gRPC port
-# via toGrpcPort(httpPort) = httpPort + 1.
+# Static discovery hosts use HTTP ports; FlexLB Master computes gRPC port via
+# toGrpcPort(httpPort) = httpPort + 1.
 _port=${MOCK_BASE_GRPC_PORT}
 for ((i = 0; i < CLUSTER_N_PREFILL; i++)); do
   if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
@@ -126,7 +126,7 @@ for ((i = 0; i < CLUSTER_N_DECODE; i++)); do
   _port=$((_port + 1))
 done
 
-# -- Combine addresses for DOMAIN_ADDRESS ----------------------------------
+# -- Combine static discovery addresses ------------------------------------
 VICTIM_ADDR="127.0.0.1:${VICTIM_HTTP_PORT}"
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
   if [[ -z "${CLUSTER_PREFILL_ADDRS}" ]]; then
@@ -144,8 +144,36 @@ else
   fi
 fi
 
-# -- Model service config (constant JSON) ----------------------------------
-readonly MODEL_SERVICE_CONFIG_JSON='{"service_id":"aigc.text-generation.generation.engine_service","role_endpoints":[{"group":"mock","prefill_endpoint":{"address":"mock.prefill.hosts.address","protocol":"http","path":"/"},"decode_endpoint":{"address":"mock.decode.hosts.address","protocol":"http","path":"/"}}]}'
+# -- Model service config ---------------------------------------------------
+MODEL_SERVICE_CONFIG_JSON="$(
+  python3 - "${PREFILL_DOMAIN_ADDR}" "${DECODE_DOMAIN_ADDR}" <<'PY'
+import json
+import sys
+
+prefill_hosts = [host for host in sys.argv[1].split(",") if host]
+decode_hosts = [host for host in sys.argv[2].split(",") if host]
+config = {
+    "service_id": "aigc.text-generation.generation.engine_service",
+    "role_endpoints": [{
+        "group": "mock",
+        "prefill_endpoint": {
+            "address": "mock.prefill.hosts.address",
+            "protocol": "http",
+            "path": "/",
+            "discovery": {"type": "static-env", "hosts": prefill_hosts},
+        },
+        "decode_endpoint": {
+            "address": "mock.decode.hosts.address",
+            "protocol": "http",
+            "path": "/",
+            "discovery": {"type": "static-env", "hosts": decode_hosts},
+        },
+    }],
+}
+print(json.dumps(config, separators=(",", ":")))
+PY
+)"
+readonly MODEL_SERVICE_CONFIG_JSON
 
 # -- Load client parameters ------------------------------------------------
 LOAD_CLIENT_LIMIT="${LOAD_CLIENT_LIMIT:-0}"
@@ -285,8 +313,6 @@ start_master() {
   echo "  starting master ..."
   env \
     "MODEL_SERVICE_CONFIG=${MODEL_SERVICE_CONFIG_JSON}" \
-    "DOMAIN_ADDRESS:mock.prefill.hosts.address=${PREFILL_DOMAIN_ADDR}" \
-    "DOMAIN_ADDRESS:mock.decode.hosts.address=${DECODE_DOMAIN_ADDR}" \
     "FLEXLB_CONFIG=${flexlb_config}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     "OTEL_TRACE_SKIP_PATTERN=.*" \
