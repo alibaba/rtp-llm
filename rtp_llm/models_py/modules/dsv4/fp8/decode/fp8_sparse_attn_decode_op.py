@@ -190,12 +190,15 @@ class SparseAttnV4DecodeFp8Op:
         # is attempted while capture is active.
         warmup(q.device)
         swa_decode_cache, swa_indices = pack_logical_workspace(
-            kv_cache, swa_indices, page_size=64
+            kv_cache, swa_indices, page_size=64, namespace="swa"
         )
         if extra_k_cache is not None and extra_indices is not None:
             extra_page_size = 2 if int(extra_k_cache.shape[1]) <= 2 else 64
             extra_decode_cache, extra_indices = pack_logical_workspace(
-                extra_k_cache, extra_indices, page_size=extra_page_size
+                extra_k_cache,
+                extra_indices,
+                page_size=extra_page_size,
+                namespace="extra",
             )
         else:
             extra_decode_cache = None
