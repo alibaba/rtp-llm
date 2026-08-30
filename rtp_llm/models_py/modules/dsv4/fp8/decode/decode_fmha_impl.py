@@ -67,8 +67,8 @@ class DSv4DecodeFmhaImplConfigFP8:
     # ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
     paged_pool_specs: Dict[str, Tuple[int, int, int]] = field(default_factory=dict)
 
-    # Snapshot of ``kv_cache.group_tags`` (framework-owned group ordering, one
-    # cache tag per entry). Kept so ``prepare`` can key a single-group
+    # Snapshot of ``kv_cache.group_tags`` (the framework's cache tags in
+    # canonical sorted order). Kept so ``prepare`` can key a single-group
     # ``PyAttentionInputs`` without a live ``kv_cache`` (the CUDA-graph replay
     # path doesn't hand one in). Static for the allocator's lifetime, so
     # snapshot-at-construct is safe.

@@ -16,9 +16,8 @@ namespace {
 
 class TestKVCacheSpec: public KVCacheSpec {
 public:
-    TestKVCacheSpec(std::string tag, KVCacheSpecType type, size_t seq_size, size_t k_elems, size_t v_elems):
+    TestKVCacheSpec(KVCacheSpecType type, size_t seq_size, size_t k_elems, size_t v_elems):
         k_elems_(k_elems), v_elems_(v_elems) {
-        this->tag                = std::move(tag);
         this->type               = type;
         this->seq_size_per_block = static_cast<uint32_t>(seq_size);
     }
@@ -65,13 +64,13 @@ GroupBase makeGroup(const std::string& tag,
                     size_t             v_elems,
                     uint32_t           local_kv_heads = 1) {
     GroupBase group;
-    group.tag                = tag;
-    group.spec               = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, k_elems, v_elems);
-    group.policy.group_type  = group_type;
-    group.layer_ids          = {0};
-    group.block_num          = 4;
-    group.local_kv_head_num  = local_kv_heads;
-    group.seq_size_per_block = physical_seq_size;
+    group.tag                       = tag;
+    group.spec                      = std::make_shared<TestKVCacheSpec>(spec_type, physical_seq_size, k_elems, v_elems);
+    group.policy.group_type         = group_type;
+    group.layer_ids                 = {0};
+    group.block_num                 = 4;
+    group.local_kv_head_num         = local_kv_heads;
+    group.seq_size_per_block        = physical_seq_size;
     group.kernel_seq_size_per_block = kernel_seq_size;
     return group;
 }
@@ -82,9 +81,10 @@ GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
     EXPECT_EQ(groups.size(), buffers.size());
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (size_t group_id = 0; group_id < topology->groups().size(); ++group_id) {
-        layouts.emplace(topology->groupById(group_id).tag,
-                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_id])}));
+    size_t                                buffer_ordinal = 0;
+    for (const auto& group : topology->groups()) {
+        layouts.emplace(group.tag,
+                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[buffer_ordinal++])}));
     }
     return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));
 }
@@ -109,7 +109,6 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
-    EXPECT_EQ(by_tag.group_id, 0);
     EXPECT_EQ(by_tag.tag, "full");
     EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
     EXPECT_EQ(cache.layerCount(), 1u);
@@ -182,6 +181,59 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     EXPECT_ANY_THROW(cache.getLayerCache(0, "missing"));
     EXPECT_ANY_THROW(cache.getLayerCache(0, "empty"));
     EXPECT_ANY_THROW(cache.getSeqSizePerBlock("missing"));
+}
+
+TEST(KVCacheLayoutViewTest, SortedBoundaryTagOrderIsCanonicalAndValidated) {
+    const std::vector<std::string> declared = {"swa_kv", "csa_kv", "indexer_kv"};
+    const std::vector<std::string> expected = {"csa_kv", "indexer_kv", "swa_kv"};
+    EXPECT_EQ(sortedCacheGroupTags(declared), expected);
+    // Sorting must not disturb the caller's own record order.
+    EXPECT_EQ(declared, (std::vector<std::string>{"swa_kv", "csa_kv", "indexer_kv"}));
+    // Reordering the declaration cannot move an entry.
+    EXPECT_EQ(sortedCacheGroupTags({"indexer_kv", "swa_kv", "csa_kv"}), expected);
+
+    for (size_t ordinal = 0; ordinal < expected.size(); ++ordinal) {
+        EXPECT_EQ(groupOrdinalForTag(expected, expected[ordinal]), ordinal);
+    }
+    EXPECT_ANY_THROW(groupOrdinalForTag(expected, "missing"));
+    EXPECT_ANY_THROW(sortedCacheGroupTags({"full", ""}));
+    EXPECT_ANY_THROW(sortedCacheGroupTags({"full", "full"}));
+}
+
+TEST(KVCacheLayoutViewTest, ModelCacheTagsAreSortedAndBindingIgnoresDeclarationOrder) {
+    const auto csa       = torch::zeros({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
+    const auto swa       = torch::ones({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
+    const auto makeCache = [&](bool reversed) {
+        auto csa_group   = makeGroup("csa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
+        auto swa_group   = makeGroup("swa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA, 8, 8, 32, 32);
+        auto placeholder = makeGroup("indexer_kv", KVCacheSpecType::OpaqueState, CacheGroupType::FULL, 1, 1, 1, 0);
+        if (reversed) {
+            return torch_ext::KVCache(makeLayout({std::move(placeholder), std::move(swa_group), std::move(csa_group)},
+                                                 {"indexer_kv", "swa_kv", "csa_kv"},
+                                                 {{{}, {}}, {swa, {}}, {csa, {}}}));
+        }
+        return torch_ext::KVCache(makeLayout({std::move(csa_group), std::move(swa_group), std::move(placeholder)},
+                                             {"csa_kv", "swa_kv", "indexer_kv"},
+                                             {{csa, {}}, {swa, {}}, {{}, {}}}));
+    };
+
+    const std::vector<std::string> sorted_tags = {"csa_kv", "indexer_kv", "swa_kv"};
+    for (const bool reversed : {false, true}) {
+        auto cache = makeCache(reversed);
+        EXPECT_EQ(cache.groupTags(), sorted_tags) << "reversed=" << reversed;
+        // The empty placeholder group is skipped by enumeration in both orders.
+        const auto groups = cache.getLayerCacheGroups(0);
+        ASSERT_EQ(groups.size(), 2u) << "reversed=" << reversed;
+        std::vector<std::string> enumerated_tags;
+        for (const auto& group : groups) {
+            enumerated_tags.push_back(group.tag);
+        }
+        std::sort(enumerated_tags.begin(), enumerated_tags.end());
+        EXPECT_EQ(enumerated_tags, (std::vector<std::string>{"csa_kv", "swa_kv"})) << "reversed=" << reversed;
+        EXPECT_EQ(cache.getLayerCache(0, "csa_kv").kv_cache_base.data_ptr(), csa.data_ptr()) << "reversed=" << reversed;
+        EXPECT_EQ(cache.getLayerCache(0, "swa_kv").kv_cache_base.data_ptr(), swa.data_ptr()) << "reversed=" << reversed;
+        EXPECT_ANY_THROW(cache.getLayerCache(0, "indexer_kv")) << "reversed=" << reversed;
+    }
 }
 
 }  // namespace

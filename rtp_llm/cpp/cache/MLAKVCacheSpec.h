@@ -29,7 +29,6 @@ struct MLAKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str());
 
         auto spec                = std::make_shared<MLAKVCacheSpec>();
-        spec->tag                = desc.tag;
         spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
@@ -37,11 +36,11 @@ struct MLAKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
 
-        const bool   is_fp8     = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
-        const size_t no_pe      = static_cast<size_t>(attn.kv_lora_rank);
-        const size_t rope       = static_cast<size_t>(attn.rope_head_dim);
-        spec->nope_per_token = no_pe;
-        spec->rope_per_token = rope;
+        const bool   is_fp8   = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
+        const size_t no_pe    = static_cast<size_t>(attn.kv_lora_rank);
+        const size_t rope     = static_cast<size_t>(attn.rope_head_dim);
+        spec->nope_per_token  = no_pe;
+        spec->rope_per_token  = rope;
         spec->elems_per_token = is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
 
         return spec;

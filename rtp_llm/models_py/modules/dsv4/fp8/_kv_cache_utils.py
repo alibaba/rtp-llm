@@ -27,21 +27,6 @@ def _positive_int(value: Any) -> Optional[int]:
     return ivalue if ivalue > 0 else None
 
 
-def _tag_for_group_or_tag(
-    kv_cache: Any,
-    group: Optional[int] = None,
-    tag: Optional[str] = None,
-) -> Optional[str]:
-    if tag is not None:
-        return str(tag)
-    if group is None:
-        return None
-    tags = _group_tags(kv_cache)
-    if not tags or group < 0 or group >= len(tags):
-        return None
-    return tags[group]
-
-
 def _seq_size_per_block(kv_cache: Any, tag: str) -> Optional[int]:
     getter = getattr(kv_cache, "get_seq_size_per_block", None)
     if getter is None:
@@ -62,11 +47,7 @@ def _kernel_seq_size_per_block(kv_cache: Any, tag: str) -> Optional[int]:
         return None
 
 
-def require_pool_tokens_per_block(
-    kv_cache: Any,
-    group: Optional[int] = None,
-    tag: Optional[str] = None,
-) -> int:
+def require_pool_tokens_per_block(kv_cache: Any, tag: str) -> int:
     """Return block-table row raw-token coverage for a cache group.
 
     The row size follows the group's identity: FULL paged pools (csa_kv /
@@ -75,10 +56,11 @@ def require_pool_tokens_per_block(
     (swa_kv and the *_state groups) index at physical-block granularity and use
     ``KVCache.get_seq_size_per_block(tag)``.
 
-    ``group`` is accepted as a positional index into ``KVCache.group_tags``
-    (topology group-id order) for callers that only hold a group id.
+    The semantic tag is the only accepted group selector: ``KVCache.group_tags``
+    is a canonically ordered set of identities, so a position in it never
+    identifies a group.
     """
-    resolved_tag = _tag_for_group_or_tag(kv_cache, group=group, tag=tag)
+    resolved_tag = str(tag)
     if resolved_tag in _PHYSICAL_ROW_TAGS:
         value = _seq_size_per_block(kv_cache, resolved_tag)
         if value is not None:
@@ -90,7 +72,7 @@ def require_pool_tokens_per_block(
 
     raise RuntimeError(
         "DSV4 KVCache pool tokens-per-block cannot be inferred. "
-        "group=%r, tag=%r, group_tags=%r" % (group, tag, _group_tags(kv_cache))
+        "tag=%r, group_tags=%r" % (tag, _group_tags(kv_cache))
     )
 
 
@@ -171,7 +153,9 @@ class PoolBackedModule(nn.Module):
         self._kv_eb = kv_eb
         self._kv_tokens_per_block = kv_tokens_per_block
         self._kv_owner_tokens_per_block = (
-            kv_owner_tokens_per_block if kv_owner_tokens_per_block > 0 else kv_tokens_per_block
+            kv_owner_tokens_per_block
+            if kv_owner_tokens_per_block > 0
+            else kv_tokens_per_block
         )
 
         if state_pool_view is not None:

@@ -21,11 +21,10 @@ namespace rtp_llm {
 
 namespace {
 
-std::shared_ptr<const CacheTopology> warmupCacheTopology() {
-    static const auto topology = []() {
+const CacheConfig& warmupCacheConfig() {
+    static const auto config = []() {
         constexpr auto kWarmupCacheTag = "__warmup__";
         auto           spec            = std::make_shared<MHAKVCacheSpec>();
-        spec->tag                      = kWarmupCacheTag;
 
         GroupBase group;
         group.tag                       = kWarmupCacheTag;
@@ -35,9 +34,12 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
         group.seq_size_per_block        = 1;
         group.kernel_seq_size_per_block = 1;
 
-        return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
+        CacheConfig config;
+        config.layer_num = 1;
+        config.setTopology({std::move(group)}, {{0, {kWarmupCacheTag}}});
+        return config;
     }();
-    return topology;
+    return config;
 }
 
 }  // namespace
@@ -269,10 +271,9 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    const auto& config =
+        resource_context_.cache_manager ? resource_context_.cache_manager->cacheConfig() : warmupCacheConfig();
+    batch_kv_cache_resource_->initGroups(config);
     resource_released_ = false;
 }
 
@@ -611,10 +612,9 @@ const CacheKeysType& StreamCacheResource::cacheKeys(int32_t batch_id) const {
 void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
-    const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
-                              warmupCacheTopology();
-    batch_kv_cache_resource_->initGroups(topology);
+    const auto& config =
+        resource_context_.cache_manager ? resource_context_.cache_manager->cacheConfig() : warmupCacheConfig();
+    batch_kv_cache_resource_->initGroups(config);
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
@@ -797,11 +797,10 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
-
-    for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+    const auto& topology = resource_context_.cache_manager->cacheConfig().topology();
+    for (const auto& group : topology.groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }
     }
 }

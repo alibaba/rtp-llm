@@ -18,15 +18,20 @@
 namespace rtp_llm {
 
 P2PConnector::P2PConnector(P2PConnectorConfig                          config,
+                           const CacheConfig&                          cache_config,
                            const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                            const kmonitor::MetricsReporterPtr&         metrics_reporter):
-    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {}
+    config_(std::move(config)),
+    cache_config_(cache_config),
+    layer_block_converter_(layer_block_converter),
+    metrics_reporter_(metrics_reporter) {}
 
 P2PConnector::~P2PConnector() = default;
 
 bool P2PConnector::init() {
     if (config_.tp_rank == 0) {
-        scheduler_             = std::make_shared<P2PConnectorScheduler>(config_.scheduler_config, metrics_reporter_);
+        scheduler_ =
+            std::make_shared<P2PConnectorScheduler>(config_.scheduler_config, cache_config_, metrics_reporter_);
         std::string process_id = autil::NetUtil::getBindIp() + "_pid_" + std::to_string(getpid()) + "_timestamp_"
                                  + std::to_string(currentTimeUs());
         if (!scheduler_->init(process_id)) {
@@ -35,7 +40,8 @@ bool P2PConnector::init() {
         }
     }
 
-    worker_ = std::make_shared<P2PConnectorWorker>(config_.worker_config, layer_block_converter_, metrics_reporter_);
+    worker_ = std::make_shared<P2PConnectorWorker>(
+        config_.worker_config, cache_config_, layer_block_converter_, metrics_reporter_);
     if (!worker_->init()) {
         RTP_LLM_LOG_ERROR("init failed: worker init failed");
         return false;

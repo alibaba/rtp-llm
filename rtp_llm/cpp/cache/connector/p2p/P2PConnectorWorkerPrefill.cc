@@ -16,10 +16,12 @@
 namespace rtp_llm {
 
 P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig                    config,
+                                                     const CacheConfig&                          cache_config,
                                                      const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                                                      const kmonitor::MetricsReporterPtr&         metrics_reporter,
                                                      const transfer::IKVCacheSenderPtr&          sender):
     config_(std::move(config)),
+    cache_config_(cache_config),
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
     sender_(sender),
@@ -66,7 +68,7 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
         for (int expected_layer = 0; expected_layer < resource->layerNum(); ++expected_layer) {
             for (const auto& expected_tag : resource->groupTagsForLayer(expected_layer)) {
                 expected_buffer_count += LayerCacheBufferUtil::hasTransferableBlocks(
-                    *resource, expected_layer, expected_tag, 0, -1, config_.cp_rank, config_.cp_size);
+                    cache_config_, *resource, expected_layer, expected_tag, 0, -1, config_.cp_rank, config_.cp_size);
             }
         }
         computed_buffer->setExpectedBufferCount(expected_buffer_count);
@@ -75,7 +77,7 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& cache_tag : resource->groupTagsForLayer(layer_id)) {
         auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(
-            *resource, 0, layer_id, cache_tag, 0, -1, config_.cp_rank, config_.cp_size);
+            cache_config_, *resource, 0, layer_id, cache_tag, 0, -1, config_.cp_rank, config_.cp_size);
         if (layer_cache_buffer) {
             collector->total_block_count += layer_cache_buffer->blockIdMap().size();
             layer_cache_buffers.push_back(std::move(layer_cache_buffer));

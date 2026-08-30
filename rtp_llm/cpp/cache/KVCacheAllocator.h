@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -23,7 +24,7 @@ struct KVCacheTokenCapacity {
 };
 
 struct KVCachePoolMetricsSnapshot {
-    size_t      pool_index           = 0;
+    std::string tag;
     std::string pool_name            = "unnamed";
     size_t      free_blocks          = 0;
     size_t      available_blocks     = 0;
@@ -54,14 +55,10 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const = 0;
     virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const = 0;
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int group_id, int block_id) const;
-    virtual std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int group_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo          convertIndexToAddrByTag(int layer_id, const std::string& tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, const std::string& tag, int block_id) const;
+    virtual BlockAddrInfo          convertIndexToAddrByTag(int layer_id, std::string_view tag, int block_id) const;
+    virtual std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, std::string_view tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBufferByTag(
-        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const;
+        int layer_id, std::string_view tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
@@ -140,7 +137,7 @@ public:
     virtual size_t                  maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
-    virtual std::vector<int>                        independentEvictionGroupIds() const;
+    virtual std::vector<std::string>                independentEvictionGroupTags() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
@@ -153,9 +150,9 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool         doInit() = 0;
-    virtual size_t       reservableAvailableBlocksNum() const;
-    MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual bool   doInit() = 0;
+    virtual size_t reservableAvailableBlocksNum() const;
+    MallocResult   initMalloc(const MallocInfo& malloc_info);
     // Classifies an init-malloc shortfall: a total-capacity shortfall is
     // PERMANENT (the request can never fit), an available-capacity shortfall is
     // RETRYABLE (the pools are momentarily full) so the stream stays WAITING
@@ -179,9 +176,9 @@ protected:
                                                     int  target_batch_size) const = 0;
     virtual void checkCPShardedMallocResult(const MallocInfo&) const {}
     virtual void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
-    bool         cpShardThisGroupForCapacity(size_t gid) const;
-    size_t       logicalSeqSizePerBlockForCapacity(size_t gid) const;
-    int          cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
+    bool         cpShardThisGroupForCapacity(std::string_view tag) const;
+    size_t       logicalSeqSizePerBlockForCapacity(std::string_view tag) const;
+    int          cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const;
     int          deviceCacheMetricTokensPerBlock() const;
 
     CacheConfig                        config_;

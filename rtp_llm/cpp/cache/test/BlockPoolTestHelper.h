@@ -85,7 +85,6 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
                             type_sz);
 
     auto spec                = std::make_shared<TestKVCacheSpec>();
-    spec->tag                = "default";
     spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
                                                                               KVCacheSpecType::MultiHeadLatentAttention;
     spec->seq_size_per_block = seq_size_per_block;

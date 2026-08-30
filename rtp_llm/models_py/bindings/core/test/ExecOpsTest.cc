@@ -141,7 +141,6 @@ static std::shared_ptr<KVCacheSpec> makeTestSpec(const std::string& tag, size_t 
     std::shared_ptr<KVCacheSpec> spec = mla_cache ?
                                             std::static_pointer_cast<KVCacheSpec>(std::make_shared<MLAKVCacheSpec>()) :
                                             std::static_pointer_cast<KVCacheSpec>(std::make_shared<MHAKVCacheSpec>());
-    spec->tag                         = tag;
     spec->seq_size_per_block          = static_cast<uint32_t>(tokens_per_block);
     return spec;
 }

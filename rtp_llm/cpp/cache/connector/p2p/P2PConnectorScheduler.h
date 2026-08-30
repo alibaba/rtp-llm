@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
@@ -20,7 +21,9 @@ class P2PConnectorScheduler {
 public:
     using AsyncReadResult = P2PConnectorSchedulerDecode::AsyncReadResult;
 
-    P2PConnectorScheduler(P2PConnectorSchedulerConfig config, const kmonitor::MetricsReporterPtr& metrics_reporter);
+    P2PConnectorScheduler(P2PConnectorSchedulerConfig         config,
+                          const CacheConfig&                  cache_config,
+                          const kmonitor::MetricsReporterPtr& metrics_reporter);
     ~P2PConnectorScheduler();
 
 public:
@@ -29,9 +32,9 @@ public:
     void stopChecker();
 
 public:
-    AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
-                              const std::shared_ptr<Meta>&    meta,
-                              const std::pair<int, int>&      block_range);
+    AsyncReadResult asyncRead(const KVCacheResourcePtr&    resource,
+                              const std::shared_ptr<Meta>& meta,
+                              const std::pair<int, int>&   block_range);
 
     ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,
                           const std::string&                                   unique_key,
@@ -42,6 +45,7 @@ public:
 
 private:
     P2PConnectorSchedulerConfig         config_;
+    const CacheConfig                   cache_config_;
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient> tp_broadcast_client_;
 

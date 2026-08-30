@@ -33,6 +33,12 @@ class HybridKVCacheSpecTest(TestCase):
         KimiLinear._post_build_model_config(config)
         return [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
 
+    def test_desc_retains_model_dsl_tag_identity(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "semantic_group"
+
+        self.assertEqual(desc.tag, "semantic_group")
+
     def test_removed_group_memory_policy_keys_are_unknown(self):
         capacity = CacheCapacityPolicyDesc()
         with self.assertRaises(AttributeError):

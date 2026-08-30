@@ -53,6 +53,9 @@ std::string GptModelInputs::debugString(bool force) const {
     if (last_hidden_states.defined()) {
         debug_string << ", last_hidden_states: " << tb(last_hidden_states);
     }
+    if (!kv_cache_group_tags.empty()) {
+        debug_string << ", kv_cache_group_tags: " << combineStrings(kv_cache_group_tags);
+    }
     if (kv_cache_kernel_block_id.defined()) {
         debug_string << ", kv_cache_kernel_block_id: " << tb(kv_cache_kernel_block_id);
     }

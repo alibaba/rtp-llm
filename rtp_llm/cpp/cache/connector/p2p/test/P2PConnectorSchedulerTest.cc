@@ -39,7 +39,9 @@ protected:
         scheduler_config.worker_grpc_addrs = tp_broadcast_addrs_;
         scheduler_config.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
 
-        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(scheduler_config), nullptr);
+        cache_config_ = test::makeTestCacheConfig(
+            test::makeTestCacheTopologyByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
+        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(scheduler_config), cache_config_, nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
 
@@ -51,16 +53,20 @@ protected:
 
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
-        auto                          resource = std::make_shared<KVCacheResource>();
-        std::vector<std::vector<int>> layer_to_group_ids(num_layers);
+        auto                                  resource = std::make_shared<KVCacheResource>();
+        std::vector<std::vector<std::string>> layer_to_group_tags(num_layers);
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group_ids[i] = {i};
+            layer_to_group_tags[i] = {"group" + std::to_string(i)};
         }
-        resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
+        auto config =
+            test::makeTestCacheConfig(test::makeTestCacheTopologyByTag(num_layers, num_layers, layer_to_group_tags));
+        resource->initGroups(config);
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
+            // Each layer owns exactly one group; layer_to_group_tags records its tag.
+            const auto& tag = layer_to_group_tags[layer_id].front();
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds(tag).add({i});
             }
         }
 
@@ -83,7 +89,9 @@ protected:
 
     KVCacheResourcePtr createInvalidKVCacheResource() {
         auto resource = std::make_shared<KVCacheResource>();
-        resource->initGroups(test::makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/1, {{0}}));
+        auto config =
+            test::makeTestCacheConfig(test::makeTestCacheTopologyByTag(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
+        resource->initGroups(config);
         return resource;
     }
 
@@ -108,7 +116,7 @@ protected:
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
         cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
         cfg.p2p_transfer_not_done_resource_hold_ms = hold_ms;
-        scheduler_                                 = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
+        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(cfg), cache_config_, nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
 
@@ -117,6 +125,7 @@ protected:
     std::vector<std::string>                    tp_broadcast_addrs_;
     std::unique_ptr<TestRpcServer>              prefill_server_;
     std::string                                 prefill_addr_;
+    CacheConfig                                 cache_config_;
     std::unique_ptr<P2PConnectorScheduler>      scheduler_;
 };
 

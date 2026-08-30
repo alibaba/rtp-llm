@@ -5,18 +5,18 @@ import unittest
 import torch
 
 from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
+from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     pool_physical_tokens_per_block,
     require_pool_tokens_per_block,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8.decode.paged_topk_translator import (
     translate_local_to_global_slots,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
     compute_kv_pool_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import CSA_KV, HCA_KV, SWA_KV
 
 
 class _FakeTagKVCache:
@@ -54,10 +54,18 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             kernel_seq_size_per_block={CSA_KV: 128, SWA_KV: 16384},
         )
 
-        self.assertEqual(require_pool_tokens_per_block(cache, group=0), 128)
-        self.assertEqual(require_pool_tokens_per_block(cache, group=1), 16384)
         self.assertEqual(require_pool_tokens_per_block(cache, tag=CSA_KV), 128)
         self.assertEqual(require_pool_tokens_per_block(cache, tag=SWA_KV), 16384)
+
+        # group_tags is a canonically ordered set of identities: declaring the
+        # same groups in another order must not move any answer.
+        reordered = _FakeTagKVCache(
+            group_tags=[SWA_KV, CSA_KV],
+            seq_size_per_block={CSA_KV: 256, SWA_KV: 16384},
+            kernel_seq_size_per_block={CSA_KV: 128, SWA_KV: 16384},
+        )
+        self.assertEqual(require_pool_tokens_per_block(reordered, tag=CSA_KV), 128)
+        self.assertEqual(require_pool_tokens_per_block(reordered, tag=SWA_KV), 16384)
 
     def test_require_pool_tokens_per_block_is_per_group(self) -> None:
         cache = _FakeTagKVCache(
@@ -66,8 +74,7 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             kernel_seq_size_per_block={HCA_KV: 256, SWA_KV: 1024},
         )
 
-        self.assertEqual(require_pool_tokens_per_block(cache, group=0), 256)
-        self.assertEqual(require_pool_tokens_per_block(cache, group=1), 1024)
+        self.assertEqual(require_pool_tokens_per_block(cache, tag=HCA_KV), 256)
         self.assertEqual(require_pool_tokens_per_block(cache, tag=SWA_KV), 1024)
         self.assertEqual(pool_physical_tokens_per_block(cache, HCA_KV), 256)
 
@@ -98,8 +105,12 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             owner_tokens_per_block=256,
         )
 
-        torch.testing.assert_close(rank0, torch.tensor([640, -1, -1, -1], dtype=torch.int64))
-        torch.testing.assert_close(rank3, torch.tensor([-1, -1, -1, 832], dtype=torch.int64))
+        torch.testing.assert_close(
+            rank0, torch.tensor([640, -1, -1, -1], dtype=torch.int64)
+        )
+        torch.testing.assert_close(
+            rank3, torch.tensor([-1, -1, -1, 832], dtype=torch.int64)
+        )
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
         cache = _FakeTagKVCache(

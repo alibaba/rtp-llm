@@ -56,8 +56,8 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -1132,9 +1132,10 @@ class DeepSeekV4Model(GptModelBase):
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
         )
-        # Snapshot framework's group ordering — CUDA-graph replay path
-        # inside the impl's ``prepare`` has no live kv_cache, so carry
-        # the list in the config. Position IS the topology group id.
+        # Snapshot the framework's cache tags — the CUDA-graph replay path
+        # inside the impl's ``prepare`` has no live kv_cache, so carry the
+        # list in the config. It is a set of semantic identities in canonical
+        # sorted order; a position in it identifies nothing.
         group_tags_snapshot = (
             [str(tag) for tag in (self.kv_cache.group_tags or [])]
             if self.kv_cache is not None

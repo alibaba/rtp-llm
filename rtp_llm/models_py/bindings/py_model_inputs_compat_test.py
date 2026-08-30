@@ -28,8 +28,8 @@ class _RoutingCache:
 
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [
-            LayerKVCache(torch.ones(1), 1, layer_id, group_id, tag)
-            for group_id, tag in enumerate(self._layer_tags[layer_id])
+            LayerKVCache(torch.ones(1), 1, layer_id, tag)
+            for tag in self._layer_tags[layer_id]
         ]
 
 
@@ -62,11 +62,9 @@ class PyModelInputsCompatTest(unittest.TestCase):
     def test_sparse_routes_select_exact_tags_independent_of_topology_order(
         self,
     ) -> None:
-        default_cache = LayerKVCache(
-            torch.ones(1), 64, layer_id=0, group_id=7, tag="default"
-        )
+        default_cache = LayerKVCache(torch.ones(1), 64, layer_id=0, tag="default")
         indexer_cache = LayerKVCache(
-            torch.ones(1) * 2, 64, layer_id=0, group_id=3, tag="indexer_kv"
+            torch.ones(1) * 2, 64, layer_id=0, tag="indexer_kv"
         )
         cache = _ConcreteRoutingCache([indexer_cache, default_cache])
 
@@ -83,16 +81,14 @@ class PyModelInputsCompatTest(unittest.TestCase):
         )
 
     def test_sparse_routes_reject_absent_duplicate_and_wrong_tags(self) -> None:
-        absent = _ConcreteRoutingCache(
-            [LayerKVCache(torch.ones(1), 64, 0, 0, "default")]
-        )
+        absent = _ConcreteRoutingCache([LayerKVCache(torch.ones(1), 64, 0, "default")])
         with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
             get_layer_cache_for_tag(absent, 0, "indexer_kv")
 
         duplicate = _ConcreteRoutingCache(
             [
-                LayerKVCache(torch.ones(1), 64, 0, 0, "indexer_kv"),
-                LayerKVCache(torch.ones(1), 64, 0, 1, "indexer_kv"),
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
             ]
         )
         with self.assertRaisesRegex(RuntimeError, "duplicate KV cache tag"):
@@ -213,7 +209,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             base,
             16,
             layer_id=3,
-            group_id=2,
             tag="full",
             kv_scale_base=scale,
         )
@@ -222,8 +217,18 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(scale.data_ptr(), layer.kv_scale_base.data_ptr())
         self.assertEqual(16, layer.seq_size_per_block)
         self.assertEqual(3, layer.layer_id)
-        self.assertEqual(2, layer.group_id)
         self.assertEqual("full", layer.tag)
+
+    def test_layer_kv_cache_exposes_no_cache_group_ordinal(self) -> None:
+        # The semantic tag is the only cache-group identity crossing to Python:
+        # neither a positional field nor a keyword default may survive.
+        self.assertFalse(hasattr(LayerKVCache, "group_id"))
+        layer = LayerKVCache(torch.ones(1), 8, layer_id=0, tag="full")
+        self.assertFalse(hasattr(layer, "group_id"))
+        with self.assertRaises(TypeError):
+            LayerKVCache(torch.ones(1), 8, layer_id=0, group_id=0, tag="full")
+        # The 4th positional argument is the tag, not an ordinal.
+        self.assertEqual("linear", LayerKVCache(torch.ones(1), 8, 0, "linear").tag)
 
     def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
         full = self._attn_inputs(is_prefill=False, input_length=1)
