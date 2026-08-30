@@ -14,8 +14,9 @@ bool LoadJoinRegistry::start(TreeNode*                                node,
                              const std::shared_ptr<LoadAsyncContext>& context,
                              bool                                     install_target_in_cache) {
     Record record;
-    record.target_blocks = target_blocks;
-    record.contexts.emplace(context->contextId(), Record::ContextEntry{context, install_target_in_cache});
+    record.target_blocks                 = target_blocks;
+    record.owner_context_id              = context->contextId();
+    record.owner_install_target_in_cache = install_target_in_cache;
     const std::pair<decltype(records_)::iterator, bool> insert_result =
         records_.emplace(Key{node, group_set_id}, std::move(record));
     return insert_result.second;
@@ -35,8 +36,8 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
             RTP_LLM_LOG_ERROR("failed to attach joined load context, group_set_id=%zu", desc.group_set_id);
             return false;
         }
-        if (record_it->second.contexts.find(context_id) == record_it->second.contexts.end()) {
-            record_it->second.contexts[context_id] = {context, desc.install_target_in_cache};
+        if (record_it->second.joined_contexts.find(context_id) == record_it->second.joined_contexts.end()) {
+            record_it->second.joined_contexts[context_id] = {context, desc.install_target_in_cache};
         }
         context->setTargetBlocks(desc_index, record_it->second.target_blocks);
         tree_->groupSets()[desc.group_set_id]->referenceBlocks(
@@ -45,35 +46,33 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
     return true;
 }
 
-bool LoadJoinRegistry::finish(TreeNode* node, size_t group_set_id, bool success) {
+bool LoadJoinRegistry::finish(TreeNode*                                       node,
+                              size_t                                          group_set_id,
+                              std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
     const auto record_it = records_.find(Key{node, group_set_id});
     if (record_it == records_.end()) {
         return false;
     }
-    Record::ContextMap contexts = std::move(record_it->second.contexts);
+    Record::ContextMap contexts = std::move(record_it->second.joined_contexts);
     records_.erase(record_it);
 
-    bool all_completed = true;
     for (const auto& context_entry : contexts) {
         const std::shared_ptr<LoadAsyncContext> context = context_entry.second.context.lock();
-        if (context == nullptr) {
-            continue;
-        }
-        if (!context->completeOne(success)) {
-            all_completed = false;
-            RTP_LLM_LOG_WARNING("failed to complete joined load context, group_set=%zu", group_set_id);
+        if (context != nullptr) {
+            joined_contexts.push_back(context);
         }
     }
-    return all_completed;
+    return true;
 }
 
 bool LoadJoinRegistry::installTargetInCache(TreeNode* node, size_t group_set_id) const {
     const auto record_it = records_.find(Key{node, group_set_id});
     RTP_LLM_CHECK_WITH_INFO(
         record_it != records_.end(), "missing load join record during settlement, group_set_id=%zu", group_set_id);
-    return std::any_of(record_it->second.contexts.begin(),
-                       record_it->second.contexts.end(),
-                       [](const auto& context_entry) { return context_entry.second.install_target_in_cache; });
+    return record_it->second.owner_install_target_in_cache
+           || std::any_of(record_it->second.joined_contexts.begin(),
+                          record_it->second.joined_contexts.end(),
+                          [](const auto& context_entry) { return context_entry.second.install_target_in_cache; });
 }
 
 bool LoadJoinRegistry::eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id) {
@@ -81,12 +80,13 @@ bool LoadJoinRegistry::eraseForContext(TreeNode* node, size_t group_set_id, uint
     if (record_it == records_.end()) {
         return false;
     }
-    const size_t erased_count = record_it->second.contexts.erase(context_id);
+    if (record_it->second.owner_context_id == context_id) {
+        records_.erase(record_it);
+        return true;
+    }
+    const size_t erased_count = record_it->second.joined_contexts.erase(context_id);
     if (erased_count != 1) {
         return false;
-    }
-    if (record_it->second.contexts.empty()) {
-        records_.erase(record_it);
     }
     return true;
 }

@@ -20,7 +20,7 @@ public:
                const std::shared_ptr<LoadAsyncContext>& context,
                bool                                     install_target_in_cache = true);
     bool join(const std::shared_ptr<LoadAsyncContext>& context);
-    bool finish(TreeNode* node, size_t group_set_id, bool success);
+    bool finish(TreeNode* node, size_t group_set_id, std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
     bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
     bool installTargetInCache(TreeNode* node, size_t group_set_id) const;
 
@@ -50,8 +50,9 @@ private:
         using ContextMap = std::unordered_map<uint64_t, ContextEntry>;
 
         std::vector<BlockIdxType> target_blocks;
-        // Joining a load must not extend its context lifetime; the context owns RAII abort.
-        ContextMap contexts;
+        uint64_t                  owner_context_id{0};
+        bool                      owner_install_target_in_cache{true};
+        ContextMap                joined_contexts;
     };
 
     using RecordMap = std::unordered_map<Key, Record, KeyHash>;

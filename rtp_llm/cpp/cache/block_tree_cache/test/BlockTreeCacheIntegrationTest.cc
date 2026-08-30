@@ -187,6 +187,164 @@ private:
     std::shared_ptr<PausablePerRankBlockTransferEngine> transfer_engine_;
 };
 
+class ManuallyCompletedAsyncContext final: public AsyncContext {
+public:
+    bool completeIfPending(ErrorInfo error) {
+        std::vector<DoneCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (done_) {
+                return false;
+            }
+            error_    = std::move(error);
+            done_     = true;
+            callbacks = std::move(callbacks_);
+        }
+        cv_.notify_all();
+        for (DoneCallback& callback : callbacks) {
+            callback(error_);
+        }
+        return true;
+    }
+
+    void waitDone() override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return done_; });
+    }
+
+    void onDone(DoneCallback callback) override {
+        ErrorInfo error;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!done_) {
+                callbacks_.push_back(std::move(callback));
+                return;
+            }
+            error = error_;
+        }
+        callback(std::move(error));
+    }
+
+    bool done() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return done_;
+    }
+
+    bool success() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return done_ && error_.ok();
+    }
+
+    ErrorInfo errorInfo() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return error_;
+    }
+
+private:
+    mutable std::mutex        mutex_;
+    std::condition_variable   cv_;
+    bool                      done_{false};
+    ErrorInfo                 error_;
+    std::vector<DoneCallback> callbacks_;
+};
+
+class ManuallyCompletedPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
+public:
+    explicit ManuallyCompletedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
+        PerRankBlockTransferEngine(groups) {}
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!manual_completion_enabled_) {
+            lock.unlock();
+            return PerRankBlockTransferEngine::submit(descriptors);
+        }
+        if (cleanup_requested_) {
+            return std::make_shared<CompletedAsyncContext>(
+                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
+        }
+        auto context = std::make_shared<ManuallyCompletedAsyncContext>();
+        contexts_.push_back(context);
+        lock.unlock();
+        cv_.notify_all();
+        return context;
+    }
+
+    void enableManualCompletion() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ASSERT_FALSE(manual_completion_enabled_);
+        ASSERT_TRUE(contexts_.empty());
+        manual_completion_enabled_ = true;
+    }
+
+    bool waitUntilSubmitted(size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this, count] { return contexts_.size() >= count; });
+    }
+
+    bool complete(size_t index, ErrorInfo error) {
+        std::shared_ptr<ManuallyCompletedAsyncContext> context;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (index >= contexts_.size()) {
+                return false;
+            }
+            context = contexts_[index];
+        }
+        return context->completeIfPending(std::move(error));
+    }
+
+    void failPendingAndFutureSubmissions() {
+        std::vector<std::shared_ptr<ManuallyCompletedAsyncContext>> contexts;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cleanup_requested_ = true;
+            contexts           = contexts_;
+        }
+        for (const std::shared_ptr<ManuallyCompletedAsyncContext>& context : contexts) {
+            context->completeIfPending(
+                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
+        }
+    }
+
+private:
+    std::mutex                                                  mutex_;
+    std::condition_variable                                     cv_;
+    bool                                                        manual_completion_enabled_{false};
+    bool                                                        cleanup_requested_{false};
+    std::vector<std::shared_ptr<ManuallyCompletedAsyncContext>> contexts_;
+};
+
+class ManualTransferCleanupGuard {
+public:
+    explicit ManualTransferCleanupGuard(std::shared_ptr<ManuallyCompletedPerRankBlockTransferEngine> transfer_engine):
+        transfer_engine_(std::move(transfer_engine)) {}
+
+    ~ManualTransferCleanupGuard() {
+        transfer_engine_->failPendingAndFutureSubmissions();
+    }
+
+private:
+    std::shared_ptr<ManuallyCompletedPerRankBlockTransferEngine> transfer_engine_;
+};
+
+TEST(ManualTransferCleanupGuardTest, FailsPendingAndFutureManualTransfers) {
+    auto transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{});
+    transfer_engine->enableManualCompletion();
+    const std::shared_ptr<AsyncContext> pending = transfer_engine->submit({TransferDescriptor{}});
+    ASSERT_NE(pending, nullptr);
+    ASSERT_FALSE(pending->done());
+
+    { ManualTransferCleanupGuard cleanup(transfer_engine); }
+
+    EXPECT_TRUE(pending->done());
+    EXPECT_FALSE(pending->success());
+    const std::shared_ptr<AsyncContext> future = transfer_engine->submit({TransferDescriptor{}});
+    ASSERT_NE(future, nullptr);
+    EXPECT_TRUE(future->done());
+    EXPECT_FALSE(future->success());
+}
+
 class ThrowingPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
 public:
     explicit ThrowingPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
@@ -211,6 +369,12 @@ private:
 // fails the test after this deadline instead of hanging until the Bazel
 // global timeout.
 constexpr std::chrono::seconds kRaceWaitTimeout{30};
+
+void waitForCacheTasksToDrainIgnoringCredits(BlockTreeCache& cache) {
+    std::unique_lock<std::mutex> lock(cache.task_pool_->wait_mutex_);
+    ASSERT_TRUE(cache.task_pool_->wait_cv_.wait_for(
+        lock, kRaceWaitTimeout, [&cache] { return cache.task_pool_->pending_tasks_.load() == 0; }));
+}
 
 class ThreadCompletion {
 public:
@@ -1328,6 +1492,137 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedRequestTierJoinAlwaysPromotesWhenAnyP
         environment->expectFullyReclaimed();
     }
 }
+
+class JoinedParentSettlementTest: public ::testing::TestWithParam<bool> {};
+
+TEST_P(JoinedParentSettlementTest, OwnedChildPublishesOnlyAfterJoinedParentSettlement) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    const bool parent_success = GetParam();
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    options.enable_disk = false;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    auto transfer_engine = std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(environment->groups);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, transfer_engine);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    demoteTo(*environment, Tier::HOST);
+    transfer_engine->enableManualCompletion();
+    ManualTransferCleanupGuard transfer_cleanup(transfer_engine);
+
+    BlockTreeMatchResult              first         = environment->cache->match({environment->keys.front()});
+    std::shared_ptr<LoadAsyncContext> first_context = takeLoadContext(first);
+    ASSERT_NE(first_context, nullptr);
+    ASSERT_FALSE(first_context->empty());
+
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
+    for (size_t desc_index = 0; desc_index < first_context->loadDescs().size(); ++desc_index) {
+        const TransferDescriptor& desc = first_context->loadDescs()[desc_index];
+        std::vector<BlockIdxType> targets;
+        for (const DeviceBlockPoolPtr& pool : environment->groups.at(desc.group_set_id)->devicePools()) {
+            const BlockIdList blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks);
+            targets.push_back(blocks.front());
+            request_targets.emplace_back(pool, blocks.front());
+        }
+        first_context->setTargetBlocks(desc_index, std::move(targets));
+    }
+
+    const size_t first_batch_count = transferBatchCount(first_context->loadDescs(), environment->cache->config());
+    ASSERT_GT(first_batch_count, 0u);
+    ASSERT_TRUE(first_context->commit());
+    ASSERT_TRUE(transfer_engine->waitUntilSubmitted(first_batch_count, kRaceWaitTimeout));
+
+    BlockTreeMatchResult              second         = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> second_context = takeLoadContext(second);
+    ASSERT_NE(second_context, nullptr);
+    ASSERT_FALSE(second_context->empty());
+
+    std::vector<TransferDescriptor> second_owned_descs;
+    size_t                          joined_count = 0;
+    for (size_t desc_index = 0; desc_index < second_context->loadDescs().size(); ++desc_index) {
+        if (second_context->joinedLoads()[desc_index]) {
+            ++joined_count;
+            continue;
+        }
+        const TransferDescriptor& desc = second_context->loadDescs()[desc_index];
+        second_owned_descs.push_back(desc);
+        std::vector<BlockIdxType> targets;
+        for (const DeviceBlockPoolPtr& pool : environment->groups.at(desc.group_set_id)->devicePools()) {
+            const BlockIdList blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks);
+            targets.push_back(blocks.front());
+            request_targets.emplace_back(pool, blocks.front());
+        }
+        second_context->setTargetBlocks(desc_index, std::move(targets));
+    }
+    ASSERT_EQ(joined_count, first_context->loadDescs().size());
+    ASSERT_FALSE(second_owned_descs.empty());
+
+    const size_t second_batch_count = transferBatchCount(second_owned_descs, environment->cache->config());
+    ASSERT_GT(second_batch_count, 0u);
+    ASSERT_TRUE(second_context->commit());
+    ASSERT_TRUE(transfer_engine->waitUntilSubmitted(first_batch_count + second_batch_count, kRaceWaitTimeout));
+
+    for (size_t index = first_batch_count; index < first_batch_count + second_batch_count; ++index) {
+        ASSERT_TRUE(transfer_engine->complete(index, ErrorInfo::OkStatus()));
+    }
+    waitForCacheTasksToDrainIgnoringCredits(*environment->cache);
+
+    EXPECT_FALSE(first_context->done());
+    EXPECT_FALSE(second_context->done());
+    const std::vector<GroupSetResource> child_while_parent_pending = environment->resourcesForPathNode(1);
+    ASSERT_EQ(child_while_parent_pending.size(), environment->groups.size());
+    for (const GroupSetResource& resource : child_while_parent_pending) {
+        EXPECT_TRUE(resource.hasTier(Tier::HOST));
+        EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
+    }
+
+    ASSERT_TRUE(transfer_engine->complete(
+        0,
+        parent_success ? ErrorInfo::OkStatus() :
+                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected parent load failure")));
+    for (size_t index = 1; index < first_batch_count; ++index) {
+        ASSERT_TRUE(transfer_engine->complete(index, ErrorInfo::OkStatus()));
+    }
+
+    first_context->waitDone();
+    second_context->waitDone();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+    EXPECT_EQ(first_context->success(), parent_success);
+    EXPECT_EQ(second_context->success(), parent_success);
+    EXPECT_TRUE(environment->allResourcesAtTier(parent_success ? Tier::DEVICE : Tier::HOST));
+    for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
+        for (const GroupSetResource& resource : environment->resourcesForPathNode(path_index)) {
+            EXPECT_EQ(resource.hasTier(Tier::HOST), !parent_success);
+            EXPECT_EQ(resource.hasTier(Tier::DEVICE), parent_success);
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        }
+    }
+
+    environment->releaseMatch(first);
+    environment->releaseMatch(second);
+    first_context.reset();
+    second_context.reset();
+    for (const auto& [pool, block] : request_targets) {
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+    }
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
+INSTANTIATE_TEST_SUITE_P(ParentSettlement,
+                         JoinedParentSettlementTest,
+                         ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "Success" : "Failure"; });
 
 TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     if (!cudaAvailable()) {

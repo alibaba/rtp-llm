@@ -26,9 +26,9 @@ struct LoadMatchResult {
     // PREFILL's post-allocation transfer fallback.
     LoadMatchResult(bool success, MallocStatus malloc_status = MallocStatus::NONE):
         success(success),
-        malloc_status(success ? MallocStatus::NONE :
+        malloc_status(success                             ? MallocStatus::NONE :
                       malloc_status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
-                                                           malloc_status) {}
+                                                            malloc_status) {}
 
     bool         success;
     MallocStatus malloc_status;
@@ -41,7 +41,8 @@ public:
         SUCCEEDED,
         FAILED
     };
-    using MatchCallback = std::function<LoadMatchResult(LoadAsyncContext&, size_t matched_blocks)>;
+    using MatchCallback           = std::function<LoadMatchResult(LoadAsyncContext&, size_t matched_blocks)>;
+    using SettlementReadyCallback = std::function<void(const std::shared_ptr<LoadAsyncContext>& context)>;
 
     LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                      std::vector<bool>                              joined_load,
@@ -60,6 +61,7 @@ public:
     bool     needBackendMatch() const;
 
     void setMatchCallback(MatchCallback callback);
+    void setSettlementReadyCallback(SettlementReadyCallback callback);
     void startBackendMatch();
     void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
     void setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block);
@@ -70,13 +72,16 @@ public:
 
     bool commit();
 
-    bool abortPending();
-    bool completeOne(bool success);
-    bool onTaskFail();
-    void waitDone() override;
-    void onDone(DoneCallback callback) override;
-    bool done() const override;
-    bool success() const override;
+    bool         abortPending();
+    bool         completeOne(bool success);
+    bool         completeTransfers(size_t count, bool success);
+    bool         aggregateSuccess() const;
+    bool         settle(bool success);
+    bool         onTaskFail();
+    void         waitDone() override;
+    void         onDone(DoneCallback callback) override;
+    bool         done() const override;
+    bool         success() const override;
     MallocStatus mallocStatus() const;
 
 private:
@@ -86,7 +91,8 @@ private:
     void onBackendRead(bool success);
     void failBeforeCommit();
     void failCommit();
-    void finishIfReadyLocked(bool& notify);
+    void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
+    void dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback);
     void notifyCompletion();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
@@ -115,6 +121,8 @@ private:
     std::condition_variable   cv_;
     size_t                    remaining_transfer_count_{0};
     bool                      has_failure_{false};
+    bool                      settlement_ready_{false};
+    SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
 
     friend class LoadContextCoordinator;
