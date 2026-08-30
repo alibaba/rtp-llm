@@ -41,7 +41,7 @@ void validateRemoteCacheTopologyBeforeAllocation(const CacheConfig& cache_config
                       cache_config.topology().groups().end(),
                       [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::FULL; });
     RTP_LLM_CHECK_WITH_INFO(group_num == 1 && full_group_num == 1
-                                && cache_config.typeForGroup(0) == CacheGroupType::FULL,
+                                && cache_config.topology().groups().front().policy.group_type == CacheGroupType::FULL,
                             "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
                             group_num,
                             static_cast<size_t>(full_group_num));
@@ -58,8 +58,8 @@ void validateSharedPoolTopologyBeforeAllocation(const CacheConfig& cache_config)
                    || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
     };
     if (cache_config.groupNums() == 1) {
-        const auto& group = cache_config.topology().groupById(0);
-        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache spec[0] is null");
+        const auto& group = cache_config.topology().groups().front();
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "sole cache group tag=%s has null spec", group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(is_full_attention(group),
                                 "HybridPoolKVCacheAllocator requires one FULL MHA/MLA cache group");
         return;
@@ -139,8 +139,12 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
                                                      const std::vector<size_t>& global_layer_ids) {
     std::vector<GroupBase> groups = source.groups();
-    for (auto& group : groups) {
-        group.layer_ids.clear();
+    // Local vector index over the projected copy built here. The tag remains
+    // the identity; this idx never leaves the function.
+    std::unordered_map<std::string, size_t> tag_to_projected_idx;
+    for (size_t idx = 0; idx < groups.size(); ++idx) {
+        groups[idx].layer_ids.clear();
+        tag_to_projected_idx.emplace(groups[idx].tag, idx);
     }
 
     std::vector<LayerBase> layers;
@@ -151,7 +155,10 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
         for (const auto& tag : layer.group_tags) {
-            groups[source.groupIdForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
+            const auto projected = tag_to_projected_idx.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(
+                projected != tag_to_projected_idx.end(), "projectLayout missing projected cache tag=%s", tag.c_str());
+            groups[projected->second].layer_ids.push_back(static_cast<int>(local_layer_id));
         }
         layers.push_back(std::move(layer));
     }
@@ -289,7 +296,7 @@ bool KVCacheManager::init() {
     validateSharedPoolTopologyBeforeAllocation(config_);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
-                                              allocator_->independentEvictionGroupIds());
+                                              allocator_->independentEvictionGroupTags());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -408,10 +415,6 @@ void KVCacheManager::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping
     return allocator_->blockBatchCopy(copy_mapping);
 }
 
-void KVCacheManager::blockBatchCopy(const torch::Tensor& copy_mapping) {
-    return allocator_->blockBatchCopy(copy_mapping);
-}
-
 void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) {
     return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
 }
@@ -441,19 +444,6 @@ std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int
 std::vector<BlockInfo>
 KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
     return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
-}
-
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToAddr(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
-    int block_index, int layer_id, int group_id, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index, partition_count, partition_id);
 }
 
 BlockAddrInfo KVCacheManager::convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const {
@@ -754,7 +744,7 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.specForGroup(0);
+    auto&  spec             = config_.topology().groups().front().spec;
     size_t expected_k_bytes = spec->k_block_size_bytes();
     size_t expected_v_bytes = spec->v_block_size_bytes();
     size_t src_k_bytes      = k_buffer.nbytes();

@@ -71,7 +71,11 @@ def kv_tag_for_compress_ratio(ratio: int) -> Optional[str]:
 
 
 def group_tags(kv_cache: Optional[Any]) -> List[str]:
-    """Framework group tags in topology group-id order (``[]`` when absent)."""
+    """Framework cache group tags in canonical sorted order (``[]`` when absent).
+
+    The list is a set of semantic identities; a position in it never identifies a
+    cache group.
+    """
     if kv_cache is None:
         return []
     tags = getattr(kv_cache, "group_tags", None)

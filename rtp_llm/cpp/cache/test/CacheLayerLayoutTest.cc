@@ -15,7 +15,6 @@ namespace {
 
 GroupBase makeLayoutGroup(std::string tag, std::vector<int> layer_ids) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
     spec->seq_size_per_block = 512;
 
     GroupBase group;
@@ -45,8 +44,7 @@ TEST(CacheLayerLayoutTest, SingleGroupCoversAllLayersAndTagMatchesSlotApi) {
 
     EXPECT_FALSE(layout.group("full").empty());
     EXPECT_EQ(layout.group("full").activeLayerCount(), 3u);
-    EXPECT_EQ(layout.groupId("full"), 0u);
-    EXPECT_EQ(layout.at("full", 1).kv_addr.data_ptr(), layout.at(0, 1).kv_addr.data_ptr());
+    // Sole-group access and tag access must reach the same buffer.
     EXPECT_EQ(layout.at(1).kv_addr.data_ptr(), layout.at("full", 1).kv_addr.data_ptr());
 }
 
@@ -86,14 +84,18 @@ TEST(CacheLayerLayoutTest, EmptyPlaceholderIsSkippedAndProjectionRecountsActiveL
     EXPECT_EQ(projected.activeLayerCount(), 1u);
 }
 
-TEST(CacheLayerLayoutTest, InvalidTagSlotAndLayerFailFast) {
+TEST(CacheLayerLayoutTest, InvalidTagAndLayerFailFast) {
     auto topology = CacheTopology::create({makeLayoutGroup("full", {0})}, {{0, {"full"}}});
     GroupedCacheLayerLayout::GroupLayouts groups;
     groups.emplace("full", makeLayerLayout(1, {0}, 1));
     GroupedCacheLayerLayout layout(topology, std::move(groups));
 
     EXPECT_ANY_THROW(layout.group("missing"));
-    EXPECT_ANY_THROW(layout.group(1));
+    // Replaces the pre-tag out-of-range slot check: there is no positional slot to
+    // overrun any more, so the equivalent fail-fast case is an undeclared tag. The
+    // empty tag is asserted specifically because that is what a defaulted or null
+    // string_view degrades into, and it must never resolve to a group.
+    EXPECT_ANY_THROW(layout.group(""));
     EXPECT_ANY_THROW(layout.group("full").at(1));
     EXPECT_ANY_THROW(layout.group("full").hasLayer(1));
 }

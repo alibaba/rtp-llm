@@ -65,7 +65,6 @@ public:
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
@@ -79,11 +78,7 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
     std::vector<BlockInfo>
                   convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
+    BlockAddrInfo convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
     std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
     std::vector<BlockInfo> convertIndexToBufferByTag(
         int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;

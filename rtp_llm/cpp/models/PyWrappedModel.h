@@ -87,7 +87,14 @@ private:
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
-                                                                   const GptModelInputs&         inputs);
+                                                                   const GptModelInputs&         inputs,
+                                                                   const std::vector<size_t>&    input_idx_by_tag);
+    std::vector<size_t>             validateTaggedCacheBoundary(const GptModelInputs& inputs) const;
+    GptModelOutputs                 forwardMicroBatchedValidated(const GptModelInputs&      inputs,
+                                                                 const std::vector<size_t>& input_idx_by_tag);
+    void                            prepareAttentionInputsValidated(const GptModelInputs&      inputs,
+                                                                    bool                       skip_forward_event_sync,
+                                                                    const std::vector<size_t>& input_idx_by_tag);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
@@ -124,10 +131,14 @@ private:
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
-    std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
-    torch::Tensor                                   residual_scale_fp32_;
-    torch::Tensor                                   residual_scale_;
-    TensorHolder                                    buffer_holder_;
+    // Canonical sorted cache tags of kv_cache_layer_layout_. Every positional
+    // cache-group payload this model packs or unpacks is ordered by this
+    // sequence; see rtp_llm/cpp/cache/CacheGroupTagOrder.h.
+    std::vector<std::string>        kv_cache_boundary_group_tags_;
+    std::shared_ptr<KVCacheManager> cache_manager_;  // For cache_store access
+    torch::Tensor                   residual_scale_fp32_;
+    torch::Tensor                   residual_scale_;
+    TensorHolder                    buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
@@ -188,6 +199,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    if (kv_cache_layer_layout_.has_value()) {
+        std::vector<std::string> tags;
+        tags.reserve(kv_cache_layer_layout_->topology().groups().size());
+        for (const auto& group : kv_cache_layer_layout_->topology().groups()) {
+            tags.push_back(group.tag);
+        }
+        kv_cache_boundary_group_tags_ = sortedCacheGroupTags(tags, "model KV cache");
+    }
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA
@@ -290,7 +309,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
-            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+            graph_params.kv_cache_group_tags = kv_cache_boundary_group_tags_;
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);

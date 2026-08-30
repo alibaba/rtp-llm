@@ -10,6 +10,7 @@
 #include "c10/core/DeviceType.h"
 #include "c10/core/TensorOptions.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 

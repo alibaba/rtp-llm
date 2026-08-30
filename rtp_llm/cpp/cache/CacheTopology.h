@@ -2,9 +2,7 @@
 
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -15,8 +13,8 @@
 
 namespace rtp_llm {
 
-// Immutable cache-group configuration published by CacheConfig. The tag is
-// the semantic identity; numeric group ids are private CacheTopology indices.
+// Immutable cache-group configuration published by CacheConfig. The tag is the
+// only business identity; the storage position of a group carries no meaning.
 struct GroupBase {
     std::string                        tag;
     std::shared_ptr<const KVCacheSpec> spec;
@@ -52,43 +50,21 @@ public:
     }
 
     const GroupBase& group(std::string_view tag) const;
-    const GroupBase& groupById(size_t group_id) const;
     const LayerBase& layer(int layer_id) const;
     GroupRefs        groupsForLayer(int layer_id) const;
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const;
     const GroupBase& soleGroupForLayer(int layer_id) const;
 
-    size_t groupIdForTag(std::string_view tag) const;
-    bool   hasSingleGlobalGroup() const;
-    bool   hasOneGroupPerLayer() const;
-
-    // Lazily materialized compatibility projections. The same immutable
-    // object is returned for the lifetime of this topology.
-    const std::vector<std::string>&                groupTagsSnapshot() const;
-    const std::vector<CacheGroupType>&             groupTypesSnapshot() const;
-    const std::vector<KVCacheSpecType>&            groupSpecTypesSnapshot() const;
-    const std::vector<std::vector<int>>&           layerGroupIdsSnapshot() const;
-    const std::vector<std::map<std::string, int>>& layerTagToGroupIdSnapshot() const;
+    bool hasSingleGlobalGroup() const;
+    bool hasOneGroupPerLayer() const;
 
 private:
-    struct SnapshotCache {
-        std::vector<std::string>                group_tags;
-        std::vector<CacheGroupType>             group_types;
-        std::vector<KVCacheSpecType>            group_spec_types;
-        std::vector<std::vector<int>>           layer_group_ids;
-        std::vector<std::map<std::string, int>> layer_tag_to_group_id;
-    };
-
     CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers);
     void validateAndBuildIndex();
-    void buildSnapshots() const;
 
     std::vector<GroupBase>                  groups_;
     std::vector<LayerBase>                  layers_;
-    std::unordered_map<std::string, size_t> tag_to_group_id_;
-
-    mutable std::once_flag                       snapshot_once_;
-    mutable std::shared_ptr<const SnapshotCache> snapshots_;
+    std::unordered_map<std::string, size_t> tag_to_idx_;
 };
 
 }  // namespace rtp_llm

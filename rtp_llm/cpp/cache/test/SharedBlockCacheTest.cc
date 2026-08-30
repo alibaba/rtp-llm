@@ -1,9 +1,13 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <string_view>
 
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
+#include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm::test {
 namespace {
@@ -22,24 +26,328 @@ BlockDependency childDep(CacheKeyType parent, uint32_t ordinal) {
     return dep;
 }
 
-void putOne(SharedBlockCache&             cache,
-            CacheKeyType                  key,
-            BlockIdxType                  block,
-            const BlockDependency&        dep,
-            SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace,
-            bool                          resident     = false) {
+CacheConfig makeTaggedCacheConfig() {
+    CacheConfig config;
+    config.dtype                     = DataType::TYPE_FP16;
+    config.layer_num                 = 2;
+    config.layer_all_num             = 2;
+    config.block_num                 = 16;
+    config.seq_size_per_block        = 4;
+    config.kernel_seq_size_per_block = 4;
+
+    auto linear = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "linear");
+    auto full   = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
+    config.fromGroupedSpecs(
+        {linear, full}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"linear", "full"});
+    config.setGroupBlockLayout({16, 16}, {linear->block_size_bytes(), full->block_size_bytes()}, {0, 0});
+    return config;
+}
+
+CacheConfig makeSlotCacheConfig(size_t group_count) {
+    CacheConfig config;
+    config.dtype                     = DataType::TYPE_FP16;
+    config.layer_num                 = static_cast<uint32_t>(group_count);
+    config.layer_all_num             = static_cast<uint32_t>(group_count);
+    config.block_num                 = 2048;
+    config.seq_size_per_block        = 1;
+    config.kernel_seq_size_per_block = 1;
+
+    std::vector<KVCacheSpecPtr>   specs;
+    std::vector<std::vector<int>> layer_ids;
+    std::vector<CacheGroupType>   group_types;
+    std::vector<std::string>      tags;
+    std::vector<uint32_t>         block_nums;
+    std::vector<size_t>           kv_strides;
+    std::vector<size_t>           scale_strides;
+    for (size_t slot = 0; slot < group_count; ++slot) {
+        const auto tag  = "group" + std::to_string(slot);
+        auto       spec = makeResolvedMhaSpec(config.dtype, 1, 1, 1, tag);
+        kv_strides.push_back(spec->block_size_bytes());
+        specs.push_back(std::move(spec));
+        layer_ids.push_back({static_cast<int>(slot)});
+        group_types.push_back(CacheGroupType::FULL);
+        tags.push_back(tag);
+        block_nums.push_back(2048);
+        scale_strides.push_back(0);
+    }
+    config.fromGroupedSpecs(specs, layer_ids, group_types, tags);
+    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+    return config;
+}
+
+BlockPoolPtr makeLargeTestPool() {
+    auto pool_config      = createTestConfig();
+    pool_config.block_num = 2048;
+    for (auto& layout : pool_config.memory_layouts) {
+        layout.block_num                = pool_config.block_num;
+        layout.kv_block_pool_size_bytes = layout.layer_num * layout.block_num * layout.kv_block_stride_bytes;
+        layout.kv_scale_offset_bytes    = layout.kv_cache_offset_bytes + layout.kv_block_pool_size_bytes;
+        layout.kv_scale_pool_size_bytes = layout.layer_num * layout.block_num * layout.kv_scale_stride_bytes;
+        layout.total_size_bytes         = layout.kv_block_pool_size_bytes + layout.kv_scale_pool_size_bytes;
+    }
+    pool_config.total_size_bytes = pool_config.memory_layouts.front().total_size_bytes;
+    auto pool                    = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
+    EXPECT_TRUE(pool->init());
+    return pool;
+}
+
+class PositionalSharedBlockCacheForTest: public SharedBlockCache {
+public:
+    PositionalSharedBlockCacheForTest(): config_(makeSlotCacheConfig(4)) {
+        std::map<std::string, BlockPoolPtr> tagged_pools;
+        for (const auto& group : config_.topology().groups()) {
+            auto pool = makeLargeTestPool();
+            pools_.push_back(pool);
+            tagged_pools.emplace(group.tag, std::move(pool));
+        }
+        init(config_, tagged_pools);
+    }
+
+    void put(CacheKeyType                     cache_key,
+             const std::vector<BlockIdxType>& block_ids,
+             bool                             is_resident,
+             NamespaceId                      namespace_id     = kDefaultNamespace,
+             const BlockDependency&           dependency       = {},
+             const std::vector<bool>&         matchable_groups = {}) {
+        std::map<std::string, BlockIdxType> groups;
+        std::map<std::string, bool>         group_matchable;
+        for (size_t slot = 0; slot < block_ids.size(); ++slot) {
+            const auto tag = "group" + std::to_string(slot);
+            groups.emplace(tag, block_ids[slot]);
+            group_matchable.emplace(tag, slot >= matchable_groups.size() || matchable_groups[slot]);
+        }
+        SharedBlockCache::put(cache_key, groups, group_matchable, is_resident, namespace_id, dependency);
+    }
+
+    BlockIdxType matchGroup(CacheKeyType cache_key, size_t group_slot) {
+        return SharedBlockCache::matchGroup(cache_key, "group" + std::to_string(group_slot));
+    }
+
+    EvictResult selectAndEvictForGroup(size_t group_slot, size_t min_blocks) {
+        return SharedBlockCache::selectAndEvictForGroup("group" + std::to_string(group_slot), min_blocks);
+    }
+
+    void setIndependentGroupEviction(bool enabled, const std::vector<int>& group_slots) {
+        std::vector<std::string> tags;
+        tags.reserve(group_slots.size());
+        for (const auto group_slot : group_slots) {
+            tags.push_back("group" + std::to_string(group_slot));
+        }
+        SharedBlockCache::setIndependentGroupEviction(enabled, tags);
+    }
+
+private:
+    CacheConfig               config_;
+    std::vector<BlockPoolPtr> pools_;
+};
+
+void putOne(PositionalSharedBlockCacheForTest& cache,
+            CacheKeyType                       key,
+            BlockIdxType                       block,
+            const BlockDependency&             dep,
+            SharedBlockCache::NamespaceId      namespace_id = SharedBlockCache::kGpuLogicalNamespace,
+            bool                               resident     = false) {
     cache.put(key, std::vector<BlockIdxType>{block}, resident, namespace_id, dep);
 }
 
+BlockIdxType blockByTag(const std::map<std::string, BlockIdxType>& groups, std::string_view tag) {
+    const auto it = groups.find(std::string(tag));
+    RTP_LLM_CHECK_WITH_INFO(it != groups.end(), "missing tagged SharedBlockCache group=%s", std::string(tag).c_str());
+    return it->second;
+}
+
+class RecordingSharedBlockCache: public SharedBlockCache {
+public:
+    std::vector<std::string> operations;
+
+protected:
+    void blockCacheReferenceByTag(std::string_view tag, BlockIdxType block_id) override {
+        operations.push_back("reference:" + std::string(tag));
+        SharedBlockCache::blockCacheReferenceByTag(tag, block_id);
+    }
+
+    void blockCacheFreeByTag(std::string_view tag, BlockIdxType block_id) override {
+        operations.push_back("free:" + std::string(tag));
+        SharedBlockCache::blockCacheFreeByTag(tag, block_id);
+    }
+};
+
 }  // namespace
 
-TEST(SharedBlockCacheTest, EmptyCacheKeepsLegacyVersion) {
+TEST(SharedBlockCacheTest, TaggedBoundaryDistinguishesSameBlockIdAcrossShuffledTags) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+    ASSERT_TRUE(linear_pool->init());
+    ASSERT_TRUE(full_pool->init());
+    const auto linear_block = linear_pool->malloc(1).at(0);
+    const auto full_block   = full_pool->malloc(1).at(0);
+    ASSERT_EQ(linear_block, full_block);
+
+    SharedBlockCache tagged_cache;
+    tagged_cache.init(config, {{"full", full_pool}, {"linear", linear_pool}});
+    tagged_cache.put(42, {{"full", full_block}, {"linear", linear_block}}, /*is_resident=*/false);
+
+    EXPECT_EQ(tagged_cache.matchGroup(42, "linear"), linear_block);
+    EXPECT_EQ(tagged_cache.matchGroup(42, "full"), full_block);
+    const auto matched = tagged_cache.match(42);
+    ASSERT_TRUE(matched.found);
+    EXPECT_EQ(blockByTag(matched.group_block_ids, "linear"), linear_block);
+    EXPECT_EQ(blockByTag(matched.group_block_ids, "full"), full_block);
+
+    const auto removed = tagged_cache.remove(42);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_EQ(blockByTag(removed->group_block_ids, "linear"), linear_block);
+    EXPECT_EQ(blockByTag(removed->group_block_ids, "full"), full_block);
+}
+
+TEST(SharedBlockCacheTest, TaggedEvictionReportsShuffledTagIdentity) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+    ASSERT_TRUE(linear_pool->init());
+    ASSERT_TRUE(full_pool->init());
+    const auto linear_block = linear_pool->malloc(1).at(0);
+    const auto full_block   = full_pool->malloc(1).at(0);
+    ASSERT_EQ(linear_block, full_block);
+
+    SharedBlockCache tagged_cache;
+    tagged_cache.init(config, {{"full", full_pool}, {"linear", linear_pool}});
+    tagged_cache.setPrefixTreeEnabled(false);
+    tagged_cache.put(7, {{"full", full_block}, {"linear", linear_block}}, /*is_resident=*/false);
+
+    const auto evicted = tagged_cache.selectAndEvict(/*min_blocks=*/2);
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{7}));
+    const auto& groups = evicted.evicted_groups.at(7);
+    EXPECT_EQ(blockByTag(groups, "linear"), linear_block);
+    EXPECT_EQ(blockByTag(groups, "full"), full_block);
+}
+
+TEST(SharedBlockCacheTest, TaggedOperationTracePreservesVersionsReferencesDependenciesAndLifetimes) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+    ASSERT_TRUE(linear_pool->init());
+    ASSERT_TRUE(full_pool->init());
+    const auto linear_free_before = linear_pool->freeBlocksNum();
+    const auto full_free_before   = full_pool->freeBlocksNum();
+    const auto linear_block       = linear_pool->malloc(1).at(0);
+    const auto full_block         = full_pool->malloc(1).at(0);
+    const auto global_block       = linear_pool->malloc(1).at(0);
+    const auto group_block        = linear_pool->malloc(1).at(0);
+    linear_pool->requestFree({linear_block, global_block, group_block});
+    full_pool->requestFree({full_block});
     SharedBlockCache cache;
+    cache.init(config, {{"linear", linear_pool}, {"full", full_pool}});
+    EXPECT_EQ(cache.version(), -1);
+
+    cache.put(10, {{"linear", linear_block}}, {}, false, SharedBlockCache::kGpuLogicalNamespace, rootDep(0));
+    EXPECT_EQ(cache.version(), 0);
+    EXPECT_EQ(linear_pool->blockCacheRefBlocksNum(), 1u);
+    const auto first_match = cache.match(10);
+    ASSERT_TRUE(first_match.found);
+    EXPECT_EQ(blockByTag(first_match.group_block_ids, "linear"), linear_block);
+    cache.put(10, {{"full", full_block}}, {}, false, SharedBlockCache::kGpuLogicalNamespace, childDep(9, 2));
+    EXPECT_EQ(cache.version(), 1);
+    EXPECT_EQ(full_pool->blockCacheRefBlocksNum(), 1u);
+    EXPECT_EQ(cache.matchGroup(10, "full"), full_block);
+    const auto removed = cache.remove(10);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_TRUE(removed->dependency.has_parent);
+    EXPECT_EQ(removed->dependency.parent_key, 9);
+    EXPECT_EQ(removed->dependency.ordinal, 2u);
+    EXPECT_FALSE(cache.contains(10));
+    EXPECT_EQ(cache.version(), 1);
+    EXPECT_EQ(linear_pool->blockCacheRefBlocksNum(), 1u);
+    EXPECT_EQ(full_pool->blockCacheRefBlocksNum(), 1u);
+    linear_pool->blockCacheFree(linear_block);
+    full_pool->blockCacheFree(full_block);
+    EXPECT_EQ(linear_pool->blockCacheRefBlocksNum(), 0u);
+    EXPECT_EQ(full_pool->blockCacheRefBlocksNum(), 0u);
+
+    cache.setPrefixTreeEnabled(false);
+    cache.put(20, {{"linear", global_block}}, {}, false, SharedBlockCache::kGpuLogicalNamespace, rootDep(3));
+    EXPECT_EQ(cache.version(), 2);
+    const auto global = cache.selectAndEvict(1);
+    ASSERT_EQ(global.evicted_keys, (CacheKeysType{20}));
+    EXPECT_GE(global.evicted_lifetime_ms.at(20), 0);
+    EXPECT_EQ(blockByTag(global.evicted_groups.at(20), "linear"), global_block);
+    EXPECT_EQ(global.evicted_dependencies.at(20).ordinal, 3u);
+    linear_pool->blockCacheFree(global_block);
+    EXPECT_EQ(linear_pool->blockCacheRefBlocksNum(), 0u);
+
+    cache.put(30, {{"linear", group_block}}, {}, false, SharedBlockCache::kGpuLogicalNamespace, rootDep(4));
+    EXPECT_EQ(cache.version(), 3);
+    SharedBlockCache::EvictResult group;
+    EXPECT_EQ(cache.evictAndFreeForGroup("linear", 1, &group), 1u);
+    ASSERT_EQ(group.evicted_keys, (CacheKeysType{30}));
+    EXPECT_GE(group.evicted_lifetime_ms.at(30), 0);
+    EXPECT_EQ(blockByTag(group.evicted_groups.at(30), "linear"), group_block);
+    EXPECT_EQ(group.evicted_dependencies.at(30).ordinal, 4u);
+    EXPECT_EQ(linear_pool->blockCacheRefBlocksNum(), 0u);
+    EXPECT_EQ(linear_pool->freeBlocksNum(), linear_free_before);
+    EXPECT_EQ(full_pool->freeBlocksNum(), full_free_before);
+}
+
+TEST(SharedBlockCacheTest, MultiGroupReferenceAndFreeSideEffectsFollowTopologyOrder) {
+    auto config      = makeTaggedCacheConfig();  // topology: linear, full; lexical map order: full, linear
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+    ASSERT_TRUE(linear_pool->init());
+    ASSERT_TRUE(full_pool->init());
+
+    const auto linear_block = linear_pool->malloc(1).at(0);
+    const auto full_block   = full_pool->malloc(1).at(0);
+    linear_pool->requestFree(linear_block);
+    full_pool->requestFree(full_block);
+
+    RecordingSharedBlockCache cache;
+    cache.init(config, {{"full", full_pool}, {"linear", linear_pool}});
+    cache.setPrefixTreeEnabled(false);
+    cache.put(40, {{"full", full_block}, {"linear", linear_block}}, /*is_resident=*/false);
+    EXPECT_EQ(cache.operations, (std::vector<std::string>{"reference:linear", "reference:full"}));
+
+    cache.operations.clear();
+    EXPECT_EQ(cache.evictAndFree(/*min_blocks=*/2), 2u);
+    EXPECT_EQ(cache.operations, (std::vector<std::string>{"free:linear", "free:full"}));
+
+    const auto next_linear_block = linear_pool->malloc(1).at(0);
+    const auto next_full_block   = full_pool->malloc(1).at(0);
+    linear_pool->requestFree(next_linear_block);
+    full_pool->requestFree(next_full_block);
+    cache.put(41, {{"full", NULL_BLOCK_IDX}, {"linear", NULL_BLOCK_IDX}}, /*is_resident=*/false);
+
+    cache.operations.clear();
+    cache.put(41, {{"full", next_full_block}, {"linear", next_linear_block}}, /*is_resident=*/false);
+    EXPECT_EQ(cache.operations, (std::vector<std::string>{"reference:linear", "reference:full"}));
+
+    cache.operations.clear();
+    EXPECT_EQ(cache.evictAndFreeForGroup("linear", /*min_blocks=*/1), 1u);
+    EXPECT_EQ(cache.operations, (std::vector<std::string>{"free:linear", "free:full"}));
+}
+
+TEST(SharedBlockCacheTest, TaggedRegistryRejectsUnknownDuplicateAndMissingTags) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+
+    SharedBlockCache unknown;
+    EXPECT_THROW(unknown.init(config, {{"linear", linear_pool}, {"unknown", full_pool}}), RTPException);
+
+    SharedBlockCache duplicate;
+    EXPECT_THROW(duplicate.init(config, {{"linear", linear_pool}, {"linear", full_pool}}), RTPException);
+
+    SharedBlockCache missing;
+    EXPECT_THROW(missing.init(config, {{"linear", linear_pool}}), RTPException);
+}
+
+TEST(SharedBlockCacheTest, EmptyCacheKeepsLegacyVersion) {
+    PositionalSharedBlockCacheForTest cache;
     EXPECT_EQ(cache.version(), -1);
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0));
     putOne(cache, 2, 102, childDep(1, 1));
     putOne(cache, 3, 103, childDep(2, 2));
@@ -47,7 +355,7 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithD
     auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 2, 3}));
-    ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101}));
+    ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group0"), 101);
     ASSERT_FALSE(evicted.evicted_dependencies.at(1).has_parent);
     ASSERT_TRUE(evicted.evicted_dependencies.at(2).has_parent);
     ASSERT_EQ(evicted.evicted_dependencies.at(2).parent_key, 1);
@@ -57,7 +365,7 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithD
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeStopsAtBranchPoint) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0));
     putOne(cache, 2, 102, childDep(1, 1));
     putOne(cache, 3, 103, childDep(1, 2));
@@ -71,7 +379,7 @@ TEST(SharedBlockCacheTest, PrefixTreeStopsAtBranchPoint) {
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeLinksChildInsertedBeforeParent) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 2, 102, childDep(1, 1));
     putOne(cache, 1, 101, rootDep(0));
 
@@ -84,7 +392,7 @@ TEST(SharedBlockCacheTest, PrefixTreeLinksChildInsertedBeforeParent) {
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictsOrphanLeafWithMissingParentDependency) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 2, 102, childDep(1, 1));
 
     auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
@@ -97,7 +405,7 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictsOrphanLeafWithMissingParentDependency
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeAttachesMultiplePendingChildrenAndStopsAtBranch) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 2, 102, childDep(1, 1));
     putOne(cache, 3, 103, childDep(1, 2));
     putOne(cache, 1, 101, rootDep(0));
@@ -115,7 +423,7 @@ TEST(SharedBlockCacheTest, PrefixTreeAttachesMultiplePendingChildrenAndStopsAtBr
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeStopsAtResidentParent) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
     putOne(cache, 2, 102, childDep(1, 1));
 
@@ -130,7 +438,7 @@ TEST(SharedBlockCacheTest, PrefixTreeStopsAtResidentParent) {
 }
 
 TEST(SharedBlockCacheTest, MatchGroupTouchesPrefixTreeLeafLru) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0));
     putOne(cache, 2, 102, childDep(1, 1));
     putOne(cache, 3, 103, rootDep(0));
@@ -146,7 +454,7 @@ TEST(SharedBlockCacheTest, MatchGroupTouchesPrefixTreeLeafLru) {
 }
 
 TEST(SharedBlockCacheTest, ResidentIsStickyAcrossPuts) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/false);
     putOne(cache, 1, NULL_BLOCK_IDX, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
     putOne(cache, 1, NULL_BLOCK_IDX, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/false);
@@ -158,7 +466,7 @@ TEST(SharedBlockCacheTest, ResidentIsStickyAcrossPuts) {
 }
 
 TEST(SharedBlockCacheTest, ResidentIsStickyAcrossNamespaceAliases) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/false);
     putOne(cache, 1, NULL_BLOCK_IDX, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace, /*resident=*/true);
 
@@ -169,7 +477,7 @@ TEST(SharedBlockCacheTest, ResidentIsStickyAcrossNamespaceAliases) {
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictionReportsNamespace) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 1, 101, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
 
     auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
@@ -180,7 +488,7 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictionReportsNamespace) {
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictionKeepsCanonicalDependencyWhenLogicalAliasUpdatesSameKey) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 8, 108, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
     putOne(cache, 8, NULL_BLOCK_IDX, childDep(7, 7), SharedBlockCache::kGpuLogicalNamespace);
 
@@ -195,7 +503,7 @@ TEST(SharedBlockCacheTest, PrefixTreeEvictionKeepsCanonicalDependencyWhenLogical
 }
 
 TEST(SharedBlockCacheTest, CanonicalAliasOwnsEvictionWhenLogicalAliasIsOlder) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     putOne(cache, 100, 1000, rootDep(0), SharedBlockCache::kGpuLogicalNamespace);
     putOne(cache, 101, 1010, childDep(100, 1), SharedBlockCache::kGpuLogicalNamespace);
     putOne(cache, 102, 1020, childDep(101, 2), SharedBlockCache::kGpuLogicalNamespace);
@@ -219,7 +527,7 @@ TEST(SharedBlockCacheTest, CanonicalAliasOwnsEvictionWhenLogicalAliasIsOlder) {
 }
 
 TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasUpdatesSameKey) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.setPrefixTreeEnabled(false);
 
     putOne(cache, 8, 108, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
@@ -236,7 +544,7 @@ TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasU
 }
 
 TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.put(1,
               std::vector<BlockIdxType>{101, 201},
               /*is_resident=*/false,
@@ -249,11 +557,12 @@ TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
 
     auto evicted = cache.selectAndEvict(/*min_blocks=*/2);
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1}));
-    ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101, 201}));
+    ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group0"), 101);
+    ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group1"), 201);
 }
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1,
@@ -272,20 +581,19 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionDropsDeepestNonLeafStateFirst
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(2, 2));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/3, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
-    ASSERT_EQ(evicted.evicted_group_block_ids.at(2),
-              (std::vector<BlockIdxType>{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302}));
-    ASSERT_TRUE(evicted.evicted_independent_group.count(2));
-    EXPECT_EQ(evicted.evicted_independent_group.at(2), 3);
+    ASSERT_EQ(blockByTag(evicted.evicted_groups.at(2), "group3"), 302);
+    ASSERT_TRUE(evicted.evicted_independent_group_tags.count(2));
+    EXPECT_EQ(evicted.evicted_independent_group_tags.at(2), "group3");
     EXPECT_EQ(cache.matchGroup(2, 0), 102);
     EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, 3)));
     EXPECT_EQ(cache.matchGroup(3, 3), 303);
 }
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1,
@@ -319,7 +627,7 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(11, 2));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/2);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/3, /*min_blocks=*/2);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2, 11}));
     EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, 3)));
@@ -329,7 +637,7 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionScansMultipleLeavesSafely) {
 }
 
 TEST(SharedBlockCacheTest, StateIndependentEvictionFallsBackToWholeChainWhenOnlyLeafStateRemains) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1,
@@ -343,15 +651,15 @@ TEST(SharedBlockCacheTest, StateIndependentEvictionFallsBackToWholeChainWhenOnly
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(1, 1));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/3, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1, 2}));
-    ASSERT_FALSE(evicted.evicted_independent_group.count(2));
+    ASSERT_FALSE(evicted.evicted_independent_group_tags.count(2));
     EXPECT_TRUE(cache.empty());
 }
 
 TEST(SharedBlockCacheTest, SelectAndEvictForGroupSkipsChainsWithoutTargetSlot) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1,
@@ -375,7 +683,7 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupSkipsChainsWithoutTargetSlot) {
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(10, 1));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/3, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{10, 11}));
     EXPECT_FALSE(cache.contains(10));
@@ -385,7 +693,7 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupSkipsChainsWithoutTargetSlot) {
 }
 
 TEST(SharedBlockCacheTest, SelectAndEvictForGroupPrunesBranchUntilTargetAncestorIsEvictable) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.put(1,
               std::vector<BlockIdxType>{101, 201},
               /*is_resident=*/false,
@@ -402,17 +710,18 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupPrunesBranchUntilTargetAncestor
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(1, 2));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/1, /*min_blocks=*/1);
 
     ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2, 1, 3}));
-    ASSERT_EQ(evicted.evicted_group_block_ids.at(1), (std::vector<BlockIdxType>{101, 201}));
-    EXPECT_TRUE(isNullBlockIdx(evicted.evicted_group_block_ids.at(2)[1]));
-    EXPECT_TRUE(isNullBlockIdx(evicted.evicted_group_block_ids.at(3)[1]));
+    ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group0"), 101);
+    ASSERT_EQ(blockByTag(evicted.evicted_groups.at(1), "group1"), 201);
+    EXPECT_TRUE(isNullBlockIdx(blockByTag(evicted.evicted_groups.at(2), "group1")));
+    EXPECT_TRUE(isNullBlockIdx(blockByTag(evicted.evicted_groups.at(3), "group1")));
     EXPECT_TRUE(cache.empty());
 }
 
 TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorBlockedByResidentSibling) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.put(1,
               std::vector<BlockIdxType>{101, 201},
               /*is_resident=*/false,
@@ -429,7 +738,7 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorB
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(1, 2));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/1, /*min_blocks=*/1);
 
     EXPECT_TRUE(evicted.evicted_keys.empty());
     EXPECT_TRUE(cache.contains(1));
@@ -438,7 +747,7 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorB
 }
 
 TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorBlockedByResidentDescendant) {
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.put(1,
               std::vector<BlockIdxType>{101, 201},
               /*is_resident=*/false,
@@ -460,7 +769,7 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorB
               SharedBlockCache::kGpuLogicalNamespace,
               childDep(3, 3));
 
-    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/1, /*min_blocks=*/1);
 
     EXPECT_TRUE(evicted.evicted_keys.empty());
     EXPECT_TRUE(cache.contains(1));
@@ -469,12 +778,148 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorB
     EXPECT_TRUE(cache.contains(4));
 }
 
+// ---------------------------------------------------------------------------
+// Invalid-input boundaries. These only exercise rejection and no-op paths;
+// valid-path locking, LRU, tree, version and reference behavior is untouched.
+// ---------------------------------------------------------------------------
+
+TEST(SharedBlockCacheTest, ZeroWorkGroupRequestsDoNothingAndKeepCacheIntact) {
+    PositionalSharedBlockCacheForTest cache;
+    putOne(cache, 1, 101, rootDep(0));
+    const auto version_before = cache.version();
+
+    // min_blocks == 0 is zero work: selectAndEvictForGroup returns before the
+    // tag is resolved, so even an invalid tag is accepted and nothing happens.
+    EXPECT_TRUE(cache.selectAndEvictForGroup(/*group_slot=*/0, /*min_blocks=*/0).evicted_keys.empty());
+    EXPECT_TRUE(cache.SharedBlockCache::selectAndEvictForGroup("", /*min_blocks=*/0).evicted_keys.empty());
+    EXPECT_TRUE(cache.SharedBlockCache::selectAndEvictForGroup("no_such_group", /*min_blocks=*/0).evicted_keys.empty());
+    EXPECT_TRUE(cache.selectAndEvict(/*min_blocks=*/0).evicted_keys.empty());
+    EXPECT_EQ(cache.evictAndFreeForGroup("group0", /*min_blocks=*/0), 0u);
+
+    EXPECT_EQ(cache.version(), version_before);
+    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_EQ(cache.matchGroup(1, 0), 101);
+}
+
+TEST(SharedBlockCacheTest, InvalidGroupTagsAreRejectedOnRealWork) {
+    PositionalSharedBlockCacheForTest cache;
+    putOne(cache, 1, 101, rootDep(0));
+
+    EXPECT_THROW(cache.SharedBlockCache::matchGroup(1, ""), RTPException);
+    EXPECT_THROW(cache.SharedBlockCache::matchGroup(1, "no_such_group"), RTPException);
+    EXPECT_THROW(cache.SharedBlockCache::selectAndEvictForGroup("", /*min_blocks=*/1), RTPException);
+    EXPECT_THROW(cache.SharedBlockCache::selectAndEvictForGroup("no_such_group", /*min_blocks=*/1), RTPException);
+    // evictAndFreeForGroup resolves the target tag unconditionally, so an
+    // invalid tag is rejected there even when no eviction work is requested.
+    EXPECT_THROW(cache.evictAndFreeForGroup("no_such_group", /*min_blocks=*/0), RTPException);
+    EXPECT_THROW(cache.SharedBlockCache::setIndependentGroupEviction(/*enabled=*/true, {"no_such_group"}),
+                 RTPException);
+
+    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_EQ(cache.matchGroup(1, 0), 101);
+}
+
+TEST(SharedBlockCacheTest, TaggedRegistryRejectsEmptyTagNullPoolAndEmptyRegistry) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+
+    SharedBlockCache empty_tag;
+    EXPECT_THROW(empty_tag.init(config, {{"linear", linear_pool}, {"", full_pool}}), RTPException);
+
+    SharedBlockCache null_pool;
+    EXPECT_THROW(null_pool.init(config, {{"linear", linear_pool}, {"full", nullptr}}), RTPException);
+
+    SharedBlockCache empty_registry;
+    EXPECT_THROW(empty_registry.init(config, {}), RTPException);
+}
+
+TEST(SharedBlockCacheTest, PutRejectsUnknownAndEmptyInputTags) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+    ASSERT_TRUE(linear_pool->init());
+    ASSERT_TRUE(full_pool->init());
+
+    SharedBlockCache cache;
+    cache.init(config, {{"linear", linear_pool}, {"full", full_pool}});
+    const auto linear_block = linear_pool->malloc(1).at(0);
+
+    EXPECT_THROW(cache.put(2, {{"no_such_group", linear_block}}, /*is_resident=*/false), RTPException);
+    EXPECT_THROW(cache.put(3, {{"", linear_block}}, /*is_resident=*/false), RTPException);
+
+    // Rejection happens before any cache mutation.
+    EXPECT_TRUE(cache.empty());
+    EXPECT_EQ(cache.version(), -1);
+}
+
+TEST(SharedBlockCacheTest, PutWithNoGroupEntriesRecordsKeyWithoutGroupBlocks) {
+    auto config      = makeTaggedCacheConfig();
+    auto linear_pool = createBlockPool();
+    auto full_pool   = createBlockPool();
+    ASSERT_TRUE(linear_pool->init());
+    ASSERT_TRUE(full_pool->init());
+
+    SharedBlockCache cache;
+    cache.init(config, {{"linear", linear_pool}, {"full", full_pool}});
+    cache.put(9, {}, /*is_resident=*/false);
+
+    EXPECT_TRUE(cache.contains(9));
+    const auto matched = cache.match(9);
+    EXPECT_TRUE(matched.found);
+    EXPECT_TRUE(matched.group_block_ids.empty());
+    EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(9, "linear")));
+    EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(9, "full")));
+
+    const auto removed = cache.remove(9);
+    ASSERT_TRUE(removed.has_value());
+    EXPECT_TRUE(removed->group_block_ids.empty());
+    EXPECT_TRUE(cache.empty());
+}
+
+TEST(SharedBlockCacheTest, IndependentEvictionStillReclaimsNonMatchableTargetGroup) {
+    PositionalSharedBlockCacheForTest cache;
+    cache.setIndependentGroupEviction(/*enabled=*/true, {3});
+
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(2,
+              std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(1, 1),
+              /*matchable_groups=*/std::vector<bool>{true, true, true, false});
+    cache.put(3,
+              std::vector<BlockIdxType>{103, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 303},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(2, 2));
+
+    // Non-matchable metadata is unusable for prefix matching...
+    EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, 3)));
+    EXPECT_EQ(cache.matchGroup(2, 0), 102);
+
+    // ...but the block is still really reserved, so independent group eviction
+    // reclaims it exactly as it does a matchable one.
+    auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/3, /*min_blocks=*/1);
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{2}));
+    EXPECT_EQ(blockByTag(evicted.evicted_groups.at(2), "group3"), 302);
+    ASSERT_TRUE(evicted.evicted_independent_group_tags.count(2));
+    EXPECT_EQ(evicted.evicted_independent_group_tags.at(2), "group3");
+    EXPECT_TRUE(isNullBlockIdx(cache.matchGroup(2, 3)));
+    EXPECT_EQ(cache.matchGroup(2, 0), 102);
+    EXPECT_EQ(cache.matchGroup(3, 3), 303);
+}
+
 TEST(SharedBlockCachePerfTest, DISABLED_FlatFallbackLargeLru) {
     constexpr int kItemCount    = 20000;
     constexpr int kTargetStride = 5;
     constexpr int kEvictCount   = 2000;
 
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     cache.setPrefixTreeEnabled(false);
     for (int i = 0; i < kItemCount; ++i) {
         const auto key         = static_cast<CacheKeyType>(i + 1);
@@ -487,9 +932,9 @@ TEST(SharedBlockCachePerfTest, DISABLED_FlatFallbackLargeLru) {
     }
 
     const auto start   = std::chrono::steady_clock::now();
-    const auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, kEvictCount);
-    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - start);
+    const auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/1, kEvictCount);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
 
     EXPECT_EQ(evicted.evicted_keys.size(), kEvictCount);
     std::cout << "[ PERF ] prefix_tree=off items=" << kItemCount << " evicted=" << evicted.evicted_keys.size()
@@ -500,16 +945,15 @@ TEST(SharedBlockCachePerfTest, DISABLED_PrefixTreeLongSessionChains) {
     constexpr int kFamilyCount = 16;
     constexpr int kChainDepth  = 512;
 
-    SharedBlockCache cache;
+    PositionalSharedBlockCacheForTest cache;
     for (int family = 0; family < kFamilyCount; ++family) {
         CacheKeyType parent_key = 0;
         for (int depth = 0; depth < kChainDepth; ++depth) {
-            const auto key = static_cast<CacheKeyType>(family * kChainDepth + depth + 1);
+            const auto key         = static_cast<CacheKeyType>(family * kChainDepth + depth + 1);
             const bool target_leaf = family == kFamilyCount - 1 && depth == kChainDepth - 1;
             cache.put(key,
-                      std::vector<BlockIdxType>{
-                          static_cast<BlockIdxType>(key + 10000),
-                          target_leaf ? static_cast<BlockIdxType>(key + 20000) : NULL_BLOCK_IDX},
+                      std::vector<BlockIdxType>{static_cast<BlockIdxType>(key + 10000),
+                                                target_leaf ? static_cast<BlockIdxType>(key + 20000) : NULL_BLOCK_IDX},
                       /*is_resident=*/false,
                       SharedBlockCache::kGpuLogicalNamespace,
                       depth == 0 ? rootDep() : childDep(parent_key, static_cast<uint32_t>(depth)));
@@ -518,14 +962,14 @@ TEST(SharedBlockCachePerfTest, DISABLED_PrefixTreeLongSessionChains) {
     }
 
     const auto start   = std::chrono::steady_clock::now();
-    const auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
-    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - start);
+    const auto evicted = cache.selectAndEvictForGroup(/*group_slot=*/1, /*min_blocks=*/1);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
 
     EXPECT_EQ(evicted.evicted_keys.size(), kChainDepth);
-    std::cout << "[ PERF ] prefix_tree=on items=" << kFamilyCount * kChainDepth
-              << " chains=" << kFamilyCount << " depth=" << kChainDepth
-              << " evicted=" << evicted.evicted_keys.size() << " selection_us=" << elapsed.count() << std::endl;
+    std::cout << "[ PERF ] prefix_tree=on items=" << kFamilyCount * kChainDepth << " chains=" << kFamilyCount
+              << " depth=" << kChainDepth << " evicted=" << evicted.evicted_keys.size()
+              << " selection_us=" << elapsed.count() << std::endl;
 }
 
 }  // namespace rtp_llm::test

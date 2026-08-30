@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <future>
 #include <string>
@@ -21,6 +22,19 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 namespace rtp_llm {
+
+namespace {
+
+CacheConfig
+makeP2PTestCacheConfig(int group_num, int layer_num, const std::vector<std::vector<std::string>>& layer_group_tags) {
+    const auto  topology = test::makeTestCacheTopologyByTag(group_num, layer_num, layer_group_tags);
+    CacheConfig config;
+    config.layer_num = static_cast<uint32_t>(layer_num);
+    config.setTopology(topology->groups(), topology->layers());
+    return config;
+}
+
+}  // namespace
 
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
@@ -63,10 +77,12 @@ protected:
 
         config_ = P2PConnectorConfig::create(
             runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
+        cache_config_ = test::makeTestCacheConfig(
+            test::makeTestCacheTopologyByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
-        connector_ = std::make_unique<P2PConnector>(config_, mock_layer_block_converter_, nullptr);
+        connector_ = std::make_unique<P2PConnector>(config_, cache_config_, mock_layer_block_converter_, nullptr);
         ASSERT_TRUE(connector_->init());
     }
 
@@ -77,16 +93,18 @@ protected:
 
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
-        auto                          resource = std::make_shared<KVCacheResource>();
-        std::vector<std::vector<int>> layer_to_group_ids(num_layers);
+        auto                                  resource = std::make_shared<KVCacheResource>();
+        std::vector<std::vector<std::string>> layer_to_group_tags(num_layers);
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group_ids[i] = {i};
+            layer_to_group_tags[i] = {"group" + std::to_string(i)};
         }
-        resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
+        resource->initGroups(makeP2PTestCacheConfig(num_layers, num_layers, layer_to_group_tags));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
+            // Each layer owns exactly one group; layer_to_group_tags records its tag.
+            const auto& tag = layer_to_group_tags[layer_id].front();
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds(tag).add({i});
             }
         }
 
@@ -145,6 +163,7 @@ protected:
 
 protected:
     P2PConnectorConfig                          config_;
+    CacheConfig                                 cache_config_;
     std::shared_ptr<MockLayerBlockConverter>    mock_layer_block_converter_;
     std::unique_ptr<P2PConnector>               connector_;
     std::vector<std::unique_ptr<TestRpcServer>> tp_broadcast_servers_;
@@ -155,7 +174,7 @@ protected:
 
 // 测试: stream_store_ 为 nullptr，返回 INTERNAL 错误
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenStreamStoreIsNull) {
-    auto connector = std::make_unique<P2PConnector>(config_, mock_layer_block_converter_, nullptr);
+    auto connector = std::make_unique<P2PConnector>(config_, cache_config_, mock_layer_block_converter_, nullptr);
 
     // 2. 创建 request
     std::string unique_key  = "test_stream_store_null";
@@ -205,13 +224,35 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
 TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({1000, 1001, 1002});
-    resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
-    resource->mutableBlockIds(1).assign({10, 11, 12});
-    resource->mutableBlockIds(3).assign({30, 31, 32});
+    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/4, /*layer_num=*/2, {{"group1"}, {"group3"}}));
+    resource->mutableBlockIds("group1").assign({10, 11, 12});
+    resource->mutableBlockIds("group3").assign({30, 31, 32});
     ASSERT_GT(resource->groupNums(), 1);
 
     P2PConnectorAsyncMatchContext ctx(resource);
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+}
+
+TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesCacheKeyTimelineInsteadOfAnyGroupBlockCount) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
+    resource->mutableBlockIds("group0").assign({10, 11});
+    resource->mutableBlockIds("group1").assign({20, 21, 22, 23});
+    resource->setCacheKeys({100, 101, 102});
+
+    P2PConnectorAsyncMatchContext ctx(resource);
+    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+}
+
+TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountIsZeroForNullOrEmptyTimeline) {
+    P2PConnectorAsyncMatchContext null_ctx(nullptr);
+    EXPECT_EQ(null_ctx.matchedBlockCount(), 0u);
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
+    resource->mutableBlockIds("group0").assign({10, 11});
+    P2PConnectorAsyncMatchContext empty_ctx(resource);
+    EXPECT_EQ(empty_ctx.matchedBlockCount(), 0u);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误
