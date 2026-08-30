@@ -143,6 +143,182 @@ def situ_and_mul(
     return output
 
 
+@triton.jit(do_not_specialize=["T"])
+def _situ_mul_fp8_quant_packed_masked_kernel(
+    input_ptr,
+    output_q_ptr,
+    output_scale_ptr,
+    counts_ptr,
+    T,
+    input_stride_e,
+    input_stride_t,
+    output_q_stride_e,
+    output_q_stride_t,
+    output_scale_stride_e,
+    output_scale_stride_t,
+    output_scale_stride_g,
+    counts_stride_e,
+    beta: tl.constexpr,
+    linear_beta: tl.constexpr,
+    has_linear_beta: tl.constexpr,
+    H: tl.constexpr,
+    NUM_GROUPS: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+):
+    """Masked SiTU + FP8 quantization for grouped MXFP4 expert GEMMs."""
+
+    expert = tl.program_id(0).to(tl.int64)
+    packed_group = tl.program_id(1).to(tl.int64)
+    token_start = tl.program_id(2).to(tl.int64) * BLOCK_M
+    token_offsets = token_start + tl.arange(0, BLOCK_M).to(tl.int64)
+    valid_tokens = tl.load(counts_ptr + expert * counts_stride_e).to(tl.int64)
+    row_mask = (token_offsets < T) & (token_offsets < valid_tokens)
+    column_offsets = tl.arange(0, GROUP_SIZE).to(tl.int64)
+    packed_scale = tl.zeros((BLOCK_M,), dtype=tl.int32)
+
+    for pack_index in tl.static_range(4):
+        group_id = packed_group * 4 + pack_index
+        if group_id < NUM_GROUPS:
+            columns = group_id * GROUP_SIZE + column_offsets
+            input_base = (
+                expert * input_stride_e
+                + token_offsets[:, None] * input_stride_t
+                + columns[None, :]
+            )
+            gate = tl.load(
+                input_ptr + input_base,
+                mask=row_mask[:, None],
+                other=0.0,
+            ).to(tl.float32)
+            up = tl.load(
+                input_ptr + input_base + H,
+                mask=row_mask[:, None],
+                other=0.0,
+            ).to(tl.float32)
+
+            gate_tanh = 2.0 * tl.sigmoid(2.0 * gate / beta) - 1.0
+            activated = beta * gate_tanh * tl.sigmoid(gate)
+            if has_linear_beta:
+                up_tanh = 2.0 * tl.sigmoid(2.0 * up / linear_beta) - 1.0
+                up = linear_beta * up_tanh
+            value = (activated * up).to(tl.bfloat16).to(tl.float32)
+
+            absmax = tl.max(tl.abs(value), axis=1)
+            scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
+            exponent = tl.ceil(tl.log2(scale_raw))
+            scale = tl.exp2(exponent)
+            quantized = tl.clamp(value / scale[:, None], fp8_min, fp8_max)
+            output_base = (
+                expert * output_q_stride_e
+                + token_offsets[:, None] * output_q_stride_t
+                + columns[None, :]
+            )
+            tl.store(
+                output_q_ptr + output_base,
+                quantized.to(output_q_ptr.dtype.element_ty),
+                mask=row_mask[:, None],
+            )
+            exponent_biased = tl.clamp(exponent + 127.0, 0.0, 255.0).to(
+                tl.int32
+            )
+            packed_scale = packed_scale | (
+                exponent_biased << (pack_index * 8)
+            )
+
+    scale_offsets = (
+        expert * output_scale_stride_e
+        + token_offsets * output_scale_stride_t
+        + packed_group * output_scale_stride_g
+    )
+    tl.store(output_scale_ptr + scale_offsets, packed_scale, mask=row_mask)
+
+
+def situ_mul_fp8_quant_packed_masked(
+    gate_up: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    beta: float,
+    linear_beta: Optional[float] = None,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply masked SiTU and emit DeepGEMM's packed UE8M0 FP8 layout.
+
+    ``gate_up`` is ``[local_experts, capacity, 2 * intermediate]``. Only the
+    leading ``tokens_per_expert[e]`` rows of each expert are initialized by
+    the dispatch scatter and are written by this kernel. The returned scale
+    tensor uses the per-expert column-major layout required by masked grouped
+    FP8xFP4 DeepGEMM.
+    """
+
+    if gate_up.ndim != 3 or gate_up.shape[-1] % 2:
+        raise ValueError(
+            "masked SiTU expects [experts, capacity, 2 * intermediate], got "
+            f"{tuple(gate_up.shape)}"
+        )
+    if gate_up.dtype != torch.bfloat16 or not gate_up.is_cuda:
+        raise ValueError("masked SiTU requires a CUDA BF16 input")
+    experts, capacity, doubled_hidden = gate_up.shape
+    hidden = doubled_hidden // 2
+    if hidden % group_size:
+        raise ValueError(
+            f"SiTU hidden size {hidden} must be divisible by group size {group_size}"
+        )
+    if tuple(tokens_per_expert.shape) != (experts,):
+        raise ValueError(
+            "tokens_per_expert must have one entry per local expert: "
+            f"counts={tuple(tokens_per_expert.shape)}, experts={experts}"
+        )
+    counts = tokens_per_expert.to(device=gate_up.device, dtype=torch.int32)
+    packed_groups = (hidden // group_size + 3) // 4
+    aligned_capacity = ((capacity + 3) // 4) * 4
+    output_q = torch.empty(
+        (experts, capacity, hidden),
+        dtype=torch.float8_e4m3fn,
+        device=gate_up.device,
+    )
+    output_scale = torch.empty(
+        (experts, packed_groups, aligned_capacity),
+        dtype=torch.int32,
+        device=gate_up.device,
+    ).transpose(1, 2)[:, :capacity, :]
+    if capacity == 0:
+        return output_q, output_scale
+
+    block_m = 8
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    _situ_mul_fp8_quant_packed_masked_kernel[
+        (experts, packed_groups, triton.cdiv(capacity, block_m))
+    ](
+        gate_up,
+        output_q,
+        output_scale,
+        counts,
+        capacity,
+        gate_up.stride(0),
+        gate_up.stride(1),
+        output_q.stride(0),
+        output_q.stride(1),
+        output_scale.stride(0),
+        output_scale.stride(1),
+        output_scale.stride(2),
+        counts.stride(0),
+        beta=float(beta),
+        linear_beta=0.0 if linear_beta is None else float(linear_beta),
+        has_linear_beta=linear_beta is not None,
+        H=hidden,
+        NUM_GROUPS=hidden // group_size,
+        GROUP_SIZE=group_size,
+        BLOCK_M=block_m,
+        fp8_min=finfo.min,
+        fp8_max=finfo.max,
+        num_warps=max(4, group_size // 32),
+        num_stages=2,
+    )
+    return output_q, output_scale
+
+
 class SituAndMul(torch.nn.Module):
     """Parameterized SiTU module for reusable gated-MLP composition."""
 

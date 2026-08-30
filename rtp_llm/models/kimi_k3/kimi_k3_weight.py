@@ -451,13 +451,21 @@ class KimiK3Weight(ModelDeployWeightInfo):
 
         cfg = LinearAttnConfig(self.model_config.linear_attention_config)
 
-        def _w(name, suffix, process_fun, *, data_type=None):
+        def _w(
+            name,
+            suffix,
+            process_fun,
+            *,
+            data_type=None,
+            projection_ktp=False,
+        ):
             return LinearAttnAtomicWeight(
                 name,
                 [CkptWeightInfo(self._layer_ckpt(suffix), identity)],
                 process_fun,
                 cfg,
                 data_type=data_type,
+                projection_ktp=projection_ktp,
             )
 
         return [
@@ -485,6 +493,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 _merge_kda_qkvg_fa_beta,
                 cfg,
+                projection_ktp=True,
             ),
             LinearAttnAtomicWeight(
                 W.linear_attn_conv1d_w,
@@ -522,7 +531,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 identity,
                 data_type=torch.float32,
             ),
-            _w(W.linear_attn_f_b_w, "self_attn.f_b_proj.weight", transpose),
+            _w(
+                W.linear_attn_f_b_w,
+                "self_attn.f_b_proj.weight",
+                transpose,
+                projection_ktp=True,
+            ),
             _w(
                 W.linear_attn_norm_w,
                 "self_attn.o_norm.weight",
