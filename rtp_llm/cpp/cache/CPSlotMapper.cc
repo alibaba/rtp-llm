@@ -311,6 +311,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
         selected.setLastBlockAligned(false);
     }
     selected.setCacheKeysAndBlockDependencies(std::move(projected_keys), std::move(projected_dependencies));
+    selected.setCacheKeysAreCpCanonical(true);
 
     for (const auto& [tag, block_ids] : source.blocksByGroup()) {
         const auto&      src_blocks = block_ids.blocks();

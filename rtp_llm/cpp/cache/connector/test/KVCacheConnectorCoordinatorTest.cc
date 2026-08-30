@@ -601,6 +601,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsNonFullGroupsIn
                 (void)is_connector;
                 EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
                 EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
+                EXPECT_TRUE(ref_resource.cacheKeysAreCpCanonical());
                 EXPECT_FALSE(ref_resource.lastBlockAligned());
                 EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(100, 101));
                 EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(201, 203));
@@ -718,6 +719,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_CPShardedKeepsCompactFixedGro
                 (void)is_connector;
                 EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13));
                 EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13));
+                EXPECT_TRUE(ref_resource.cacheKeysAreCpCanonical());
                 EXPECT_FALSE(ref_resource.lastBlockAligned());
                 EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(100, 101));
                 EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(200, 201));
@@ -772,6 +774,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_DecodePrefillCpRemapsFullAndC
                 (void)is_connector;
                 EXPECT_THAT(ref_keys, testing::ElementsAre(11, 13, 14));
                 EXPECT_THAT(ref_resource.cacheKeys(), testing::ElementsAre(11, 13, 14));
+                EXPECT_TRUE(ref_resource.cacheKeysAreCpCanonical());
                 EXPECT_FALSE(ref_resource.lastBlockAligned());
                 EXPECT_THAT(ref_resource.blocks("full_kv"), testing::ElementsAre(101, 103));
                 EXPECT_THAT(ref_resource.blocks("swa_kv"), testing::ElementsAre(200, 201));
