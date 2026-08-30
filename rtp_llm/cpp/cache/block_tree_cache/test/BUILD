@@ -55,10 +55,11 @@ pool_test_deps = [
 
 cc_test(
     name = "block_tree_cache_factory_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["BlockTreeCacheFactoryTest.cc"],
     copts = pool_test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
@@ -70,6 +71,7 @@ cc_test(
 
 cc_test(
     name = "block_tree_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["BlockTreeTest.cc"],
     copts = test_copts,
     deps = test_deps + [":block_tree_cache_test_utils"],
@@ -110,10 +112,11 @@ cc_library(
 
 cc_test(
     name = "block_tree_cache_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",
@@ -123,10 +126,11 @@ cc_test(
 
 cc_test(
     name = "block_tree_cache_integration_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["BlockTreeCacheIntegrationTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
@@ -175,6 +179,7 @@ cc_test(
 
 cc_test(
     name = "device_swa_kv_cache_group_malloc_range_test",
+    exec_properties = {"gpu": "A10"},
     srcs = [
         "DeviceSWAKVCacheGroupMallocRangeTest.cc",
     ],

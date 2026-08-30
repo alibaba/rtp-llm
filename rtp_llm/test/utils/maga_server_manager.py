@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 import psutil
@@ -436,6 +437,7 @@ class MagaServerManager(object):
             )
 
         if errors:
+            self.print_process_log(max_lines=200)
             message = "unclean server shutdown: " + "; ".join(errors)
             if raise_on_error:
                 raise RuntimeError(message)

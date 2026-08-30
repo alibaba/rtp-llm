@@ -251,11 +251,15 @@ protected:
     std::shared_ptr<StreamReadStorageBackend>
     prepareStorageBackendResource(bool block_matches, bool seed_host = false, RoleType role_type = RoleType::PDFUSION) {
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_remote_cache = true;
-        kv_cache_config.enable_host_cache   = seed_host;
-        kv_cache_config.host_cache_size_mb  = seed_host ? 1 : 0;
+        kv_cache_config.enable_remote_cache   = true;
+        kv_cache_config.enable_host_cache     = seed_host;
+        kv_cache_config.host_cache_size_mb    = seed_host ? 1 : 0;
+        KVCacheConfig manager_kv_cache_config = kv_cache_config;
+        // The manager must not construct a real KVCM client before this test
+        // replaces its BlockTreeCache with the controllable fake backend.
+        manager_kv_cache_config.enable_remote_cache = false;
         prepareResourceWithCacheConfig(
-            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, kv_cache_config);
+            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
 
         auto backend = std::make_shared<StreamReadStorageBackend>();
         if (block_matches) {

@@ -367,6 +367,38 @@ class MagaServerManagerShutdownTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "SIGABRT"):
                     manager.stop_server()
 
+    def test_nonzero_exit_prints_bounded_process_log(self):
+        process = Mock(pid=123)
+        process.poll.return_value = 1
+        parent = Mock()
+        parent.children.return_value = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._file_stream.close()
+            manager._file_stream = None
+            with open(manager._log_file, "wb") as log_file:
+                log_file.write(b"oldest-marker\n")
+                log_file.write(b"second-oldest-marker\n")
+                for line_number in range(198):
+                    log_file.write(f"filler-{line_number}\n".encode())
+                log_file.write(b"invalid-\xff-marker\n")
+                log_file.write(b"newest-marker\n")
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ), self.assertLogs(level="WARNING") as captured_logs:
+                with self.assertRaisesRegex(RuntimeError, "exited with code 1"):
+                    manager.stop_server()
+
+        log_output = "\n".join(captured_logs.output)
+        self.assertIn("... (2 lines truncated)", log_output)
+        self.assertIn("invalid-\ufffd-marker", log_output)
+        self.assertIn("newest-marker", log_output)
+        self.assertNotIn("oldest-marker", log_output)
+        self.assertNotIn("second-oldest-marker", log_output)
+
     def test_timeout_uses_recursive_fallback_and_fails_smoke(self):
         process = Mock(pid=123)
         process.poll.return_value = None
