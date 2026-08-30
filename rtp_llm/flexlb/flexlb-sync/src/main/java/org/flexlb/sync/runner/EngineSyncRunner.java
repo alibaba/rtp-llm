@@ -63,6 +63,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final EndpointRegistry endpointRegistry;
 
+    private final long statusStaleAfterUs;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -78,6 +80,31 @@ public class EngineSyncRunner implements Runnable {
                             boolean cacheFullSnapshotDebugMode,
                             EndpointEventSink endpointEventSink,
                             EndpointRegistry endpointRegistry) {
+
+        this(modelName, workerStatusMap, workerAddressService,
+                statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                roleType, cacheAwareService, cacheIntervalService,
+                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                cacheFullSnapshotDebugMode, endpointEventSink,
+                endpointRegistry, 10_000_000L);
+    }
+
+    public EngineSyncRunner(String modelName,
+                            Map<String, WorkerStatus> workerStatusMap,
+                            WorkerAddressService workerAddressService,
+                            ExecutorService statusCheckExecutor,
+                            EngineHealthReporter engineHealthReporter,
+                            EngineGrpcService engineGrpcService,
+                            RoleType roleType,
+                            CacheAwareService cacheAwareService,
+                            DynamicCacheIntervalService cacheIntervalService,
+                            long syncRequestTimeoutMs,
+                            LongAdder syncCount,
+                            Long syncEngineStatusInterval,
+                            boolean cacheFullSnapshotDebugMode,
+                            EndpointEventSink endpointEventSink,
+                            EndpointRegistry endpointRegistry,
+                            long statusStaleAfterUs) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -97,6 +124,11 @@ public class EngineSyncRunner implements Runnable {
         this.endpointEventSink = Objects.requireNonNull(
                 endpointEventSink, "endpointEventSink");
         this.endpointRegistry = endpointRegistry;
+        if (statusStaleAfterUs <= 0L) {
+            throw new IllegalArgumentException(
+                    "statusStaleAfterUs must be positive");
+        }
+        this.statusStaleAfterUs = statusStaleAfterUs;
     }
 
     @Override
@@ -185,7 +217,7 @@ public class EngineSyncRunner implements Runnable {
                         logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                                workerStatus, cachePollLease,
+                                workerStatus, cachePollLease, cachedWorkerStatuses,
                                 engineHealthReporter, engineGrpcService,
                                 cacheAwareService, cacheIntervalService,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
@@ -337,7 +369,7 @@ public class EngineSyncRunner implements Runnable {
             }
             WorkerGenerationRetirement.complete(
                     workerStatus, workerStatuses, cacheAwareService,
-                    generationRole, workerIpPort, endpointToRetire, logger);
+                    workerIpPort, endpointToRetire, logger);
             logger.info(
                     "[replace] retiring worker topology generation, model={}, role={}, ipPort={}, generation={}, newGroup={}",
                     modelName,
@@ -390,12 +422,9 @@ public class EngineSyncRunner implements Runnable {
                 return;
             }
             WorkerStatus.PollHealth health = workerStatus.pollHealth();
-            long actualIntervalUs = health.successfulPollIntervalUs();
-            long removalThresholdUs = Math.max(
-                    3 * actualIntervalUs, 1_000_000L);
             if (System.nanoTime() / 1000
                     - health.lastSuccessfulPollUs()
-                    <= removalThresholdUs) {
+                    <= statusStaleAfterUs) {
                 return;
             }
 
@@ -411,7 +440,7 @@ public class EngineSyncRunner implements Runnable {
         if (retirementStarted) {
             WorkerGenerationRetirement.complete(
                     workerStatus, workerStatuses, cacheAwareService,
-                    generationRole, workerIpPort, endpointToRetire, logger);
+                    workerIpPort, endpointToRetire, logger);
             logger.info(
                     "[remove] retiring missing worker, model={}, role={}, ipPort={}, generation={}",
                     modelName,

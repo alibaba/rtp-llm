@@ -177,7 +177,7 @@ public class HttpLoadBalanceServer {
                     MasterChangeNotifyResp resp = lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), MasterChangeNotifyReq.class);
+                            .body(Mono.just(resp), MasterChangeNotifyResp.class);
                 }).onErrorResume((Function<Throwable, Mono<ServerResponse>>) e -> {
                     Logger.error("notifyParticipant error", e);
                     return ServerResponse.status(500)

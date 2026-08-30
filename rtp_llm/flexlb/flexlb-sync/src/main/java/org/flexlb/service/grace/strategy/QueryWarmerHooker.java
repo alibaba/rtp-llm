@@ -5,36 +5,32 @@ import org.flexlb.listener.AppOnlineHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.springframework.stereotype.Component;
 
-import java.util.Timer;
-import java.util.TimerTask;
-
 @Slf4j
 @Component
 public class QueryWarmerHooker implements AppOnlineHooker {
 
     public static volatile boolean warmUpFinished;
-    private static final int maxWaitTimeSeconds = 3;
+    private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
     private final GracefulLifecycleReporter lifecycleReporter;
+    private final long warmUpWaitMs;
 
     public QueryWarmerHooker(GracefulLifecycleReporter lifecycleReporter) {
+        this(lifecycleReporter, DEFAULT_WARM_UP_WAIT_MS);
+    }
+
+    QueryWarmerHooker(
+            GracefulLifecycleReporter lifecycleReporter,
+            long warmUpWaitMs) {
         this.lifecycleReporter = lifecycleReporter;
+        if (warmUpWaitMs < 0L) {
+            throw new IllegalArgumentException("warmUpWaitMs must not be negative");
+        }
+        this.warmUpWaitMs = warmUpWaitMs;
     }
 
     @Override
     public void afterStartUp() {
-
-        // Set maximum warm-up wait time
-        Timer timer = new Timer();
-        TimerTask task = new TimerTask() {
-            @Override
-            public void run() {
-                QueryWarmerHooker.warmUpFinished = true;
-                log.info("max wait time before health online finished");
-            }
-        };
-        log.info("max wait time before health online: {}", maxWaitTimeSeconds);
-        timer.schedule(task, maxWaitTimeSeconds * 1000); // Execute after delayTime seconds
-
+        warmUpFinished = false;
         doWarmUp();
     }
 
@@ -47,10 +43,10 @@ public class QueryWarmerHooker implements AppOnlineHooker {
      * Warm up
      */
     private void doWarmUp() {
-        log.info("do warm up: waiting for 3 seconds for sync engine");
+        log.info("do warm up: waiting for {} ms for sync engine", warmUpWaitMs);
         long startTime = System.currentTimeMillis();
         try {
-            Thread.sleep(3000);
+            Thread.sleep(warmUpWaitMs);
             long duration = System.currentTimeMillis() - startTime;
             lifecycleReporter.reportWarmerComplete(duration);
             log.info("warm up success");

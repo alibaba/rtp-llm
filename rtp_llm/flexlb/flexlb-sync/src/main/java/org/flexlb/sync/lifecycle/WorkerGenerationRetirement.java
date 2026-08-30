@@ -69,7 +69,6 @@ public final class WorkerGenerationRetirement {
             WorkerStatus status,
             Map<String, WorkerStatus> statusMap,
             CacheAwareService cacheAwareService,
-            RoleType role,
             String ipPort,
             EndpointRegistry.DetachedGeneration detachedGeneration,
             Logger logger) {
@@ -94,7 +93,6 @@ public final class WorkerGenerationRetirement {
                     status,
                     statusMap,
                     cacheAwareService,
-                    role,
                     ipPort,
                     logger);
         }
@@ -110,7 +108,6 @@ public final class WorkerGenerationRetirement {
             WorkerStatus status,
             Map<String, WorkerStatus> statusMap,
             CacheAwareService cacheAwareService,
-            RoleType role,
             String ipPort,
             Logger logger) {
         status.lock.lock();
@@ -121,6 +118,16 @@ public final class WorkerGenerationRetirement {
                         "Status identity changed before retirement finalized for {}#{}",
                         ipPort, status.getGenerationId());
                 return;
+            }
+            try {
+                // The old identity is still published and replacement is
+                // therefore fenced. Clear the address-only cache index before
+                // allowing a new generation to reuse this address.
+                cacheAwareService.removeEngineBlockCache(ipPort);
+            } catch (Throwable cacheCleanupFailure) {
+                logger.error(
+                        "Cache cleanup failed while retiring generation {} for {}",
+                        status.getGenerationId(), ipPort, cacheCleanupFailure);
             }
             boolean removed = statusMap.remove(ipPort, status);
             if (!removed) {

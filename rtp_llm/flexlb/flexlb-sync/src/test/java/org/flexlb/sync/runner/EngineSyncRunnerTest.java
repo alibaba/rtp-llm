@@ -207,7 +207,8 @@ class EngineSyncRunnerTest {
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false,
-                RunnerTestSupport.eventSink(), registry);
+                RunnerTestSupport.eventSink(), registry,
+                1_000_000L);
         runner.run();
 
         assertFalse(status.isActiveGeneration());

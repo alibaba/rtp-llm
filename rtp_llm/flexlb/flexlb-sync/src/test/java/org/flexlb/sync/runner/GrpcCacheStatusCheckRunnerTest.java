@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -19,6 +21,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 class GrpcCacheStatusCheckRunnerTest {
@@ -53,6 +56,7 @@ class GrpcCacheStatusCheckRunnerTest {
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
                 modelName, ipPort, site, RoleType.PREFILL, workerStatus,
                 workerStatus.tryBeginCachePoll(),
+                Map.of(ipPort, workerStatus),
                 engineHealthReporter, engineGrpcService,
                 localKvCacheAwareManager, cacheIntervalService,
                 20, new LongAdder(), 50L, true, Runnable::run);
@@ -67,6 +71,40 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Assert
         verify(engineGrpcService).getCacheStatusAsync(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
+    }
+
+    @Test
+    void staleGenerationCallbackCannotPublishAddressCache() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus oldStatus = workerStatus();
+        Map<String, WorkerStatus> current = new ConcurrentHashMap<>();
+        current.put(ipPort, oldStatus);
+        CompletableFuture<EngineRpcService.CacheStatusPB> response =
+                new CompletableFuture<>();
+        when(engineGrpcService.getCacheStatusAsync(
+                anyString(), anyInt(), any(WorkerStatus.class), anyLong(),
+                anyLong(), eq(RoleType.PREFILL))).thenReturn(response);
+
+        GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
+                "test-model", ipPort, "test-site", RoleType.PREFILL,
+                oldStatus, oldStatus.tryBeginCachePoll(), current,
+                engineHealthReporter, engineGrpcService,
+                localKvCacheAwareManager, cacheIntervalService,
+                20, new LongAdder(), 50L, true, Runnable::run);
+        runner.run();
+
+        current.put(ipPort, WorkerStatus.createDiscovered(
+                RoleType.PREFILL, null, "127.0.0.1",
+                8080, 8081, "replacement-site"));
+        response.complete(EngineRpcService.CacheStatusPB.newBuilder()
+                .setVersion(7)
+                .setAvailableKvCache(1000)
+                .setTotalKvCache(2000)
+                .setBlockSize(128)
+                .build());
+
+        verify(localKvCacheAwareManager, never())
+                .updateEngineBlockCache(oldStatus);
     }
 
     private static WorkerStatus workerStatus() {

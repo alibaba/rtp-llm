@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 
 class ExpirationCleanerTest {
 
@@ -66,6 +67,8 @@ class ExpirationCleanerTest {
             releaseFirstAwait.countDown();
             cleaning.get(5, TimeUnit.SECONDS);
             assertTrue(statuses.isEmpty());
+            verify(cache).removeEngineBlockCache(first.getIpPort());
+            verify(cache).removeEngineBlockCache(second.getIpPort());
         } finally {
             releaseFirstAwait.countDown();
             executor.shutdownNow();

@@ -32,4 +32,13 @@ public interface CacheAwareService {
      * @return Update result
      */
     WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus);
+
+    /**
+     * Remove every cached block associated with one engine address.
+     *
+     * <p>Callers must fence the address against generation replacement before
+     * invoking this method. The cache index is address based and therefore
+     * cannot distinguish two worker generations by itself.
+     */
+    void removeEngineBlockCache(String engineIpPort);
 }

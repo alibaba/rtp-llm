@@ -282,7 +282,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     if (generationRetiring) {
                         WorkerGenerationRetirement.complete(
                                 workerStatus, workerStatusMap, cacheAwareService,
-                                roleType, ipPort, endpointToRetire, logger);
+                                ipPort, endpointToRetire, logger);
                     }
                 }
             }
@@ -382,7 +382,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (generationRetiring) {
             WorkerGenerationRetirement.complete(
                     workerStatus, workerStatusMap, cacheAwareService,
-                    roleType, ipPort, endpointToRetire, logger);
+                    ipPort, endpointToRetire, logger);
         }
     }
 

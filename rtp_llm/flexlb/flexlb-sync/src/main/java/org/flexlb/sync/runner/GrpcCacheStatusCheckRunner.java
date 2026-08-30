@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
+import java.util.Map;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.LongAdder;
@@ -31,6 +32,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final String site;
     private final RoleType roleType;
     private final WorkerStatus workerStatus;
+    private final Map<String, WorkerStatus> workerStatusMap;
     private final WorkerStatus.PollLease pollLease;
     private final long generationId;
     private final EngineHealthReporter engineHealthReporter;
@@ -50,6 +52,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
                                       WorkerStatus workerStatus,
                                       WorkerStatus.PollLease pollLease,
+                                      Map<String, WorkerStatus> workerStatusMap,
                                       EngineHealthReporter engineHealthReporter,
                                       EngineGrpcService engineGrpcService,
                                       CacheAwareService cacheAwareService,
@@ -67,6 +70,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
         this.modelName = modelName;
         this.workerStatus = workerStatus;
+        this.workerStatusMap = java.util.Objects.requireNonNull(
+                workerStatusMap, "workerStatusMap");
         this.pollLease = java.util.Objects.requireNonNull(
                 pollLease, "pollLease");
         workerStatus.requireCachePollLease(pollLease);
@@ -178,19 +183,35 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 return;
             }
 
-            engineHealthReporter.reportCacheStatusCheckRemoteInfo(
-                    modelName, roleType.name(), startTime);
-
-            if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
-                workerStatus.publishCacheStatus(newCacheStatus);
-                if (isCacheProducingRole()) {
-                    updateLocalKvCache();
+            long successfulIntervalUs;
+            workerStatus.lock.lock();
+            try {
+                if (workerStatusMap.get(ipPort) != workerStatus
+                        || !workerStatus.isActiveGeneration()) {
+                    logger.debug(
+                            "Ignore stale cache callback for {}#{}, role:{}",
+                            ipPort, generationId, roleType);
+                    return;
                 }
-                logCacheStatusUpdate(newCacheStatus, startTime);
+                if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
+                    workerStatus.publishCacheStatus(newCacheStatus);
+                    if (isCacheProducingRole()) {
+                        // CacheAwareService is keyed by address, not generation.
+                        // Keep the generation lock through this in-memory index
+                        // update so retirement cannot publish a replacement or
+                        // clear the address between validation and publication.
+                        updateLocalKvCache();
+                    }
+                    logCacheStatusUpdate(newCacheStatus, startTime);
+                }
+                successfulIntervalUs =
+                        workerStatus.recordSuccessfulCachePoll();
+            } finally {
+                workerStatus.lock.unlock();
             }
 
-            long successfulIntervalUs =
-                    workerStatus.recordSuccessfulCachePoll();
+            engineHealthReporter.reportCacheStatusCheckRemoteInfo(
+                    modelName, roleType.name(), startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
                     modelName, workerStatus, successfulIntervalUs);
         } catch (Throwable e) {

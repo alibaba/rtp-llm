@@ -80,14 +80,10 @@ public class ExpirationCleaner {
     public void cleanExpiredWorkers() {
         ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<PendingRetirement> retirements = new ArrayList<>();
-        retirements.addAll(beginExpiredRetirements(
-                modelWorkerStatus.getPrefillStatusMap(), RoleType.PREFILL));
-        retirements.addAll(beginExpiredRetirements(
-                modelWorkerStatus.getDecodeStatusMap(), RoleType.DECODE));
-        retirements.addAll(beginExpiredRetirements(
-                modelWorkerStatus.getPdFusionStatusMap(), RoleType.PDFUSION));
-        retirements.addAll(beginExpiredRetirements(
-                modelWorkerStatus.getVitStatusMap(), RoleType.VIT));
+        for (RoleType role : RoleType.values()) {
+            retirements.addAll(beginExpiredRetirements(
+                    modelWorkerStatus.getRoleStatusMap(role), role));
+        }
         completeRetirements(retirements);
     }
 
@@ -146,11 +142,10 @@ public class ExpirationCleaner {
     /** Phase two: await already-detached generations and finalize identities. */
     private void completeRetirements(List<PendingRetirement> retirements) {
         for (PendingRetirement retirement : retirements) {
-            WorkerGenerationRetirement.complete(
+        WorkerGenerationRetirement.complete(
                     retirement.workerStatus(),
                     retirement.workerStatusMap(),
                     cacheAwareService,
-                    retirement.role(),
                     retirement.ipPort(),
                     retirement.endpointToRetire(),
                     logger);

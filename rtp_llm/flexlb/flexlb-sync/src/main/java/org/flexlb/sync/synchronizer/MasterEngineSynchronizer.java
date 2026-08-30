@@ -38,6 +38,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
+    private final long statusStaleAfterUs;
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
@@ -65,6 +66,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 .getStatusPollIntervalMs();
         this.syncRequestTimeoutMs = flexlbConfig.getWorkerRegistry().getHealth()
                 .getStatusRpcTimeoutMs();
+        this.statusStaleAfterUs = flexlbConfig.getWorkerRegistry().getHealth()
+                .getStatusStaleAfterMs() * 1000L;
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
         this.scheduler.scheduleAtFixedRate(
@@ -90,7 +93,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                         syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
                                 .isFullSnapshotDebugMode(),
-                        endpointEventSink, endpointRegistry
+                        endpointEventSink, endpointRegistry,
+                        statusStaleAfterUs
                 ));
             }
         } catch (Exception e) {
