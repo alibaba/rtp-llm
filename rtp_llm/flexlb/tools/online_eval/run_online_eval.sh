@@ -592,7 +592,9 @@ PY
 
 PROCESS_ENV_ARGS=()
 if [[ -f "${PROCESS_CONFIG_FILE}" ]]; then
-  mapfile -d '' -t PROCESS_ENV_ARGS < <(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
+  while IFS= read -r -d '' process_env; do
+    PROCESS_ENV_ARGS+=("${process_env}")
+  done < <(python3 - "${PROCESS_CONFIG_FILE}" <<'PY'
 import json
 import sys
 
@@ -603,7 +605,7 @@ for item in envs:
         continue
     sys.stdout.write(f"{str(item[0])}={str(item[1])}\0")
 PY
-)
+  )
 fi
 
 PROCESS_FLEXLB_CONFIG=""

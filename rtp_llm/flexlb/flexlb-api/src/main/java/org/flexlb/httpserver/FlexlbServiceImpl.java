@@ -1,5 +1,6 @@
 package org.flexlb.httpserver;
 
+import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -219,21 +220,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ActiveRequestCounter.RequestToken token,
             AtomicBoolean completionClaimed,
             ScheduleOrigin origin) {
+        CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
         try {
-            routeLocally(context).whenComplete((response, routeError) -> {
-                if (routeError != null) {
-                    Logger.warn("FlexlbService.schedule async error, request_id={}",
-                            request.getRequestId(), routeError);
-                }
-                completeOnce(
-                        request.getRequestId(),
-                        context,
-                        routeError == null ? response : buildErrorResponse(routeError),
-                        responseObserver,
-                        origin,
-                        token,
-                        completionClaimed);
-            });
+            // route() registers the scheduler owner synchronously. Install the
+            // cancellation listener only after that owner exists, so an
+            // already-cancelled Context cannot race ahead of registration.
+            routeFuture = routeLocally(context);
         } catch (Exception error) {
             Logger.warn("FlexlbService.schedule local route error, request_id={}",
                     request.getRequestId(), error);
@@ -245,7 +237,37 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     origin,
                     token,
                     completionClaimed);
+            return;
         }
+        Context inboundContext = Context.current();
+        Context.CancellationListener cancellationListener = ignored -> {
+            if (!completionClaimed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                cancelUndeliveredRoute(request.getRequestId());
+            } finally {
+                closeRequestToken(request.getRequestId(), token);
+            }
+        };
+        inboundContext.addListener(cancellationListener, Runnable::run);
+        Runnable removeCancellationListener =
+                () -> inboundContext.removeListener(cancellationListener);
+        routeFuture.whenComplete((response, routeError) -> {
+            if (routeError != null) {
+                Logger.warn("FlexlbService.schedule async error, request_id={}",
+                        request.getRequestId(), routeError);
+            }
+            completeOnce(
+                    request.getRequestId(),
+                    context,
+                    routeError == null ? response : buildErrorResponse(routeError),
+                    responseObserver,
+                    origin,
+                    token,
+                    completionClaimed,
+                    removeCancellationListener);
+        });
     }
 
     private void completeOnce(
@@ -256,7 +278,21 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ScheduleOrigin origin,
             ActiveRequestCounter.RequestToken token,
             AtomicBoolean completionClaimed) {
+        completeOnce(requestId, context, response, responseObserver, origin,
+                token, completionClaimed, () -> { });
+    }
+
+    private void completeOnce(
+            long requestId,
+            BalanceContext context,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver,
+            ScheduleOrigin origin,
+            ActiveRequestCounter.RequestToken token,
+            AtomicBoolean completionClaimed,
+            Runnable completionCleanup) {
         if (!completionClaimed.compareAndSet(false, true)) {
+            completionCleanup.run();
             return;
         }
         try {
@@ -265,12 +301,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             Logger.warn("FlexlbService.schedule response completion error, request_id={}",
                     requestId, error);
         } finally {
-            try {
-                token.close();
-            } catch (Exception error) {
-                Logger.warn("FlexlbService.schedule request token close failed, request_id={}",
-                        requestId, error);
-            }
+            completionCleanup.run();
+            closeRequestToken(requestId, token);
+        }
+    }
+
+    private void closeRequestToken(
+            long requestId, ActiveRequestCounter.RequestToken token) {
+        try {
+            token.close();
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule request token close failed, request_id={}",
+                    requestId, error);
         }
     }
 
@@ -547,6 +589,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             observer.onNext(response);
             observer.onCompleted();
+        } catch (RuntimeException deliveryError) {
+            if (response.getSuccess() && ownsLocalRoute(origin) && ctx != null) {
+                cancelUndeliveredRoute(ctx.getRequestId());
+            }
+            throw deliveryError;
         } finally {
             try {
                 serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
@@ -560,6 +607,21 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             engineHealthReporter.reportBalancingService(ctx);
             reportPrioritySchedule(ctx, response);
         }
+    }
+
+    private void cancelUndeliveredRoute(long requestId) {
+        try {
+            routeService.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+        } catch (Exception error) {
+            Logger.warn("FlexlbService.schedule cancellation failed, request_id={}",
+                    requestId, error);
+        }
+    }
+
+    private static boolean ownsLocalRoute(ScheduleOrigin origin) {
+        return origin == ScheduleOrigin.LOCAL_MASTER
+                || origin == ScheduleOrigin.LOCAL_FALLBACK
+                || origin == ScheduleOrigin.LOCAL_STANDALONE;
     }
 
     /** Write one PV record on the node that made the scheduling decision. */
