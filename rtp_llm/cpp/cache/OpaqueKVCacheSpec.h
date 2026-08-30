@@ -281,7 +281,6 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
                                 desc.tag.c_str());
 
         auto spec                = std::make_shared<CompressedKVCacheSpec>();
-        spec->tag                = desc.tag;
         spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
         spec->entry_dtype_       = desc.entry_dtype;
         const uint32_t entries   = entryCount(desc, ctx);
@@ -317,7 +316,6 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
                                 desc.tag.c_str());
 
         auto spec                = std::make_shared<FixedStateCacheSpec>();
-        spec->tag                = desc.tag;
         spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
         spec->entry_dtype_       = desc.entry_dtype;
         const uint32_t entries   = entryCount(desc, ctx);

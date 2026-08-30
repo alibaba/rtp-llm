@@ -2,6 +2,7 @@ load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
 package(default_visibility = ["//visibility:public"])
 
+
 cc_library(
     name = "cuda_copy_util",
     hdrs = ["CudaCopyUtil.h"],
@@ -67,4 +68,3 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
-

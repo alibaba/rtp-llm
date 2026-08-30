@@ -10,6 +10,14 @@ remote_test_copts = test_copts + select({
     "//conditions:default": [],
 })
 
+remote_test_deps = select({
+    "//:using_remote_kv_cache": [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache/connector:connector",
+    ],
+    "//conditions:default": [],
+})
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -32,10 +40,6 @@ test_deps = [
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps() + cuda13_torch_link_deps
-
-test_copts = [
-    "-fno-access-control",
-] + copts()
 
 cuda13_target_compatibility = select({
     "//:using_cuda13_arm": ["@platforms//:incompatible"],
@@ -96,9 +100,7 @@ cc_test(
     target_compatible_with = cuda13_target_compatibility,
     deps = test_deps + [
         ":remote_connector_mock_base",
-        "//rtp_llm/cpp/cache:cache",
-        "//rtp_llm/cpp/cache/connector:connector",
-    ],
+    ] + remote_test_deps,
 )
 
 cc_test(

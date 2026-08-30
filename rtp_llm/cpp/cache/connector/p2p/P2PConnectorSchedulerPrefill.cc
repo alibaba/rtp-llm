@@ -11,9 +11,13 @@ namespace rtp_llm {
 
 P2PConnectorSchedulerPrefill::P2PConnectorSchedulerPrefill(
     P2PConnectorSchedulerConfig                config,
+    const CacheConfig&                         cache_config,
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
-    config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
+    config_(std::move(config)),
+    cache_config_(cache_config),
+    metrics_reporter_(metrics_reporter),
+    tp_broadcast_client_(tp_broadcast_client) {}
 
 ErrorInfo
 P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&                            resource,
@@ -37,7 +41,7 @@ P2PConnectorSchedulerPrefill::sendKVCache(const KVCacheResourcePtr&             
         }
     };
 
-    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(cache_config_, *resource, 0);
     if (layer_cache_buffers.empty()) {
         std::string error_msg = "sendKVCache: layer_cache_buffers is empty, request_id: " + std::to_string(request_id);
         RTP_LLM_LOG_WARNING("%s", error_msg.c_str());

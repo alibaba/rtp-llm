@@ -99,16 +99,8 @@ public:
         return it->second;
     }
 
-    const CacheLayerLayout& group(size_t group_id) const {
-        return group(topology().groupById(group_id).tag);
-    }
-
     const BlockBufferPtrInfo& at(std::string_view tag, size_t layer_id) const {
         return group(tag).at(layer_id);
-    }
-
-    const BlockBufferPtrInfo& at(size_t group_id, size_t layer_id) const {
-        return group(group_id).at(layer_id);
     }
 
     // Layer-only access is valid only when exactly one group has data for the
@@ -136,10 +128,6 @@ public:
 
     bool hasGroupData(std::string_view tag) const {
         return !group(tag).empty();
-    }
-
-    size_t groupId(std::string_view tag) const {
-        return topology().groupIdForTag(tag);
     }
 
     const CacheTopology& topology() const {

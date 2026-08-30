@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include <c10/core/Event.h>
@@ -30,6 +31,7 @@ struct P2PConnectorResourceEntry;
 class P2PConnector: public KVCacheConnector {
 public:
     P2PConnector(P2PConnectorConfig                          config,
+                 const CacheConfig&                          cache_config,
                  const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                  const kmonitor::MetricsReporterPtr&         metrics_reporter);
     ~P2PConnector() override;
@@ -96,6 +98,7 @@ private:
 
 private:
     const P2PConnectorConfig             config_;
+    const CacheConfig                    cache_config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 

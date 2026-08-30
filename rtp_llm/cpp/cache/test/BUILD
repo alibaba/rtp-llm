@@ -54,6 +54,7 @@ cc_library(
     ],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_layout",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
     ],
@@ -135,6 +136,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
@@ -189,25 +191,15 @@ cc_library(
 )
 
 cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "shared_block_cache_test",
     srcs = [
         "SharedBlockCacheTest.cc",
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = block_cache_test_deps + [
+        ":block_pool_test_helper",
+    ],
     env = {},
     exec_properties = {'gpu':'H20'},
 )

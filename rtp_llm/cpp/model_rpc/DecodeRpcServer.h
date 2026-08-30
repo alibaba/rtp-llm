@@ -1,8 +1,13 @@
 #pragma once
 
+#include <map>
+#include <mutex>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -25,22 +30,22 @@ public:
 
     class LoadKVCacheContext {
     public:
-        LoadKVCacheContext(int64_t                          request_id,
-                           const std::string&               request_key,
-                           const std::vector<std::string>&  peer_addrs,
-                           const std::vector<CacheKeyType>& cache_keys,
-                           const GroupBlockIds&             block_ids_by_group,
-                           int64_t                          reuse_block_size,
-                           int64_t                          timeout_ms,
-                           int                              partition_count,
-                           int                              partition_id,
-                           grpc::ServerContext*             server_context,
-                           int32_t                          prefill_cp_size = 1):
+        LoadKVCacheContext(int64_t                                request_id,
+                           const std::string&                     request_key,
+                           const std::vector<std::string>&        peer_addrs,
+                           const std::vector<CacheKeyType>&       cache_keys,
+                           const std::map<std::string, BlockIds>& group_blocks,
+                           int64_t                                reuse_block_size,
+                           int64_t                                timeout_ms,
+                           int                                    partition_count,
+                           int                                    partition_id,
+                           grpc::ServerContext*                   server_context,
+                           int32_t                                prefill_cp_size = 1):
             request_id(request_id),
             request_key(request_key),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
-            block_ids_by_group(block_ids_by_group),
+            group_blocks(group_blocks),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
@@ -51,11 +56,12 @@ public:
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
-        const GroupBlockIds&             block_ids_by_group;
-        int64_t                          reuse_block_size;
-        int64_t                          timeout_ms;
-        int                              partition_count;
-        int                              partition_id;
+        // Tag-bearing cache group records; the record order is not identity.
+        const std::map<std::string, BlockIds>& group_blocks;
+        int64_t                                reuse_block_size;
+        int64_t                                timeout_ms;
+        int                                    partition_count;
+        int                                    partition_id;
 
         grpc::ServerContext* server_context;
         int32_t              prefill_cp_size;
@@ -90,8 +96,9 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static std::map<std::string, BlockIds> decodeGroupBlockRecords(const BroadcastLoadRequestPB& request,
+                                                                   const CacheTopology&          topology);
+    static std::string makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);

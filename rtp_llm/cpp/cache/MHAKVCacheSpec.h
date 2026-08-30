@@ -35,7 +35,6 @@ struct MHAKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str());
 
         auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->tag                = desc.tag;
         spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
@@ -48,7 +47,7 @@ struct MHAKVCacheSpec: public KVCacheSpec {
         const uint32_t kv             = static_cast<uint32_t>(attn.kv_head_num);
         const uint32_t local_kv_heads = (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
 
-        spec->per_token_k_elems       = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
+        spec->per_token_k_elems = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
         if (spec->dtype_ == DataType::TYPE_INT8 || spec->dtype_ == DataType::TYPE_FP8_E4M3) {
             spec->per_token_k_scale_bytes = static_cast<size_t>(local_kv_heads) * sizeof(float);
         }

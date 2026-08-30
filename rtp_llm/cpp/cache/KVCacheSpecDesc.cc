@@ -5,7 +5,12 @@
 
 namespace rtp_llm {
 
-KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+BuiltLayerSpec SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+    auto spec = buildSpec(desc, ctx);
+    return {desc.tag, std::move(spec), groupPolicy(desc)};
+}
+
+KVCacheSpecPtr SpecBuilder::buildSpec(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
     RTP_LLM_CHECK_WITH_INFO(!desc.tag.empty(), "KVCacheSpecDesc tag must not be empty");
     switch (desc.cache_type) {
         case KVCacheSpecType::MultiHeadAttention:

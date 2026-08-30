@@ -5,6 +5,7 @@ import torch
 from rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test import (
     PyModelInputs,
     PyModelOutputs,
+    run_invalid_boundary_diagnostics,
     run_scenario,
 )
 
@@ -86,7 +87,87 @@ def _record_for_request(result: dict, request_id: int) -> dict:
     return matches[0]
 
 
+def _offsets_by_tag(result: dict) -> dict:
+    blocks = _blocks_by_key(result)
+    offsets = {}
+    for tag in ("full", "linear"):
+        offsets[tag] = sorted(
+            block["address"] - result["base_addresses"][tag]
+            for key, block in blocks.items()
+            if ("_tag_" + tag) in key
+        )
+    return offsets
+
+
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def _assert_boundary_failure_has_no_publication(self, scenario: str) -> None:
+        model = CacheStoreForwardModel()
+        result = run_invalid_boundary_diagnostics(model, scenario)
+        self.assertTrue(result["message"])
+        self.assertEqual(result["held_delta"], 0)
+        self.assertEqual(result["device_copy_delta"], 0)
+        self.assertEqual(result["store_records"], 0)
+        self.assertEqual(model.forward_calls, 0)
+
+    def test_tagged_boundary_rejects_missing_tags_before_python_forward(self) -> None:
+        model = CacheStoreForwardModel()
+        with self.assertRaisesRegex(RuntimeError, "cache tags"):
+            run_scenario(model, "missing_boundary_tags")
+        self.assertEqual(model.forward_calls, 0)
+
+    def test_multi_tag_binding_ignores_cache_group_declaration_order(self) -> None:
+        # The block-table group dimension is ordered by sorted tags, so
+        # declaring the same two groups in the other order must publish exactly
+        # the same per-tag addresses.
+        unsorted_result = run_scenario(CacheStoreForwardModel(), "multi_tag")
+        sorted_result = run_scenario(
+            CacheStoreForwardModel(), "multi_tag_sorted_declaration"
+        )
+
+        self.assertEqual(
+            _offsets_by_tag(unsorted_result), _offsets_by_tag(sorted_result)
+        )
+        self.assertEqual(
+            _offsets_by_tag(sorted_result),
+            {"full": [16, 32], "linear": [72, 96, 120, 144]},
+        )
+
+    def test_multi_tag_boundary_reorders_tags_and_all_parallel_rows_together(
+        self,
+    ) -> None:
+        canonical = run_scenario(CacheStoreForwardModel(), "multi_tag")
+        reordered = run_scenario(CacheStoreForwardModel(), "reordered_boundary_tags")
+        self.assertEqual(_offsets_by_tag(reordered), _offsets_by_tag(canonical))
+
+    def test_tp_non_root_reconstructs_single_tag_after_tensor_sync(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "tp_non_root_single_tag")
+        self.assertEqual(model.forward_calls, 1)
+        record = _record_for_request(result, 351)
+        base = result["base_addresses"]["default"]
+        self.assertEqual(
+            sorted(block["address"] - base for block in record["blocks"]),
+            [16, 32],
+        )
+
+    def test_tp_non_root_reconstructs_reordered_multi_group_parallel_rows(self) -> None:
+        canonical = run_scenario(CacheStoreForwardModel(), "multi_tag")
+        reconstructed = run_scenario(CacheStoreForwardModel(), "tp_non_root_multi_tag")
+        self.assertEqual(_offsets_by_tag(reconstructed), _offsets_by_tag(canonical))
+
+    def test_tagged_boundary_rejects_all_invalid_parallel_payloads_before_publication(
+        self,
+    ) -> None:
+        for scenario in (
+            "duplicate_boundary_tags",
+            "unknown_boundary_tag",
+            "unequal_group_types",
+            "late_group_type_mismatch",
+            "tp_non_root_group_type_mismatch",
+        ):
+            with self.subTest(scenario=scenario):
+                self._assert_boundary_failure_has_no_publication(scenario)
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")

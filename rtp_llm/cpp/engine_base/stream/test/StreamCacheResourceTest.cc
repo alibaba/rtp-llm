@@ -77,6 +77,11 @@ protected:
                                         RoleType                role_type) {
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
+        // Every cache group owns an independent block pool sized to its own block_num, and each
+        // pool keeps block 0 back as the null block, so the free count is sum(block_num - 1) over
+        // the declared groups: 8 for the single-group MHA plans, 16 for the two-group hybrid plan.
+        // This must stay an accurate expectation: ASSERT_* here only returns from this helper, so a
+        // stale value leaves stream_ null and the caller crashes on the next dereference.
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_config.topology().groups()) {
             ASSERT_GT(group.block_num, 0u);
@@ -103,10 +108,13 @@ protected:
         stream_->generate_status_->status = StreamState::RUNNING;
     }
 
+    // Every CHECK_BLOCK caller builds its manager from init_config(), i.e.
+    // makeSimpleMhaCacheConfig, whose single cache group is tagged "default".
+    // The tag is the group's only identity.
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, "default").size(), inner_size);
         }
     };
 
@@ -398,8 +406,10 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             EXPECT_FALSE(info.reuse_cache);
             EXPECT_FALSE(info.enable_device_cache);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
+            // prepareHybridResource() uses makeSimpleHybridMhaCacheConfig, whose linear group
+            // is tagged "linear"; that is the group this mock used to fill.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, "linear");
                 block_ids.assign(BlockIndicesType{/*block=*/1});
             }
             return {true, 0};

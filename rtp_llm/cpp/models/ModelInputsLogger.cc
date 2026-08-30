@@ -147,6 +147,9 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("execution_stage", executionStage(inputs));
     payload.insert("model_id", model_id);
     payload.insert("trace_ids", inputs.trace_ids);
+    // Canonical sorted cache tags naming every group-dimension row of the block
+    // tables, kv_cache_group_types and kv_cache_update_mapping recorded below.
+    payload.insert("kv_cache_group_tags", inputs.kv_cache_group_tags);
     c10::impl::GenericDict float8_dtypes(c10::StringType::get(), c10::StringType::get());
 #define ADD_TENSOR(field) addTensor(payload, #field, inputs.field, devices, float8_dtypes);
     MODEL_INPUT_TENSORS(ADD_TENSOR)

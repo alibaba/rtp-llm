@@ -16,7 +16,6 @@ namespace rtp_llm {
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
-typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
 struct BlockAddrInfo {
@@ -43,16 +42,16 @@ struct TaggedBlockIdPair {
     BlockIdxType dst;
 };
 
-// Process-local tensor representation. group_id is resolved from a stable tag
-// immediately before execution and is never used as an external identity.
-struct GroupBlockIdPair {
-    GroupIdType  group_id;
+// Process-local tensor representation. The ordinal is resolved from a stable
+// tag immediately before execution and is never used as an external identity.
+struct GroupOrdinalBlockIdPair {
+    int32_t      group_ordinal;
     BlockIdxType src;
     BlockIdxType dst;
 };
 
-static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
-              "GroupBlockIdPair must match the three-column int32 tensor layout");
+static_assert(sizeof(GroupOrdinalBlockIdPair) == 3 * sizeof(int32_t),
+              "GroupOrdinalBlockIdPair must match the three-column int32 tensor layout");
 
 struct MatchResult {
     size_t           reuse_length = 0;

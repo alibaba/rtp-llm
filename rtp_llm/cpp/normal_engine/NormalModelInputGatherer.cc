@@ -6,6 +6,7 @@
 #include <string>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
@@ -28,26 +29,26 @@ bool deviceInputEnabled() {
 }
 
 struct GatherModelInputContext {
-    int               input_vocab_size;
-    bool              need_cal_position_id;
-    size_t            max_blocks_num;
-    int*              merged_tokens;
-    int*              input_lengths;
-    int*              lm_output_indexes;
-    int*              combo_position_ids;
-    GroupBlockIdPair* kv_cache_update_mapping;
-    int               batch_idx;
-    int*              sequence_lengths;
-    bool              has_multimodal_input;
-    bool              has_mm_extra_input;
-    size_t            total_decode_batch_size;
-    int*              prefix_lengths;
-    int*              prefix_lengths_host;
-    int*              merged_text_mask;
-    int*              mm_features_locs;
-    int               token_idx;
-    int               cum_output_seq_len;
-    int               mm_feature_index;
+    int                      input_vocab_size;
+    bool                     need_cal_position_id;
+    size_t                   max_blocks_num;
+    int*                     merged_tokens;
+    int*                     input_lengths;
+    int*                     lm_output_indexes;
+    int*                     combo_position_ids;
+    GroupOrdinalBlockIdPair* kv_cache_update_mapping;
+    int                      batch_idx;
+    int*                     sequence_lengths;
+    bool                     has_multimodal_input;
+    bool                     has_mm_extra_input;
+    size_t                   total_decode_batch_size;
+    int*                     prefix_lengths;
+    int*                     prefix_lengths_host;
+    int*                     merged_text_mask;
+    int*                     mm_features_locs;
+    int                      token_idx;
+    int                      cum_output_seq_len;
+    int                      mm_feature_index;
 };
 
 enum class GatherContextMode {
@@ -88,7 +89,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     }
     ctx.kv_cache_update_mapping =
         model_input.kv_cache_update_mapping.defined() ?
-            reinterpret_cast<GroupBlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr())
+            reinterpret_cast<GroupOrdinalBlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr())
                 + kv_cache_mapping_offset :
             nullptr;
 
@@ -100,33 +101,61 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     return ctx;
 }
 
-void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
-                                   const BatchKVCacheResource& kv_cache,
-                                   int                         stream_batch_idx,
-                                   int                         model_batch_idx,
-                                   size_t                      max_blocks_num,
-                                   size_t                      kernel_blocks_per_kv_block) {
+void copyKvCacheBlocksToModelInput(GptModelInputs&                 model_input,
+                                   const BatchKVCacheResource&     kv_cache,
+                                   int                             stream_batch_idx,
+                                   int                             model_batch_idx,
+                                   size_t                          max_blocks_num,
+                                   size_t                          kernel_blocks_per_kv_block,
+                                   const std::vector<std::string>& boundary_group_tags) {
     if (!model_input.kv_cache_kernel_block_id.defined() || max_blocks_num == 0) {
         return;
     }
     RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_kernel_block_id.dim() == 3,
                             "hybrid kv_cache_kernel_block_id must be 3-D");
     RTP_LLM_CHECK_WITH_INFO(model_input.kv_cache_block_id.dim() == 3, "hybrid kv_cache_block_id must be 3-D");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(kv_cache.groupNums()) == boundary_group_tags.size(),
+                            "request cache resource group count=%d does not match cache tag count=%zu",
+                            kv_cache.groupNums(),
+                            boundary_group_tags.size());
 
     const size_t batch           = model_input.kv_cache_kernel_block_id.size(1);
     int32_t*     kernel_dst_base = model_input.kv_cache_kernel_block_id.data_ptr<int32_t>();
     int32_t*     store_dst_base  = model_input.kv_cache_block_id.data_ptr<int32_t>();
 
-    for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-        auto&    kernel_blocks = kv_cache.kernelBlocks(stream_batch_idx, gid);
-        int32_t* kernel_dst    = kernel_dst_base
-                              + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx))
-                                    * max_blocks_num * kernel_blocks_per_kv_block;
+    std::vector<const BlockIndicesType*> kernel_blocks_by_tag;
+    std::vector<const BlockIndicesType*> physical_blocks_by_tag;
+    kernel_blocks_by_tag.reserve(boundary_group_tags.size());
+    physical_blocks_by_tag.reserve(boundary_group_tags.size());
+    const size_t kernel_row_capacity = max_blocks_num * kernel_blocks_per_kv_block;
+    for (const auto& tag : boundary_group_tags) {
+        const auto& kernel_blocks   = kv_cache.kernelBlocks(stream_batch_idx, tag);
+        const auto& physical_blocks = kv_cache.blocks(stream_batch_idx, tag);
+        RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= kernel_row_capacity,
+                                "kernel block table overflow for tag=%s: blocks=%zu capacity=%zu",
+                                tag.c_str(),
+                                kernel_blocks.size(),
+                                kernel_row_capacity);
+        RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= max_blocks_num,
+                                "physical block table overflow for tag=%s: blocks=%zu capacity=%zu",
+                                tag.c_str(),
+                                physical_blocks.size(),
+                                max_blocks_num);
+        kernel_blocks_by_tag.push_back(&kernel_blocks);
+        physical_blocks_by_tag.push_back(&physical_blocks);
+    }
+
+    // Boundary adapter: row group_ordinal of both block tables belongs to
+    // boundary_group_tags[group_ordinal], and its payload is fetched by that tag
+    // right here, so the request resource's own record order never leaks out.
+    for (size_t group_ordinal = 0; group_ordinal < boundary_group_tags.size(); ++group_ordinal) {
+        const size_t   row_offset    = group_ordinal * batch + static_cast<size_t>(model_batch_idx);
+        const auto&    kernel_blocks = *kernel_blocks_by_tag[group_ordinal];
+        int32_t* const kernel_dst    = kernel_dst_base + row_offset * max_blocks_num * kernel_blocks_per_kv_block;
         std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
 
-        auto&    physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
-        int32_t* store_dst =
-            store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * max_blocks_num;
+        const auto&    physical_blocks = *physical_blocks_by_tag[group_ordinal];
+        int32_t* const store_dst       = store_dst_base + row_offset * max_blocks_num;
         std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
     }
 }
@@ -193,8 +222,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
                 sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
             if (!current_extra_input.is_cuda()) {
                 host_holder.hold_host(current_extra_input);
-                gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                gathered_mm_extra_input.emplace_back(current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
             } else {
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }
@@ -204,18 +232,19 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 
+// Boundary adapter: the first kv_cache_update_mapping column is an
+// adapter-local group_ordinal in canonical sorted-tag order. NormalExecutor
+// decodes it back to tags before touching the cache layer.
 void addCacheUpdateCopy(GatherModelInputContext&              ctx,
                         const std::vector<TaggedBlockIdPair>& update_mapping,
-                        const std::vector<std::string>&       group_tags) {
+                        const std::vector<std::string>&       boundary_group_tags) {
     if (!ctx.kv_cache_update_mapping) {
         return;
     }
     for (const auto& mapping : update_mapping) {
-        const auto it = std::find(group_tags.begin(), group_tags.end(), mapping.tag);
-        RTP_LLM_CHECK_WITH_INFO(
-            it != group_tags.end(), "cache update mapping references unknown tag=%s", mapping.tag.c_str());
+        const auto group_ordinal = groupOrdinalForTag(boundary_group_tags, mapping.tag, "cache update mapping");
         *ctx.kv_cache_update_mapping++ =
-            GroupBlockIdPair{static_cast<GroupIdType>(std::distance(group_tags.begin(), it)), mapping.src, mapping.dst};
+            GroupOrdinalBlockIdPair{static_cast<int32_t>(group_ordinal), mapping.src, mapping.dst};
     }
 }
 
@@ -256,17 +285,16 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
-    auto       indexes =
-        torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto* dst = indexes.data_ptr<int32_t>();
+    auto       indexes = torch::empty({total_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto*      dst     = indexes.data_ptr<int32_t>();
     for (int64_t i = 0; i < total_decode_batch_size; ++i) {
         dst[i] = static_cast<int32_t>(i);
     }
     if (total_context_batch_size > 0) {
-        auto input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
-                                                                  model_input.input_lengths.contiguous();
-        const auto* lengths = input_lengths.data_ptr<int32_t>();
-        int32_t     offset  = static_cast<int32_t>(total_decode_batch_size);
+        auto        input_lengths = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().contiguous() :
+                                                                          model_input.input_lengths.contiguous();
+        const auto* lengths       = input_lengths.data_ptr<int32_t>();
+        int32_t     offset        = static_cast<int32_t>(total_decode_batch_size);
         for (int64_t i = 0; i < total_context_batch_size; ++i) {
             offset += lengths[total_decode_batch_size + i];
             dst[total_decode_batch_size + i] = offset - 1;
@@ -305,7 +333,22 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 }  // anonymous namespace
 
-NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {}
+namespace {
+
+std::vector<std::string> buildBoundaryGroupTags(const std::unordered_map<std::string, GroupBase>& groups) {
+    std::vector<std::string> tags;
+    tags.reserve(groups.size());
+    for (const auto& [tag, group] : groups) {
+        (void)group;
+        tags.push_back(tag);
+    }
+    return sortedCacheGroupTags(tags, "model input cache");
+}
+
+}  // namespace
+
+NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config):
+    config_(config), boundary_group_tags_(buildBoundaryGroupTags(config.kv_cache_groups)) {}
 
 GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups) const {
     const size_t current_tokens_size      = stream_groups.modelExecuteTokenSize();
@@ -333,14 +376,17 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
 
     if (max_blocks_num) {
-        model_input.kv_cache_kernel_block_id =
-            torch::zeros({(int64_t)config_.kv_cache_group_nums,
-                          (int64_t)total_batch_size,
-                          (int64_t)(max_blocks_num * config_.kernel_blocks_per_kv_block)},
-                         pinned_i32);
-        model_input.kv_cache_block_id = torch::zeros(
-            {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
-        model_input.kv_cache_group_types    = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
+        const int64_t group_num = (int64_t)boundary_group_tags_.size();
+        // Every group dimension below is ordered by boundary_group_tags_; the tag
+        // list travels with the input so the log and the consuming model can name
+        // each row.
+        model_input.kv_cache_group_tags      = boundary_group_tags_;
+        model_input.kv_cache_kernel_block_id = torch::zeros(
+            {group_num, (int64_t)total_batch_size, (int64_t)(max_blocks_num * config_.kernel_blocks_per_kv_block)},
+            pinned_i32);
+        model_input.kv_cache_block_id =
+            torch::zeros({group_num, (int64_t)total_batch_size, (int64_t)max_blocks_num}, pinned_i32);
+        model_input.kv_cache_group_types    = torch::empty({group_num}, pinned_i32);
         model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
         // CP-sharded group block tables can be narrower than the global cache-key
         // namespace. Keep cache_keys independently sized so PD writer and reader
@@ -372,11 +418,15 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
 }
 
 void NormalModelInputGatherer::initializeKvCacheMetadata(GptModelInputs& model_input) const {
-    if (model_input.kv_cache_group_types.defined()) {
-        auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
-        for (size_t g = 0; g < config_.kv_cache_group_nums; ++g) {
-            dst[g] = static_cast<int32_t>(config_.kv_cache_group_types[g]);
-        }
+    if (!model_input.kv_cache_group_types.defined()) {
+        return;
+    }
+    // Boundary adapter: kv_cache_group_types is the payload parallel to the block
+    // tables, so it is permuted into the same canonical sorted-tag order here.
+    auto* dst = model_input.kv_cache_group_types.data_ptr<int32_t>();
+    for (size_t idx = 0; idx < boundary_group_tags_.size(); ++idx) {
+        const auto& group = config_.kv_cache_groups.at(boundary_group_tags_[idx]);
+        dst[idx]          = static_cast<int32_t>(group.policy.group_type);
     }
 }
 
@@ -385,8 +435,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const char* device_input_env = std::getenv("RTP_LLM_DEVICE_INPUT");
-    bool use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
+    const char* device_input_env        = std::getenv("RTP_LLM_DEVICE_INPUT");
+    bool        use_normal_device_state = device_input_env != nullptr && std::string(device_input_env) == "1"
                                    && stream_groups.totalContextBatchSize() == 0
                                    && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
     if (use_normal_device_state) {
@@ -451,11 +501,16 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                                    + ctx.batch_idx * config_.position_id_len_factor);
                 }
             }
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+            copyKvCacheBlocksToModelInput(model_input,
+                                          kv_cache,
+                                          i,
+                                          ctx.batch_idx,
+                                          ctx.max_blocks_num,
+                                          config_.kernel_blocks_per_kv_block,
+                                          boundary_group_tags_);
             ctx.batch_idx += 1;
         }
-        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);
+        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), boundary_group_tags_);
         stream->step();
     }
 
@@ -472,10 +527,10 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_context_streams");
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<torch::Tensor> gathered_mm_extra_input;
-    const auto context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
-    auto prefix_lengths_host =
+    const auto                 context_batch_size = static_cast<int64_t>(stream_groups.totalContextBatchSize());
+    auto                       prefix_lengths_host =
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
+    auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
 
     for (const auto& stream : stream_groups.contextStreams()) {
@@ -522,8 +577,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                        (context_pos_ids.numel() - reuse_offset) * sizeof(int));
             }
 
-            copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+            copyKvCacheBlocksToModelInput(model_input,
+                                          kv_cache,
+                                          i,
+                                          ctx.batch_idx,
+                                          ctx.max_blocks_num,
+                                          config_.kernel_blocks_per_kv_block,
+                                          boundary_group_tags_);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
@@ -545,7 +605,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx.token_idx += input_tokens.size();
         }
 
-        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), config_.kv_cache_group_tags);
+        addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping(), boundary_group_tags_);
         stream->step();
     }
 
@@ -567,6 +627,71 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     return absl::OkStatus();
 }
 
+void NormalModelInputGatherer::gatherKvCacheKernelBlockIdToHost(const StreamGroups& stream_groups,
+                                                                torch::Tensor&      host_tensor) const {
+    const size_t total_batch_size = stream_groups.totalModelBatchSize();
+    RTP_LLM_CHECK_WITH_INFO(host_tensor.device().is_cpu() && host_tensor.scalar_type() == torch::kInt32
+                                && host_tensor.dim() == 3,
+                            "kernel block staging tensor must be a 3-D CPU int32 tensor");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(host_tensor.size(0)) == boundary_group_tags_.size()
+                                && static_cast<size_t>(host_tensor.size(1)) == total_batch_size,
+                            "kernel block staging tensor shape does not match tags/batch");
+    const size_t per_batch_stride = static_cast<size_t>(host_tensor.size(2));
+
+    std::vector<const BlockIndicesType*> staged_rows;
+    staged_rows.reserve(total_batch_size * boundary_group_tags_.size());
+    size_t     staged_batch_size = 0;
+    const auto stage_one_stream  = [&](const GenerateStreamPtr& stream) {
+        const auto& kv_cache           = *stream->kvCachePtr();
+        const auto  current_batch_size = stream->currentBatchSize();
+        RTP_LLM_CHECK_WITH_INFO(current_batch_size >= 0 && current_batch_size == kv_cache.batchSize(),
+                                "stream batch size=%d does not match cache batch size=%d",
+                                current_batch_size,
+                                kv_cache.batchSize());
+        for (int i = 0; i < current_batch_size; ++i) {
+            const auto& rows_by_tag = kv_cache.blocksByTag(i);
+            RTP_LLM_CHECK_WITH_INFO(rows_by_tag.size() == boundary_group_tags_.size(),
+                                    "request cache resource tag count=%zu does not match expected tag count=%zu",
+                                    rows_by_tag.size(),
+                                    boundary_group_tags_.size());
+            for (const auto& tag : boundary_group_tags_) {
+                RTP_LLM_CHECK_WITH_INFO(rows_by_tag.find(tag) != rows_by_tag.end(),
+                                        "request cache resource missing expected tag=%s",
+                                        tag.c_str());
+                const auto& kernel_blocks = kv_cache.kernelBlocks(i, tag);
+                RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
+                                        "kernel block refresh row overflow for tag=%s: blocks=%zu capacity=%zu",
+                                        tag.c_str(),
+                                        kernel_blocks.size(),
+                                        per_batch_stride);
+                staged_rows.push_back(&kernel_blocks);
+            }
+            ++staged_batch_size;
+        }
+    };
+    for (const auto& stream : stream_groups.decodeStreams()) {
+        stage_one_stream(stream);
+    }
+    for (const auto& stream : stream_groups.contextStreams()) {
+        stage_one_stream(stream);
+    }
+    RTP_LLM_CHECK_WITH_INFO(staged_batch_size == total_batch_size,
+                            "staged kernel block batch=%zu does not match expected batch=%zu",
+                            staged_batch_size,
+                            total_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(staged_rows.size() == total_batch_size * boundary_group_tags_.size(),
+                            "staged kernel block row count mismatch");
+
+    int32_t* dst_base = host_tensor.data_ptr<int32_t>();
+    for (size_t group_ordinal = 0; group_ordinal < boundary_group_tags_.size(); ++group_ordinal) {
+        for (size_t batch_idx = 0; batch_idx < total_batch_size; ++batch_idx) {
+            const auto& row = *staged_rows[batch_idx * boundary_group_tags_.size() + group_ordinal];
+            int32_t*    dst = dst_base + (group_ordinal * total_batch_size + batch_idx) * per_batch_stride;
+            std::memcpy(dst, row.data(), row.size() * sizeof(int32_t));
+        }
+    }
+}
+
 absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
                                                                                    TensorHolder& host_holder) const {
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
@@ -576,37 +701,11 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
     }
 
     static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
-    auto              host_tensor = torch::zeros({(int64_t)config_.kv_cache_group_nums,
+    auto              host_tensor = torch::zeros({(int64_t)boundary_group_tags_.size(),
                                                   (int64_t)total_batch_size,
                                                   (int64_t)(max_blocks_num * config_.kernel_blocks_per_kv_block)},
                                     pinned_i32);
-
-    const size_t per_batch_stride = max_blocks_num * config_.kernel_blocks_per_kv_block;
-    int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
-
-    auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx) {
-        auto& kv_cache           = *stream->kvCachePtr();
-        auto  current_batch_size = stream->currentBatchSize();
-        for (int i = 0; i < current_batch_size; ++i) {
-            for (int gid = 0; gid < kv_cache.groupNums(); ++gid) {
-                const auto& kernel_blocks = kv_cache.kernelBlocks(i, gid);
-                int32_t*    dst =
-                    dst_base
-                    + (static_cast<size_t>(gid) * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
-                std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
-            }
-            batch_idx += 1;
-        }
-    };
-
-    int batch_idx = 0;
-    for (const auto& stream : stream_groups.decodeStreams()) {
-        fill_one_stream(stream, batch_idx);
-    }
-    for (const auto& stream : stream_groups.contextStreams()) {
-        fill_one_stream(stream, batch_idx);
-    }
-
+    gatherKvCacheKernelBlockIdToHost(stream_groups, host_tensor);
     return publishInt32ToCuda(host_tensor, host_holder);
 }
 

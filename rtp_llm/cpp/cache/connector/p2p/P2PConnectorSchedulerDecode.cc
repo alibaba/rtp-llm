@@ -11,9 +11,13 @@ namespace rtp_llm {
 
 P2PConnectorSchedulerDecode::P2PConnectorSchedulerDecode(
     P2PConnectorSchedulerConfig                config,
+    const CacheConfig&                         cache_config,
     const kmonitor::MetricsReporterPtr&        metrics_reporter,
     const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client):
-    config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
+    config_(std::move(config)),
+    cache_config_(cache_config),
+    metrics_reporter_(metrics_reporter),
+    tp_broadcast_client_(tp_broadcast_client) {}
 
 P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
     if (checker_) {
@@ -73,8 +77,9 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                           "prefill_ip is empty or prefill_port is 0")};
     }
 
-    auto collector           = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
-    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0, block_range.first, block_range.second);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
+    auto layer_cache_buffers =
+        LayerCacheBufferUtil::convert(cache_config_, *resource, 0, block_range.first, block_range.second);
     if (layer_cache_buffers.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: layer_cache_buffers is empty");
         collector->success = false;
