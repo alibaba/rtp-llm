@@ -83,8 +83,6 @@ private:
     const size_t     kernel_blocks_per_block_;
 };
 
-using PoolBlockIds = BlockIds;
-
 class KVCacheResource {
 public:
     void initGroups(const CacheConfig& config);
@@ -137,14 +135,20 @@ public:
         return local;
     }
 
+    // Reuse counters are always measured in global cache-key blocks, where one
+    // block is `CacheConfig::seq_size_per_block` tokens. CP projection does not
+    // change this unit.
     size_t reuseBlockNum() const;
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t deviceReuseBlockNum() const;
     void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t remoteReuseBlockNum() const;
     void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
 
@@ -161,11 +165,11 @@ public:
 private:
     bool layerContainsTag(int layer_id, std::string_view tag) const;
 
-    std::vector<std::vector<std::string>>   layer_group_tags_;
-    std::map<std::string, BlockIds>         blocks_by_group_;
-    CacheKeysType                           cache_keys;
-    BlockDependenciesType                   block_dependencies;
-    bool                                    cache_keys_are_cp_canonical_{false};
+    std::vector<std::vector<std::string>> layer_group_tags_;
+    std::map<std::string, BlockIds>       blocks_by_group_;
+    CacheKeysType                         cache_keys;
+    BlockDependenciesType                 block_dependencies;
+    bool                                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

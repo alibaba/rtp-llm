@@ -76,9 +76,10 @@ bool visitSelectedBlocks(const CacheConfig&     config,
         physical_capacity = local_block_count * world_size;
     }
 
-    const size_t keys_per_physical_block = group.seqSizePerBlock() / config.seq_size_per_block;
-    const size_t available_key_count     = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
-    const size_t key_begin               = static_cast<size_t>(start_key_ordinal);
+    const CPSlotMapper mapper(cp_rank, cp_size, static_cast<int>(config.seq_size_per_block));
+    const size_t       keys_per_physical_block = mapper.cacheKeysPerPhysicalBlock(config, tag);
+    const size_t available_key_count = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
+    const size_t key_begin           = static_cast<size_t>(start_key_ordinal);
     if (key_begin >= available_key_count) {
         return false;
     }
@@ -293,7 +294,7 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     int                       layer_id = layer_cache_buffer->getLayerId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBufferByTag(
+        auto block_infos = converter->convertIndexToBuffer(
             layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
 
         transfer::KeyBlockInfo kbi;

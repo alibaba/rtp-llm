@@ -30,7 +30,7 @@ test_deps = [
 
 async_cache_test_deps = test_deps + [
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-    "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+    "//rtp_llm/cpp/cache/test/mock:mock_coordinator_cache_manager_lib",
     "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
 ]
 

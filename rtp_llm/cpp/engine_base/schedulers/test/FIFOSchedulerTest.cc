@@ -1179,11 +1179,11 @@ TEST_F(FIFOSchedulerTest, testPeakEstimateSharesAlignedPromptAcrossMaximumBatchW
     ASSERT_EQ(multi_return->estimatePeakNeedBlocks(/*remaining_tokens=*/3), 6);
     ASSERT_EQ(dynamic_beam->estimatePeakNeedBlocks(/*remaining_tokens=*/3), 6);
 
-    // Prefill has allocated the two shared blocks at width one. The non-empty estimate must retain
-    // those blocks and reserve four private future blocks for the maximum beam width.
+    // Prefill has allocated the two shared blocks at width one. The non-empty estimate reserves four private future
+    // blocks plus one possible tail copy for each of the three additional beam sequences.
     ASSERT_TRUE(dynamic_beam->initKVBlock().ok());
     ASSERT_EQ(dynamic_beam->estimateInitialNeedBlocks(), 0);
-    ASSERT_EQ(dynamic_beam->estimatePeakNeedBlocks(/*remaining_tokens=*/3), 4);
+    ASSERT_EQ(dynamic_beam->estimatePeakNeedBlocks(/*remaining_tokens=*/3), 7);
     dynamic_beam->releaseResource();
 }
 

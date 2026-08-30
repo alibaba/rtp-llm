@@ -57,6 +57,48 @@ class PyModelInputsCompatTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             HybridAttentionConfig(True)
 
+    def test_hybrid_attention_config_stub_matches_runtime_api(self) -> None:
+        stub_path = (
+            Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"
+        )
+        stub_text = stub_path.read_text()
+        class_source = (
+            "class HybridAttentionConfig:"
+            + stub_text.split("class HybridAttentionConfig:", 1)[1].split(
+                "\nclass ", 1
+            )[0]
+        )
+        config_class = ast.parse(class_source).body[0]
+        self.assertIsInstance(config_class, ast.ClassDef)
+
+        public_members = {
+            node.target.id
+            for node in config_class.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+        public_members.update(
+            node.name
+            for node in config_class.body
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+        )
+        self.assertEqual(
+            public_members,
+            {"enable_hybrid_attention", "hybrid_attention_types", "to_string"},
+        )
+
+        constructor_args = [
+            [arg.arg for arg in node.args.args]
+            for node in config_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        ]
+        self.assertEqual(
+            constructor_args,
+            [
+                ["self"],
+                ["self", "enable_hybrid_attention", "hybrid_attention_types"],
+            ],
+        )
+
     def test_sparse_routes_select_exact_tags_independent_of_topology_order(
         self,
     ) -> None:

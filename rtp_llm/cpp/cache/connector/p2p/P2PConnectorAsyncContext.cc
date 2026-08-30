@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -14,7 +15,13 @@ size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
     if (resource_ == nullptr) {
         return 0;
     }
-    return resource_->cacheKeys().size();
+    const size_t connector_entries = resource_->cacheKeys().size();
+    if (!resource_->cacheKeysAreCpCanonical()) {
+        return connector_entries;
+    }
+    RTP_LLM_CHECK_WITH_INFO(cp_size_ > 1, "CP-canonical P2P match resource requires cp_size > 1");
+    return CPSlotMapper(cp_size_ - 1, cp_size_, /*block_size=*/1)
+        .globalKeyBlockCountFromCanonicalEntries(connector_entries);
 }
 
 bool P2PConnectorAsyncMatchContext::done() const {

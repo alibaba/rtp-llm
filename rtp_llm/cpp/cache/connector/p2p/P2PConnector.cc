@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 
+#include <limits>
+
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -74,7 +77,7 @@ std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourc
     }
 
     if (config_.role_type == RoleType::DECODE) {
-        return std::make_shared<P2PConnectorAsyncMatchContext>(resource);
+        return std::make_shared<P2PConnectorAsyncMatchContext>(resource, config_.scheduler_config.cp_size);
     }
     RTP_LLM_LOG_WARNING("asyncMatch failed, unsupported role type %d", config_.role_type);
     return nullptr;
@@ -91,6 +94,30 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
     }
 
     std::pair<int, int> block_range{start_read_block_index, read_block_num};
+    if (resource->cacheKeysAreCpCanonical()) {
+        RTP_LLM_CHECK_WITH_INFO(start_read_block_index >= 0 && read_block_num >= -1,
+                                "P2P global read range is invalid: start=%d count=%d",
+                                start_read_block_index,
+                                read_block_num);
+        const int cp_size = config_.scheduler_config.cp_size;
+        RTP_LLM_CHECK_WITH_INFO(cp_size > 1, "CP-canonical P2P read resource requires cp_size > 1");
+        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
+        const auto start_entry = mapper.canonicalEntryCountFromGlobalKeyBlocks(
+            static_cast<size_t>(start_read_block_index));
+        RTP_LLM_CHECK_WITH_INFO(start_entry <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                "P2P canonical read start exceeds int: %zu",
+                                start_entry);
+        int entry_count = -1;
+        if (read_block_num >= 0) {
+            const auto converted_count =
+                mapper.canonicalEntryCountFromGlobalKeyBlocks(static_cast<size_t>(read_block_num));
+            RTP_LLM_CHECK_WITH_INFO(converted_count <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                                    "P2P canonical read count exceeds int: %zu",
+                                    converted_count);
+            entry_count = static_cast<int>(converted_count);
+        }
+        block_range = {static_cast<int>(start_entry), entry_count};
+    }
 
     if (scheduler_ == nullptr) {
         RTP_LLM_LOG_WARNING("asyncRead failed, scheduler not ready (only tp_rank 0 has scheduler)");

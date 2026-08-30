@@ -6,7 +6,7 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
 
 namespace rtp_llm {
 namespace test {
@@ -78,7 +78,7 @@ std::shared_ptr<MHAKVCacheSpec> makeMHASpec(int seq_size_per_block) {
 
 }  // namespace
 
-TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
+TEST(SWACacheManagerMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M) {
     constexpr int kSeqSizePerBlock = 256;
     constexpr int kMaxSeqLen       = 1000000;
 
@@ -90,10 +90,10 @@ TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M)
     group_config.policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
     group_config.kv_block_stride_bytes = group_config.spec->block_size_bytes();
     group_config.kv_scale_stride_bytes = group_config.spec->scale_block_size_bytes();
-    SWAKVCacheGroup group(std::move(group_config), block_pool, 0);
+    SWACacheManager group(std::move(group_config), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {
-        PoolBlockIds block_ids;
+        BlockIds block_ids;
         ASSERT_EQ(block_ids.blocksNum(), 0u) << "seq_len=" << seq_len;
 
         ASSERT_TRUE(group.malloc(block_ids, seq_len, /*enable_reuse_cache=*/false, /*reserve_step=*/0))

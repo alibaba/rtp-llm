@@ -4,38 +4,39 @@
 #include <vector>
 #include <cstdint>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class LinearKVCacheGroup: public KVCacheGroup {
+class LinearCacheManager: public SingleTypeCacheManager {
 public:
-    LinearKVCacheGroup(const CacheGroup&                   cache_group,
+    LinearCacheManager(const CacheGroup&                   cache_group,
                        std::vector<int>                    layer_ids,
                        BlockPoolPtr                        block_pool,
                        int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(cache_group, std::move(layer_ids), std::move(block_pool), shared_cache, metrics_reporter),
+        SingleTypeCacheManager(
+            cache_group, std::move(layer_ids), std::move(block_pool), shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
-    LinearKVCacheGroup(const CacheGroup&                   cache_group,
+    LinearCacheManager(const CacheGroup&                   cache_group,
                        BlockPoolPtr                        block_pool,
                        int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        LinearKVCacheGroup(cache_group, {0}, std::move(block_pool), linear_step, shared_cache, metrics_reporter) {}
+        LinearCacheManager(cache_group, {0}, std::move(block_pool), linear_step, shared_cache, metrics_reporter) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
-    bool        malloc(PoolBlockIds&        block_ids,
+    bool        malloc(BlockIds&            block_ids,
                        int                  seq_len,
                        bool                 enable_reuse_cache   = false,
                        int                  reserve_step         = 0,
                        std::vector<size_t>* backfilled_positions = nullptr) override;
 
-    void removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
-    void reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
+    void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
@@ -68,6 +69,6 @@ private:
     int linear_step_ = 0;
 };
 
-using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
+using LinearCacheManagerPtr = std::shared_ptr<LinearCacheManager>;
 
 }  // namespace rtp_llm

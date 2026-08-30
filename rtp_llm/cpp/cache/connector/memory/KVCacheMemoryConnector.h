@@ -28,23 +28,23 @@ namespace rtp_llm {
 
 class BlockPool;
 class BroadcastManager;
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 class MemoryAsyncContext;
 struct StagedMemoryCopyScratch;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
-    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                           const KVCacheConfig&                     kv_cache_config,
-                           const ParallelismConfig&                 parallelism_config,
-                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                           const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
-    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                           const KVCacheConfig&                     kv_cache_config,
-                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                           const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
+    KVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                           const KVCacheConfig&                            kv_cache_config,
+                           const ParallelismConfig&                        parallelism_config,
+                           const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                           const std::vector<std::string>&                 tp_addrs,
+                           const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr);
+    KVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                           const KVCacheConfig&                            kv_cache_config,
+                           const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                           const std::vector<std::string>&                 tp_addrs,
+                           const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr);
     ~KVCacheMemoryConnector() override;
 
 public:
@@ -87,7 +87,7 @@ private:
         BlockIdxType pool_block_id{NULL_BLOCK_IDX};
     };
     using LayerTagBlocks          = std::vector<LayerTagBlock>;
-    using LayerTagPoolBlockTables = std::vector<std::unordered_map<std::string, const PoolBlockIds*>>;
+    using LayerTagPoolBlockTables = std::vector<std::unordered_map<std::string, const BlockIds*>>;
     struct CopyInfoPerKey {
         CacheKeyType         cache_key{0};
         CacheBlockKind       kind{CacheBlockKind::COMPLETE};
@@ -287,34 +287,36 @@ private:
     void                       putToCache(CopyInfoPerKey& copy_info);
     bool putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref = false);
 
-    void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
-    void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
-    void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
-    void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
-    void reportCopyTaskMetrics(bool          success,
-                               int64_t       latency_us,
-                               int64_t       queue_wait_us,
-                               int64_t       broadcast_setup_us,
-                               int64_t       wait_done_us,
-                               int64_t       copy_item_num,
-                               int64_t       disk_item_num,
-                               CopyDirection direction);
-    void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
-    void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
-    void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
-    void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
-    int  cpSizeForMetrics() const;
-    int  cacheKeyTokensPerBlockForMetrics() const;
-    void reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
-    void reportMetricsLoop();
+    void   reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
+    void   reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
+    void   reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
+    void   reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void   reportCopyTaskMetrics(bool          success,
+                                 int64_t       latency_us,
+                                 int64_t       queue_wait_us,
+                                 int64_t       broadcast_setup_us,
+                                 int64_t       wait_done_us,
+                                 int64_t       copy_item_num,
+                                 int64_t       disk_item_num,
+                                 CopyDirection direction);
+    void   reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
+    void   reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
+    void   reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
+    void   reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    int    connectorCpSize() const;
+    size_t connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const;
+    size_t globalKeyBlockCount(const KVCacheResource& resource, size_t connector_entries) const;
+    int    cacheKeyTokensPerBlockForMetrics() const;
+    void   reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
+    void   reportMetricsLoop();
 
 private:
-    const CacheConfig&                cache_config_;
-    const std::vector<LayerTagSlot>   pool_block_memory_layout_;
-    const KVCacheConfig&              kv_cache_config_;
-    const ParallelismConfig           parallelism_config_;
-    std::shared_ptr<KVCacheAllocator> allocator_;
-    const std::vector<std::string>    tp_addrs_;
+    const CacheConfig                        cache_config_;
+    const std::vector<LayerTagSlot>          pool_block_memory_layout_;
+    const KVCacheConfig&                     kv_cache_config_;
+    const ParallelismConfig                  parallelism_config_;
+    std::shared_ptr<CoordinatorCacheManager> coordinator_cache_manager_;
+    const std::vector<std::string>           tp_addrs_;
 
     std::shared_ptr<BlockPool>                              block_pool_;
     mutable std::mutex                                      malloc_mutex_;

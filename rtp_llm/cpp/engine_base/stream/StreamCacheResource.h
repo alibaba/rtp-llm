@@ -31,13 +31,13 @@ public:
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
     absl::Status         initKVBlock();
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
-    absl::Status         incrKVBlock(int seq_len_override = -1);
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    absl::Status incrKVBlock(int seq_len_override = -1);
+    void         fakeInitKVBlock(size_t reserved_blocks = 0);
+    int          tryReleaseKVBlock(size_t nums);
+    void         freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void         releaseResource();
+    bool         asyncLoadCache();
+    bool         loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -58,7 +58,7 @@ public:
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
     // getKVBlockUpdateMapping/KVCacheManager::blockBatchCopy before reuse.
-    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
+    bool updateKVBlock(const std::vector<int>& block_src_batch, int previous_seq_len);
 
     // clear block copy mapping
     void clearKVBlockUpdateMapping() {
@@ -76,16 +76,6 @@ public:
 
     int seqSizePerBlock() const {
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
-    }
-
-    // KVCacheResource reuse counters follow the canonical cache-key namespace.
-    // Under CP sharding one canonical block spans cp_size physical blocks.
-    int reuseBlockTokens() const {
-        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        if (mapper && mapper->isSharded()) {
-            return mapper->virtualBlockSize();
-        }
-        return seqSizePerBlock();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {

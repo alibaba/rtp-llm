@@ -35,9 +35,8 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     auto             spec = std::make_shared<MHAKVCacheSpec>();
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.layer_num = static_cast<uint32_t>(layer_num);
     rtp_llm::test::assignCacheConfigFromGroupedSpecs(
-        cache_config, cache_config.layer_num, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        cache_config, static_cast<uint32_t>(layer_num), {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
@@ -140,17 +139,16 @@ static void initTwoGroupCacheConfig(CacheConfig& cache_config, bool declare_in_s
     auto             full_spec   = std::make_shared<MHAKVCacheSpec>();
     auto             linear_spec = std::make_shared<MHAKVCacheSpec>();
     std::vector<int> layer_ids{0};
-    cache_config.layer_num = 1;
     if (declare_in_sorted_order) {
         rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
-                                                         cache_config.layer_num,
+                                                         /*main_layer_num=*/1,
                                                          {full_spec, linear_spec},
                                                          {layer_ids, layer_ids},
                                                          {CacheGroupType::FULL, CacheGroupType::LINEAR},
                                                          {"full", "linear"});
     } else {
         rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
-                                                         cache_config.layer_num,
+                                                         /*main_layer_num=*/1,
                                                          {linear_spec, full_spec},
                                                          {layer_ids, layer_ids},
                                                          {CacheGroupType::LINEAR, CacheGroupType::FULL},
@@ -234,10 +232,9 @@ TEST_F(NormalBatchStreamProcessorTest, testGathererUsesLargestPerGroupKernelSubd
     linear_spec->kernel_seq_size_per_block = 2;
 
     CacheConfig cache_config;
-    cache_config.layer_num          = 1;
     cache_config.seq_size_per_block = 2;
     rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
-                                                     cache_config.layer_num,
+                                                     /*main_layer_num=*/1,
                                                      {linear_spec, full_spec},
                                                      {{0}, {0}},
                                                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
@@ -265,10 +262,9 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     linear_spec->seq_size_per_block        = 2;
     linear_spec->kernel_seq_size_per_block = 2;
     CacheConfig cache_config;
-    cache_config.layer_num          = 1;
     cache_config.seq_size_per_block = 2;
     rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
-                                                     cache_config.layer_num,
+                                                     /*main_layer_num=*/1,
                                                      {linear_spec, full_spec},
                                                      {{0}, {0}},
                                                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
@@ -306,10 +302,9 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMuta
         second_spec->seq_size_per_block        = second_b;
         second_spec->kernel_seq_size_per_block = 2;
         CacheConfig config;
-        config.layer_num          = 1;
         config.seq_size_per_block = 2;
         rtp_llm::test::assignCacheConfigFromGroupedSpecs(config,
-                                                         config.layer_num,
+                                                         /*main_layer_num=*/1,
                                                          {first_spec, second_spec},
                                                          {{0}, {0}},
                                                          {CacheGroupType::FULL, CacheGroupType::LINEAR},

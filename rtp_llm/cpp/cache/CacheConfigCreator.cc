@@ -116,13 +116,13 @@ uint32_t computeLocalBlockNum(const KVCacheBlockBudget&                        b
 }
 
 std::pair<uint32_t, uint32_t> resolveSeqSizes(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
-    RTP_LLM_CHECK_WITH_INFO(
-        kv_cache_config.seq_size_per_block >= 0, "cache seq_size_per_block must be non-negative before resolution");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.seq_size_per_block >= 0,
+                            "cache seq_size_per_block must be non-negative before resolution");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.kernel_seq_size_per_block >= 0,
                             "cache kernel_seq_size_per_block must be non-negative before resolution");
-    const auto seq_size_per_block = kv_cache_config.seq_size_per_block > 0 ?
-                                        static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
-                                        static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto seq_size_per_block        = kv_cache_config.seq_size_per_block > 0 ?
+                                               static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
+                                               static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     const auto kernel_seq_size_per_block = kv_cache_config.kernel_seq_size_per_block > 0 ?
                                                static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
                                                seq_size_per_block;
@@ -390,6 +390,55 @@ CacheConfig createConfigFromDescs(const ModelConfig& model_config, const SpecBui
     return config;
 }
 
+bool isMtpSharedPoolCompatible(const CacheGroup& target, const CacheGroup& source) {
+    return target.spec != nullptr && source.spec != nullptr && CacheConfig::samePolicy(target.policy, source.policy)
+           && target.spec->type == source.spec->type
+           && target.spec->memoryLayoutDType() == source.spec->memoryLayoutDType()
+           && target.seqSizePerBlock() == source.seqSizePerBlock()
+           && target.kernelSeqSizePerBlock() == source.kernelSeqSizePerBlock()
+           && target.spec->block_size_bytes() == source.spec->block_size_bytes()
+           && target.spec->scale_block_size_bytes() == source.spec->scale_block_size_bytes()
+           && target.kv_block_stride_bytes == source.kv_block_stride_bytes
+           && target.kv_scale_stride_bytes == source.kv_scale_stride_bytes
+           && target.storedKernelBlocksPerKvBlock() == source.storedKernelBlocksPerKvBlock();
+}
+
+std::string mtpSharedPoolSummary(const CacheGroup& group) {
+    std::ostringstream os;
+    os << "tag=" << group.tag << ",policy={group_type=" << static_cast<int>(group.policy.group_type)
+       << ",prefix_reuse=" << group.policy.enable_prefix_reuse
+       << ",evict=" << static_cast<int>(group.policy.evict_policy) << ",reservable=" << group.policy.reservable
+       << ",explicit_blocks=" << group.policy.explicit_block_num
+       << ",active_tail_blocks=" << group.policy.active_tail_blocks
+       << ",validate_tail_blocks=" << group.policy.validate_tail_blocks
+       << ",cp_mapping=" << static_cast<int>(group.policy.cp_mapping)
+       << ",cp_slice=" << static_cast<int>(group.policy.cp_slice) << "}";
+    if (group.spec == nullptr) {
+        return os.str() + ",spec=null";
+    }
+    os << ",spec_type=" << static_cast<int>(group.spec->type)
+       << ",dtype=" << static_cast<int>(group.spec->memoryLayoutDType())
+       << ",seq_size_per_block=" << group.seqSizePerBlock()
+       << ",kernel_seq_size_per_block=" << group.kernelSeqSizePerBlock()
+       << ",block_size_bytes=" << group.spec->block_size_bytes()
+       << ",scale_block_size_bytes=" << group.spec->scale_block_size_bytes()
+       << ",kv_block_stride_bytes=" << group.kv_block_stride_bytes
+       << ",kv_scale_stride_bytes=" << group.kv_scale_stride_bytes
+       << ",stored_kernel_blocks_per_kv_block=" << group.storedKernelBlocksPerKvBlock();
+    return os.str();
+}
+
+void validateMtpSharedPoolCompatibility(const CacheGroup& target, const CacheGroup& source) {
+    if (isMtpSharedPoolCompatible(target, source)) {
+        return;
+    }
+    const auto target_summary = mtpSharedPoolSummary(target);
+    const auto source_summary = mtpSharedPoolSummary(source);
+    RTP_LLM_FAIL("mergeMTPModule incompatible MTP shared pool: target={%s} source={%s}",
+                 target_summary.c_str(),
+                 source_summary.c_str());
+}
+
 }  // namespace
 
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step) {
@@ -478,17 +527,24 @@ CacheTopologyPair CacheConfigCreator::mergeMTPModule(CacheTopologyPair&       ta
         if (source.spec != nullptr && source.policy.group_type == CacheGroupType::FULL
             && (source.spec->type == KVCacheSpecType::MultiHeadAttention
                 || source.spec->type == KVCacheSpecType::MultiHeadLatentAttention)) {
+            std::vector<const CacheGroup*> alias_candidates;
             for (const auto& group : target.first) {
-                if (group.tag != "default" && CacheConfig::samePolicy(group.policy, source.policy)
-                    && group.spec != nullptr && group.spec->type == source.spec->type
-                    && group.spec->memoryLayoutDType() == source.spec->memoryLayoutDType()
-                    && group.spec->block_size_bytes() == source.spec->block_size_bytes()
-                    && group.spec->scale_block_size_bytes() == source.spec->scale_block_size_bytes()
-                    && group.seqSizePerBlock() == source.seqSizePerBlock()) {
+                const bool is_full_attention_target =
+                    group.tag != "default" && group.spec != nullptr && group.policy.group_type == CacheGroupType::FULL
+                    && (group.spec->type == KVCacheSpecType::MultiHeadAttention
+                        || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
+                if (!is_full_attention_target) {
+                    continue;
+                }
+                alias_candidates.push_back(&group);
+                if (isMtpSharedPoolCompatible(group, source)) {
                     RTP_LLM_CHECK_WITH_INFO(!alias_target.has_value(),
                                             "mergeMTPModule ambiguous default propose alias");
                     alias_target = group.tag;
                 }
+            }
+            if (!alias_target.has_value() && !alias_candidates.empty()) {
+                validateMtpSharedPoolCompatibility(*alias_candidates.front(), source);
             }
         }
     }
@@ -498,9 +554,9 @@ CacheTopologyPair CacheConfigCreator::mergeMTPModule(CacheTopologyPair&       ta
     std::vector<bool>       consumed_propose_groups(propose.first.size(), false);
     sub_groups.reserve(target.first.size());
     for (const auto& target_group : target.first) {
-        const auto        exact     = propose_index.find(target_group.tag);
-        const bool        has_exact = exact != propose_index.end();
-        const bool        use_alias = !has_exact && alias_target.has_value() && target_group.tag == *alias_target;
+        const auto exact     = propose_index.find(target_group.tag);
+        const bool has_exact = exact != propose_index.end();
+        const bool use_alias = !has_exact && alias_target.has_value() && target_group.tag == *alias_target;
         if (has_exact) {
             consumed_propose_groups[exact->second] = true;
         } else if (use_alias) {
@@ -508,7 +564,10 @@ CacheTopologyPair CacheConfigCreator::mergeMTPModule(CacheTopologyPair&       ta
         }
         const CacheGroup* source_group_ptr =
             has_exact ? &propose.first[exact->second] : (use_alias ? &propose.first.front() : nullptr);
-        const auto&      source_group = source_group_ptr != nullptr ? *source_group_ptr : target_group;
+        const auto& source_group = source_group_ptr != nullptr ? *source_group_ptr : target_group;
+        if (source_group_ptr != nullptr) {
+            validateMtpSharedPoolCompatibility(target_group, source_group);
+        }
         std::vector<int> source_layer_ids;
         for (size_t layer_id = 0; layer_id < propose.second.size(); ++layer_id) {
             if (std::find(propose.second[layer_id].begin(), propose.second[layer_id].end(), source_group.tag)
@@ -586,26 +645,26 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     CacheConfig config    = createBasicConfig(model_config, parallelism_config, kv_cache_config, 0);
     uint32_t    block_num = computeLocalBlockNum(blockBudgetForConfig(config),
-                                                 model_config,
-                                                 runtime_config,
-                                                 kv_cache_config,
-                                                 parallelism_config,
-                                                 warm_up_result,
-                                                 sp_config,
-                                                 config.linear_step);
+                                              model_config,
+                                              runtime_config,
+                                              kv_cache_config,
+                                              parallelism_config,
+                                              warm_up_result,
+                                              sp_config,
+                                              config.linear_step);
     if (kv_cache_config.test_block_num <= 0) {
         block_num = clampAutomaticBlockNum(block_num, config);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
-                            "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
+                            "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.totalGroupBlockSizeBytes() / 1024 / 1024));
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.finalizeBlockNums(block_num, runtime_config);
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %zu tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
-        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
+        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %zu tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
                             block_num,
                             kv_cache_seq_len,
@@ -771,7 +830,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.finalizeBlockNums(block_num, runtime_config);
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
+    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%u, "
                      "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
                      is_mtp,
                      total_layer_num,

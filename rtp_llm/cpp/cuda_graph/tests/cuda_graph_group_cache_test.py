@@ -13,6 +13,7 @@ from rtp_llm.ops.compute_ops import (
 
 GROUP_TAGS = ["full", "aux"]
 HIDDEN_SIZE = 4
+HETEROGENEOUS_HIDDEN_SIZE = 10
 TOKENS_PER_BLOCK = 8
 
 
@@ -63,6 +64,42 @@ class GroupPaddingModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class HeterogeneousGroupPaddingModel:
+    """Expose capture width plus tag-local active and safe-tail columns."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full = inputs.attention_inputs["full"].kv_cache_kernel_block_id_device[0]
+        aux = inputs.attention_inputs["aux"].kv_cache_kernel_block_id_device[0]
+        zero = full[0] * 0
+        signature = torch.stack(
+            (
+                zero + full.shape[0],
+                zero + aux.shape[0],
+                full[0],
+                full[1],
+                full[2],
+                full[-1],
+                aux[0],
+                aux[1],
+                aux[2],
+                aux[-1],
+            )
+        ).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class FlatBlockTableModel:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        block_id = inputs.attention_inputs.kv_cache_kernel_block_id_device[0, 0]
+        return PyModelOutputs(inputs.input_hiddens + block_id)
+
+
 def _group_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -88,11 +125,12 @@ def _build_common_inputs(
     batch_size: int,
     token_count: int,
     block_count: int,
+    hidden_size: int = HIDDEN_SIZE,
 ) -> PyModelInputs:
     inputs = PyModelInputs()
     inputs.input_ids = torch.arange(token_count, dtype=torch.int32, device="cuda")
     inputs.input_hiddens = torch.zeros(
-        (token_count, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda"
+        (token_count, hidden_size), dtype=torch.bfloat16, device="cuda"
     )
 
     attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
@@ -110,7 +148,11 @@ def _build_common_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
-    inputs.attention_inputs = _group_attention_inputs(attention_inputs, tags, values)
+    inputs.attention_inputs = (
+        _group_attention_inputs(attention_inputs, tags, values)
+        if tags
+        else attention_inputs
+    )
     return inputs
 
 
@@ -119,6 +161,7 @@ def _build_decode_inputs(
     values: dict[str, int],
     batch_size: int = 2,
     block_count: int = 1,
+    hidden_size: int = HIDDEN_SIZE,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
@@ -151,7 +194,28 @@ def _build_decode_inputs(
         batch_size=batch_size,
         token_count=batch_size,
         block_count=block_count,
+        hidden_size=hidden_size,
     )
+
+
+def _set_group_block_tables(
+    inputs: PyModelInputs, values_by_group: dict[str, list[int]]
+) -> PyModelInputs:
+    batch_size = inputs.input_hiddens.shape[0]
+    for tag, values in values_by_group.items():
+        host_blocks = (
+            torch.tensor(values, dtype=torch.int32)
+            .view(1, -1)
+            .expand(batch_size, -1)
+            .clone()
+            .pin_memory()
+        )
+        group_inputs = inputs.attention_inputs[tag]
+        group_inputs.kv_cache_kernel_block_id = host_blocks
+        group_inputs.kv_cache_kernel_block_id_device = host_blocks.cuda()
+        group_inputs.kv_cache_block_id = host_blocks
+        group_inputs.kv_cache_block_id_device = host_blocks.cuda()
+    return inputs
 
 
 def _build_prefill_inputs(
@@ -236,12 +300,21 @@ def _build_target_verify_inputs(
 
 class TestCudaGraphGroupCache(unittest.TestCase):
     def _assert_replay_signature(
-        self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
+        self,
+        runner: CudaGraphRunner,
+        inputs: PyModelInputs,
+        expected: int | torch.Tensor,
     ) -> None:
         self.assertTrue(runner.canRun(inputs))
         output = runner.forward(inputs)
         torch.cuda.synchronize()
-        expected_output = torch.full_like(output.hidden_states, expected)
+        if isinstance(expected, int):
+            expected_output = torch.full_like(output.hidden_states, expected)
+        else:
+            expected_output = expected.to(
+                dtype=output.hidden_states.dtype,
+                device=output.hidden_states.device,
+            ).expand_as(output.hidden_states)
         torch.testing.assert_close(output.hidden_states, expected_output)
 
     def test_decode_tag_validation_and_replay_updates(self) -> None:
@@ -281,6 +354,54 @@ class TestCudaGraphGroupCache(unittest.TestCase):
                 _build_decode_inputs(["full", "wrong"], {"full": 2, "wrong": 1})
             )
         )
+
+    def test_flat_block_table_capacity_is_checked_before_replay(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            FlatBlockTableModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+        )
+
+        for location in ("host", "device"):
+            with self.subTest(location=location):
+                inputs = _build_decode_inputs([], {}, block_count=1)
+                wider = torch.zeros((2, 2), dtype=torch.int32).pin_memory()
+                if location == "host":
+                    inputs.attention_inputs.kv_cache_kernel_block_id = wider
+                else:
+                    inputs.attention_inputs.kv_cache_kernel_block_id_device = (
+                        wider.cuda()
+                    )
+                self.assertFalse(runner.canRun(inputs))
+
+    def test_group_block_table_capacity_is_checked_before_replay(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            GroupBlockTableModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+        )
+
+        for location in ("host", "device"):
+            with self.subTest(location=location):
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 2, "aux": 1}, block_count=1
+                )
+                full_inputs = inputs.attention_inputs["full"]
+                wider = torch.zeros((2, 2), dtype=torch.int32).pin_memory()
+                if location == "host":
+                    full_inputs.kv_cache_kernel_block_id = wider
+                else:
+                    full_inputs.kv_cache_kernel_block_id_device = wider.cuda()
+                self.assertFalse(runner.canRun(inputs))
 
     def test_prefill_group_capture_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()
@@ -330,6 +451,68 @@ class TestCudaGraphGroupCache(unittest.TestCase):
             _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}, block_count=1),
             0,
         )
+
+    def test_decode_replay_uses_heterogeneous_group_geometry(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            HeterogeneousGroupPaddingModel(),
+            HETEROGENEOUS_HIDDEN_SIZE,
+            2 * TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+            group_tokens_per_block=[TOKENS_PER_BLOCK, TOKENS_PER_BLOCK],
+            group_kernel_tokens_per_block=[
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK // 2,
+            ],
+        )
+        self.assertEqual(runner.getGroupKernelBlockRatio("full"), 1)
+        self.assertEqual(runner.getGroupKernelBlockRatio("aux"), 2)
+
+        wide = _set_group_block_tables(
+            _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": 1, "aux": 1},
+                hidden_size=HETEROGENEOUS_HIDDEN_SIZE,
+            ),
+            {"full": [11, 12], "aux": [21, 22, 23, 24]},
+        )
+        self._assert_replay_signature(
+            runner,
+            wide,
+            torch.tensor([4, 4, 11, 12, 0, 0, 21, 22, 23, 24]),
+        )
+
+        narrow = _set_group_block_tables(
+            _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": 1, "aux": 1},
+                hidden_size=HETEROGENEOUS_HIDDEN_SIZE,
+            ),
+            {"full": [31], "aux": [41, 42]},
+        )
+        self._assert_replay_signature(
+            runner,
+            narrow,
+            torch.tensor([4, 4, 31, 0, 0, 0, 41, 42, 0, 0]),
+        )
+
+    def test_cache_config_rejects_incomplete_group_geometry(self) -> None:
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(RuntimeError, "kernel geometry count=1"):
+            runner.init_decode(
+                GroupBlockTableModel(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                [1],
+                GROUP_TAGS,
+                group_tokens_per_block=[TOKENS_PER_BLOCK, TOKENS_PER_BLOCK],
+                group_kernel_tokens_per_block=[TOKENS_PER_BLOCK],
+            )
 
     def test_cache_config_rejects_duplicate_group_tag(self) -> None:
         runner = CudaGraphRunner()

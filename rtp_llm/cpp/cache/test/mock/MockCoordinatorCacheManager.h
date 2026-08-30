@@ -2,15 +2,18 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 
 namespace rtp_llm {
 
-class MockKVCacheAllocator: public KVCacheAllocator {
+class MockCoordinatorCacheManager: public CoordinatorCacheManager {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, atype) {}
-    ~MockKVCacheAllocator() override = default;
+    explicit MockCoordinatorCacheManager(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        CoordinatorCacheManager(config, atype) {}
+    ~MockCoordinatorCacheManager() override = default;
+
+    using CoordinatorCacheManager::convertIndexToAddr;
+    using CoordinatorCacheManager::convertIndexToBuffer;
 
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));
@@ -31,7 +34,7 @@ public:
                 updateKVBlock,
                 (const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                  const std::vector<int>&         block_src_batch,
-                 bool                            copy_last_block,
+                 int                             previous_seq_len,
                  std::vector<TaggedBlockIdPair>& block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
@@ -51,6 +54,11 @@ public:
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
 
 protected:
+    MOCK_METHOD(MallocStatus,
+                evaluateInitCapacity,
+                (const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode),
+                (const, override));
+
     MOCK_METHOD(bool, doInit, (), (override));
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));

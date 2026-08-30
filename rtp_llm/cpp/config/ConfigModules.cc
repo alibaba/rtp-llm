@@ -187,9 +187,48 @@ std::string LinearAttentionConfig::to_string() const {
     return oss.str();
 }
 // HybridAttentionConfig
+namespace {
+
+std::string hybridAttentionTypeName(HybridAttentionType type) {
+    switch (type) {
+        case HybridAttentionType::NONE:
+            return "NONE";
+        case HybridAttentionType::LINEAR:
+            return "LINEAR";
+        case HybridAttentionType::SLIDING_WINDOW:
+            return "SLIDING_WINDOW";
+        default:
+            return "UNKNOWN(" + std::to_string(static_cast<int>(type)) + ")";
+    }
+}
+
+std::string summarizeHybridAttentionTypes(const std::vector<HybridAttentionType>& types) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t begin = 0; begin < types.size();) {
+        size_t end = begin + 1;
+        while (end < types.size() && types[end] == types[begin]) {
+            ++end;
+        }
+        if (begin != 0) {
+            oss << ", ";
+        }
+        oss << hybridAttentionTypeName(types[begin]);
+        if (end - begin > 1) {
+            oss << " x " << end - begin;
+        }
+        begin = end;
+    }
+    oss << "]";
+    return oss.str();
+}
+
+}  // namespace
+
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
+        << "hybrid_attention_types: " << summarizeHybridAttentionTypes(hybrid_attention_types);
     return oss.str();
 }
 

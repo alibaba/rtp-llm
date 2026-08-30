@@ -42,16 +42,16 @@ struct TaggedBlockIdPair {
     BlockIdxType dst;
 };
 
-// Process-local tensor representation. The ordinal is resolved from a stable
-// tag immediately before execution and is never used as an external identity.
-struct GroupOrdinalBlockIdPair {
-    int32_t      group_ordinal;
+// Process-local tensor representation. The index is resolved from a stable tag
+// in canonical group order and is never used as an external identity.
+struct GroupBlockIdPair {
+    int32_t      group_index;
     BlockIdxType src;
     BlockIdxType dst;
 };
 
-static_assert(sizeof(GroupOrdinalBlockIdPair) == 3 * sizeof(int32_t),
-              "GroupOrdinalBlockIdPair must match the three-column int32 tensor layout");
+static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
+              "GroupBlockIdPair must match the three-column int32 tensor layout");
 
 struct MatchResult {
     size_t           reuse_length = 0;
