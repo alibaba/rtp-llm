@@ -70,6 +70,7 @@ py_test(
     srcs = ["backend_manager_shutdown_test.py"],
     deps = [
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/server:server",
     ],
 )
