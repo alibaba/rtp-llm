@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
 namespace test {
@@ -164,11 +165,16 @@ static ModelConfig makeProModelConfig() {
 }
 
 // Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
-static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
+static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200,
+                                            uint32_t seq_size_per_block = 128,
+                                            uint32_t kernel_seq_size_per_block = 128) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.seq_size_per_block     = 128;
+    mc.attn_config.tokens_per_block            = seq_size_per_block;
+    mc.attn_config.kernel_tokens_per_block     = kernel_seq_size_per_block;
+    kv_cache_config.seq_size_per_block         = seq_size_per_block;
+    kv_cache_config.kernel_seq_size_per_block  = kernel_seq_size_per_block;
     kv_cache_config.dsv4_fixed_pool_blocks = block_num;
     auto config                            = HybridPoolConfigCreator::createConfig(mc, pc, kv_cache_config, false, 0);
     config.block_num                       = block_num;
@@ -1201,30 +1207,56 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrByRegionRoutesToCor
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToBufferByRegionAndPartition) {
-    auto config    = makeDSV4HybridPoolConfig();
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/200,
+                                              /*seq_size_per_block=*/1024,
+                                              /*kernel_seq_size_per_block=*/128);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    int csa_layer = -1;
+    int indexer_layer = -1;
     for (size_t l = 0; l < config.layer_all_num; ++l) {
-        if (config.layer_region_to_group_id[l][static_cast<size_t>(KVCacheRegionName::CSA_KV)] >= 0) {
-            csa_layer = static_cast<int>(l);
+        if (config.layer_region_to_group_id[l][static_cast<size_t>(KVCacheRegionName::INDEXER_KV)] >= 0) {
+            indexer_layer = static_cast<int>(l);
             break;
         }
     }
-    ASSERT_GE(csa_layer, 0);
+    ASSERT_GE(indexer_layer, 0);
 
-    auto buf = allocator->convertIndexToBuffer(csa_layer, KVCacheRegionName::CSA_KV, /*block_id=*/1);
-    ASSERT_FALSE(buf.empty());
+    const size_t indexer_gid = 2;
+    ASSERT_EQ(config.group_region_names[indexer_gid], KVCacheRegionName::INDEXER_KV);
+    ASSERT_EQ(config.group_kv_block_stride_bytes[indexer_gid],
+              config.kernelBlocksPerKvBlock() * config.cache_specs[indexer_gid]->block_size_bytes());
+    auto buf = allocator->convertIndexToBuffer(indexer_layer, KVCacheRegionName::INDEXER_KV, /*block_id=*/1);
+    ASSERT_EQ(buf.size(), 1u);
     EXPECT_NE(buf[0].addr, nullptr);
+    EXPECT_EQ(buf[0].size_bytes, config.group_kv_block_stride_bytes[indexer_gid]);
 
-    auto buf_part = allocator->convertIndexToBuffer(csa_layer,
-                                                    KVCacheRegionName::CSA_KV,
+    auto buf_part = allocator->convertIndexToBuffer(indexer_layer,
+                                                    KVCacheRegionName::INDEXER_KV,
                                                     /*block_id=*/1,
-                                                    /*partition_count=*/1,
-                                                    /*partition_id=*/0);
+                                                    /*partition_count=*/4,
+                                                    /*partition_id=*/2);
+    ASSERT_EQ(buf_part.size(), buf.size());
     ASSERT_FALSE(buf_part.empty());
-    EXPECT_NE(buf_part[0].addr, nullptr);
+    EXPECT_EQ(buf_part[0].addr, buf[0].addr);
+    EXPECT_EQ(buf_part[0].size_bytes, buf[0].size_bytes);
+
+    const auto layout = allocator->allLayerCacheBase();
+    torch_ext::KVCache kv_cache;
+    kv_cache.seq_size_per_block             = static_cast<int>(config.seq_size_per_block);
+    kv_cache.kernel_seq_size_per_block      = static_cast<int>(config.kernel_seq_size_per_block);
+    kv_cache.layer_group_types              = layout.layer_group_types;
+    kv_cache.group_region_names             = layout.group_region_names;
+    kv_cache.layer_region_to_group_id       = layout.layer_region_to_group_id;
+    kv_cache.kv_cache_base_by_layer_region  = layout.layers_to_kv_buffer_ptrs_by_attn;
+    for (auto value : layout.group_seq_size_per_block) {
+        kv_cache.group_seq_size_per_block.push_back(static_cast<int>(value));
+    }
+    auto layer_cache = kv_cache.getLayerCache(indexer_layer, KVCacheRegionName::INDEXER_KV);
+    EXPECT_TRUE(layer_cache.cache_store_tensor_is_kernel_block_view);
+    EXPECT_EQ(layer_cache.seq_size_per_block, 128);
+    EXPECT_EQ(static_cast<size_t>(layer_cache.kv_cache_base.stride(0) * layer_cache.kv_cache_base.element_size()),
+              config.cache_specs[indexer_gid]->block_size_bytes());
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerRegionTensors) {

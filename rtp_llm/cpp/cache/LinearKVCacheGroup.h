@@ -16,9 +16,10 @@ public:
 	                       int                          group_id,
 	                       int                          linear_step  = 0,
 	                       SharedBlockCache*            shared_cache = nullptr,
-	                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+	                       const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr,
+	                       int                          linear_fixed_cap = 0):
 	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter),
-	        linear_step_(linear_step) {}
+	        linear_step_(linear_step), linear_fixed_cap_(linear_fixed_cap) {}
 
     MatchResult match(const CacheKeysType& cache_keys) override;
     // Match a single cache key (used by Hybrid allocator to do right-to-left joint matching).
@@ -44,6 +45,7 @@ private:
     // - always keep the last 2 blocks (decode edge case: read block i, write block i+1)
     // - other blocks can be freed (set to NULL_BLOCK_IDX)
     int linear_step_ = 0;
+    int linear_fixed_cap_ = 0;
 };
 
 using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;

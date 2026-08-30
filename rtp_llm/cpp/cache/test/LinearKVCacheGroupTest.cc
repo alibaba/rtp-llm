@@ -442,6 +442,38 @@ TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBloc
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
 }
 
+TEST_F(LinearKVCacheGroupTest, FixedCapKeepsNewestReuseSnapshotsAndRequiredTail) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(
+        /*layer_ids=*/{},
+        spec,
+        block_pool,
+        /*group_id=*/0,
+        /*linear_step=*/2,
+        /*shared_cache=*/nullptr,
+        /*metrics_reporter=*/nullptr,
+        /*linear_fixed_cap=*/4);
+    ASSERT_TRUE(group.init());
+
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/32, /*enable_reuse_cache=*/true));
+    ASSERT_EQ(blocks.blocksNum(), 8u);
+    for (int pos = 0; pos < 8; ++pos) {
+        const bool expected = pos == 3 || pos == 5 || pos == 6 || pos == 7;
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
+    }
+
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/40, /*enable_reuse_cache=*/true));
+    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true);
+    ASSERT_EQ(blocks.blocksNum(), 10u);
+    for (int pos = 0; pos < 10; ++pos) {
+        const bool expected = pos == 5 || pos == 7 || pos == 8 || pos == 9;
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
+    }
+}
 }  // namespace test
 }  // namespace rtp_llm
 

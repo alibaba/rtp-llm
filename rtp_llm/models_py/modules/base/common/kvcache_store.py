@@ -152,13 +152,13 @@ def create_write_cache_store_impl(
     has_multi_region = (
         kv_cache is not None
         and bool(getattr(kv_cache, "layer_region_to_group_id", None))
-        and bool(getattr(attn_inputs, "kv_cache_kernel_block_id_host_by_group", None))
+        and bool(getattr(attn_inputs, "kv_cache_block_id_host_by_group", None))
     )
     if has_multi_region:
         return WriteCacheStoreOp(
             input_lengths,
             prefix_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host_by_group,
+            attn_inputs.kv_cache_block_id_host_by_group,
             cache_store_inputs,
         )
 

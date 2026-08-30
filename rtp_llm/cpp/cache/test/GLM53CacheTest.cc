@@ -210,10 +210,26 @@ TEST(GLM53CacheConfigTest, SplitPhysicalBlocksScaleOnlyPagedKPool) {
     kv_config.seq_size_per_block        = 256;
     kv_config.kernel_seq_size_per_block = 128;
     auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 0);
+
+    auto* mla = dynamic_cast<MLAKVCacheSpec*>(config.cache_specs[0].get());
+    ASSERT_NE(mla, nullptr);
+    EXPECT_EQ(mla->seq_size_per_block, 128u);
+    EXPECT_EQ(config.group_kv_block_stride_bytes[0], 2u * mla->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[2], 2u * 32u * 132u);
     auto* state = dynamic_cast<DSV4StateSpec*>(config.cache_specs[3].get());
     ASSERT_NE(state, nullptr);
     EXPECT_EQ(config.group_kv_block_stride_bytes[3], state->block_size_bytes());
+}
+
+TEST(GLM53CacheConfigTest, PhysicalMlaSpecIsNotExpandedTwice) {
+    ParallelismConfig pc;
+    auto              model     = makeGlm53Config();
+    auto              kv_config = makeKvConfig();
+    model.attn_config.tokens_per_block = 1024;
+    kv_config.seq_size_per_block       = 1024;
+    auto config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    EXPECT_EQ(config.group_kv_block_stride_bytes[0], config.cache_specs[0]->block_size_bytes());
+    EXPECT_EQ(config.group_kv_block_stride_bytes[2], 8u * 32u * 132u);
 }
 
 TEST(GLM53CacheConfigTest, RejectsInvalidGeometryOwnershipAndPrefillCp) {
@@ -240,5 +256,16 @@ TEST(GLM53CacheConfigTest, RejectsInvalidGeometryOwnershipAndPrefillCp) {
     EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, makeKvConfig(), false, 0), "");
 }
 
+TEST(GLM53CacheConfigTest, PropagatesLinearReusePolicy) {
+    ParallelismConfig pc;
+    auto              kv_config = makeKvConfig();
+    kv_config.linear_step       = 4;
+    kv_config.linear_fixed_cap  = 6;
+
+    auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 0);
+
+    EXPECT_EQ(config.linear_step, 4);
+    EXPECT_EQ(config.linear_fixed_cap, 6);
+}
 }  // namespace test
 }  // namespace rtp_llm

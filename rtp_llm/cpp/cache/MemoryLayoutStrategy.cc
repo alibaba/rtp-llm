@@ -204,8 +204,9 @@ MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int parti
         return createLinearPartitionedBlockInfo(layer_id, block_id, partition_count, partition_id);
     }
 
-    // MLA state is replicated across attention TP ranks, so transfer one full copy.
-    if (config_.is_mla || config_.enable_hybrid_attention) {
+    // MLA and opaque typed-region state are replicated across attention TP
+    // ranks, so transfer one full copy.
+    if (!config_.enable_kv_cache_partition || config_.is_mla || config_.enable_hybrid_attention) {
         return createBasicBlockInfo(layer_id, block_id);
     }
 

@@ -163,6 +163,7 @@ struct KVCacheConfig {
     bool                                    memory_cache_disk_buffered_io     = true;
     int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
     int                                     linear_step                       = 1;  // for linear attention cache reuse
+    int                                     linear_fixed_cap                  = 0;  // 0 = unlimited reuse snapshots
     // Fields merged from PyKvCacheConfig
     int         int8_kv_cache             = 0;
     int         fp8_kv_cache              = 0;

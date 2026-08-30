@@ -110,6 +110,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="线性注意力（Linear Attention）缓存重用的步长：每隔 linear_step 个 block 额外保留一个 block（>=1）。",
     )
     kv_cache_group.add_argument(
+        "--linear_fixed_cap",
+        env_name="LINEAR_FIXED_CAP",
+        bind_to=(kv_cache_config, "linear_fixed_cap"),
+        type=int,
+        default=0,
+        help="线性注意力每个请求最多保留的序列 block 数；0 表示不限制。正确性必需的尾块不受小于 2 的配置影响。",
+    )
+
+    kv_cache_group.add_argument(
         "--ssm_state_dtype",
         env_name="SSM_STATE_DTYPE",
         bind_to=(kv_cache_config, "ssm_state_dtype"),

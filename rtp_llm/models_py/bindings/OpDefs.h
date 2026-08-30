@@ -208,6 +208,12 @@ struct KVCache {
                                              kernel_seq_size_per_block :
                                              groupSeqSizePerBlock(layer_cache.group_id);
         layer_cache.kv_cache_base      = base;
+        // Independent DSV4 paged pools expose dim(0) at kernel-page
+        // granularity. CacheStore keys remain physical-block based, so the
+        // writer must merge all kernel pages owned by one physical block.
+        layer_cache.cache_store_tensor_is_kernel_block_view =
+            is_full_region && kernel_seq_size_per_block > 0
+            && seq_size_per_block > kernel_seq_size_per_block;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];

@@ -44,7 +44,8 @@ void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,       
                                           const torch::Tensor& workspace_starts,   // [BATCH]
                                           int64_t              batch_size);
 
-// V2: Gather and upconvert FP8 KV cache to a single fused BF16 buffer [total_tokens, 576]
+// V2: Gather and upconvert FP8 KV cache to a fused BF16 buffer.
+// Supports DeepSeek's [total_tokens, 576] and GLM-5.3's NoPE [total_tokens, 512].
 // One CUDA block per token for full GPU utilization.
 void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
                                              torch::Tensor&       dst_fused,         // [TOT_TOKENS, 576]
@@ -53,5 +54,11 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,    
                                              const torch::Tensor& workspace_starts,  // [BATCH]
                                              int64_t              batch_size,
                                              int64_t              total_tokens);
+
+// Gather only the physical token positions selected by sparse attention.
+// GLM-5.3 FP8 entries are 512 FP8 bytes followed by four float scales.
+void gather_selected_glm53_fp8_mla_kv(const torch::Tensor& src_cache,
+                                      torch::Tensor&       dst_fused,
+                                      const torch::Tensor& physical_indices);
 
 }  // namespace rtp_llm

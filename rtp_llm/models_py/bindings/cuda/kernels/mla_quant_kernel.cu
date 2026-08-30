@@ -437,7 +437,8 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
                                                const int64_t cache_entry_stride,
                                                const int64_t dst_fused_stride,
                                                const int32_t batch_size,
-                                               const int64_t total_tokens) {
+                                               const int64_t total_tokens,
+                                               const bool    copy_rope) {
     const int     warp_id          = threadIdx.x >> 5;
     const int     lane             = threadIdx.x & 31;
     const int64_t token_global_idx = (int64_t)blockIdx.x * (blockDim.x >> 5) + warp_id;
@@ -509,8 +510,11 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
     dst_u4[0]     = *reinterpret_cast<const uint4*>(&out[0]);
     dst_u4[1]     = *reinterpret_cast<const uint4*>(&out[4]);
 
-    // Rope: 32 lanes x 2 bf16 = 64 bf16
-    *reinterpret_cast<int32_t*>(dst_ptr + 512 + lane * 2) = *reinterpret_cast<const int32_t*>(rope_ptr + lane * 2);
+    if (copy_rope) {
+        // Rope: 32 lanes x 2 bf16 = 64 bf16
+        *reinterpret_cast<int32_t*>(dst_ptr + 512 + lane * 2) =
+            *reinterpret_cast<const int32_t*>(rope_ptr + lane * 2);
+    }
 }
 
 void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
@@ -530,7 +534,12 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
     TORCH_CHECK(workspace_starts.dtype() == torch::kInt32, "workspace_starts must be int32");
     TORCH_CHECK(src_cache.dtype() == torch::kUInt8, "src_cache must be uint8");
     TORCH_CHECK(dst_fused.dtype() == torch::kBFloat16, "dst_fused must be bfloat16");
-    TORCH_CHECK(dst_fused.size(1) == 576, "dst_fused dim1 must be 576 (512 kv + 64 rope)");
+    const bool copy_rope = dst_fused.size(1) == 576;
+    TORCH_CHECK(copy_rope || dst_fused.size(1) == 512,
+                "dst_fused dim1 must be 512 (GLM-5.3 NoPE) or 576 (DeepSeek MLA)");
+    TORCH_CHECK(src_cache.dim() == 3, "src_cache must be a 3D paged tensor");
+    TORCH_CHECK(src_cache.size(2) == (copy_rope ? 656 : 528),
+                "src_cache entry width must match the selected MLA layout");
 
     int64_t block_table_stride = block_table.stride(0);
     int64_t cache_block_stride = src_cache.stride(0);
@@ -552,7 +561,94 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
         cache_entry_stride,
         dst_fused_stride,
         static_cast<int32_t>(batch_size),
-        total_tokens);
+        total_tokens,
+        copy_rope);
+}
+
+__global__ void gather_selected_glm53_fp8_mla_kv_kernel(const uint8_t* __restrict__ src_cache,
+                                                        __nv_bfloat16* __restrict__ dst_fused,
+                                                        const int32_t* __restrict__ physical_indices,
+                                                        const int64_t num_selected,
+                                                        const int64_t num_cache_entries,
+                                                        const int64_t cache_block_stride,
+                                                        const int64_t cache_entry_stride,
+                                                        const int64_t dst_stride,
+                                                        const int32_t block_size) {
+    const int     warp_id      = threadIdx.x >> 5;
+    const int     lane         = threadIdx.x & 31;
+    const int64_t selected_idx = static_cast<int64_t>(blockIdx.x) * (blockDim.x >> 5) + warp_id;
+    if (selected_idx >= num_selected) {
+        return;
+    }
+
+    const int32_t   physical_idx = physical_indices[selected_idx];
+    __nv_bfloat16* dst_ptr      = dst_fused + selected_idx * dst_stride;
+    const int       base         = lane * 16;
+    if (physical_idx < 0 || physical_idx >= num_cache_entries) {
+#pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            dst_ptr[base + i] = __float2bfloat16(0.0f);
+        }
+        return;
+    }
+
+    const int32_t block_id     = physical_idx / block_size;
+    const int32_t block_offset = physical_idx % block_size;
+    const uint8_t* token_ptr =
+        src_cache + static_cast<int64_t>(block_id) * cache_block_stride
+        + static_cast<int64_t>(block_offset) * cache_entry_stride;
+    const float*    scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
+    const float     scale      = __ldg(scales_ptr + (base >> 7));
+    const uint4     packed     = *reinterpret_cast<const uint4*>(token_ptr + base);
+    const uint32_t* u32        = reinterpret_cast<const uint32_t*>(&packed);
+
+    __nv_bfloat162 out[8];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const uint32_t             val = u32[i];
+        const __nv_fp8x2_storage_t p0  = static_cast<__nv_fp8x2_storage_t>(val & 0xFFFFu);
+        const __nv_fp8x2_storage_t p1  = static_cast<__nv_fp8x2_storage_t>((val >> 16) & 0xFFFFu);
+        const __half2_raw          h0  = __nv_cvt_fp8x2_to_halfraw2(p0, __NV_E4M3);
+        const __half2_raw          h1  = __nv_cvt_fp8x2_to_halfraw2(p1, __NV_E4M3);
+        const float2               f0  = __half22float2(*reinterpret_cast<const __half2*>(&h0));
+        const float2               f1  = __half22float2(*reinterpret_cast<const __half2*>(&h1));
+        out[2 * i]                     = __floats2bfloat162_rn(f0.x * scale, f0.y * scale);
+        out[2 * i + 1]                 = __floats2bfloat162_rn(f1.x * scale, f1.y * scale);
+    }
+
+    uint4* dst_u4 = reinterpret_cast<uint4*>(dst_ptr + base);
+    dst_u4[0]     = *reinterpret_cast<const uint4*>(&out[0]);
+    dst_u4[1]     = *reinterpret_cast<const uint4*>(&out[4]);
+}
+
+void gather_selected_glm53_fp8_mla_kv(const torch::Tensor& src_cache,
+                                      torch::Tensor&       dst_fused,
+                                      const torch::Tensor& physical_indices) {
+    const c10::cuda::CUDAGuard device_guard(src_cache.device());
+    const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+
+    TORCH_CHECK(src_cache.dtype() == torch::kUInt8 && src_cache.dim() == 3 && src_cache.size(2) == 528,
+                "src_cache must be uint8 [num_blocks, block_size, 528]");
+    TORCH_CHECK(dst_fused.dtype() == torch::kBFloat16 && dst_fused.dim() == 2 && dst_fused.size(1) == 512,
+                "dst_fused must be bfloat16 [num_selected, 512]");
+    TORCH_CHECK(physical_indices.dtype() == torch::kInt32 && physical_indices.is_contiguous(),
+                "physical_indices must be contiguous int32");
+    TORCH_CHECK(dst_fused.size(0) == physical_indices.numel(),
+                "dst_fused rows must equal physical_indices.numel()");
+
+    const int64_t num_selected = physical_indices.numel();
+    dim3         grid(static_cast<unsigned>((num_selected + 3) / 4));
+    dim3         block(128);
+    gather_selected_glm53_fp8_mla_kv_kernel<<<grid, block, 0, stream>>>(
+        src_cache.data_ptr<uint8_t>(),
+        reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
+        physical_indices.data_ptr<int32_t>(),
+        num_selected,
+        src_cache.size(0) * src_cache.size(1),
+        src_cache.stride(0),
+        src_cache.stride(1),
+        dst_fused.stride(0),
+        static_cast<int32_t>(src_cache.size(1)));
 }
 
 void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,
@@ -987,7 +1083,7 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
             } else {                                                                                                   \
                 TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE);                                 \
             }                                                                                                          \
-        } else if (KV_DTYPE == "fp8_ds_mla") {                                                                         \
+        } else if (KV_DTYPE == "fp8_ds_mla" || KV_DTYPE == "fp8_glm53_mla") {                                        \
             if (SRC_DTYPE == torch::kFloat) {                                                                          \
                 FN(float, uint8_t, Fp8KVCacheDataType::kFp8E4M3);                                                      \
             } else if (SRC_DTYPE == torch::kHalf) {                                                                    \
@@ -1033,6 +1129,12 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                     "kv_cache.size(2) must be 656 bytes for fp8_ds_mla");
         TORCH_CHECK(kv_c.element_size() == 2, "kv_c.element_size() must be 2 for fp8_ds_mla");
         TORCH_CHECK(k_pe.element_size() == 2, "k_pe.element_size() must be 2 for fp8_ds_mla");
+    } else if (kv_cache_dtype == "fp8_glm53_mla") {
+        TORCH_CHECK(kv_lora_rank == 512, "kv_lora_rank must be 512 for fp8_glm53_mla");
+        TORCH_CHECK(pe_dim == 0, "pe_dim must be 0 for fp8_glm53_mla");
+        TORCH_CHECK(kv_cache.size(2) == 528 / kv_cache.element_size(),
+                    "kv_cache.size(2) must be 528 bytes for fp8_glm53_mla");
+        TORCH_CHECK(kv_c.element_size() == 2, "kv_c.element_size() must be 2 for fp8_glm53_mla");
     } else if (kv_cache_dtype == "fp8_model1_mla") {
         TORCH_CHECK(kv_lora_rank == 448, "kv_lora_rank must be 448 for fp8_model1_mla");
         TORCH_CHECK(pe_dim == 64, "pe_dim must be 64 for fp8_model1_mla");
@@ -1052,14 +1154,14 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
     const c10::cuda::CUDAGuard device_guard(kv_c.device());
     const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
 
-    if (kv_cache_dtype == "fp8_ds_mla") {
+    if (kv_cache_dtype == "fp8_ds_mla" || kv_cache_dtype == "fp8_glm53_mla") {
         dim3 grid(num_tokens);
         // For the NoPE part, each tile of 128 elements is handled by half of one
         // warp (16 threads). There are 4 total tiles, so 2 warps (64 threads).
         // Lanes 0 and 16 of each warp write the scale values for that warp's tiles.
         // The RoPE part (last 64 elements) is handled by another 1 warp (32
         // threads). So in total, we use 3 warps (96 threads) per block.
-        dim3 block(96);
+        dim3 block(kv_cache_dtype == "fp8_glm53_mla" ? 64 : 96);
         DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_DS_MLA);
     } else if (kv_cache_dtype == "fp8_model1_mla") {
         dim3 grid(num_tokens);

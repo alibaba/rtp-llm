@@ -26,3 +26,10 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20'},
 )
+py_test(
+    name = "test_glm53_fp8",
+    srcs = ["test_glm53_fp8.py"],
+    deps = py_test_deps,
+    tags = ["L20A_DEV"],
+    exec_properties = {'gpu': 'L20A_DEV'},
+)

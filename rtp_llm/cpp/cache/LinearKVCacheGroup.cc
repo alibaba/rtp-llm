@@ -32,8 +32,16 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
     const int  total_slots = needBlocksNum(seq_len, 0, reserve_step);
     const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
     const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-    const bool step_hit    = (((pos + 1) % step) == 0);
-    return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+    const bool step_hit = (((pos + 1) % step) == 0);
+    bool       keep_step_hit = step_hit;
+    if (step_hit && linear_fixed_cap_ > 0 && pos < seq_slots - 2) {
+        const int mandatory_tail = std::min(seq_slots, 2);
+        const int history_budget = std::max(linear_fixed_cap_ - mandatory_tail, 0);
+        const int history_hits   = std::max(seq_slots - 2, 0) / step;
+        const int hit_ordinal    = (pos + 1) / step;
+        keep_step_hit = hit_ordinal > history_hits - history_budget;
+    }
+    return is_reserve || (enable_reuse_cache ? (keep_step_hit || is_seq_tail) : is_seq_tail);
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
@@ -94,21 +102,11 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
 }
 
 bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
-    const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
-    const int seq_slots          = needBlocksNum(seq_len, 0, 0);
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
-    auto should_materialize = [&](int pos) {
-        // Materialize tail and tail-1: causal_conv1d_update may read
-        // (seq_len - 2) / SBP when seq_len crosses a block boundary.
-        // Leaving tail-1 NULL can hit IMA on long prompts.
-        const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
-        const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-        const bool step_hit    = (((pos + 1) % step) == 0);
-        return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
-    };
+    auto should_materialize = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache); };
 
     std::vector<size_t> positions_to_backfill;
     const auto&         existing_blocks = block_ids.blocks();
@@ -179,8 +177,9 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
     if (block_indices.empty()) {
         return;
     }
-    const int step       = std::max(1, linear_step_);
-    const int block_size = static_cast<int>(block_indices.size());
+    const int block_size  = static_cast<int>(block_indices.size());
+    const int extra_slots = reserve_step > 0 ? reserve_step - 1 : 0;
+    const int seq_len     = std::max(block_size - extra_slots, 0) * seq_size_per_block_;
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
@@ -189,7 +188,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }
-        if (enable_reuse_cache && ((i + 1) % step) == 0) {
+        if (shouldMaterializeBlock(i, seq_len, reserve_step, enable_reuse_cache)) {
             continue;
         }
         blocks_to_free.push_back(block_indices[i]);

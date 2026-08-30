@@ -150,7 +150,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearKVCacheGroup>(
-                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_);
+                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_, config_.linear_fixed_cap);
             linear_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::SWA) {
             group = std::make_shared<SWAKVCacheGroup>(

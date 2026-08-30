@@ -218,6 +218,13 @@ def test_long_seq_radix_path():
     _assert_equiv(out, logits, lengths, k=2048, tag="radix L=64K")
 
 
+def test_glm53_1m_decode_b8():
+    """GLM-5.3 1M decode uses eight 262K compressed indexer rows."""
+    logits, lengths = _make(8, 262144, seed=10, lengths_mode="full")
+    out = _run(logits, lengths, k=512, max_seq_len=262144)
+    _assert_equiv(out, logits, lengths, k=512, tag="GLM-5.3 1M decode B=8")
+
+
 def test_zero_length_row():
     """lengths[r] == 0 must yield an all-(-1) row."""
     logits, lengths = _make(2, 1024, seed=8, lengths_mode="full")
@@ -310,6 +317,7 @@ if __name__ == "__main__":
     test_mtp_batched_decode_flattened_bs_rows()
     test_filtered_path_b64()
     test_long_seq_radix_path()
+    test_glm53_1m_decode_b8()
     test_zero_length_row()
     test_lengths_2d_accepted()
     print("\n== Benchmark ==")

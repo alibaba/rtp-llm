@@ -57,6 +57,10 @@ struct MemoryLayoutConfig {
 
     bool enable_kv_scale         = false;
     bool enable_hybrid_attention = false;
+    // Opaque typed cache regions (DSV4 paged/state pools) are replicated as
+    // complete blocks across attention TP ranks. They must not be interpreted
+    // as ordinary head-partitioned K/V storage during PD cache transfer.
+    bool enable_kv_cache_partition = true;
 
     bool hasScale() const {
         return enable_kv_scale && kv_scale_pool_size_bytes > 0;

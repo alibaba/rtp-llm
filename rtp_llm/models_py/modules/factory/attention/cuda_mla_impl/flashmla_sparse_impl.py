@@ -3,7 +3,9 @@ Sparse MLA implementation for prefill and decode.
 
 Two operators:
 - SparseMlaOp:    BF16 KV cache → flash_mla_sparse_fwd
-- SparseMlaFp8Op: FP8 paged KV cache. Two paths controlled by USE_GATHER_PATH env:
+- SparseMlaFp8Op: FP8 paged KV cache. DeepSeek uses FlashMLA's packed-cache
+  decode kernel; NoPE MLA gathers only selected entries into a BF16 workspace.
+  Prefill has two paths controlled by USE_GATHER_PATH env:
     * USE_GATHER_PATH=1 (prefill): gather + upconvert FP8 → BF16 workspace,
       then flash_mla_sparse_fwd. ~1.7x faster than with_kvcache for large s_q.
     * Otherwise: flash_mla_with_kvcache directly on FP8 paged cache.
@@ -270,6 +272,15 @@ class SparseMlaOp(object):
         Returns [T, H, kv_lora_rank].
         """
         global_indices = self._convert_topk_indices_to_global(topk_indices)
+        return self._forward_sparse(q, kv, global_indices)
+
+    def _forward_sparse(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        global_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the BF16 sparse kernel and handle TP-sharded query heads."""
         if self.num_heads not in _FLASHMLA_SPARSE_Q_HEADS:
             # FlashMLA sparse prefill only instantiates Hq=64/128. Tensor
             # parallelism shards GLM-5.3-Flash's 64 heads to 16 (TP4) or 8
@@ -498,14 +509,40 @@ class SparseMlaFp8Op(SparseMlaOp):
             self.kernel_top_k,
         )
 
-        out, _, _ = flash_mla_sparse_fwd(
-            q,
-            fused_kv.unsqueeze(1),  # [total_kv_len, 1, dim]
-            global_indices,
-            self.scale,
-            d_v=self.kv_lora_rank,
+        return self._forward_sparse(q, fused_kv.unsqueeze(1), global_indices)
+
+    def _forward_nope_selected(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        topk_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dequantize only GLM-5.3's selected 528-byte NoPE cache entries."""
+        global_indices = _pad_flashmla_topk(
+            self._convert_topk_indices_to_global(topk_indices),
+            self.kernel_top_k,
         )
-        return out
+        physical_indices = global_indices.reshape(-1).contiguous()
+        fused_kv = torch.empty(
+            (physical_indices.numel(), self.kv_lora_rank),
+            dtype=torch.bfloat16,
+            device=kv.device,
+        )
+
+        src = _as_uint8(kv)
+        if src.ndim == 4:
+            src = src.squeeze(2)
+        rtp_llm_ops.gather_selected_glm53_fp8_mla_kv(
+            src, fused_kv, physical_indices
+        )
+
+        local_indices = torch.arange(
+            physical_indices.numel(),
+            dtype=torch.int32,
+            device=physical_indices.device,
+        ).view_as(global_indices)
+        local_indices.masked_fill_(global_indices < 0, -1)
+        return self._forward_sparse(q, fused_kv.unsqueeze(1), local_indices)
 
     def _forward_with_kvcache(
         self,
@@ -515,6 +552,9 @@ class SparseMlaFp8Op(SparseMlaOp):
         layer_id: int = 0,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache directly on FP8 paged cache."""
+        if self.qk_rope_head_dim == 0:
+            return self._forward_nope_selected(q, kv, topk_indices)
+
         assert self._sched_meta is not None
         if layer_id == 0:
             self._sched_meta.tile_scheduler_metadata = None

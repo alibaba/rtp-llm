@@ -23,17 +23,17 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 
 def _select_mla_block_id_host(attn_inputs: PyAttentionInputs) -> torch.Tensor:
-    block_id = getattr(attn_inputs, "kv_cache_block_id_host", None)
+    block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_host", None)
     if block_id is not None and block_id.numel() > 0:
         return block_id
-    return attn_inputs.kv_cache_kernel_block_id_host
+    return attn_inputs.kv_cache_block_id_host
 
 
 def _select_mla_block_id_device(attn_inputs: PyAttentionInputs) -> torch.Tensor:
-    block_id = getattr(attn_inputs, "kv_cache_block_id_device", None)
+    block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
     if isinstance(block_id, torch.Tensor) and block_id.numel() > 0:
         return block_id
-    return attn_inputs.kv_cache_kernel_block_id_device
+    return attn_inputs.kv_cache_block_id_device
 
 
 class MlaFlashInferImplBase(MlaImplBase):

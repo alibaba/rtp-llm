@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/GLM53CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
@@ -138,12 +139,35 @@ void populateDefaultRegionMappings(CacheConfig& config) {
 }
 
 size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id) {
+    RTP_LLM_CHECK_WITH_INFO(group_id < config.cache_specs.size() && config.cache_specs[group_id] != nullptr,
+                            "missing cache spec for group %zu",
+                            group_id);
     RTP_LLM_CHECK_WITH_INFO(group_id < config.group_types.size(),
                             "missing cache group type for group %zu (group_types.size=%zu)",
                             group_id,
                             config.group_types.size());
     const bool is_full = config.group_types[group_id] == CacheGroupType::FULL;
-    return is_full ? config.kernelBlocksPerKvBlock() : 1;
+    if (!is_full) {
+        return 1;
+    }
+
+    const auto& spec = config.cache_specs[group_id];
+    if (std::dynamic_pointer_cast<DSV4KVSpec>(spec) != nullptr) {
+        // DSV4 paged specs describe one kernel page even though their
+        // seq_size_per_block records the owning physical block size.
+        return config.kernelBlocksPerKvBlock();
+    }
+
+    // Standard MLA/MHA specs price storage using their own token count. Only
+    // extend them when the requested physical block is actually larger; do
+    // not multiply a spec that already describes the full physical block.
+    RTP_LLM_CHECK_WITH_INFO(spec->seq_size_per_block > 0
+                                && config.seq_size_per_block % spec->seq_size_per_block == 0,
+                            "physical block size %u must be divisible by group %zu spec block size %u",
+                            config.seq_size_per_block,
+                            group_id,
+                            spec->seq_size_per_block);
+    return config.seq_size_per_block / spec->seq_size_per_block;
 }
 
 void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
@@ -261,7 +285,6 @@ void setupGroupCounts(CacheConfig& config) {
     config.full_group_num   = 0;
     config.swa_group_num    = 0;
     config.linear_group_num = 0;
-    config.linear_fixed_cap = 0;
     for (auto group_type : config.group_types) {
         if (group_type == CacheGroupType::FULL) {
             ++config.full_group_num;
@@ -290,7 +313,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                            config.seq_size_per_block;
     config.use_mla                   = model_config.attn_config.use_mla;
     config.dtype                     = dtype;
-    config.linear_step               = 1;
+    config.linear_step               = std::max(1, kv_cache_config.linear_step);
+    config.linear_fixed_cap          = std::max(0, kv_cache_config.linear_fixed_cap);
     config.is_sparse                 = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {

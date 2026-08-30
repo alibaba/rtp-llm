@@ -101,6 +101,23 @@ py_test(
     deps = _DSV4_FP8_TEST_DEPS,
 )
 
+py_test(
+    name = "test_glm53_1m_persistent_topk",
+    srcs = ["test_dsv4_persistent_topk.py"],
+    main = "test_dsv4_persistent_topk.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV"},
+)
+
+py_test(
+    name = "test_glm53_1m_indexer_score",
+    srcs = ["test_glm53_1m_indexer_score.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV"},
+)
+
 [
     py_test(
         name = t,

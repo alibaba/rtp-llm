@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 
 #include <string>
 
@@ -207,12 +208,23 @@ private:
             cfg.linear_v_bytes_per_history =
                 static_cast<size_t>(linear_spec->local_num_v_heads) * linear_spec->head_v_dim * conv_type_size;
         }
-        // A mixed KDA+MLA model has a model-level use_mla flag, but an
-        // independent LINEAR group must never be reshaped as MLA. Shared
-        // HybridCache still builds its single physical layout from the leading
-        // FULL spec, so this remains true for the common pool.
-        cfg.is_mla             = !cfg.is_linear_attention && (cache_config.use_mla || cache_config.is_sparse);
-        cfg.use_mla            = !cfg.is_linear_attention && cache_config.use_mla;
+        // DSV4KVSpec already describes one kernel page. A larger physical
+        // cache-manager block concatenates kernel_blocks_per_kv_block pages;
+        // it must therefore use MemoryLayoutStrategy's kernel-block view, not
+        // the generic MLA physical-token reshape. Otherwise INDEXER_KV with
+        // physical=1024/kernel=128 is exposed as 256 compressed entries per
+        // row instead of eight 32-entry rows, which DeepGEMM rejects.
+        const bool is_dsv4_paged_kv = std::dynamic_pointer_cast<DSV4KVSpec>(spec) != nullptr;
+        const bool is_dsv4_state    = std::dynamic_pointer_cast<DSV4StateSpec>(spec) != nullptr;
+
+        // A mixed KDA+MLA model has a model-level use_mla flag, but independent
+        // LINEAR and typed DSV4 paged groups must never be reshaped as generic
+        // MLA. Shared HybridCache still builds its single physical layout from
+        // the leading FULL spec, so this remains true for the common pool.
+        cfg.is_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv
+                     && (cache_config.use_mla || cache_config.is_sparse);
+        cfg.use_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv && cache_config.use_mla;
+        cfg.enable_kv_cache_partition = !is_dsv4_paged_kv && !is_dsv4_state;
         cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
 
         cfg.kv_block_pool_size_bytes =
