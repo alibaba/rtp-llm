@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
+from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
 from rtp_llm.server.backend_manager import BackendManager, _reset_ep_wrappers
 
 
@@ -154,6 +155,54 @@ class BackendManagerShutdownTest(unittest.TestCase):
 
         deepep.reset.assert_called_once_with()
         moriep.reset.assert_called_once_with()
+
+    def test_deepep_buffer_is_explicitly_destroyed_with_external_reference(self):
+        buffer = Mock()
+        wrapper = object.__new__(DeepEPWrapper)
+        wrapper._buffer = buffer
+
+        with patch(
+            "rtp_llm.models_py.distributed.deepep_wrapper.gc.collect"
+        ) as collect:
+            wrapper._destroy_buffer()
+
+        buffer.destroy.assert_called_once_with()
+        self.assertIsNone(wrapper._buffer)
+        collect.assert_called_once_with()
+
+    def test_deepep_buffer_construction_failure_destroys_partial_runtime(self):
+        init_error = RuntimeError("buffer init failed")
+        runtime = Mock()
+
+        class FailingBuffer:
+            instance = None
+
+            def __new__(cls):
+                instance = object.__new__(cls)
+                cls.instance = instance
+                return instance
+
+            def __init__(self, **kwargs):
+                self.explicitly_destroy = kwargs["explicitly_destroy"]
+                self.runtime = runtime
+                raise init_error
+
+            def destroy(self):
+                self.runtime.destroy()
+                self.runtime = None
+
+        with patch(
+            "rtp_llm.models_py.distributed.deepep_wrapper.DeepEPBuffer",
+            FailingBuffer,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                DeepEPWrapper._construct_buffer(explicitly_destroy=True)
+
+        self.assertIs(raised.exception, init_error)
+        runtime.destroy.assert_called_once_with()
+        self.assertIsNotNone(FailingBuffer.instance)
+        self.assertTrue(FailingBuffer.instance.explicitly_destroy)
+        self.assertIsNone(FailingBuffer.instance.runtime)
 
 
 if __name__ == "__main__":

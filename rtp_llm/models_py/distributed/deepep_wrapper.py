@@ -512,6 +512,23 @@ class DeepEPWrapper:
                 f"enable_ffn_disaggregate={config.enable_ffn_disaggregate}"
             )
 
+    @staticmethod
+    def _construct_buffer(**init_kwargs) -> DeepEPBuffer:
+        """Construct a buffer while retaining its half-built object for rollback."""
+        buffer = DeepEPBuffer.__new__(DeepEPBuffer)
+        try:
+            DeepEPBuffer.__init__(buffer, **init_kwargs)
+        except BaseException:
+            if getattr(buffer, "runtime", None) is not None:
+                try:
+                    buffer.destroy()
+                except BaseException:
+                    logging.exception(
+                        "Failed to destroy partially initialized DeepEP buffer"
+                    )
+            raise
+        return buffer
+
     def _init_normal_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for normal mode."""
         config = self._config
@@ -544,6 +561,7 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
+            "explicitly_destroy": True,
         }
 
         if self._use_accl_ep:
@@ -554,7 +572,7 @@ class DeepEPWrapper:
             else:
                 init_kwargs["allow_mnnvl"] = False
 
-        return DeepEPBuffer(**init_kwargs)  # type: ignore
+        return self._construct_buffer(**init_kwargs)
 
     def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for low-latency mode."""
@@ -585,6 +603,7 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
             "allow_mnnvl": True,
+            "explicitly_destroy": True,
         }
 
         if self._use_accl_ep:
@@ -595,7 +614,7 @@ class DeepEPWrapper:
             else:
                 init_kwargs["allow_mnnvl"] = False
 
-        return DeepEPBuffer(**init_kwargs)  # type: ignore
+        return self._construct_buffer(**init_kwargs)
 
     def _init_low_latency_m2n_buffer(self, group: ProcessGroup) -> DeepEPBuffer:
         """Initialize buffer for low-latency M2N mode."""
@@ -635,18 +654,19 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
+            "explicitly_destroy": True,
         }
 
         if self._use_accl_ep:
             init_kwargs["allow_nvlink_for_low_latency_mode"] = True
             init_kwargs["allow_mnnvl"] = False
 
-        return DeepEPBuffer(**init_kwargs)  # type: ignore
+        return self._construct_buffer(**init_kwargs)
 
     def _destroy_buffer(self) -> None:
         """Destroy the DeepEP buffer and free resources."""
         if self._buffer is not None:
-            del self._buffer
+            self._buffer.destroy()
             self._buffer = None
         gc.collect()
 
