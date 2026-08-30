@@ -83,7 +83,7 @@ def _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS: tl.constexpr) -> None:
 # =============================================================================
 # Per-token state-cache writer (fp32). ape is added to score in-kernel.
 # =============================================================================
-@triton.jit
+@triton.jit(do_not_specialize=["num_state_blocks"])
 def _save_partial_states_kernel(
     kv_ptr,
     kv_stride,
@@ -97,7 +97,7 @@ def _save_partial_states_kernel(
     state_cache_stride1,
     slot_mapping_ptr,
     block_size,
-    num_state_blocks: tl.constexpr,
+    num_state_blocks,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,

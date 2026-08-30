@@ -118,6 +118,14 @@ py_test(
     exec_properties = {"gpu": "L20A_DEV"},
 )
 
+py_test(
+    name = "test_compressor_pool_size",
+    srcs = ["test_compressor_pool_size.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV"},
+)
+
 [
     py_test(
         name = t,
