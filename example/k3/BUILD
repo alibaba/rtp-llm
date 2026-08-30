@@ -1,4 +1,5 @@
 exports_files([
+    "kimi_k3_full_model_three_host_pd_smoke_driver.py",
     "kimi_k3_full_model_two_host_pd_smoke.sh",
     "kimi_k3_full_model_two_host_pd_smoke_driver.py",
     "start_kimi_k3_pd.sh",
@@ -30,6 +31,21 @@ py_test(
 py_library(
     name = "kimi_k3_full_model_two_host_pd_smoke_driver_lib",
     srcs = ["kimi_k3_full_model_two_host_pd_smoke_driver.py"],
+)
+
+py_test(
+    name = "kimi_k3_full_model_three_host_pd_smoke_driver_test",
+    srcs = ["kimi_k3_full_model_three_host_pd_smoke_driver_test.py"],
+    deps = [
+        ":kimi_k3_full_model_three_host_pd_smoke_driver_lib",
+        ":kimi_k3_full_model_two_host_pd_smoke_driver_lib",
+    ],
+)
+
+py_library(
+    name = "kimi_k3_full_model_three_host_pd_smoke_driver_lib",
+    srcs = ["kimi_k3_full_model_three_host_pd_smoke_driver.py"],
+    deps = [":kimi_k3_full_model_two_host_pd_smoke_driver_lib"],
 )
 
 sh_binary(

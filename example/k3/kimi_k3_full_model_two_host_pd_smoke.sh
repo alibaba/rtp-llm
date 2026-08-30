@@ -119,9 +119,18 @@ Important optional variables:
                             Projection-KTP replicates DP-local KDA/O-proj
                             weights, so the older 42000 MiB budget can OOM
                             before CUDA Graph capture on a 93-layer model.
+  SMOKE_DECODE_TOPOLOGY     dp8_ktp8_ep8 (default) or dp16_ktp16_ep16
+  SMOKE_DECODE_NODE_INDEX   Decode gang node index: 0 for DP8/first DP16 node,
+                            1 for the second DP16 node
   SMOKE_DECODE_ROLE_ADDRS   optional comma-separated ordered
-                            IP:HTTP_PORT:GRPC_PORT list. The DP8 default is
-                            derived from DECODE_ENDPOINT using the rank stride.
+                            IP:HTTP_PORT:GRPC_PORT list. DP8 derives 8 local
+                            ranks; DP16 requires all 16 ordered rank endpoints.
+  SMOKE_SECONDARY_COMPLETION_FILE
+                            absolute run-scoped marker used by the controller
+                            to release the second DP16 Decode node after PASS
+  SMOKE_PRIMARY_READY_FILE / SMOKE_PRIMARY_COMPLETION_FILE
+                            run-scoped DP16 Decode0 handshake; Decode0 remains
+                            healthy while Decode1 verifies and exits cleanly
   SMOKE_LINEAR_STEP         KDA materialization step; defaults to 1
   SMOKE_CHUNKWISE_RDMA      1 (default) enables Layer x Chunk publication;
                             0 retains compute-all-then-transfer behavior
@@ -148,6 +157,40 @@ CHECKPOINT_PATH="${CHECKPOINT_PATH:-/ssd/2/kimi-k3}"
 SMOKE_RUN_ID="${SMOKE_RUN_ID:-manual}"
 [[ "${SMOKE_RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]] \
     || die "SMOKE_RUN_ID may contain only letters, digits, dot, underscore and dash"
+smoke_decode_topology="${SMOKE_DECODE_TOPOLOGY:-dp8_ktp8_ep8}"
+case "${smoke_decode_topology}" in
+    dp8_ktp8_ep8 | dp16_ktp16_ep16) ;;
+    *) die "SMOKE_DECODE_TOPOLOGY must be dp8_ktp8_ep8 or dp16_ktp16_ep16" ;;
+esac
+smoke_decode_node_index="${SMOKE_DECODE_NODE_INDEX:-0}"
+[[ "${smoke_decode_node_index}" == "0" || "${smoke_decode_node_index}" == "1" ]] \
+    || die "SMOKE_DECODE_NODE_INDEX must be 0 or 1"
+if [[ "${role}" == "prefill" || "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]]; then
+    [[ "${smoke_decode_node_index}" == "0" ]] \
+        || die "only the second DP16 Decode node may use SMOKE_DECODE_NODE_INDEX=1"
+fi
+if [[ "${role}" == "decode" && "${smoke_decode_topology}" == "dp16_ktp16_ep16" ]]; then
+    expected_world_rank="$((smoke_decode_node_index * 8))"
+    [[ "${WORLD_RANK:-0}" == "${expected_world_rank}" ]] \
+        || die "DP16 Decode node ${smoke_decode_node_index} requires WORLD_RANK=${expected_world_rank}"
+    : "${GANG_CONFIG_STRING:?DP16 Decode requires GANG_CONFIG_STRING}"
+fi
+secondary_completion_file="${SMOKE_SECONDARY_COMPLETION_FILE:-}"
+primary_ready_file="${SMOKE_PRIMARY_READY_FILE:-}"
+primary_completion_file="${SMOKE_PRIMARY_COMPLETION_FILE:-}"
+if [[ "${role}" == "decode" && "${smoke_decode_node_index}" == "1" ]]; then
+    [[ "${secondary_completion_file}" == /* ]] \
+        || die "second DP16 Decode node requires an absolute SMOKE_SECONDARY_COMPLETION_FILE"
+    [[ ! -e "${secondary_completion_file}" ]] \
+        || die "secondary Decode completion marker already exists: ${secondary_completion_file}"
+fi
+if [[ "${role}" == "decode" && "${smoke_decode_topology}" == "dp16_ktp16_ep16" \
+    && "${smoke_decode_node_index}" == "0" ]]; then
+    [[ "${primary_ready_file}" == /* && "${primary_completion_file}" == /* ]] \
+        || die "first DP16 Decode node requires absolute primary ready/completion files"
+    [[ ! -e "${primary_ready_file}" && ! -e "${primary_completion_file}" ]] \
+        || die "primary Decode handshake marker already exists"
+fi
 
 endpoint_port() {
     local endpoint="$1"
@@ -320,8 +363,9 @@ cleanup() {
     fi
     stop_owned_process "${service_pid}"
     stop_owned_process "${listener_pid}"
-    printf 'role=%s\nstatus=%s\ncheckpoint=%s\nartifacts=%s\n' \
-        "${role}" "${rc}" "${checkpoint_real}" "${role_dir}" >"${summary_file}"
+    printf 'role=%s\nstatus=%s\ndecode_node_index=%s\ntopology=%s\ncheckpoint=%s\nartifacts=%s\n' \
+        "${role}" "${rc}" "${smoke_decode_node_index}" "${smoke_decode_topology}" \
+        "${checkpoint_real}" "${role_dir}" >"${summary_file}"
     exit "${rc}"
 }
 trap cleanup EXIT
@@ -398,11 +442,14 @@ verify_projection_ktp_decode_log() {
     for marker in \
         K3_PROJECTION_KTP_LAYOUT \
         K3_PROJECTION_KTP_STEP \
-        K3_PROJECTION_KTP_GRAPH_REPLAY \
-        K3_PD_FAN_IN; do
+        K3_PROJECTION_KTP_GRAPH_REPLAY; do
         grep -Eh "${marker}" "${logs[@]}" | tail -20 >>"${evidence_file}" \
             || die "Decode log has no ${marker} evidence"
     done
+    if [[ "${smoke_decode_node_index}" == "0" ]]; then
+        grep -Eh K3_PD_FAN_IN "${logs[@]}" | tail -20 >>"${evidence_file}" \
+            || die "Decode0 log has no K3_PD_FAN_IN evidence"
+    fi
     for bucket in 1 2 4 8; do
         grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
             | tail -1 >>"${evidence_file}" \
@@ -424,6 +471,7 @@ verify_role_environment() {
         "${smoke_decode_kv_cache_mem_mb}" \
         "${smoke_linear_step}" \
         "${smoke_chunkwise_rdma}" \
+        "${smoke_decode_topology}" \
         "${FT_CORE_DUMP_ON_EXCEPTION}" <<'PY'
 import pathlib
 import sys
@@ -438,6 +486,7 @@ import sys
     decode_kv_cache_mem_mb,
     linear_step,
     chunkwise_rdma,
+    decode_topology,
     core_dump_on_exception,
 ) = sys.argv[1:]
 entries = pathlib.Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
@@ -503,7 +552,7 @@ else:
         "MEGA_MOE_MAX_TOKENS_PER_RANK": "16",
         "ENABLE_CUDA_GRAPH": "1",
         "DECODE_CAPTURE_CONFIG": "1,2,4,8",
-        "KIMI_K3_DECODE_TOPOLOGY": "dp8_ktp8_ep8",
+        "KIMI_K3_DECODE_TOPOLOGY": decode_topology,
         "RTP_MLA_DECODE_KERNEL": "tokenspeed_mla",
         "MOE_STRATEGY": "mega_moe_se",
         "RTP_LLM_DEVICE_INPUT": "1",
@@ -603,7 +652,7 @@ apply_validated_decode_profile() {
     # Exercise several arbitrary public graph buckets; the coordinator chooses
     # one common key from the DP-local maximum batch.
     export DECODE_CAPTURE_CONFIG=1,2,4,8
-    export KIMI_K3_DECODE_TOPOLOGY=dp8_ktp8_ep8
+    export KIMI_K3_DECODE_TOPOLOGY="${smoke_decode_topology}"
     export RTP_MLA_DECODE_KERNEL=tokenspeed_mla
     export MOE_STRATEGY=mega_moe_se
     export RTP_LLM_DEVICE_INPUT=1
@@ -620,7 +669,7 @@ fi
 
 echo "[${role}] artifacts=${role_dir}"
 echo "[${role}] checkpoint=${checkpoint_real} (${checkpoint_fs}:${checkpoint_source})"
-echo "[${role}] projection_ktp=dp8_ktp8_ep8 mtp=disabled"
+echo "[${role}] projection_ktp=${smoke_decode_topology} decode_node_index=${smoke_decode_node_index} mtp=disabled"
 echo "[${role}] endpoints prefill=${PREFILL_ENDPOINT} decode=${DECODE_ENDPOINT}"
 
 setsid "${launcher}" "${role}" >"${service_log}" 2>&1 &
@@ -635,6 +684,21 @@ verify_rdma_log
 verify_role_environment
 
 if [[ "${role}" == "decode" ]]; then
+    if [[ "${smoke_decode_node_index}" == "1" ]]; then
+        echo "[decode] secondary gang node READY; waiting for run-scoped controller completion marker"
+        deadline=$((SECONDS + result_timeout))
+        while ((SECONDS < deadline)); do
+            kill -0 "${service_pid}" 2>/dev/null \
+                || die "secondary Decode service exited before controller completion"
+            [[ -f "${secondary_completion_file}" ]] && break
+            sleep 1
+        done
+        [[ -f "${secondary_completion_file}" ]] \
+            || die "timed out waiting for secondary Decode completion marker"
+        verify_projection_ktp_decode_log
+        echo "PASS: secondary DP16 Decode gang node stayed healthy through validation"
+        exit 0
+    fi
     # One-shot result endpoint. It accepts only the matching run ID and writes
     # PASS/FAIL to a local file; no remote shell or shared filesystem is used.
     python3 - "${result_port}" "${result_file}" "${SMOKE_RUN_ID}" <<'PY' &
@@ -696,6 +760,19 @@ PY
     verdict="$(tr -d '[:space:]' <"${result_file}")"
     [[ "${verdict}" == "PASS" ]] || die "Prefill reported ${verdict}"
     verify_projection_ktp_decode_log
+    if [[ "${smoke_decode_topology}" == "dp16_ktp16_ep16" ]]; then
+        touch "${primary_ready_file}"
+        echo "[decode] primary validation complete; holding gang until Decode1 exits"
+        deadline=$((SECONDS + result_timeout))
+        while ((SECONDS < deadline)); do
+            kill -0 "${service_pid}" 2>/dev/null \
+                || die "primary Decode service exited during coordinated shutdown"
+            [[ -f "${primary_completion_file}" ]] && break
+            sleep 1
+        done
+        [[ -f "${primary_completion_file}" ]] \
+            || die "timed out waiting for primary Decode completion marker"
+    fi
     echo "PASS: Decode stayed healthy and Prefill validated the PD response and semantic accuracy"
     exit 0
 fi
@@ -725,6 +802,8 @@ decode_role_addrs=()
 if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
     IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
 else
+    [[ "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]] \
+        || die "DP16 smoke requires SMOKE_DECODE_ROLE_ADDRS for all 16 ranks"
     for ((rank = 0; rank < 8; ++rank)); do
         rank_http_port="$((decode_port + rank * 9))"
         rank_grpc_port="$((rank_http_port + 1))"
@@ -733,8 +812,11 @@ else
         )
     done
 fi
-[[ "${#decode_role_addrs[@]}" -eq 8 ]] \
-    || die "DP8 formal smoke requires exactly 8 ordered Decode role addresses"
+expected_decode_roles=8
+[[ "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]] \
+    || expected_decode_roles=16
+[[ "${#decode_role_addrs[@]}" -eq "${expected_decode_roles}" ]] \
+    || die "${smoke_decode_topology} smoke requires exactly ${expected_decode_roles} ordered Decode role addresses"
 decode_role_addr_args=()
 for addr in "${decode_role_addrs[@]}"; do
     [[ "${addr}" =~ ^[^:]+:[1-9][0-9]*:[1-9][0-9]*$ ]] \
