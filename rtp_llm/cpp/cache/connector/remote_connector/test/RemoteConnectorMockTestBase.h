@@ -203,9 +203,9 @@ protected:
         return locations;
     }
 
-    std::shared_ptr<BlockIds> makeGroupBlockIds(const BlockIndicesType& block_indices) {
-        auto result           = std::make_shared<BlockIds>();
-        result->block_indices = block_indices;
+    std::shared_ptr<PoolBlockIds> makeGroupBlockIds(const BlockIndicesType& block_indices) {
+        auto result = std::make_shared<PoolBlockIds>();
+        result->assign(block_indices);
         return result;
     }
 

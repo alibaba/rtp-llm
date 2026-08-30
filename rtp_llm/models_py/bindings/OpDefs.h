@@ -75,7 +75,7 @@ public:
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
         const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.topology().layer(layer_id).group_tags;
+        const auto& tags  = grouped_layout_.topology().groupsForLayer(layer_id);
 
         std::vector<LayerKVCache> layer_caches;
         layer_caches.reserve(tags.size());
@@ -100,11 +100,11 @@ public:
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seq_size_per_block);
+        return static_cast<int>(grouped_layout_.topology().group(tag).seqSizePerBlock());
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
+        return static_cast<int>(grouped_layout_.topology().group(tag).kernelSeqSizePerBlock());
     }
 
 private:
@@ -123,14 +123,14 @@ private:
         }
     }
 
-    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) {
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::CacheGroup& group) {
+        RTP_LLM_CHECK_WITH_INFO(group.kernelSeqSizePerBlock() > 0
+                                    && group.seqSizePerBlock() % group.kernelSeqSizePerBlock() == 0,
                                 "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
                                 group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
+                                group.seqSizePerBlock(),
+                                group.kernelSeqSizePerBlock());
+        return static_cast<int64_t>(group.kernelBlocksPerKvBlock());
     }
 
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
@@ -160,14 +160,14 @@ private:
     }
 
     LayerKVCache
-    makeLayerCache(int layer_id, const rtp_llm::GroupBase& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
+    makeLayerCache(int layer_id, const rtp_llm::CacheGroup& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
         RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
                                 "KV cache tensor must be defined for layer=%d tag=%s",
                                 layer_id,
                                 group.tag.c_str());
 
         LayerKVCache result(
-            buffers.kv_addr, static_cast<int>(group.seq_size_per_block), layer_id, group.tag, buffers.kv_scale_addr);
+            buffers.kv_addr, static_cast<int>(group.seqSizePerBlock()), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -179,13 +179,13 @@ private:
         const int64_t physical_block_num  = buffers.kv_addr.size(0);
         const int64_t blocks_per_physical = kernelBlocksPerPhysicalBlock(group);
         const int64_t kernel_block_num    = physical_block_num * blocks_per_physical;
-        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernel_seq_size_per_block);
+        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernelSeqSizePerBlock());
         result.seq_size_per_block         = static_cast<int>(kernel_seq_size);
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadAttention) {
             const int64_t local_kv_heads = static_cast<int64_t>(group.local_kv_head_num);
             RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", group.tag.c_str());
-            const int64_t physical_seq_size = static_cast<int64_t>(group.seq_size_per_block);
+            const int64_t physical_seq_size = static_cast<int64_t>(group.seqSizePerBlock());
             const int64_t k_block_elems     = static_cast<int64_t>(group.spec->k_block_size());
             RTP_LLM_CHECK_WITH_INFO(k_block_elems > 0 && k_block_elems % (local_kv_heads * physical_seq_size) == 0,
                                     "MHA tag=%s cannot derive head dimension from k_block_size=%ld heads=%ld seq=%ld",

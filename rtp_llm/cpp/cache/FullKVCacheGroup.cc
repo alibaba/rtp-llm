@@ -43,7 +43,7 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
+bool FullKVCacheGroup::malloc(PoolBlockIds&        block_ids,
                               int                  seq_len,
                               bool                 enable_reuse_cache,
                               int                  reserve_step,
@@ -109,12 +109,13 @@ void FullKVCacheGroup::free(const BlockIndicesType& block_indices) {
     RTP_LLM_LOG_DEBUG("Freed %zu blocks", block_indices.size());
 }
 
-void FullKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void FullKVCacheGroup::reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     block_pool_->requestReference(new_block_indices);
 }
 
-void FullKVCacheGroup::removeSkippedBlocks(BlockIds& /*block_ids*/, bool /*enable_reuse_cache*/, int /*reserve_step*/) {
-}
+void FullKVCacheGroup::removeSkippedBlocks(PoolBlockIds& /*block_ids*/,
+                                           bool /*enable_reuse_cache*/,
+                                           int /*reserve_step*/) {}
 
 }  // namespace rtp_llm

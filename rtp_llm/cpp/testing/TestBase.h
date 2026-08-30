@@ -225,7 +225,7 @@ protected:
         RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
                                 "DeviceTestBase::allocateKVBlocks requires exactly one cache group, got %d",
                                 cache_config.groupNums());
-        const auto& cache_tag = cache_config.topology().soleGroupForLayer(0).tag;
+        const auto& cache_tag = cache_config.soleGroupForLayer(0).tag;
 
         for (size_t i = 0; i < batch_size; i++) {
             const auto& indices = batch_kv_cache->blocks(static_cast<int>(i), cache_tag);
@@ -237,7 +237,7 @@ protected:
                 auto        k_indexs       = indices;
                 const auto  max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
                 const auto  blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
-                const auto& sole_group     = cache_config.topology().groups().front();
+                const auto& sole_group     = cache_config.groups().front();
                 const auto  spec           = sole_group.spec;
                 const auto  local_kv_heads = cache_config.localKvHeadNum(sole_group.tag);
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");

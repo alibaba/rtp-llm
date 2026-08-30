@@ -10,7 +10,7 @@ namespace rtp_llm {
 
 void SharedBlockCache::init(const CacheConfig& config, const std::map<std::string, BlockPoolPtr>& group_pools) {
     std::lock_guard<std::mutex> lock(mu_);
-    const auto&                 groups = config.topology().groups();
+    const auto&                 groups = config.groups();
     RTP_LLM_CHECK_WITH_INFO(group_pools.size() == groups.size(),
                             "group_pools size %zu != cache group count %zu",
                             group_pools.size(),
@@ -82,20 +82,21 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
                 if (isNullBlockIdx(block_id)) {
                     continue;
                 }
-                const auto existing_block_it = existing_item.group_block_ids.find(tag);
-                if (existing_block_it == existing_item.group_block_ids.end()
-                    || isNullBlockIdx(existing_block_it->second)) {
-                    existing_item.group_block_ids[tag]             = block_id;
-                    existing_item.group_block_created_time_us[tag] = now_us;
-                    existing_item.group_matchable[tag] =
-                        group_matchable.find(tag) == group_matchable.end() ? true : group_matchable.at(tag);
+                auto binding_it = existing_item.bindings_by_group.find(tag);
+                if (binding_it == existing_item.bindings_by_group.end()) {
+                    existing_item.bindings_by_group.emplace(
+                        tag,
+                        SharedGroupBinding{block_id,
+                                           group_matchable.find(tag) == group_matchable.end()
+                                               || group_matchable.at(tag),
+                                           now_us});
                     updated = true;
                     blockCacheReferenceByTag(tag, block_id);
-                } else if (const auto matchable_it = group_matchable.find(tag);
-                           matchable_it != group_matchable.end() && matchable_it->second
-                           && !groupMatchable(existing_item, tag)) {
-                    existing_item.group_matchable[tag] = true;
-                    updated                            = true;
+                } else if (const auto matchable_it = group_matchable.find(tag); matchable_it != group_matchable.end()
+                                                                                && matchable_it->second
+                                                                                && !binding_it->second.matchable) {
+                    binding_it->second.matchable = true;
+                    updated                      = true;
                 }
             }
             if (updated || existing_item.is_resident || dependency_updated) {
@@ -113,14 +114,14 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
 
     UnifiedCacheItem item;
     const auto       now_us = currentTimeUs();
-    item.cache_key          = cache_key;
     item.is_resident        = is_resident;
-    item.group_block_ids    = group_block_ids;
     item.created_time_us    = now_us;
     for (const auto& [tag, block_id] : group_block_ids) {
-        item.group_matchable[tag] = group_matchable.find(tag) == group_matchable.end() ? true : group_matchable.at(tag);
         if (!isNullBlockIdx(block_id)) {
-            item.group_block_created_time_us[tag] = now_us;
+            item.bindings_by_group.emplace(
+                tag,
+                SharedGroupBinding{
+                    block_id, group_matchable.find(tag) == group_matchable.end() || group_matchable.at(tag), now_us});
         }
     }
     updateItemDependencyLocked(item, namespace_id, dependency);
@@ -142,18 +143,6 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
     }
 }
 
-SharedBlockCache::MatchResult SharedBlockCache::match(CacheKeyType cache_key) {
-    RTP_LLM_PROFILE_FUNCTION();
-    std::lock_guard<std::mutex> lock(mu_);
-
-    auto [success, item] = lru_cache_.get(cache_key);
-    if (!success) {
-        return {false, {}};
-    }
-    touchTreeAliasesLocked(cache_key);
-    return {true, item.group_block_ids, item.group_matchable};
-}
-
 BlockIdxType SharedBlockCache::matchGroup(CacheKeyType cache_key, std::string_view tag) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
@@ -164,17 +153,14 @@ BlockIdxType SharedBlockCache::matchGroup(CacheKeyType cache_key, std::string_vi
         return NULL_BLOCK_IDX;
     }
     touchTreeAliasesLocked(cache_key);
-    const auto block_it = item.group_block_ids.find(std::string(tag));
-    if (block_it == item.group_block_ids.end()) {
+    const auto binding_it = item.bindings_by_group.find(std::string(tag));
+    if (binding_it == item.bindings_by_group.end() || !binding_it->second.matchable) {
         return NULL_BLOCK_IDX;
     }
-    if (!groupMatchable(item, tag)) {
-        return NULL_BLOCK_IDX;
-    }
-    return block_it->second;
+    return binding_it->second.pool_block_id;
 }
 
-SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks) {
+EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
 
@@ -200,22 +186,9 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
                     removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                     continue;
                 }
-                if (result.evicted_groups.find(tree_key.cache_key) == result.evicted_groups.end()) {
-                    result.evicted_keys.push_back(tree_key.cache_key);
-                    result.evicted_groups[tree_key.cache_key] = removed_item.group_block_ids;
-                    result.evicted_lifetime_ms[tree_key.cache_key] =
-                        std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
-                    result.evicted_namespaces[tree_key.cache_key] =
-                        removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
-                    if (removed_item.has_dependency) {
-                        result.evicted_dependencies[tree_key.cache_key] = removed_item.dependency;
-                    }
-                    for (const auto& [tag, block_id] : removed_item.group_block_ids) {
-                        if (!isNullBlockIdx(block_id)) {
-                            selected_blocks++;
-                        }
-                    }
-                }
+                result.evictions.push_back(
+                    makeWholeItemEvictionLocked(tree_key.cache_key, removed_item, tree_key.namespace_id));
+                selected_blocks += removed_item.bindings_by_group.size();
                 removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
             }
         }
@@ -225,17 +198,18 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
     std::unordered_set<CacheKeyType> resident_keys;
     for (const auto& [key, item] : lru_cache_.items()) {
         if (item.is_resident) {
-            resident_keys.insert(item.cache_key);
+            resident_keys.insert(key);
         }
     }
 
     std::vector<CacheKeyType> lru_keys;
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
-        const auto& item = it->second;
-        if (item.is_resident || resident_keys.count(item.cache_key)) {
+        const auto  cache_key = it->first;
+        const auto& item      = it->second;
+        if (item.is_resident || resident_keys.count(cache_key)) {
             continue;
         }
-        lru_keys.push_back(item.cache_key);
+        lru_keys.push_back(cache_key);
     }
 
     size_t selected_blocks = 0;
@@ -246,21 +220,8 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
 
-        result.evicted_keys.push_back(cache_key);
-        result.evicted_groups[cache_key] = removed_item.group_block_ids;
-        result.evicted_lifetime_ms[cache_key] =
-            std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
-        result.evicted_namespaces[cache_key] =
-            removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
-        if (removed_item.has_dependency) {
-            result.evicted_dependencies[cache_key] = removed_item.dependency;
-        }
-
-        for (const auto& [tag, block_id] : removed_item.group_block_ids) {
-            if (!isNullBlockIdx(block_id)) {
-                selected_blocks++;
-            }
-        }
+        result.evictions.push_back(makeWholeItemEvictionLocked(cache_key, removed_item, kDefaultNamespace));
+        selected_blocks += removed_item.bindings_by_group.size();
         if (selected_blocks >= min_blocks) {
             break;
         }
@@ -269,7 +230,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
     return result;
 }
 
-SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(std::string_view tag, size_t min_blocks) {
+EvictResult SharedBlockCache::selectAndEvictForGroup(std::string_view tag, size_t min_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
     if (min_blocks == 0) {
         return {};
@@ -283,7 +244,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(std::stri
             return result;
         }
     }
-    if (!result.evicted_keys.empty()) {
+    if (!result.evictions.empty()) {
         return result;
     }
 
@@ -319,19 +280,10 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(std::stri
                         continue;
                     }
                     made_progress = true;
-                    if (result.evicted_groups.find(tree_key.cache_key) == result.evicted_groups.end()) {
-                        result.evicted_keys.push_back(tree_key.cache_key);
-                        result.evicted_groups[tree_key.cache_key] = removed_item.group_block_ids;
-                        result.evicted_lifetime_ms[tree_key.cache_key] =
-                            std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
-                        result.evicted_namespaces[tree_key.cache_key] =
-                            removed_item.has_dependency ? removed_item.dependency_namespace : tree_key.namespace_id;
-                        if (removed_item.has_dependency) {
-                            result.evicted_dependencies[tree_key.cache_key] = removed_item.dependency;
-                        }
-                        if (hasUsableGroup(removed_item, tag)) {
-                            selected_blocks++;
-                        }
+                    result.evictions.push_back(
+                        makeWholeItemEvictionLocked(tree_key.cache_key, removed_item, tree_key.namespace_id));
+                    if (hasUsableGroup(removed_item, tag)) {
+                        selected_blocks++;
                     }
                     removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                 }
@@ -343,17 +295,18 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(std::stri
     std::unordered_set<CacheKeyType> resident_keys;
     for (const auto& [key, item] : lru_cache_.items()) {
         if (item.is_resident) {
-            resident_keys.insert(item.cache_key);
+            resident_keys.insert(key);
         }
     }
 
     std::vector<CacheKeyType> lru_keys;
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
-        const auto& item = it->second;
-        if (item.is_resident || resident_keys.count(item.cache_key)) {
+        const auto  cache_key = it->first;
+        const auto& item      = it->second;
+        if (item.is_resident || resident_keys.count(cache_key)) {
             continue;
         }
-        lru_keys.push_back(item.cache_key);
+        lru_keys.push_back(cache_key);
     }
 
     size_t selected_blocks = 0;
@@ -369,15 +322,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(std::stri
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
 
-        result.evicted_keys.push_back(cache_key);
-        result.evicted_groups[cache_key] = removed_item.group_block_ids;
-        result.evicted_lifetime_ms[cache_key] =
-            std::max<int64_t>(0, (currentTimeUs() - removed_item.created_time_us) / 1000);
-        result.evicted_namespaces[cache_key] =
-            removed_item.has_dependency ? removed_item.dependency_namespace : kDefaultNamespace;
-        if (removed_item.has_dependency) {
-            result.evicted_dependencies[cache_key] = removed_item.dependency;
-        }
+        result.evictions.push_back(makeWholeItemEvictionLocked(cache_key, removed_item, kDefaultNamespace));
 
         if (hasUsableGroup(removed_item, tag)) {
             selected_blocks++;
@@ -394,18 +339,15 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
     RTP_LLM_PROFILE_FUNCTION();
 
     auto evict_result = selectAndEvict(min_blocks);
-    if (evict_result.evicted_keys.empty()) {
+    if (evict_result.evictions.empty()) {
         return 0;
     }
 
     size_t freed = 0;
-    for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
-        const auto  cache_key = evict_result.evicted_keys[i];
-        const auto& groups    = evict_result.evicted_groups.at(cache_key);
-
+    for (const auto& eviction : evict_result.evictions) {
         for (const auto& tag : group_tags_in_order_) {
-            const auto block_it = groups.find(tag);
-            if (block_it != groups.end() && !isNullBlockIdx(block_it->second)) {
+            const auto block_it = eviction.blocks_by_group.find(tag);
+            if (block_it != eviction.blocks_by_group.end()) {
                 blockCacheFreeByTag(tag, block_it->second);
                 freed++;
             }
@@ -419,7 +361,7 @@ size_t SharedBlockCache::evictAndFreeForGroup(std::string_view tag, size_t min_b
 
     auto evict_result = selectAndEvictForGroup(tag, min_blocks);
     validateTagLocked(tag);
-    if (evict_result.evicted_keys.empty()) {
+    if (evict_result.evictions.empty()) {
         if (evict_result_out) {
             *evict_result_out = std::move(evict_result);
         }
@@ -427,13 +369,10 @@ size_t SharedBlockCache::evictAndFreeForGroup(std::string_view tag, size_t min_b
     }
 
     size_t freed = 0;
-    for (size_t i = 0; i < evict_result.evicted_keys.size(); ++i) {
-        const auto  cache_key = evict_result.evicted_keys[i];
-        const auto& groups    = evict_result.evicted_groups.at(cache_key);
-
+    for (const auto& eviction : evict_result.evictions) {
         for (const auto& group_tag : group_tags_in_order_) {
-            const auto block_it = groups.find(group_tag);
-            if (block_it != groups.end() && !isNullBlockIdx(block_it->second)) {
+            const auto block_it = eviction.blocks_by_group.find(group_tag);
+            if (block_it != eviction.blocks_by_group.end()) {
                 blockCacheFreeByTag(group_tag, block_it->second);
                 if (group_tag == tag) {
                     freed++;
@@ -447,7 +386,7 @@ size_t SharedBlockCache::evictAndFreeForGroup(std::string_view tag, size_t min_b
     return freed;
 }
 
-std::optional<SharedBlockCache::UnifiedCacheItem> SharedBlockCache::remove(CacheKeyType cache_key) {
+std::optional<UnifiedCacheItem> SharedBlockCache::remove(CacheKeyType cache_key) {
     std::lock_guard<std::mutex> lock(mu_);
 
     UnifiedCacheItem removed_item;
@@ -725,6 +664,21 @@ bool SharedBlockCache::updateItemDependencyLocked(UnifiedCacheItem&      item,
     return true;
 }
 
+CacheEviction SharedBlockCache::makeWholeItemEvictionLocked(CacheKeyType            cache_key,
+                                                            const UnifiedCacheItem& item,
+                                                            NamespaceId             fallback_namespace) const {
+    CacheEviction eviction;
+    eviction.cache_key            = cache_key;
+    eviction.dependency           = item.dependency;
+    eviction.dependency_namespace = item.has_dependency ? item.dependency_namespace : fallback_namespace;
+    eviction.has_dependency       = item.has_dependency;
+    eviction.lifetime_ms          = std::max<int64_t>(0, (currentTimeUs() - item.created_time_us) / 1000);
+    for (const auto& [tag, binding] : item.bindings_by_group) {
+        eviction.blocks_by_group.emplace(tag, binding.pool_block_id);
+    }
+    return eviction;
+}
+
 void SharedBlockCache::validateTagLocked(std::string_view tag) const {
     RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "SharedBlockCache group tag must not be empty");
     const auto it = group_pools_.find(std::string(tag));
@@ -740,14 +694,8 @@ void SharedBlockCache::blockCacheFreeByTag(std::string_view tag, BlockIdxType bl
     group_pools_.at(std::string(tag))->blockCacheFree(block_id);
 }
 
-bool SharedBlockCache::groupMatchable(const UnifiedCacheItem& item, std::string_view tag) {
-    const auto it = item.group_matchable.find(std::string(tag));
-    return it == item.group_matchable.end() || it->second;
-}
-
 bool SharedBlockCache::hasUsableGroup(const UnifiedCacheItem& item, std::string_view tag) {
-    const auto it = item.group_block_ids.find(std::string(tag));
-    return it != item.group_block_ids.end() && !isNullBlockIdx(it->second);
+    return item.bindings_by_group.find(std::string(tag)) != item.bindings_by_group.end();
 }
 
 std::vector<SharedBlockCache::NamespacedKey>
@@ -880,27 +828,26 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, std::st
     }
 
     const std::string group_tag(tag);
-    result.evicted_keys.push_back(cache_key);
-    result.evicted_groups[cache_key] = {{group_tag, item.group_block_ids.at(group_tag)}};
-    result.evicted_namespaces[cache_key] =
-        item.has_dependency ? item.dependency_namespace : SharedBlockCache::kGpuLogicalNamespace;
-    if (item.has_dependency) {
-        result.evicted_dependencies[cache_key] = item.dependency;
-    }
-    const auto    created_time_it = item.group_block_created_time_us.find(group_tag);
-    const int64_t created_time_us =
-        created_time_it == item.group_block_created_time_us.end() ? item.created_time_us : created_time_it->second;
-    result.evicted_lifetime_ms[cache_key]            = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
-    result.evicted_independent_group_tags[cache_key] = group_tag;
+    const auto        binding_it = item.bindings_by_group.find(group_tag);
+    RTP_LLM_CHECK_WITH_INFO(binding_it != item.bindings_by_group.end(),
+                            "missing SharedBlockCache binding for cache_key=%ld tag=%s",
+                            cache_key,
+                            group_tag.c_str());
 
-    item.group_block_ids[group_tag]             = NULL_BLOCK_IDX;
-    item.group_matchable[group_tag]             = false;
-    item.group_block_created_time_us[group_tag] = 0;
+    CacheEviction eviction;
+    eviction.cache_key            = cache_key;
+    eviction.blocks_by_group      = {{group_tag, binding_it->second.pool_block_id}};
+    eviction.dependency           = item.dependency;
+    eviction.dependency_namespace = item.has_dependency ? item.dependency_namespace : kGpuLogicalNamespace;
+    eviction.has_dependency       = item.has_dependency;
+    eviction.lifetime_ms          = std::max<int64_t>(0, (currentTimeUs() - binding_it->second.created_time_us) / 1000);
+    eviction.kind                 = EvictionKind::IndependentGroup;
+    eviction.group_tag            = group_tag;
+    result.evictions.push_back(std::move(eviction));
 
-    const bool has_any_group = std::any_of(item.group_block_ids.begin(),
-                                           item.group_block_ids.end(),
-                                           [](const auto& entry) { return !isNullBlockIdx(entry.second); });
-    if (has_any_group) {
+    item.bindings_by_group.erase(binding_it);
+
+    if (!item.bindings_by_group.empty()) {
         lru_cache_.put(cache_key, item);
         refreshAllTreeAliasesLocked(cache_key);
     } else {

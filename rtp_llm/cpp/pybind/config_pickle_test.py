@@ -134,14 +134,12 @@ class CacheConfigPickleTest(unittest.TestCase):
         cp = CacheCpPolicyDesc()
         cp.mapping = CpBlockMappingMode.COMPACT_LAST_RANK
         cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
-        cp.scale_seq_size = True
         cp.align_payload = False
         cp.prefill_slice_layout = CpPrefillSliceLayout.BLOCK_STRIDE
 
         desc = KVCacheSpecDesc()
         desc.tag = "pickle-policy"
         desc.cache_type = KVCacheSpecType.OPAQUE_STATE
-        desc.kernel_tokens_per_block_alignment = 128
         desc.capacity = capacity
         desc.tail = tail
         desc.cp = cp
@@ -151,7 +149,6 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertIs(type(restored), KVCacheSpecDesc)
         self.assertEqual(restored.tag, "pickle-policy")
         self.assertEqual(restored.cache_type, KVCacheSpecType.OPAQUE_STATE)
-        self.assertEqual(restored.kernel_tokens_per_block_alignment, 128)
         self.assertIs(type(restored.capacity), CacheCapacityPolicyDesc)
         self.assertIs(restored.capacity.reservable, True)
         self.assertEqual(restored.capacity.explicit_block_num, 409)
@@ -161,7 +158,6 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertIs(type(restored.cp), CacheCpPolicyDesc)
         self.assertEqual(restored.cp.mapping, CpBlockMappingMode.COMPACT_LAST_RANK)
         self.assertEqual(restored.cp.slice, CpBlockSliceMode.PAYLOAD_BYTES)
-        self.assertIs(restored.cp.scale_seq_size, True)
         self.assertIs(restored.cp.align_payload, False)
         self.assertEqual(
             restored.cp.prefill_slice_layout, CpPrefillSliceLayout.BLOCK_STRIDE

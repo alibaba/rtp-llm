@@ -35,9 +35,9 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     auto             spec = std::make_shared<MHAKVCacheSpec>();
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    cache_config.layer_num = static_cast<uint32_t>(layer_num);
+    rtp_llm::test::assignCacheConfigFromGroupedSpecs(
+        cache_config, cache_config.layer_num, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
@@ -140,18 +140,21 @@ static void initTwoGroupCacheConfig(CacheConfig& cache_config, bool declare_in_s
     auto             full_spec   = std::make_shared<MHAKVCacheSpec>();
     auto             linear_spec = std::make_shared<MHAKVCacheSpec>();
     std::vector<int> layer_ids{0};
-    cache_config.layer_num     = 1;
-    cache_config.layer_all_num = 1;
+    cache_config.layer_num = 1;
     if (declare_in_sorted_order) {
-        cache_config.fromGroupedSpecs({full_spec, linear_spec},
-                                      {layer_ids, layer_ids},
-                                      {CacheGroupType::FULL, CacheGroupType::LINEAR},
-                                      {"full", "linear"});
+        rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
+                                                         cache_config.layer_num,
+                                                         {full_spec, linear_spec},
+                                                         {layer_ids, layer_ids},
+                                                         {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                                         {"full", "linear"});
     } else {
-        cache_config.fromGroupedSpecs({linear_spec, full_spec},
-                                      {layer_ids, layer_ids},
-                                      {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                      {"linear", "full"});
+        rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
+                                                         cache_config.layer_num,
+                                                         {linear_spec, full_spec},
+                                                         {layer_ids, layer_ids},
+                                                         {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                                         {"linear", "full"});
     }
 }
 
@@ -223,25 +226,29 @@ TEST_F(NormalBatchStreamProcessorTest, testGathererUsesLargestPerGroupKernelSubd
     ModelConfig model_config;
     model_config.num_layers = 1;
 
-    auto full_spec                  = std::make_shared<MHAKVCacheSpec>();
-    full_spec->seq_size_per_block   = 8;
-    auto linear_spec                = std::make_shared<MHAKVCacheSpec>();
-    linear_spec->seq_size_per_block = 2;
+    auto full_spec                         = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block          = 8;
+    full_spec->kernel_seq_size_per_block   = 2;
+    auto linear_spec                       = std::make_shared<MHAKVCacheSpec>();
+    linear_spec->seq_size_per_block        = 2;
+    linear_spec->kernel_seq_size_per_block = 2;
 
     CacheConfig cache_config;
-    cache_config.layer_num                 = 1;
-    cache_config.layer_all_num             = 1;
-    cache_config.seq_size_per_block        = 2;
-    cache_config.kernel_seq_size_per_block = 2;
-    cache_config.fromGroupedSpecs(
-        {linear_spec, full_spec}, {{0}, {0}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+    cache_config.layer_num          = 1;
+    cache_config.seq_size_per_block = 2;
+    rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
+                                                     cache_config.layer_num,
+                                                     {linear_spec, full_spec},
+                                                     {{0}, {0}},
+                                                     {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                                     {"linear", "full"});
 
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     NormalBatchStreamProcessor  processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
 
-    EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block, 4);
+    EXPECT_EQ(processor.model_input_gatherer_config_.max_kernel_blocks_per_kv_block, 4);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsBeforePublishing) {
@@ -251,17 +258,21 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     model_config.vocab_size  = 32;
     model_config.num_layers  = 1;
 
-    auto full_spec                  = std::make_shared<MHAKVCacheSpec>();
-    full_spec->seq_size_per_block   = 8;
-    auto linear_spec                = std::make_shared<MHAKVCacheSpec>();
-    linear_spec->seq_size_per_block = 2;
+    auto full_spec                         = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block          = 8;
+    full_spec->kernel_seq_size_per_block   = 2;
+    auto linear_spec                       = std::make_shared<MHAKVCacheSpec>();
+    linear_spec->seq_size_per_block        = 2;
+    linear_spec->kernel_seq_size_per_block = 2;
     CacheConfig cache_config;
-    cache_config.layer_num                 = 1;
-    cache_config.layer_all_num             = 1;
-    cache_config.seq_size_per_block        = 2;
-    cache_config.kernel_seq_size_per_block = 2;
-    cache_config.fromGroupedSpecs(
-        {linear_spec, full_spec}, {{0}, {0}}, {CacheGroupType::LINEAR, CacheGroupType::FULL}, {"linear", "full"});
+    cache_config.layer_num          = 1;
+    cache_config.seq_size_per_block = 2;
+    rtp_llm::test::assignCacheConfigFromGroupedSpecs(cache_config,
+                                                     cache_config.layer_num,
+                                                     {linear_spec, full_spec},
+                                                     {{0}, {0}},
+                                                     {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                                     {"linear", "full"});
 
     auto query             = make_shared<GenerateInput>();
     query->input_ids       = hostIntBuffer({1});
@@ -271,7 +282,7 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     BatchKVCacheResource resource;
     resource.resetBatchSize(1);
     resource.initGroups(cache_config);
-    resource.setBatchBlocks(0, "full", {3});
+    resource.setBatchBlocks(0, "full", {0});
     resource.setBatchBlocks(0, "linear", {7});
     stream->setKVCache(resource);
     stream->generate_status_->status = StreamState::RUNNING;
@@ -283,24 +294,26 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshStagesHeterogeneousRowsB
     TensorHolder                holder;
     auto                        result = processor.gatherKvCacheKernelBlockId(stream_groups, holder);
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(toVec<int32_t>(*result), (std::vector<int32_t>{12, 13, 14, 15, 7, 0, 0, 0}));
+    EXPECT_EQ(toVec<int32_t>(*result), (std::vector<int32_t>{0, 1, 2, 3, 7, 0, 0, 0}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMutateHostOrPublish) {
     const auto make_config = [](const std::string& second_tag, size_t second_b) {
-        auto first_spec                 = std::make_shared<MHAKVCacheSpec>();
-        first_spec->seq_size_per_block  = 2;
-        auto second_spec                = std::make_shared<MHAKVCacheSpec>();
-        second_spec->seq_size_per_block = second_b;
+        auto first_spec                        = std::make_shared<MHAKVCacheSpec>();
+        first_spec->seq_size_per_block         = 2;
+        first_spec->kernel_seq_size_per_block  = 2;
+        auto second_spec                       = std::make_shared<MHAKVCacheSpec>();
+        second_spec->seq_size_per_block        = second_b;
+        second_spec->kernel_seq_size_per_block = 2;
         CacheConfig config;
-        config.layer_num                 = 1;
-        config.layer_all_num             = 1;
-        config.seq_size_per_block        = 2;
-        config.kernel_seq_size_per_block = 2;
-        config.fromGroupedSpecs({first_spec, second_spec},
-                                {{0}, {0}},
-                                {CacheGroupType::FULL, CacheGroupType::LINEAR},
-                                {"full", second_tag});
+        config.layer_num          = 1;
+        config.seq_size_per_block = 2;
+        rtp_llm::test::assignCacheConfigFromGroupedSpecs(config,
+                                                         config.layer_num,
+                                                         {first_spec, second_spec},
+                                                         {{0}, {0}},
+                                                         {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                                         {"full", second_tag});
         return config;
     };
     const auto run_invalid = [&](const CacheConfig& expected_config,
@@ -320,9 +333,9 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelRefreshLateInvalidRowsDoNotMuta
         resource.resetBatchSize(1);
         resource.initGroups(resource_config);
         resource.setBatchBlocks(0, "full", {3});
-        resource.setBatchBlocks(0, resource_config.topology().groups()[1].tag, {7});
+        resource.setBatchBlocks(0, resource_config.groups()[1].tag, {7});
         if (make_late_row_oversized) {
-            resource.mutableBlockIds(0, "linear").kernel_block_indices_ = {7, 8};
+            resource.setBatchBlocks(0, "linear", {7, 8});
         }
         stream->setKVCache(resource);
         stream->generate_status_->status = StreamState::RUNNING;
@@ -394,9 +407,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
-
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
@@ -478,8 +488,6 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
     }
     {
         MMModelConfig mm_model_config;

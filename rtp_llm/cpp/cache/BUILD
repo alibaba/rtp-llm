@@ -79,11 +79,9 @@ cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
-        "CacheTopology.cc",
     ],
     hdrs = [
         "CacheConfig.h",
-        "CacheTopology.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -320,6 +318,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:kv_cache_utils",
+        "@com_google_absl//absl/numeric:int128",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ] + torch_deps() + select({

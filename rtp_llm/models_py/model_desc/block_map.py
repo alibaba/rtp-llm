@@ -1,5 +1,5 @@
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
@@ -92,39 +92,11 @@ def get_layer_caches_for_tags(
     local_layer_idx: int,
     tags: Sequence[str],
 ) -> dict[str, LayerKVCache]:
-    required_tags = list(tags)
-    if (
-        not required_tags
-        or any(not tag for tag in required_tags)
-        or len(required_tags) != len(set(required_tags))
-    ):
-        raise RuntimeError(
-            f"required KV cache tags must be unique and non-empty: {tags}"
-        )
-    if kv_cache is None:
-        raise RuntimeError(
-            f"KV cache is not initialized for local layer {local_layer_idx}; "
-            f"required tags={required_tags}"
-        )
-
-    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
-    by_tag: dict[str, LayerKVCache] = {}
-    for cache in layer_caches:
-        cache_tag = str(cache.tag)
-        if not cache_tag:
-            raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")
-        if cache_tag in by_tag:
-            raise RuntimeError(
-                f"local layer {local_layer_idx} has duplicate KV cache tag {cache_tag!r}"
-            )
-        by_tag[cache_tag] = cache
-
-    if set(by_tag) != set(required_tags):
-        raise RuntimeError(
-            f"local layer {local_layer_idx} requires exactly KV cache tags "
-            f"{required_tags}; available tags={list(by_tag)}"
-        )
-    return {tag: by_tag[tag] for tag in required_tags}
+    layer_caches = cast(LayeredKVCache, kv_cache).get_layer_cache_groups(
+        local_layer_idx
+    )
+    by_tag = {str(cache.tag): cache for cache in layer_caches}
+    return {tag: by_tag[tag] for tag in tags}
 
 
 def get_group_tags_for_layers(

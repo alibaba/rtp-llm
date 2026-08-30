@@ -1,7 +1,7 @@
 // Why the end-to-end hybrid full+linear remote coverage that used to live here is gone:
 //
 //   * The approved design authorizes remote cache support for a **single FULL cache group
-//     only**. `validateRemoteCacheTopology()` rejects any other topology and `RemoteConnector`
+//     only**. Remote-cache validation rejects any other configuration and `RemoteConnector`
 //     is hard-wired to `FullLayerGroupPolicy` with an empty other-tags list, so the
 //     1-FULL-plus-2-LINEAR remote topology those 19 tests drove is no longer a reachable
 //     configuration — they exercised a premise the design now deliberately refuses.
@@ -17,6 +17,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Exception.h"
@@ -96,10 +97,8 @@ public:
 
 private:
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        const size_t all_group_num    = full_group_tags_.size() + other_group_tags_.size();
-        cache_config_.layer_num       = all_group_num * layer_num;
-        cache_config_.layer_all_num   = all_group_num * layer_num;
-        cache_config_.group_layer_num = layer_num;
+        const size_t all_group_num = full_group_tags_.size() + other_group_tags_.size();
+        cache_config_.layer_num    = all_group_num * layer_num;
 
         auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
         auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
@@ -129,28 +128,15 @@ private:
             }
             ++declared;
         }
-        // Sizing must be set before fromGroupedSpecs(): setTopology() seeds each group's
-        // block_num from config.block_num, and each group now owns an independent BlockPool
-        // that rejects a zero-block plan.
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
 
-        cache_config_.fromGroupedSpecs(specs, layers_by_group, group_types, tags);
+        rtp_llm::test::assignCacheConfigFromGroupedSpecs(
+            cache_config_, cache_config_.layer_num, specs, layers_by_group, group_types, tags);
+        cache_config_.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config_);
 
-        const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
-        const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
-        ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-        cache_config_.kv_block_stride_bytes = full_kv_block_stride_bytes;
-        cache_config_.kv_block_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-        cache_config_.kv_scale_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_scale_stride_bytes;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
-                                                         static_cast<int>(per_layer_stride_bytes));
+        ASSERT_GE(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     }
 };
 
@@ -159,11 +145,11 @@ private:
 // time — before init(), before any meta client exists. Only the failure stage and category
 // are asserted here; the message text is free to change in this phase.
 TEST_F(RemoteConnectorMockFullLinearTest, test_construct_rejects_full_plus_linear_remote_topology) {
-    const auto& groups = cache_config_.topology().groups();
+    const auto& groups = cache_config_.groups();
     ASSERT_EQ(groups.size(), 3u);
     ASSERT_EQ(std::count_if(groups.begin(),
                             groups.end(),
-                            [](const GroupBase& group) { return group.policy.group_type == CacheGroupType::FULL; }),
+                            [](const CacheGroup& group) { return group.policy.group_type == CacheGroupType::FULL; }),
               1);
 
     // The topology is a legal, allocatable hybrid pool: the rejection below belongs to the

@@ -31,18 +31,14 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     CSA_KV,
     CSA_STATE,
-    DSV4_KERNEL_ROW_TAGS,
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
     build_block_tables_for_tags,
+    primary_attention_inputs,
 )
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    group_tags as _kv_cache_group_tags,
-)
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the
@@ -56,38 +52,6 @@ _DSV4_DECODE_POOL_TAGS: Tuple[str, ...] = (
     HCA_STATE,
     INDEXER_STATE,
 )
-
-
-def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
-    """No-fallback accessor for the FULL pools' kernel tokens-per-block.
-
-    The tag-driven KVCache exposes this per cache group
-    (``get_kernel_seq_size_per_block(tag)``); every DSV4 paged pool shares the
-    one value ``DSV4CacheConfigHelper`` writes, so the first kernel-row tag the
-    topology carries is authoritative. Surfaces the C++ propagation bug instead
-    of silently sizing block tables with the wrong stride.
-    """
-    if kv_cache is None:
-        raise RuntimeError(
-            "DSV4 decode: kv_cache is None when sizing paged pool specs."
-        )
-    tags = _kv_cache_group_tags(kv_cache)
-    getter = getattr(kv_cache, "get_kernel_seq_size_per_block", None)
-    if getter is not None:
-        for tag in DSV4_KERNEL_ROW_TAGS:
-            if tag not in tags:
-                continue
-            try:
-                ksb = int(getter(tag))
-            except RuntimeError:
-                continue
-            if ksb > 0:
-                return ksb
-    raise RuntimeError(
-        "DSV4 KVCache kernel_seq_size_per_block is unavailable for every paged "
-        "tag (expected >0 for one of %r). group_tags=%r."
-        % (list(DSV4_KERNEL_ROW_TAGS), tags)
-    )
 
 
 def _dsv4_pool_tokens_per_block(kv_cache: Any, tag: str) -> int:
@@ -107,10 +71,9 @@ def build_paged_pool_specs(
     stride on layer 0 (all layers share the same allocator geometry per
     cache tag).
 
-    ``max_blocks_per_req`` MUST match the framework's runtime block_table
-    width — the framework uniformly allocates
-    ``ceil(max_seq_len / kernel_seq_size_per_block) + 1`` columns for
-    every pool. Under-sizing here truncates the framework block_table
+    ``max_blocks_per_req`` MUST match each tagged runtime block_table width:
+    ``ceil(max_seq_len / pool_tokens_per_block) + 1``. Under-sizing here
+    truncates the framework block_table
     on copy in ``update_decode_metadata_in_place``, leaving zero block-
     ids in the unfilled tail; the captured graph then reads block_id=0
     for real decode positions, computes a slot in pool block 0, and
@@ -127,11 +90,6 @@ def build_paged_pool_specs(
                 "build_paged_pool_specs: max_seq_len required to size paged "
                 "block tables to match the framework allocator."
             )
-    # Framework's block_table width per pool. Add +1 slack for the same
-    # reason the C++ allocator does (last-token-of-prefill + first-decode
-    # may bridge a block boundary mid-step).
-    ksb = _dsv4_kernel_tokens_per_block(kv_cache)
-    max_blocks_per_req = (max_seq_len + ksb - 1) // ksb + 1
     # ``_pool_entries_per_block`` reads ``self._kv_cache`` which is only
     # bound during ``Attention.forward_decode``'s try/finally. Caller
     # (decode/forward.forward_decode) invokes us BEFORE the layer forward
@@ -162,6 +120,11 @@ def build_paged_pool_specs(
                         kv_cache,
                         tag,
                     )
+                    # Each tagged block table is sized from its own finalized
+                    # group geometry. Add one bridge block for prefill->decode.
+                    max_blocks_per_req = (
+                        max_seq_len + tokens_per_block - 1
+                    ) // tokens_per_block + 1
                     specs[tag] = (
                         entries_per_block,
                         tokens_per_block,

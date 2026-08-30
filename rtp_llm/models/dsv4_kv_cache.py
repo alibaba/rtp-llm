@@ -98,7 +98,6 @@ def _make_dsv4_desc(
         desc.is_state_cache = False
         desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
         desc.compression_ratio = compression_ratio
-        desc.kernel_tokens_per_block_alignment = 128
         if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
         # Compressed pools deliberately carry no ``cp`` policy and leave
@@ -143,7 +142,6 @@ def _make_dsv4_desc(
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
 
     desc.state_ring_include_gen_num_per_cycle = True
-    cp.scale_seq_size = True
     desc.block_stride_alignment_min_entries = DSV4_SWA_WINDOW_ENTRIES
     desc.reuse = reuse
     desc.cp = cp

@@ -44,7 +44,6 @@ struct CacheTailPolicyDesc {
 struct CacheCpPolicyDesc {
     std::optional<CpBlockMappingMode>   mapping;
     std::optional<CpBlockSliceMode>     slice;
-    std::optional<bool>                 scale_seq_size;
     std::optional<bool>                 align_payload;
     std::optional<CpPrefillSliceLayout> prefill_slice_layout;
 };
@@ -58,15 +57,11 @@ struct KVCacheSpecDesc {
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
 
-    OpaqueBlockEntryCountMode entry_count_mode     = OpaqueBlockEntryCountMode::EXPLICIT;
-    uint32_t                  explicit_entry_count = 0;
-    uint32_t                  compression_ratio    = 1;
-    // KERNEL_BLOCK_COMPRESSED descriptors may require a model-specific
-    // kernel-page granularity. The default keeps the generic compressed
-    // contract usable by indexer kernels whose native page is 64 tokens.
-    uint32_t kernel_tokens_per_block_alignment    = 1;
-    uint32_t state_ring_overlap                   = 0;
-    bool     state_ring_include_gen_num_per_cycle = false;
+    OpaqueBlockEntryCountMode entry_count_mode                     = OpaqueBlockEntryCountMode::EXPLICIT;
+    uint32_t                  explicit_entry_count                 = 0;
+    uint32_t                  compression_ratio                    = 1;
+    uint32_t                  state_ring_overlap                   = 0;
+    bool                      state_ring_include_gen_num_per_cycle = false;
 
     size_t   block_stride_bytes_override        = 0;
     size_t   block_stride_bytes_alignment       = 0;
@@ -80,14 +75,16 @@ struct KVCacheSpecDesc {
 };
 
 struct SpecBuildContext {
-    DataType                     dtype                   = DataType::TYPE_INVALID;
-    uint32_t                     seq_size_per_block      = 0;
-    uint32_t                     kernel_tokens_per_block = 0;
-    const AttentionConfigs*      attn_config             = nullptr;
-    const LinearAttentionConfig* linear_attention_config = nullptr;
-    const ParallelismConfig*     parallelism_config      = nullptr;
-    uint32_t                     gen_num_per_cycle       = 0;
+    DataType                     dtype                     = DataType::TYPE_INVALID;
+    uint32_t                     seq_size_per_block        = 0;
+    uint32_t                     kernel_seq_size_per_block = 0;
+    const AttentionConfigs*      attn_config               = nullptr;
+    const LinearAttentionConfig* linear_attention_config   = nullptr;
+    const ParallelismConfig*     parallelism_config        = nullptr;
+    uint32_t                     gen_num_per_cycle         = 0;
 };
+
+uint32_t effectiveCacheCpSize(const SpecBuildContext& ctx);
 
 struct BuiltLayerSpec {
     // Minimal descriptor-lowering result: tag remains business identity while

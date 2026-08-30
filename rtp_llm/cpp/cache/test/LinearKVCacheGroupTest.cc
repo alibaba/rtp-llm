@@ -25,28 +25,23 @@ static std::shared_ptr<LinearKVCacheSpec> makeTestLinearSpec(uint32_t seq_size_p
                                   "linear");
 }
 
-static const GroupBase& makeTestLinearGroup(KVCacheSpecPtr   spec,
-                                            CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)) {
-    static std::deque<GroupBase> groups;
-    GroupBase                    group;
-    group.tag                       = "linear";
-    group.spec                      = std::move(spec);
-    group.policy                    = policy;
-    group.seq_size_per_block        = group.spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = group.seq_size_per_block;
-    group.kv_block_stride_bytes     = group.spec->block_size_bytes();
-    group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+static const CacheGroup&
+makeTestLinearGroup(KVCacheSpecPtr spec, CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR)) {
+    static std::deque<CacheGroup> groups;
+    CacheGroup                    group;
+    group.tag                   = "linear";
+    group.spec                  = std::move(spec);
+    group.policy                = policy;
+    group.kv_block_stride_bytes = group.spec->block_size_bytes();
+    group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
     groups.push_back(std::move(group));
     return groups.back();
 }
 
 static CacheConfig makeLinearCacheConfig() {
-    auto      spec  = makeTestLinearSpec(/*seq_size_per_block=*/4);
-    GroupBase group = makeTestLinearGroup(spec);
-    group.layer_ids = {0};
-    CacheConfig config;
-    config.setTopology({std::move(group)}, {{0, {"linear"}}});
-    return config;
+    auto       spec  = makeTestLinearSpec(/*seq_size_per_block=*/4);
+    CacheGroup group = makeTestLinearGroup(spec);
+    return CacheConfig({std::move(group)}, {{"linear"}}, /*main_layer_num=*/1);
 }
 
 class LinearKVCacheGroupTest: public ::testing::Test {};
@@ -115,7 +110,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesStepHitsAndTailWhenReuseEnabled) {
     LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    BlockIds blocks;
+    PoolBlockIds blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/true));  // 4 slots
 
     ASSERT_EQ(blocks.blocksNum(), 4u);
@@ -137,7 +132,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesLastTwoTailBlocksWhenReuseDisabled
     LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    BlockIds blocks;
+    PoolBlockIds blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/false));  // 4 slots
 
     ASSERT_EQ(blocks.blocksNum(), 4u);
@@ -159,7 +154,7 @@ TEST_F(LinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled
     ASSERT_TRUE(group.init());
 
     // seq_len=16 => seq_slots=4; reserve_step=2 => total_slots=5
-    BlockIds blocks;
+    PoolBlockIds blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/false, /*reserve_step=*/2));
 
     ASSERT_EQ(blocks.blocksNum(), 5u);
@@ -194,7 +189,7 @@ TEST_F(LinearKVCacheGroupTest, ActiveTailPolicyMatchesInitialAllocationAndPeakEs
                       /*seq_len=*/24, {}, /*remaining_tokens=*/0, /*reserve_step=*/0, false),
                   expected_materialized_tail);
 
-        BlockIds blocks;
+        PoolBlockIds blocks;
         ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/24, /*enable_reuse_cache=*/false));
         ASSERT_EQ(blocks.blocksNum(), 6u);
         int allocated_blocks = 0;
@@ -215,7 +210,7 @@ TEST_F(LinearKVCacheGroupTest, EstimatePeakContinuesCleanupAcrossSparseHoles) {
 
     auto allocated = block_pool->malloc(2);
     ASSERT_EQ(allocated.size(), 2u);
-    BlockIds blocks;
+    PoolBlockIds blocks;
     blocks.assign({allocated[0], NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, allocated[1]});
 
     // Runtime cleanup scans across the holes and releases slot 0 after allocating slot 6. The second future
@@ -279,7 +274,7 @@ TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksIncludesTransientTailAlloca
     LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, 0, 1};
+    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, 1, 2};
 
     // Three logical slots currently contain two physical tail blocks.
     // Decoding across the next block still allocates the new tail before sparse cleanup releases the old one.
@@ -351,7 +346,7 @@ TEST_F(LinearKVCacheGroupTest, EstimatePeakNeedBlocksIncludesTransientReserveAll
     LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 0, 1};
+    const BlockIndicesType current_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 1, 2};
 
     // With reserve_step=2, only the new reserve tail is allocated before cleanup.
     EXPECT_EQ(group.estimatePeakNeedBlocks(
@@ -371,7 +366,7 @@ TEST_F(LinearKVCacheGroupTest, MallocBackfillsExistingNullReadSlot) {
     auto allocated = block_pool->malloc(2);
     ASSERT_EQ(allocated.size(), 2u);
 
-    BlockIds blocks;
+    PoolBlockIds blocks;
     blocks.assign(BlockIndicesType{allocated[0], NULL_BLOCK_IDX, allocated[1]});
     const size_t free_before = block_pool->freeBlocksNum();
 
@@ -398,7 +393,7 @@ TEST_F(LinearKVCacheGroupTest, MallocMaterializesCausalConvReadSlotAtBoundaries)
             LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
             ASSERT_TRUE(group.init());
 
-            BlockIds blocks;
+            PoolBlockIds blocks;
             ASSERT_TRUE(group.malloc(blocks, seq_len, enable_reuse_cache)) << "seq_len=" << seq_len;
 
             const int tail_pos = (seq_len + 4 - 1) / 4 - 1;
@@ -426,7 +421,7 @@ TEST_F(LinearKVCacheGroupTest, GetNeedBlocksMatchesMallocForReserveSteps) {
                                                   /*reuse_blocks_len=*/0,
                                                   enable_reuse_cache);
 
-            BlockIds blocks;
+            PoolBlockIds blocks;
             ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/8, enable_reuse_cache));
             ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/12, enable_reuse_cache, reserve_step));
 
@@ -454,7 +449,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksFreesNonStepBlocksButKeepsLast
     // Start with 6 allocated blocks (no NULLs) to test the pruning logic.
     auto allocated = block_pool->malloc(6);
     ASSERT_EQ(allocated.size(), 6u);
-    BlockIds blocks;
+    PoolBlockIds blocks;
     blocks.assign(allocated);
 
     const size_t free_before = block_pool->freeBlocksNum();
@@ -528,7 +523,7 @@ TEST_F(LinearKVCacheGroupTest, MallocNoNewBlocksReturnsTrueAndKeepsState) {
     LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    BlockIds blocks;
+    PoolBlockIds blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/16, /*enable_reuse_cache=*/true));  // 4 slots
     const auto   blocks_before = blocks.blocks();
     const size_t free_before   = block_pool->freeBlocksNum();
@@ -544,7 +539,7 @@ TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    // Exhaust all free blocks (block 0 is reserved).
+    // Exhaust all allocatable blocks; the final ID is the CUDA-graph dummy.
     auto all_blocks = block_pool->malloc(static_cast<int>(block_pool->freeBlocksNum()));
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
@@ -552,7 +547,7 @@ TEST_F(LinearKVCacheGroupTest, MallocFailsWhenBlockPoolExhausted) {
     LinearKVCacheGroup group(makeTestLinearGroup(spec), block_pool, /*linear_step=*/2);
     ASSERT_TRUE(group.init());
 
-    BlockIds blocks;
+    PoolBlockIds blocks;
     EXPECT_FALSE(group.malloc(blocks, /*seq_len=*/4, /*enable_reuse_cache=*/false));
 
     // Cleanup to avoid leaking refs in the test process.
@@ -581,7 +576,7 @@ TEST_F(LinearKVCacheGroupTest, MallocEnsuresFreeBlocksByEvictingCache) {
     auto occupied = block_pool->malloc(static_cast<int>(block_pool->freeBlocksNum()));
     ASSERT_EQ(block_pool->freeBlocksNum(), 0u);
 
-    BlockIds blocks;
+    PoolBlockIds blocks;
     ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/4, /*enable_reuse_cache=*/false));
     ASSERT_EQ(blocks.blocksNum(), 1u);
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[0]));
@@ -602,7 +597,7 @@ TEST_F(LinearKVCacheGroupTest, RemoveSkippedBlocksWithReserveStepKeepsLastTwoAnd
 
     auto allocated = block_pool->malloc(6);
     ASSERT_EQ(allocated.size(), 6u);
-    BlockIds blocks;
+    PoolBlockIds blocks;
     blocks.assign(allocated);  // no NULLs
 
     const size_t free_before = block_pool->freeBlocksNum();
@@ -649,7 +644,7 @@ TEST_F(LinearKVCacheGroupTest, ReferenceAppendsAndIncrementsRefCountForValidBloc
     ASSERT_EQ(blocks.size(), 1u);
     ASSERT_EQ(block_pool->freeBlocksNum(), 8u);
 
-    BlockIds         dst;
+    PoolBlockIds     dst;
     BlockIndicesType new_blocks = {NULL_BLOCK_IDX, blocks[0]};
     group.reference(dst, new_blocks);
 

@@ -1,7 +1,10 @@
+import json
+import tempfile
+from pathlib import Path
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models.deepseek_v4 import DeepSeekV4
+from rtp_llm.models.deepseek_v4 import DeepSeekV4, DeepSeekV4DSpark
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
@@ -36,6 +39,40 @@ LAYER_COMPRESS_RATIOS = [4, 128, 0, 0, 4]
 HEAD_DIM = 512
 INDEXER_HEAD_DIM = 128
 FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
+
+
+class Dsv4ConfigFactoryTest(TestCase):
+    def test_real_config_factory_for_target_and_dspark(self):
+        config_json = {
+            "num_hidden_layers": 2,
+            "hidden_size": 16,
+            "vocab_size": 32,
+            "num_attention_heads": 2,
+            "head_dim": 8,
+            "qk_rope_head_dim": 4,
+            "compress_ratios": [0, 4, 0],
+            "o_groups": 1,
+            "o_lora_rank": 4,
+            "index_head_dim": 4,
+            "index_n_heads": 1,
+            "index_topk": 1,
+            "routed_scaling_factor": 1.0,
+            "num_experts_per_tok": 1,
+            "n_routed_experts": 2,
+            "moe_intermediate_size": 8,
+            "n_shared_experts": 1,
+        }
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            Path(ckpt_path, "config.json").write_text(json.dumps(config_json))
+
+            target = DeepSeekV4._create_config(ckpt_path)
+            dspark = DeepSeekV4DSpark._create_config(ckpt_path)
+
+        self.assertEqual(target.num_layers, 2)
+        self.assertEqual(list(target.attn_config.layer_compress_ratios), [0, 4])
+        self.assertEqual(dspark.num_layers, 1)
+        self.assertEqual(list(dspark.attn_config.layer_compress_ratios), [0])
+        self.assertTrue(dspark.is_mtp)
 
 
 class Dsv4KvCacheSpecTest(TestCase):
@@ -142,8 +179,6 @@ class Dsv4KvCacheSpecTest(TestCase):
         self.assertEqual(by_tag[CSA_KV_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[INDEXER_KV_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[HCA_KV_TAG].compression_ratio, 128)
-        for tag in (CSA_KV_TAG, INDEXER_KV_TAG, HCA_KV_TAG):
-            self.assertEqual(by_tag[tag].kernel_tokens_per_block_alignment, 128, tag)
         self.assertEqual(by_tag[INDEXER_STATE_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[CSA_STATE_TAG].compression_ratio, 4)
         self.assertEqual(by_tag[HCA_STATE_TAG].compression_ratio, 128)
@@ -194,14 +229,12 @@ class Dsv4KvCacheSpecTest(TestCase):
             cp = by_tag[tag].cp
             self.assertIsNotNone(cp, tag)
             self.assertTrue(cp.align_payload, tag)
-            self.assertTrue(cp.scale_seq_size, tag)
             self.assertEqual(cp.prefill_slice_layout, CpPrefillSliceLayout.PAYLOAD, tag)
             self.assertEqual(cp.slice, CpBlockSliceMode.PAYLOAD_BYTES, tag)
 
         swa_cp = by_tag[SWA_KV_TAG].cp
         self.assertIsNotNone(swa_cp)
         self.assertTrue(swa_cp.align_payload)
-        self.assertTrue(swa_cp.scale_seq_size)
         self.assertEqual(swa_cp.prefill_slice_layout, CpPrefillSliceLayout.BLOCK_STRIDE)
         self.assertEqual(swa_cp.slice, CpBlockSliceMode.EQUAL_BYTES)
 

@@ -8,13 +8,20 @@ namespace rtp_llm {
 
 class FullKVCacheGroup: public KVCacheGroup {
 public:
-    FullKVCacheGroup(const GroupBase&                    cache_group,
+    FullKVCacheGroup(const CacheGroup&                   cache_group,
+                     std::vector<int>                    layer_ids,
                      BlockPoolPtr                        block_pool,
                      SharedBlockCache*                   shared_cache     = nullptr,
                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(cache_group, std::move(block_pool), shared_cache, metrics_reporter) {}
+        KVCacheGroup(cache_group, std::move(layer_ids), std::move(block_pool), shared_cache, metrics_reporter) {}
 
-    bool        malloc(BlockIds&            block_indices,
+    FullKVCacheGroup(const CacheGroup&                   cache_group,
+                     BlockPoolPtr                        block_pool,
+                     SharedBlockCache*                   shared_cache     = nullptr,
+                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        FullKVCacheGroup(cache_group, {0}, std::move(block_pool), shared_cache, metrics_reporter) {}
+
+    bool        malloc(PoolBlockIds&        block_indices,
                        int                  seq_len,
                        bool                 enable_reuse_cache   = false,
                        int                  reserve_step         = 0,
@@ -23,7 +30,7 @@ public:
     void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
     void free(const BlockIndicesType& block_indices) override;
-    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
@@ -41,7 +48,7 @@ public:
                                  int  reserve_step,
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
-    void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
+    void           reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
 };

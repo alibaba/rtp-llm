@@ -110,7 +110,8 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.soleGroupForLayer(0).layer_ids.size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.groupLayerIds(cache_cfg.soleGroupForLayer(0).tag).size(),
+              static_cast<size_t>(cache_cfg.layer_all_num));
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
@@ -120,10 +121,14 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).spec->block_size_bytes(),
               cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).spec->block_size_bytes());
 
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).layer_ids.size(), 1u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).layer_ids.size(), 1u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).layer_ids[0], 0);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).layer_ids[0], 0);
+    ASSERT_EQ(
+        cache_cfg.mtp_sub_configs[0]->groupLayerIds(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).tag).size(), 1u);
+    ASSERT_EQ(
+        cache_cfg.mtp_sub_configs[1]->groupLayerIds(cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).tag).size(), 1u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->groupLayerIds(cache_cfg.mtp_sub_configs[0]->soleGroupForLayer(0).tag)[0],
+              0);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->groupLayerIds(cache_cfg.mtp_sub_configs[1]->soleGroupForLayer(0).tag)[0],
+              0);
 
     RuntimeConfig runtime_config;
     cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
@@ -226,9 +231,8 @@ TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
     ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
     ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
 
-    // Shared default pool follows the main cache_config.block_num after TP sync.
-    // MTP sub-config block_num may still contain the pre-sync local value.
-    cache_cfg.block_num = 3;
+    // TP sync rematerializes the main and MTP views from one global count.
+    cache_cfg.finalizeBlockNums(/*global_block_num=*/3, RuntimeConfig{});
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.block_num, 3u);
@@ -245,9 +249,30 @@ TEST_F(BlockPoolTest, AllocSingleBlock) {
 
     auto blocks = block_pool_->malloc(1);
     EXPECT_EQ(blocks.size(), 1);
-    EXPECT_GE(blocks[0], 0);
+    EXPECT_EQ(blocks[0], 1);
     EXPECT_LT(blocks[0], static_cast<BlockIdxType>(config.block_num));
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 2);
+}
+
+TEST_F(BlockPoolTest, PositiveBlockSupportsRequestAndConnectorReferenceLifecycle) {
+    auto config = createTestConfig();
+    block_pool_ = std::make_shared<BlockPool>(config);
+    ASSERT_TRUE(block_pool_->init());
+
+    const auto blocks = block_pool_->malloc(1);
+    ASSERT_EQ(blocks, (BlockIndicesType{1}));
+    EXPECT_EQ(block_pool_->requestRefBlocksNum(), 1u);
+
+    block_pool_->requestReference(1);
+    block_pool_->connectorReference(1);
+    EXPECT_EQ(block_pool_->requestRefBlocksNum(), 1u);
+    EXPECT_EQ(block_pool_->connectorRefBlocksNum(), 1u);
+
+    block_pool_->requestFree(1);
+    block_pool_->requestFree(1);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 2);
+    block_pool_->connectorFree(1);
+    EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
 }
 
 TEST_F(BlockPoolTest, AllocMultipleBlocks) {
@@ -271,6 +296,10 @@ TEST_F(BlockPoolTest, AllocAllBlocks) {
 
     auto blocks = block_pool_->malloc(config.block_num - 1);
     EXPECT_EQ(blocks.size(), config.block_num - 1);
+    ASSERT_FALSE(blocks.empty());
+    EXPECT_EQ(blocks.front(), 1);
+    EXPECT_EQ(blocks.back(), static_cast<BlockIdxType>(config.block_num - 1));
+    EXPECT_EQ(std::find(blocks.begin(), blocks.end(), 0), blocks.end());
     EXPECT_EQ(block_pool_->freeBlocksNum(), 0);
 }
 

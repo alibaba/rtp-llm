@@ -1,17 +1,11 @@
-from math import gcd
 from typing import Sequence
 
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
-
-
-def calculate_hybrid_group_layer_num(linear_count: int, full_count: int) -> int:
-    if linear_count > 0 and full_count > 0:
-        group_layer_num = gcd(linear_count, full_count)
-        if group_layer_num < full_count:
-            group_layer_num = full_count
-    else:
-        group_layer_num = max(linear_count, full_count)
-    return max(group_layer_num, 1)
+from rtp_llm.ops import (
+    CacheGroupType,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 
 
 def build_hybrid_kv_cache_spec_descs(
@@ -22,10 +16,12 @@ def build_hybrid_kv_cache_spec_descs(
     full_desc = KVCacheSpecDesc()
     full_desc.tag = "full"
     full_desc.cache_type = full_cache_type
+    full_desc.group_type = CacheGroupType.FULL
 
     linear_desc = KVCacheSpecDesc()
     linear_desc.tag = "linear"
     linear_desc.cache_type = linear_cache_type
+    linear_desc.group_type = CacheGroupType.LINEAR
 
     layer_descs = []
     for attn_type in hybrid_attention_types:

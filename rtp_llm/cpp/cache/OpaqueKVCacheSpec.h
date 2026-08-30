@@ -95,10 +95,6 @@ protected:
         block_stride_bytes_ = block_stride_bytes;
     }
 
-    static bool cpScaleSeqSize(const KVCacheSpecDesc& desc) {
-        return desc.cp.has_value() && desc.cp->scale_seq_size.value_or(false);
-    }
-
     static bool cpAlignPayload(const KVCacheSpecDesc& desc) {
         return desc.cp.has_value() && desc.cp->align_payload.value_or(false);
     }
@@ -119,8 +115,8 @@ protected:
     }
 
     static uint32_t fixedRegionCpSize(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
-        const bool needs_cp_size = cpScaleSeqSize(desc) || cpAlignPayload(desc) || cpPrefillSlicePayload(desc)
-                                   || cpPrefillSliceBlockStride(desc);
+        const bool needs_cp_size =
+            cpAlignPayload(desc) || cpPrefillSlicePayload(desc) || cpPrefillSliceBlockStride(desc);
         if (!needs_cp_size) {
             return 1;
         }
@@ -128,21 +124,7 @@ protected:
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
-        const auto& parallelism_config = *ctx.parallelism_config;
-        if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
-            return 1;
-        }
-        if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
-            return static_cast<uint32_t>(parallelism_config.tp_size);
-        }
-        if (parallelism_config.role_type == RoleType::DECODE
-            && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-            RTP_LLM_CHECK_WITH_INFO(
-                parallelism_config.prefill_cp_config.prefill_cp_size > 1,
-                "fixed/SWA CP sharding decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
-            return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
-        }
-        return 1;
+        return effectiveCacheCpSize(ctx);
     }
 
     static bool isPrefillCpSliced(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
@@ -157,13 +139,8 @@ protected:
         return ctx.parallelism_config->role_type == RoleType::PREFILL;
     }
 
-    static uint32_t seqSizePerBlock(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
-        const uint32_t ctx_seq_size = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        const uint32_t cp_size      = fixedRegionCpSize(desc, ctx);
-        if (cpScaleSeqSize(desc) && cp_size > 1) {
-            return ctx_seq_size * cp_size;
-        }
-        return ctx_seq_size;
+    static uint32_t seqSizePerBlock(const SpecBuildContext& ctx) {
+        return ctx.seq_size_per_block;
     }
 
     static uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
@@ -182,23 +159,31 @@ protected:
     static uint32_t entryCount(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         uint32_t entries = 0;
         switch (desc.entry_count_mode) {
-            case OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED:
+            case OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED: {
                 RTP_LLM_CHECK_WITH_INFO(
                     desc.compression_ratio > 0,
                     "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
                     desc.tag.c_str(),
                     desc.compression_ratio);
                 RTP_LLM_CHECK_WITH_INFO(
-                    ctx.kernel_tokens_per_block > 0,
-                    "desc tag=%s derives entries from kernel block but kernel_tokens_per_block is 0",
+                    ctx.kernel_seq_size_per_block > 0,
+                    "desc tag=%s derives entries from kernel block but kernel_seq_size_per_block is 0",
                     desc.tag.c_str());
-                RTP_LLM_CHECK_WITH_INFO(ctx.kernel_tokens_per_block % desc.compression_ratio == 0,
+                RTP_LLM_CHECK_WITH_INFO(ctx.kernel_seq_size_per_block % desc.compression_ratio == 0,
                                         "desc tag=%s compression_ratio=%u must divide kernel block %u",
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
-                                        ctx.kernel_tokens_per_block);
-                entries = ctx.kernel_tokens_per_block / desc.compression_ratio;
+                                        ctx.kernel_seq_size_per_block);
+                const uint32_t physical_tokens_per_block = seqSizePerBlock(ctx);
+                RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block >= ctx.kernel_seq_size_per_block
+                                            && physical_tokens_per_block % ctx.kernel_seq_size_per_block == 0,
+                                        "desc tag=%s physical block %u must be >= and divisible by kernel block %u",
+                                        desc.tag.c_str(),
+                                        physical_tokens_per_block,
+                                        ctx.kernel_seq_size_per_block);
+                entries = physical_tokens_per_block / desc.compression_ratio;
                 break;
+            }
             case OpaqueBlockEntryCountMode::STATE_RING:
                 entries = stateRingEntries(desc, ctx);
                 break;
@@ -280,12 +265,26 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
                                 "COMPRESSED_KV KVCacheSpecDesc tag=%s requires valid entry_dtype",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<CompressedKVCacheSpec>();
-        spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
-        spec->entry_dtype_       = desc.entry_dtype;
-        const uint32_t entries   = entryCount(desc, ctx);
-        const size_t   payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride    = blockStrideBytes(desc, payload, entries);
+        auto spec = std::make_shared<CompressedKVCacheSpec>();
+        spec->setSequenceGeometry(seqSizePerBlock(ctx), ctx.kernel_seq_size_per_block, desc.tag);
+        spec->entry_dtype_     = desc.entry_dtype;
+        const uint32_t entries = entryCount(desc, ctx);
+        size_t         payload = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
+        size_t         stride  = blockStrideBytes(desc, payload, entries);
+        if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
+            const uint32_t kernel_entries = spec->kernel_seq_size_per_block / desc.compression_ratio;
+            const uint32_t kernel_pages   = spec->seq_size_per_block / spec->kernel_seq_size_per_block;
+            RTP_LLM_CHECK_WITH_INFO(entries == kernel_entries * kernel_pages,
+                                    "desc tag=%s physical entries %u do not match kernel entries %u * pages %u",
+                                    desc.tag.c_str(),
+                                    entries,
+                                    kernel_entries,
+                                    kernel_pages);
+            const size_t kernel_payload = payloadBytes(desc.entry_elems, kernel_entries, desc.entry_dtype);
+            const size_t kernel_stride  = blockStrideBytes(desc, kernel_payload, kernel_entries);
+            payload                     = kernel_payload * kernel_pages;
+            stride                      = kernel_stride * kernel_pages;
+        }
         spec->setLayout(desc.entry_elems, entries, payload, stride);
         return spec;
     }
@@ -315,12 +314,12 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
                                 "FIXED_STATE KVCacheSpecDesc tag=%s requires valid entry_dtype",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<FixedStateCacheSpec>();
-        spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
-        spec->entry_dtype_       = desc.entry_dtype;
-        const uint32_t entries   = entryCount(desc, ctx);
-        const size_t   payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride    = fixedStateBlockStrideBytes(desc, payload, entries, ctx);
+        auto spec = std::make_shared<FixedStateCacheSpec>();
+        spec->setSequenceGeometry(seqSizePerBlock(ctx), ctx.kernel_seq_size_per_block, desc.tag);
+        spec->entry_dtype_     = desc.entry_dtype;
+        const uint32_t entries = entryCount(desc, ctx);
+        const size_t   payload = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
+        const size_t   stride  = fixedStateBlockStrideBytes(desc, payload, entries, ctx);
         spec->setLayout(desc.entry_elems,
                         entries,
                         payload,

@@ -112,8 +112,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     std::vector<BlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
-    for (size_t idx = 0; idx < config_.topology().groups().size(); ++idx) {
-        const auto& group       = config_.topology().groups()[idx];
+    for (size_t idx = 0; idx < config_.groups().size(); ++idx) {
+        const auto& group       = config_.groups()[idx];
         auto        pool_config = BlockPoolConfigHelper::createConfigForGroup(config_, group.tag);
         appendPoolSummary(pool_summary, has_pool, idx, group.tag, group.policy.group_type, pool_config);
         pool_total_bytes += pool_config.total_size_bytes;
@@ -131,9 +131,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
                          pool_total_blocks);
     }
 
-    for (size_t idx = 0; idx < config_.topology().groups().size(); ++idx) {
+    for (size_t idx = 0; idx < config_.groups().size(); ++idx) {
         const auto& pool_config = group_pool_configs[idx];
-        const auto& cache_group = config_.topology().groups()[idx];
+        const auto& cache_group = config_.groups()[idx];
         const auto  group_type  = cache_group.policy.group_type;
         auto        group_pool =
             std::make_shared<BlockPool>(pool_config, allocation_type_, false, use_cuda_malloc_block_pool_);
@@ -146,15 +146,24 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
-            group = std::make_shared<LinearKVCacheGroup>(
-                cache_group, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            group = std::make_shared<LinearKVCacheGroup>(cache_group,
+                                                         config_.groupLayerIds(cache_group.tag),
+                                                         group_pool,
+                                                         config_.linear_step,
+                                                         shared_cache_raw,
+                                                         metrics_reporter_);
             staged_linear_group_tags.push_back(cache_group.tag);
         } else if (group_type == CacheGroupType::SWA) {
-            group = std::make_shared<SWAKVCacheGroup>(
-                cache_group, group_pool, config_.linear_step, shared_cache_raw, metrics_reporter_);
+            group = std::make_shared<SWAKVCacheGroup>(cache_group,
+                                                      config_.groupLayerIds(cache_group.tag),
+                                                      group_pool,
+                                                      config_.linear_step,
+                                                      shared_cache_raw,
+                                                      metrics_reporter_);
             staged_swa_group_tags.push_back(cache_group.tag);
         } else {
-            group = std::make_shared<FullKVCacheGroup>(cache_group, group_pool, shared_cache_raw, metrics_reporter_);
+            group = std::make_shared<FullKVCacheGroup>(
+                cache_group, config_.groupLayerIds(cache_group.tag), group_pool, shared_cache_raw, metrics_reporter_);
             staged_full_group_tags.push_back(cache_group.tag);
         }
 
@@ -173,8 +182,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
     if (shared_block_cache_) {
         std::map<std::string, BlockPoolPtr> tagged_group_pools;
-        for (size_t idx = 0; idx < config_.topology().groups().size(); ++idx) {
-            tagged_group_pools.emplace(config_.topology().groups()[idx].tag, group_block_pools_[idx]);
+        for (size_t idx = 0; idx < config_.groups().size(); ++idx) {
+            tagged_group_pools.emplace(config_.groups()[idx].tag, group_block_pools_[idx]);
         }
         shared_block_cache_->init(config_, tagged_group_pools);
     }
@@ -183,7 +192,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
     return true;
 }
 
-const GroupBase& HybridPoolKVCacheAllocator::defaultGroupForLayer(int layer_id) const {
+const CacheGroup& HybridPoolKVCacheAllocator::defaultGroupForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
     }
@@ -192,7 +201,7 @@ const GroupBase& HybridPoolKVCacheAllocator::defaultGroupForLayer(int layer_id) 
     return group;
 }
 
-const GroupBase& HybridPoolKVCacheAllocator::validateGroupForLayer(int layer_id, std::string_view tag) const {
+const CacheGroup& HybridPoolKVCacheAllocator::validateGroupForLayer(int layer_id, std::string_view tag) const {
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config_.layer_all_num,
                             "invalid layer id %d for layer_all_num=%u",
                             layer_id,
@@ -221,7 +230,7 @@ void HybridPoolKVCacheAllocator::freeBlocks(std::string_view tag, const BlockInd
 }
 
 GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
-    const auto topology = config_.topologyPtr();
+    const auto topology = std::make_shared<const CacheConfig>(config_.groups(), config_.layers(), config_.layer_num);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_groups_.size() == topology->groups().size(),
                             "cache group count=%zu topology count=%zu",
                             kv_cache_groups_.size(),
@@ -293,11 +302,11 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
         return;
     }
 
-    RTP_LLM_CHECK_WITH_INFO(config_.topology().hasOneGroupPerLayer(),
+    RTP_LLM_CHECK_WITH_INFO(config_.hasOneGroupPerLayer(),
                             "legacy layer-only block copy requires exactly one cache group per layer");
     std::vector<TaggedBlockIdPair> tagged_mappings;
-    tagged_mappings.reserve(static_cast<size_t>(end_ptr - begin_ptr) * config_.topology().groups().size());
-    for (const auto& group : config_.topology().groups()) {
+    tagged_mappings.reserve(static_cast<size_t>(end_ptr - begin_ptr) * config_.groups().size());
+    for (const auto& group : config_.groups()) {
         for (auto it = begin_ptr; it != end_ptr; ++it) {
             tagged_mappings.push_back({group.tag, it->src, it->dst});
         }
@@ -316,7 +325,7 @@ void HybridPoolKVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlo
         const auto   copy_type         = BatchCopyParams::get_copy_type(pool->where(), pool->where());
         const auto&  group             = config_.group(mapping.tag);
         const size_t buffers_per_layer = group.kv_scale_stride_bytes > 0 ? 2 : 1;
-        copy_nums[copy_type] += group.layer_ids.size() * buffers_per_layer;
+        copy_nums[copy_type] += config_.groupLayerIds(group.tag).size() * buffers_per_layer;
     }
 
     BatchCopyParams copy_params;
@@ -331,7 +340,7 @@ void HybridPoolKVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlo
         const auto&  pool                = blockPool(mapping.tag);
         const auto   copy_type           = BatchCopyParams::get_copy_type(pool->where(), pool->where());
 
-        for (int layer_id : group.layer_ids) {
+        for (int layer_id : config_.groupLayerIds(group.tag)) {
             auto src_addr_info = groupStrategy(mapping.tag)->convertIndexToAddr(layer_id, mapping.src);
             auto dst_addr_info = groupStrategy(mapping.tag)->convertIndexToAddr(layer_id, mapping.dst);
 
@@ -379,16 +388,15 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     }
 
     auto evict_result = shared_block_cache_->selectAndEvict(min_blocks_to_free);
-    if (evict_result.evicted_keys.empty()) {
+    if (evict_result.evictions.empty()) {
         return nullptr;
     }
     if (metrics_reporter_) {
-        for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+        for (const auto& eviction : evict_result.evictions) {
             RtpLLMCacheEvictionMetricsCollector collector;
-            collector.lifetime_ms = lifetime_ms;
+            collector.lifetime_ms = eviction.lifetime_ms;
             kmonitor::MetricsTags tags("scope", "gpu");
-            tags.AddTag("evict_policy",
-                        evict_result.evicted_independent_group_tags.count(cache_key) ? "independent" : "chain");
+            tags.AddTag("evict_policy", eviction.kind == EvictionKind::IndependentGroup ? "independent" : "chain");
             tags.AddTag("backing", "device");
             metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
                                                                                                        &collector);
@@ -400,34 +408,30 @@ BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t mi
     batch_resource->initGroups(config_);
     batch_resource->setLastBlockAligned(true);
 
-    for (const auto& group : config_.topology().groups()) {
-        batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
+    for (const auto& group : config_.groups()) {
+        batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evictions.size(), NULL_BLOCK_IDX);
     }
 
     CacheKeysType         evicted_keys;
     BlockDependenciesType evicted_dependencies;
-    evicted_keys.reserve(evict_result.evicted_keys.size());
-    evicted_dependencies.reserve(evict_result.evicted_keys.size());
-    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
-        const auto& groups    = evict_result.evicted_groups.at(cache_key);
-        evicted_keys.push_back(cache_key);
-        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
-        if (dep_it != evict_result.evicted_dependencies.end()) {
-            evicted_dependencies.push_back(dep_it->second);
+    evicted_keys.reserve(evict_result.evictions.size());
+    evicted_dependencies.reserve(evict_result.evictions.size());
+    for (size_t evicted_idx = 0; evicted_idx < evict_result.evictions.size(); ++evicted_idx) {
+        const auto& eviction = evict_result.evictions[evicted_idx];
+        evicted_keys.push_back(eviction.cache_key);
+        if (eviction.has_dependency) {
+            evicted_dependencies.push_back(eviction.dependency);
         } else {
             BlockDependency dependency;
             dependency.ordinal = static_cast<uint32_t>(evicted_idx);
             if (evicted_idx > 0) {
                 dependency.has_parent = true;
-                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
+                dependency.parent_key = evict_result.evictions[evicted_idx - 1].cache_key;
             }
             evicted_dependencies.push_back(dependency);
         }
-        for (const auto& [tag, block_id] : groups) {
-            if (!isNullBlockIdx(block_id)) {
-                batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
-            }
+        for (const auto& [tag, block_id] : eviction.blocks_by_group) {
+            batch_resource->mutableBlockIds(0, tag).setAt(evicted_idx, block_id);
         }
     }
     batch_resource->cacheResource(0).setCacheKeysAndBlockDependencies(std::move(evicted_keys),
@@ -444,7 +448,10 @@ void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& b
         return;
     }
     for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (const auto& [tag, block_ids] : batch_kv_cache_resource->blocksByTag(batch_id)) {
+        const auto& resource = batch_kv_cache_resource->cacheResource(batch_id);
+        for (const auto& group : config_.groups()) {
+            const auto&                      tag       = group.tag;
+            const auto&                      block_ids = resource.blockIds(tag);
             BlockIndicesType                 blocks_to_free;
             std::unordered_set<BlockIdxType> seen_blocks;
             for (auto block_idx : block_ids.blocks()) {
@@ -500,7 +507,7 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, b
     auto calculate = [&](bool only_full_groups) {
         size_t min_tokens = std::numeric_limits<size_t>::max();
         bool   saw_group  = false;
-        for (const auto& group : config_.topology().groups()) {
+        for (const auto& group : config_.groups()) {
             if (only_full_groups && group.policy.group_type != CacheGroupType::FULL) {
                 continue;
             }
@@ -554,12 +561,12 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
     size_t total_tokens     = std::numeric_limits<size_t>::max();
     size_t available_tokens = std::numeric_limits<size_t>::max();
     bool   has_pool         = false;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& pool = blockPool(group.tag);
         if (!pool) {
             continue;
         }
-        const size_t seq_size = group.seq_size_per_block;
+        const size_t seq_size = group.seqSizePerBlock();
         total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
         available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
         has_pool              = true;
@@ -572,7 +579,7 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
     snapshots.reserve(group_block_pools_.size());
     const size_t reserve_blocks                    = reserveBlocksNum();
     const size_t total_reservable_available_blocks = totalReservableAvailableBlocks();
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& pool = blockPool(group.tag);
         if (!pool) {
             continue;
@@ -611,7 +618,7 @@ int64_t HybridPoolKVCacheAllocator::getMrCostTimeMs() const {
 
 size_t HybridPoolKVCacheAllocator::totalReservableAvailableBlocks() const {
     size_t total = 0;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& pool = blockPool(group.tag);
         if (!pool || config_.usesExplicitIndependentBlocks(group.tag)) {
             continue;
@@ -654,7 +661,7 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     // so the reserve share for the total-capacity test is prorated by each pool's
     // total size instead.
     size_t total_reservable_blocks = 0;
-    for (const auto& group : config_.topology().groups()) {
+    for (const auto& group : config_.groups()) {
         const auto& reservable_pool = blockPool(group.tag);
         if (!reservable_pool || config_.usesExplicitIndependentBlocks(group.tag)) {
             continue;
@@ -663,7 +670,7 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     }
 
     MallocStatus status = MallocStatus::NONE;
-    const auto&  groups = config_.topology().groups();
+    const auto&  groups = config_.groups();
     for (size_t idx = 0; idx < groups.size(); ++idx) {
         const auto& group = groups[idx];
         // Diagnostic-only positional column in the rejection logs; never an identity.
@@ -785,7 +792,7 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
 
     size_t idx               = 0;
     bool   before_failed_tag = !failed_tag.empty();
-    for (const auto& group_config : config_.topology().groups()) {
+    for (const auto& group_config : config_.groups()) {
         const auto& tag        = group_config.tag;
         const auto  group_type = group_config.policy.group_type;
         if (tag == failed_tag) {
@@ -862,9 +869,9 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
                             pool->requestRefBlocksNum(),
                             pool->connectorRefBlocksNum(),
                             pool->blockCacheRefBlocksNum(),
-                            group_config.layer_ids.size(),
+                            config_.groupLayerIds(tag).size(),
                             config_.blockSizeBytes(tag),
-                            group_config.seq_size_per_block);
+                            group_config.seqSizePerBlock());
         ++idx;
     }
 }

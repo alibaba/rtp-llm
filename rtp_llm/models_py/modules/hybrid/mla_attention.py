@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import torch
 from torch import nn
@@ -141,34 +141,15 @@ class MlaAttention(nn.Module):
         kv_cache: Optional[LayerKVCache] | Mapping[str, LayerKVCache] = None,
     ) -> torch.Tensor:
         if self.indexer is not None:
-            required_tags = {"default", "indexer_kv"}
-            if (
-                not isinstance(fmha_impl, Mapping)
-                or not isinstance(kv_cache, Mapping)
-                or set(fmha_impl) != required_tags
-                or set(kv_cache) != required_tags
-            ):
-                raise RuntimeError(
-                    "sparse MLA requires exactly the default and indexer_kv "
-                    "FMHA and KV-cache routes"
-                )
-            default_fmha_impl = fmha_impl["default"]
-            indexer_fmha_impl = fmha_impl["indexer_kv"]
-            default_kv_cache = kv_cache["default"]
-            indexer_kv_cache = kv_cache["indexer_kv"]
-            if not isinstance(default_fmha_impl, MlaImplBase) or not isinstance(
-                indexer_fmha_impl, MlaImplBase
-            ):
-                raise RuntimeError("sparse MLA FMHA routes must contain MlaImplBase")
-            if not isinstance(default_kv_cache, LayerKVCache) or not isinstance(
-                indexer_kv_cache, LayerKVCache
-            ):
-                raise RuntimeError("sparse MLA cache routes must contain LayerKVCache")
+            fmha_routes = cast(Mapping[str, MlaImplBase], fmha_impl)
+            cache_routes = cast(Mapping[str, LayerKVCache], kv_cache)
+            default_fmha_impl = fmha_routes["default"]
+            indexer_fmha_impl = fmha_routes["indexer_kv"]
+            default_kv_cache = cache_routes["default"]
+            indexer_kv_cache = cache_routes["indexer_kv"]
         else:
-            if isinstance(fmha_impl, Mapping) or isinstance(kv_cache, Mapping):
-                raise RuntimeError("dense MLA does not accept tagged cache routes")
-            default_fmha_impl = fmha_impl
-            default_kv_cache = kv_cache
+            default_fmha_impl = cast(MlaImplBase, fmha_impl)
+            default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
 
         input_shape = hidden_states.shape[:-1]
         q_c = None

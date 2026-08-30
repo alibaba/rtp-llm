@@ -23,8 +23,8 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 }  // namespace
 
 void validateRemoteCacheTopology(const CacheConfig& cache_config) {
-    const auto& groups         = cache_config.topology().groups();
-    const auto  full_group_num = std::count_if(groups.begin(), groups.end(), [](const GroupBase& group) {
+    const auto& groups         = cache_config.groups();
+    const auto  full_group_num = std::count_if(groups.begin(), groups.end(), [](const CacheGroup& group) {
         return group.policy.group_type == CacheGroupType::FULL;
     });
     RTP_LLM_CHECK_WITH_INFO(groups.size() == 1 && full_group_num == 1,
@@ -35,7 +35,7 @@ void validateRemoteCacheTopology(const CacheConfig& cache_config) {
 
 std::vector<std::string> fullCacheTags(const CacheConfig& cache_config) {
     std::vector<std::string> tags;
-    for (const auto& group : cache_config.topology().groups()) {
+    for (const auto& group : cache_config.groups()) {
         if (group.policy.group_type == CacheGroupType::FULL) {
             tags.push_back(group.tag);
         }
@@ -95,12 +95,14 @@ bool DefaultLayerGroupPolicy::init() {
     const auto  layer_layout       = allocator_->allLayerCacheBase();
     const auto& topology           = layer_layout.topology();
     uint64_t    group_name_bithash = 1;
-    for (const auto& layer : topology.layers()) {
-        if (layer.group_tags.empty()) {
-            RTP_LLM_LOG_ERROR("layer [%d] has no cache group tag", layer.layer_id);
+    const auto& layers             = topology.layers();
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        const auto& layer = layers[layer_id];
+        if (layer.empty()) {
+            RTP_LLM_LOG_ERROR("layer [%zu] has no cache group tag", layer_id);
             return false;
         }
-        for (const auto& cache_tag : layer.group_tags) {
+        for (const auto& cache_tag : layer) {
             const bool is_full_group = full_tags_.count(cache_tag) != 0;
             if (!is_full_group && other_tags_.count(cache_tag) == 0) {
                 RTP_LLM_LOG_ERROR("not find valid cache tag, [%s]", cache_tag.c_str());
@@ -115,7 +117,7 @@ bool DefaultLayerGroupPolicy::init() {
                 const std::string prefix         = is_full_group ? "F" : GetOtherGroupPrefixName();
                 std::string       group_name     = prefix + cache_tag;
                 const size_t      block_size_bytes =
-                    topology_group.layer_ids.size()
+                    topology.groupLayerIds(cache_tag).size()
                     * (topology_group.kv_block_stride_bytes + topology_group.kv_scale_stride_bytes);
                 groups_[cache_tag] = Group{is_full_group, group_name_bithash, group_name, cache_tag, block_size_bytes};
                 tag_to_layer_ids_[cache_tag] = {};
@@ -123,7 +125,7 @@ bool DefaultLayerGroupPolicy::init() {
                     group_name_bithash <<= 1;
                 }
             }
-            tag_to_layer_ids_.at(cache_tag).push_back(layer.layer_id);
+            tag_to_layer_ids_.at(cache_tag).push_back(static_cast<int>(layer_id));
         }
     }
     return true;

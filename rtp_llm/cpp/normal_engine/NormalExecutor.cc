@@ -32,8 +32,8 @@ std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& map
                                 && mapping.is_contiguous() && mapping.dim() == 2 && mapping.size(1) == 3,
                             "kv_cache_update_mapping must be a contiguous CPU int32 [copies, 3] matrix");
     std::vector<std::string> tags;
-    tags.reserve(cache_config.topology().groups().size());
-    for (const auto& group : cache_config.topology().groups()) {
+    tags.reserve(cache_config.groups().size());
+    for (const auto& group : cache_config.groups()) {
         tags.push_back(group.tag);
     }
     const auto sorted_tags = sortedCacheGroupTags(tags, "cache update mapping");
@@ -149,12 +149,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
-                                                                   params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
-
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -173,8 +167,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         runtime_tokens_per_block,
-         runtime_kernel_tokens_per_block,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
@@ -194,10 +186,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
+    CacheConfig        empty_cache_config;
+    const CacheConfig& cache_config = cache_manager ?
+                                          (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                         cache_manager->cacheConfig()) :
+                                          empty_cache_config;
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
