@@ -313,6 +313,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+    if (model_output.skip_run) {
+        model_->releaseBuffers();
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
+        return absl::OkStatus();
+    }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);

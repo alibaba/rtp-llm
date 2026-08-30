@@ -179,6 +179,9 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Rank-synchronized Projection-KTP all-idle wave.  No sampler or stream
+    // dispatch work is valid for this synthetic step.
+    bool skip_run = false;
 
     std::vector<torch::Tensor> moe_gating;
 };

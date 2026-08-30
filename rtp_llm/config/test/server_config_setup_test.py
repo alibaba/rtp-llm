@@ -12,6 +12,44 @@ from rtp_llm.server.server_args.server_args import setup_args
 
 class GenerateConfigTest(TestCase):
 
+    def test_projection_ktp_decode_topology(self):
+        from rtp_llm.ops import ParallelismConfig
+
+        pc = ParallelismConfig()
+        pc.tp_size = 1
+        pc.dp_size = 8
+        pc.ep_size = 8
+        pc.ktp_size = 8
+        pc.world_size = 8
+        pc.local_world_size = 8
+        set_parallelism_config(pc, world_rank=7)
+        self.assertEqual(pc.ktp_rank, 7)
+        self.assertEqual(pc.dp_rank, 7)
+
+    def test_projection_ktp_rejects_attention_tp(self):
+        from rtp_llm.ops import ParallelismConfig
+
+        pc = ParallelismConfig()
+        pc.tp_size = 8
+        pc.dp_size = 1
+        pc.ep_size = 8
+        pc.ktp_size = 8
+        pc.world_size = 8
+        with self.assertRaisesRegex(AssertionError, "attention tp_size=1"):
+            set_parallelism_config(pc)
+
+    def test_projection_ktp_rejects_mismatched_world(self):
+        from rtp_llm.ops import ParallelismConfig
+
+        pc = ParallelismConfig()
+        pc.tp_size = 1
+        pc.dp_size = 8
+        pc.ep_size = 8
+        pc.ktp_size = 8
+        pc.world_size = 16
+        with self.assertRaisesRegex(AssertionError, "DP=EP=KTP=world_size"):
+            set_parallelism_config(pc)
+
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
     @patch.dict(

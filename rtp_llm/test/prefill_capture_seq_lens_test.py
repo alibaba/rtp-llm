@@ -175,10 +175,14 @@ class DecodeCaptureBatchSizesTest(TestCase):
         result = _parse_decode_capture_config("1, 2, 4, 8, 16, 32")
         self.assertEqual(result, [1, 2, 4, 8, 16, 32])
 
-    def test_comma_separated_list_filters_invalid(self):
-        """Test that invalid values (non-positive) are filtered out"""
-        result = _parse_decode_capture_config("1,0,-5,2,4")
-        self.assertEqual(result, [1, 2, 4])
+    def test_comma_separated_list_rejects_non_positive(self):
+        """Decode graph keys must all be positive."""
+        with self.assertRaises(argparse.ArgumentTypeError):
+            _parse_decode_capture_config("1,0,-5,2,4")
+
+    def test_comma_separated_list_is_sorted_and_deduplicated(self):
+        result = _parse_decode_capture_config("8,1,4,2,4")
+        self.assertEqual(result, [1, 2, 4, 8])
 
     def test_empty_config_returns_empty_list(self):
         """Test that empty config returns empty list"""

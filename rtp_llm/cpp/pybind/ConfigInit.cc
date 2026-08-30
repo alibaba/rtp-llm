@@ -1169,6 +1169,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<ParallelismConfig>(m, "ParallelismConfig")
         .def(py::init<>())
         .def_readwrite("tp_size", &ParallelismConfig::tp_size)
+        .def_readwrite("ktp_size", &ParallelismConfig::ktp_size)
         .def_readwrite("ep_size", &ParallelismConfig::ep_size)
         .def_readwrite("dp_size", &ParallelismConfig::dp_size)
         .def_readwrite("pp_size", &ParallelismConfig::pp_size)
@@ -1178,6 +1179,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("local_rank", &ParallelismConfig::local_rank)
         .def_readwrite("ffn_sp_size", &ParallelismConfig::ffn_sp_size)
         .def_readwrite("tp_rank", &ParallelismConfig::tp_rank)
+        .def_readwrite("ktp_rank", &ParallelismConfig::ktp_rank)
         .def_readwrite("ep_rank", &ParallelismConfig::ep_rank)
         .def_readwrite("dp_rank", &ParallelismConfig::dp_rank)
         .def_readwrite("ffn_tp_size", &ParallelismConfig::ffn_tp_size)
@@ -1190,11 +1192,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &ParallelismConfig::to_string)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
+        .def("get_ktp_size", &ParallelismConfig::get_ktp_size)
+        .def("get_ktp_rank", &ParallelismConfig::get_ktp_rank)
         .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
         .def("get_ffn_tp_rank", &ParallelismConfig::get_ffn_tp_rank)
         .def(py::pickle(
             [](const ParallelismConfig& self) {
                 return py::make_tuple(self.tp_size,
+                                      self.ktp_size,
                                       self.ep_size,
                                       self.dp_size,
                                       self.pp_size,
@@ -1203,6 +1208,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.local_world_size,
                                       self.ffn_sp_size,
                                       self.tp_rank,
+                                      self.ktp_rank,
                                       self.ep_rank,
                                       self.dp_rank,
                                       self.ffn_tp_size,
@@ -1214,28 +1220,51 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.role_type);
             },
             [](py::tuple t) {
-                if (t.size() != 18)
+                if (t.size() != 18 && t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
+                    if (t.size() == 18) {
+                        c.tp_size                 = t[0].cast<int64_t>();
+                        c.ep_size                 = t[1].cast<int64_t>();
+                        c.dp_size                 = t[2].cast<int64_t>();
+                        c.pp_size                 = t[3].cast<int64_t>();
+                        c.world_size              = t[4].cast<int64_t>();
+                        c.world_rank              = t[5].cast<int64_t>();
+                        c.local_world_size        = t[6].cast<int64_t>();
+                        c.ffn_sp_size             = t[7].cast<int64_t>();
+                        c.tp_rank                 = t[8].cast<int64_t>();
+                        c.ep_rank                 = t[9].cast<int64_t>();
+                        c.dp_rank                 = t[10].cast<int64_t>();
+                        c.ffn_tp_size             = t[11].cast<int64_t>();
+                        c.ffn_tp_rank             = t[12].cast<int64_t>();
+                        c.enable_sp               = t[13].cast<bool>();
+                        c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
+                        c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
+                        c.use_ub_comm             = t[16].cast<bool>();
+                        c.role_type               = t[17].cast<RoleType>();
+                        return c;
+                    }
                     c.tp_size                 = t[0].cast<int64_t>();
-                    c.ep_size                 = t[1].cast<int64_t>();
-                    c.dp_size                 = t[2].cast<int64_t>();
-                    c.pp_size                 = t[3].cast<int64_t>();
-                    c.world_size              = t[4].cast<int64_t>();
-                    c.world_rank              = t[5].cast<int64_t>();
-                    c.local_world_size        = t[6].cast<int64_t>();
-                    c.ffn_sp_size             = t[7].cast<int64_t>();
-                    c.tp_rank                 = t[8].cast<int64_t>();
-                    c.ep_rank                 = t[9].cast<int64_t>();
-                    c.dp_rank                 = t[10].cast<int64_t>();
-                    c.ffn_tp_size             = t[11].cast<int64_t>();
-                    c.ffn_tp_rank             = t[12].cast<int64_t>();
-                    c.enable_sp               = t[13].cast<bool>();
-                    c.ffn_disaggregate_config = t[14].cast<FfnDisAggregateConfig>();
-                    c.prefill_cp_config       = t[15].cast<PrefillCPConfig>();
-                    c.use_ub_comm             = t[16].cast<bool>();
-                    c.role_type               = t[17].cast<RoleType>();
+                    c.ktp_size                = t[1].cast<int64_t>();
+                    c.ep_size                 = t[2].cast<int64_t>();
+                    c.dp_size                 = t[3].cast<int64_t>();
+                    c.pp_size                 = t[4].cast<int64_t>();
+                    c.world_size              = t[5].cast<int64_t>();
+                    c.world_rank              = t[6].cast<int64_t>();
+                    c.local_world_size        = t[7].cast<int64_t>();
+                    c.ffn_sp_size             = t[8].cast<int64_t>();
+                    c.tp_rank                 = t[9].cast<int64_t>();
+                    c.ktp_rank                = t[10].cast<int64_t>();
+                    c.ep_rank                 = t[11].cast<int64_t>();
+                    c.dp_rank                 = t[12].cast<int64_t>();
+                    c.ffn_tp_size             = t[13].cast<int64_t>();
+                    c.ffn_tp_rank             = t[14].cast<int64_t>();
+                    c.enable_sp               = t[15].cast<bool>();
+                    c.ffn_disaggregate_config = t[16].cast<FfnDisAggregateConfig>();
+                    c.prefill_cp_config       = t[17].cast<PrefillCPConfig>();
+                    c.use_ub_comm             = t[18].cast<bool>();
+                    c.role_type               = t[19].cast<RoleType>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("ParallelismConfig unpickle error: ") + e.what());
                 }
