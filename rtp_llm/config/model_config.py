@@ -68,6 +68,7 @@ class ModelConfig(CppModelConfig):
         "mm_related_params",
         "src_quantization_bit",
         "config_dtype",
+        "router_logits_fp32",
         "template_type",
         "model_name",
         "quant_config",
@@ -544,6 +545,11 @@ class ModelConfig(CppModelConfig):
         )
         self.src_quantization_bit: int = 0
         self.config_dtype: Optional[str] = None
+        # Compute the MoE router projection in fp32 instead of the model dtype.
+        # Off by default so existing models keep their numerics; models whose
+        # reference implementation specifies an fp32 router turn it on in their
+        # own _create_config. See GenericMoeLayer.forward for why it matters.
+        self.router_logits_fp32: bool = False
 
         # Model metadata fields (merged from function parameters)
         self.template_type: Optional[Any] = None  # TemplateType enum

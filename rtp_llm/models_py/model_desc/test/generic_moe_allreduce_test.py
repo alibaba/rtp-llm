@@ -21,6 +21,8 @@ def _make_layer(
     ep_size=1,
     moe_style=2,
     with_shared_expert_gate=False,
+    router_logits_fp32=False,
+    use_swizzleA=None,
 ):
     config = SimpleNamespace(
         hidden_size=8,
@@ -31,6 +33,7 @@ def _make_layer(
         activation_type="SiGLU",
         moe_style=moe_style,
         eplb_config=SimpleNamespace(phy_exp_num=lambda count: count),
+        router_logits_fp32=router_logits_fp32,
     )
     parallelism_config = SimpleNamespace(
         ep_size=ep_size,
@@ -43,9 +46,14 @@ def _make_layer(
     weights = {
         W.moe_w1: torch.empty(4, 2, 8),
         W.moe_w2: torch.empty(4, 8, 2),
+        # Stored input-major, [hidden, expert_num], the way the loader leaves it.
+        W.moe_gate: torch.randn(8, 4),
     }
     if with_shared_expert_gate:
         weights[W.shared_expert_gate] = torch.empty(8, 1)
+    hw_kernel_config = (
+        None if use_swizzleA is None else SimpleNamespace(use_swizzleA=use_swizzleA)
+    )
     fused_moe = SimpleNamespace(
         topk_ids_dtype=torch.int32,
         router=SimpleNamespace(
@@ -73,7 +81,13 @@ def _make_layer(
         ) as fused_moe_factory,
     ):
         fused_moe_factory.return_value.create_fused_moe.return_value = fused_moe
-        return GenericMoeLayer(config, parallelism_config, weights, moe_config)
+        return GenericMoeLayer(
+            config,
+            parallelism_config,
+            weights,
+            moe_config,
+            hw_kernel_config=hw_kernel_config,
+        )
 
 
 def _configure_forward(layer, *, gate_enabled=False):
@@ -229,6 +243,63 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         torch.testing.assert_close(result, routed_output + shared_output)
         self.assertFalse(fused_moe.call_args.kwargs["skip_tp_allreduce"])
         self.assertFalse(layer.shared_expert.call_args.kwargs["skip_allreduce"])
+
+
+class GenericMoeFp32RouterTest(TestCase):
+    """The opt-in fp32 router projection and its ROCm SwizzleA guard.
+
+    The projection bypasses self.gate and reads W.moe_gate directly. That is
+    only sound while the stored tensor is in its canonical layout: ROCm permutes
+    W.moe_gate under use_swizzleA and the permutation preserves shape, so
+    nothing downstream could notice a wrong read.
+    """
+
+    def test_swizzle_disables_the_fp32_projection(self):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=True)
+        self.assertFalse(layer.router_logits_fp32)
+        self.assertIsNone(layer._gate_weight_src)
+
+    def test_fp32_projection_survives_without_swizzle(self):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=False)
+        self.assertTrue(layer.router_logits_fp32)
+        self.assertIsNotNone(layer._gate_weight_src)
+
+    def test_absent_hw_kernel_config_leaves_the_projection_on(self):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=None)
+        self.assertTrue(layer.router_logits_fp32)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_swizzled_layer_routes_through_the_gate_module(self, mock_all_reduce):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=True)
+        _configure_forward(layer)
+        mock_all_reduce.side_effect = lambda tensor, group: tensor
+        hidden_states = torch.randn(4, 8)
+
+        layer(hidden_states)
+
+        # The fallback is the point: the swizzled weight must never reach F.linear.
+        layer.gate.assert_called_once()
+        torch.testing.assert_close(
+            layer.select_topk.call_args.args[0], torch.zeros(4, 4)
+        )
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_fp32_projection_computes_in_fp32(self, mock_all_reduce):
+        layer = _make_layer(router_logits_fp32=True, use_swizzleA=False)
+        _configure_forward(layer)
+        mock_all_reduce.side_effect = lambda tensor, group: tensor
+        # bf16 activations are what makes the option worth having: the reference
+        # implementation keeps this projection in fp32 so near-ties in the
+        # top-k selection are not reordered by the narrower accumulate.
+        hidden_states = torch.randn(4, 8, dtype=torch.bfloat16)
+        expected = hidden_states.float() @ layer._gate_weight_src.float()
+
+        layer(hidden_states)
+
+        layer.gate.assert_not_called()
+        logits = layer.select_topk.call_args.args[0]
+        self.assertEqual(logits.dtype, torch.float32)
+        torch.testing.assert_close(logits, expected)
 
 
 if __name__ == "__main__":
