@@ -14,6 +14,8 @@ struct P2PConnectorSchedulerConfig {
     int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
+    int                      cp_rank                                      = 0;
+    int                      cp_size                                      = 1;
 
     static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
                                               const CacheStoreConfig& cache_store_config,
@@ -96,6 +98,8 @@ struct P2PConnectorConfig {
             P2PConnectorSchedulerConfig::create(runtime_config, cache_store_config, pd_sep_config);
         config.worker_config =
             P2PConnectorWorkerConfig::create(cache_store_config, pd_sep_config, parallelism_config, layer_all_num);
+        config.scheduler_config.cp_rank = config.worker_config.cp_rank;
+        config.scheduler_config.cp_size = config.worker_config.cp_size;
         return config;
     }
 };

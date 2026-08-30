@@ -77,9 +77,9 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                           "prefill_ip is empty or prefill_port is 0")};
     }
 
-    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
-    auto layer_cache_buffers =
-        LayerCacheBufferUtil::convert(cache_config_, *resource, 0, block_range.first, block_range.second);
+    auto collector           = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(
+        cache_config_, *resource, 0, block_range.first, block_range.second, config_.cp_rank, config_.cp_size);
     if (layer_cache_buffers.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: layer_cache_buffers is empty");
         collector->success = false;
