@@ -97,6 +97,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                flexlbConfig.isKvcmCacheMatching(),
                                 flexlbConfig.getWorkerRegistry().getCacheStatus()
                                         .isFullSnapshotDebugMode(),
                                 priorityScheduler, endpointRegistry
