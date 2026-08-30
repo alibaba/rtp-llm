@@ -208,7 +208,8 @@ class MockEngineState:
         """Set error-injection / timeout-simulation config.
 
         Supported keys:
-          enqueue_error  – enqueue_batch returns empty-successes response
+          enqueue_error  – enqueue_batch returns a malformed response
+          enqueue_reject – enqueue_batch explicitly rejects every request
           fetch_error    – fetch_response yields one frame then raises grpc.RpcError
           generate_error – generate_stream raises grpc.RpcError immediately
           no_respond     – prefill/decode sleep but never queue responses (stream hangs)
@@ -244,6 +245,13 @@ class MockEngineState:
         )
         if self.inject_config.get("enqueue_error"):
             return self.pb2.EnqueueBatchResponsePB(batch_id=batch_id)
+        if self.inject_config.get("enqueue_reject"):
+            response = self.pb2.EnqueueBatchResponsePB(batch_id=batch_id)
+            for request_id in rids:
+                error = response.errors.add(request_id=request_id)
+                error.error_info.error_code = 8501
+                error.error_info.error_message = "injected enqueue rejection"
+            return response
         inputs = []
         for slot in request.dp_slots:
             for item in slot.requests:
@@ -276,6 +284,10 @@ class MockEngineState:
             import grpc
 
             raise grpc.RpcError("injected enqueue_error")
+        if self.inject_config.get("enqueue_reject"):
+            import grpc
+
+            raise grpc.RpcError("injected enqueue rejection")
         request_id = int(input_pb.request_id)
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
         decode_task: Optional[asyncio.Task] = None
@@ -580,6 +592,20 @@ class MockEngineState:
         self._prune_lifecycle()
         self._status_version += 1
 
+        if self.inject_config.get("no_respond"):
+            # Model an accepted task stalled inside Prefill.  It remains
+            # running and owned until Cancel, which then publishes the single
+            # authoritative terminal.  Marking Prefill successful before this
+            # wait would create an impossible gap between completed Prefill
+            # and missing Decode ownership.
+            await asyncio.gather(
+                *(
+                    self._await_stalled_prefill_cancel(shape.request_id)
+                    for shape in shapes
+                )
+            )
+            return
+
         prefill_ms = self.performance.prefill_ms(shapes)
         self._prefill_waiting += 1
         async with self._prefill_semaphore:
@@ -613,9 +639,6 @@ class MockEngineState:
                     lc["end_ms"] = end_ms_lc
                     lc["end_state"] = "completed"
         self._status_version += 1
-
-        if self.inject_config.get("no_respond"):
-            return
 
         decode_tasks = []
         for input_pb, shape in zip(inputs, shapes):
@@ -685,6 +708,25 @@ class MockEngineState:
                     decode_tasks.append(downstream_task)
         if batch_id < 0 and decode_tasks:
             await asyncio.gather(*decode_tasks, return_exceptions=True)
+
+    async def _await_stalled_prefill_cancel(self, request_id: int) -> None:
+        control = self._owned_requests.get(request_id)
+        if control is None:
+            return
+        await control.cancel_event.wait()
+        task = self._running.pop(request_id, None)
+        if task is not None:
+            task.execution_time_ms = max(1, now_ms() - task.start_ms)
+            status_task = self._ensure_control_status_task(control)
+            status_task.execution_time_ms = task.execution_time_ms
+        self._publish_prefill_canceled(control)
+        lifecycle = self._request_lifecycle.get(request_id)
+        if lifecycle is not None:
+            lifecycle["end_ms"] = now_ms()
+            lifecycle["end_state"] = "cancelled"
+        await control.queue.put(TerminalError(8429, "priority preempted"))
+        await control.queue.put(SENTINEL)
+        self._owned_requests.pop(request_id, None)
 
     async def _run_owned_downstream(
         self,

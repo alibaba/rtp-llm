@@ -112,27 +112,37 @@ final class EndpointEventProjector {
         if (slot == null) {
             return;
         }
-        RequestLifecycleCoordinator.PreemptionWork work;
+        RequestLifecycleCoordinator.PreemptionWork work = null;
+        RequestSlot.FenceHandle authoritativeFence = null;
         synchronized (slot) {
             if (!scheduler.isCurrentSlot(slot)
                     || !slot.ownsPrefillFact(reduction.source(), item)) {
                 return;
             }
-            WorkerTerminalObservation observation =
-                    new WorkerTerminalObservation(
-                            WorkerTerminalSource.PREFILL_BACKED,
-                            fact.kind()
-                                == PrefillWorkLedger.TerminalFactKind.COMPLETED,
-                            fact.errorCode());
-            DeferredTerminal terminal = DeferredTerminal.worker(observation);
             if (fact.kind()
                     == PrefillWorkLedger.TerminalFactKind.PRIORITY_CANCELED) {
-                work = scheduler.reducePreemptionFactLocked(
-                        slot,
-                        new RequestSlot.PreemptionFact.PriorityCanceled(
-                                reduction.source(), item, terminal),
-                        null);
+                authoritativeFence =
+                        slot.authoritativePrefillCanceledFence(
+                                reduction.source(), item);
+                if (authoritativeFence == null) {
+                    DeferredTerminal terminal = DeferredTerminal.worker(
+                            new WorkerTerminalObservation(
+                                    WorkerTerminalSource.PREFILL_BACKED,
+                                    false,
+                                    fact.errorCode()));
+                    work = scheduler.reducePreemptionFactLocked(
+                            slot,
+                            new RequestSlot.PreemptionFact.PriorityCanceled(
+                                    reduction.source(), item, terminal),
+                            null);
+                }
             } else {
+                DeferredTerminal terminal = DeferredTerminal.worker(
+                        new WorkerTerminalObservation(
+                                WorkerTerminalSource.PREFILL_BACKED,
+                                fact.kind()
+                                    == PrefillWorkLedger.TerminalFactKind.COMPLETED,
+                                fact.errorCode()));
                 work = scheduler.reducePreemptionFactLocked(
                         slot,
                         new RequestSlot.PreemptionFact.WorkerTerminal(
@@ -140,7 +150,12 @@ final class EndpointEventProjector {
                         null);
             }
         }
-        scheduler.consumePreemptionWork(slot, work);
+        if (authoritativeFence != null) {
+            scheduler.consumeAuthoritativePrefillCanceledFence(
+                    slot, authoritativeFence);
+        } else {
+            scheduler.consumePreemptionWork(slot, work);
+        }
     }
 
     private void projectDecodeStatus(DecodeEndpoint.StatusReduction reduction) {

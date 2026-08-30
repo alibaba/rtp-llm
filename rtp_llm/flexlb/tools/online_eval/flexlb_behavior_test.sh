@@ -96,7 +96,7 @@ print(json.dumps({
                         "type": "RANDOM_WITHIN_TOLERANCE",
                         "outlierRejection": {
                             "maxPendingVsAverageMultiplier": 1.5,
-                            "maxWaitVsAverageMultiplier": 3.0,
+                            "maxProjectedDrainVsAverageMultiplier": 3.0,
                         },
                     },
                 },

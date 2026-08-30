@@ -8,7 +8,7 @@ three anomaly-path scenarios:
                            terminates within 5s -> recovery ok.
   E2  timeout_test        - Inject no_respond on all prefill workers -> request
                            errors -> clear inject -> recovery ok.
-  E3  worker_fail_test    - Inject enqueue_error on all prefill workers -> request
+  E3  worker_fail_test    - Inject enqueue_reject on all prefill workers -> request
                            errors -> clear inject -> recovery ok.
 
 Usage:
@@ -138,6 +138,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
         error_detail = "no error observed"
         injected_names: list[str] = []
         response = None
+        cancel_result = None
         try:
             injected_names = await self._inject_all_prefill({"no_respond": True})
 
@@ -156,7 +157,14 @@ class AnomalySmokeTest(FlexLBSmokeBase):
                     snap = StreamSnapshot()
                     task = asyncio.create_task(self._consume_stream(stream, snap))
                     try:
-                        await asyncio.wait_for(task, timeout=self.TIMEOUT_WAIT_S)
+                        # _consume_stream deliberately absorbs cancellation so
+                        # ordinary client cancellation is not reported as an
+                        # RPC error.  Shield it here; otherwise wait_for's
+                        # cancellation is absorbed and a real stall looks like
+                        # a normally completed stream.
+                        await asyncio.wait_for(
+                            asyncio.shield(task), timeout=self.TIMEOUT_WAIT_S
+                        )
                     except asyncio.TimeoutError:
                         task.cancel()
                         try:
@@ -183,7 +191,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
             # the decode KV reservation leaks until TTL eviction (300s).
             if response is not None and response.success:
                 try:
-                    await self._cancel(rid, response)
+                    cancel_result = await self._cancel(rid, response)
                 except Exception:
                     pass
 
@@ -200,13 +208,44 @@ class AnomalySmokeTest(FlexLBSmokeBase):
                     timeout_s=10.0
                 )
 
-            passed = error_observed and recovery_ok
+            lifecycle_detail = "N/A"
+            if response is not None and response.success:
+                batch_id = (
+                    response.lifecycle.batch_id
+                    if response.HasField("lifecycle")
+                    else 0
+                )
+                state = await self._request_state(rid, batch_id)
+                state_name = (
+                    self.schedule_pb2.RequestStatePB.Name(state.lifecycle.state)
+                    if state.found
+                    else "NOT_FOUND"
+                )
+                cancel_state = (
+                    self.schedule_pb2.RequestStatePB.Name(
+                        cancel_result.lifecycle.state
+                    )
+                    if cancel_result is not None and cancel_result.found
+                    else "NOT_FOUND"
+                )
+                snapshot = await self._get_snapshot()
+                mock_states = {
+                    engine["name"]: engine.get("request_lifecycle", {}).get(str(rid))
+                    for engine in snapshot.get("engines", [])
+                    if str(rid) in engine.get("request_lifecycle", {})
+                }
+                lifecycle_detail = (
+                    f"cancel={cancel_state}, final={state_name}, "
+                    f"mock={mock_states}"
+                )
+
+            passed = error_observed and inflight_ok and recovery_ok
             return ScenarioResult(
                 "E2: timeout_test",
                 passed,
                 f"error_observed={error_observed} "
                 f"({error_detail}), inflight_clean={inflight_ok}({inflight_detail}), "
-                f"recovery={recovery_msg}",
+                f"lifecycle={lifecycle_detail}, recovery={recovery_msg}",
                 time.monotonic() - start,
             )
         except Exception as exc:
@@ -220,7 +259,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
     # -- E3: worker_fail_test --------------------------------------------
 
     async def test_worker_fail(self) -> ScenarioResult:
-        """Inject enqueue_error -> request errors -> clear -> recovery."""
+        """Inject an authoritative enqueue rejection -> error -> recovery."""
         start = time.monotonic()
         rid = self._next_request_id()
         error_observed = False
@@ -228,7 +267,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
         injected_names: list[str] = []
         response = None
         try:
-            injected_names = await self._inject_all_prefill({"enqueue_error": True})
+            injected_names = await self._inject_all_prefill({"enqueue_reject": True})
 
             try:
                 response = await self._schedule_auto(rid)
@@ -287,7 +326,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
                     timeout_s=10.0
                 )
 
-            passed = error_observed and recovery_ok
+            passed = error_observed and inflight_ok and recovery_ok
             return ScenarioResult(
                 "E3: worker_fail_test",
                 passed,

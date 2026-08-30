@@ -1340,6 +1340,13 @@ final class RequestLifecycleCoordinator implements EndpointRequestRuntime,
         endpointEvents.project(event);
     }
 
+    /** Settle an exact ordinary-cancellation fence from typed Prefill proof. */
+    void consumeAuthoritativePrefillCanceledFence(
+            RequestSlot entry,
+            RequestSlot.FenceHandle exactFence) {
+        engineFenceCoordinator.resumeTombstoned(entry, exactFence);
+    }
+
     /** Route a typed deferred terminal through the slot's opaque reducer. */
     private PreemptionWork reduceDeferredTerminalFactLocked(
             RequestSlot entry,

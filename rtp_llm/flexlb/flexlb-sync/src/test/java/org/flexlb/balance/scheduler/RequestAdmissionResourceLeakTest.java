@@ -5,6 +5,9 @@ import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointEvent;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -12,6 +15,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -44,6 +50,7 @@ class RequestAdmissionResourceLeakTest {
     private FlexlbConfig config;
     private ConfigService configService;
     private BatchSchedulerReporter batchReporter;
+    private EngineCancelChannel engineCancelChannel;
     private RequestLifecycleCoordinator lifecycle;
 
     @BeforeEach
@@ -52,12 +59,13 @@ class RequestAdmissionResourceLeakTest {
         SchedulingTestConfig.usePriorityQueue(config);
         configService = mock(ConfigService.class);
         batchReporter = mock(BatchSchedulerReporter.class);
+        engineCancelChannel = mock(EngineCancelChannel.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         lifecycle = new RequestLifecycleCoordinator(
                 configService,
                 batchReporter,
                 mock(RequestSchedulerReporter.class),
-                mock(EngineCancelChannel.class));
+                engineCancelChannel);
     }
 
     @AfterEach
@@ -242,6 +250,69 @@ class RequestAdmissionResourceLeakTest {
         assertDecodeOwned(registered.item().requestId());
         assertEquals(1, releases.get(),
                 "a late Decode fact must not release an expired resource twice");
+    }
+
+    @Test
+    void acceptedExternalCancelClosesOnAuthoritativePrefillCanceledStatus() {
+        long requestId = 551L;
+        BalanceContext context = context(requestId);
+        CompletableFuture<Response> future = lifecycle.register(context, 4);
+        PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        WorkerStatus decodeStatus = WorkerStatus.createDiscovered(
+                RoleType.DECODE, null, "127.0.0.2", 8081, 8091, null);
+        DecodeEndpoint decode = new DecodeEndpoint(
+                decodeStatus, ignored -> { });
+        DecodeEndpoint.ReservationHandle reservation;
+        try (WorkerEndpoint.GenerationPin pin = decode.tryPinGeneration()) {
+            assertNotNull(pin);
+            reservation = decode.reservePinned(
+                    pin, requestId, 16L, 16L, 0);
+        }
+        ServerStatus prefillStatus = new ServerStatus();
+        prefillStatus.setServerIp("127.0.0.1");
+        prefillStatus.setGrpcPort(8090);
+        BatchItem item = new BatchItem(
+                context,
+                future,
+                new Response(),
+                prefillStatus,
+                null,
+                prefill,
+                decode,
+                reservation,
+                System.currentTimeMillis());
+        Registered registered = new Registered(item, future);
+        when(engineCancelChannel.cancel(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.eq(requestId),
+                org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(CompletableFuture.completedFuture(
+                        EngineCancelChannel.CancelOutcome.accepted()));
+
+        bindRoute(registered, 0, 30_000L);
+        acknowledge(registered);
+        assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
+                lifecycle.cancelRequest(
+                        requestId, 0L, CancelReason.CLIENT_CANCELLED).state());
+
+        PrefillEndpoint.StatusReduction reduction =
+                mock(PrefillEndpoint.StatusReduction.class);
+        when(reduction.source()).thenReturn(prefill);
+        when(reduction.semantics())
+                .thenReturn(PrefillEndpoint.StatusSemantics.PREFILL_STAGE);
+        when(reduction.facts()).thenReturn(List.of(
+                new PrefillWorkLedger.TerminalWorkerStatusFact(
+                        item,
+                        PrefillWorkLedger.TerminalFactKind.PRIORITY_CANCELED,
+                        8429L)));
+        lifecycle.onEndpointEvent(
+                new EndpointEvent.StatusReduced(reduction));
+
+        assertEquals(RequestLifecycleState.CANCELLED,
+                lifecycle.getRequestState(requestId, 0L).state());
+        assertEquals(0, lifecycle.liveRequestCount());
+        assertEquals(0, decode.getInflightCount(),
+                "the authoritative fence must settle Decode accounting");
     }
 
     @Test

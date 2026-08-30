@@ -213,7 +213,7 @@ set_group_config() {
   case "$1" in
     batch)
       SCHEDULING_PROFILE="queue-priority-batch"
-      FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000,"maxWaitingRequestsPerPrefillWorker":1024}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4,"enqueueRpcTimeoutMs":5000},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"executionTimeEstimator":{"type":"FORMULA"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxWaitVsAverageMultiplier":3.0}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}},"vit":{"selector":{"type":"RANDOM"}}}}}'
+      FLEXLB_CONFIG='{"schemaVersion":2,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":10,"maxPredictedExecutionMs":550},"capacity":{"maxOutstandingRequestsGlobal":5000,"maxWaitingRequestsPerPrefillWorker":1024}},"dispatcher":{"type":"BATCH","maxInflightBatchesPerPrefillWorker":4,"enqueueRpcTimeoutMs":5000},"router":{"availabilityHysteresisPercent":0,"roles":{"prefill":{"availability":{"maxPendingRequests":100000},"executionTimeEstimator":{"type":"FORMULA"},"selector":{"type":"ESTIMATED_TTFT","candidateChoice":{"type":"RANDOM_WITHIN_TOLERANCE","outlierRejection":{"maxPendingVsAverageMultiplier":1.5,"maxProjectedDrainVsAverageMultiplier":3.0}}}},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":132},"kvReservation":{"maxOutputTokensForEstimate":1000},"selector":{"type":"KV_USAGE_WEIGHTED_RANDOM"}},"vit":{"selector":{"type":"RANDOM"}}}}}'
       TEST_RID_BASES=(10000 20000 30000)
       ;;
     direct)
@@ -276,13 +276,13 @@ run_test_suite() {
     --flexlb-http-port "${FLEXLB_HTTP_PORT}"
     --request-id-base "${rid_base}"
   )
-  # scheduling_smoke.py and anomaly_smoke.py need --mock-http-port;
-  # cancel_smoke.py does not accept it.
-  if [[ "${script}" != "cancel_smoke.py" ]]; then
-    cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
+  cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
+  if [[ "${script}" == "cancel_smoke.py" ]]; then
+    cmd_args+=(--schedule-mode "${group}")
   fi
   set +e
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/${script}" \
+  FLEXLB_CONFIG="${FLEXLB_CONFIG}" PYTHONDONTWRITEBYTECODE=1 \
+    python3 "${SCRIPT_DIR}/${script}" \
     "${cmd_args[@]}" 2>&1 | tee "${group_dir}/${name}.stdout"
   exit_code=${PIPESTATUS[0]}
   set -e
@@ -296,9 +296,15 @@ run_test_suite() {
 
 # -- Main loop: 3 groups x 3 test suites ------------------------------------
 
-GROUP_NAMES=("batch" "direct" "queue")
+IFS=',' read -r -a GROUP_NAMES <<< "${MATRIX_GROUPS:-batch,direct,queue}"
 TEST_NAMES=("cancel_smoke" "scheduling_smoke" "anomaly_smoke")
 TEST_SCRIPTS=("cancel_smoke.py" "scheduling_smoke.py" "anomaly_smoke.py")
+if [[ "${MATRIX_SUITES:-all}" == "anomaly" ]]; then
+  TEST_NAMES=("anomaly_smoke")
+  TEST_SCRIPTS=("anomaly_smoke.py")
+  TEST_RID_BASES=(30000)
+fi
+SUITE_COUNT="${#TEST_NAMES[@]}"
 TOTAL_PASS=0
 TOTAL_FAIL=0
 GROUP_RESULTS=()
@@ -327,7 +333,7 @@ for group in "${GROUP_NAMES[@]}"; do
 
   TOTAL_PASS=$((TOTAL_PASS + group_pass))
   TOTAL_FAIL=$((TOTAL_FAIL + group_fail))
-  GROUP_RESULTS+=("${group}: ${group_pass}/3 passed")
+  GROUP_RESULTS+=("${group}: ${group_pass}/${SUITE_COUNT} passed")
 
   stop_master
 done

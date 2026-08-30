@@ -281,7 +281,7 @@ class FlexLBSmokeBase:
 
     # -- Cancel (dual-path) -----------------------------------------------
 
-    async def _cancel(self, request_id: int, response=None) -> None:
+    async def _cancel(self, request_id: int, response=None):
         """Cancel via Master (always) + Worker (direct/queue path only)."""
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             await self._channel(self._master_target())
@@ -294,12 +294,26 @@ class FlexLBSmokeBase:
             lifecycle = response.lifecycle
             if lifecycle.batch_id:
                 cancel_request.batch_id = lifecycle.batch_id
-        await stub.Cancel(
+        result = await stub.Cancel(
             cancel_request,
             timeout=10.0,
         )
         if response is not None and not response.enqueued_by_master:
             await self._worker_cancel(request_id, response)
+        return result
+
+    async def _request_state(self, request_id: int, batch_id: int = 0):
+        """Read the Master's authoritative lifecycle for diagnostics."""
+        stub = self.schedule_pb2_grpc.FlexlbServiceStub(
+            await self._channel(self._master_target())
+        )
+        return await stub.GetRequestState(
+            self.schedule_pb2.GetRequestStateRequestPB(
+                request_id=request_id,
+                batch_id=batch_id,
+            ),
+            timeout=10.0,
+        )
 
     async def _worker_cancel(self, request_id: int, response) -> None:
         """Call Worker ``RpcService.Cancel`` directly."""

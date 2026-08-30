@@ -1261,6 +1261,19 @@ final class RequestSlot extends RequestLifecycle {
                 : new FenceReduction.Start(installed, cancelTarget(item));
     }
 
+    /**
+     * Return the canonical fence which owns an exact Prefill cancellation
+     * terminal. The endpoint ledger has already settled its own item before
+     * this lookup; only the fence may now reconcile the retained Decode side.
+     */
+    FenceHandle authoritativePrefillCanceledFence(
+            PrefillEndpoint source,
+            BatchItem expected) {
+        requireSlotLock("authoritative Prefill cancellation fence lookup");
+        return engineFence != null && ownsPrefillFact(source, expected)
+                ? engineFence : null;
+    }
+
     /** Reduce one event against the exact Engine-fence owner. */
     FenceReduction applyFenceUpdate(
             FenceHandle handle,
@@ -2222,7 +2235,8 @@ final class RequestSlot extends RequestLifecycle {
         }
 
         private boolean awaitTerminal() {
-            if (phase != FencePhase.CANCEL_IN_FLIGHT) {
+            if (phase != FencePhase.INSTALLED
+                    && phase != FencePhase.CANCEL_IN_FLIGHT) {
                 return false;
             }
             phase = FencePhase.AWAITING_TERMINAL;
@@ -2230,7 +2244,7 @@ final class RequestSlot extends RequestLifecycle {
         }
 
         private boolean recordTombstoned() {
-            if (phase != FencePhase.CANCEL_IN_FLIGHT) {
+            if (phase == FencePhase.CLOSED) {
                 return false;
             }
             phase = FencePhase.CLOSED;

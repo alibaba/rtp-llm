@@ -108,6 +108,69 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(11, cache.cache_keys)
         self.assertIn(12, cache.cache_keys)
 
+    async def test_enqueue_reject_is_authoritative_per_request(self) -> None:
+        stub = self.pb2_grpc.RpcServiceStub(self.channel)
+        self.prefill.set_injection({"enqueue_reject": True})
+        batch = self.pb2.EnqueueBatchRequestPB(batch_id=17)
+        slot = batch.dp_slots.add(dp_rank=0)
+        for request_id in (171, 172):
+            slot.requests.add().input.CopyFrom(
+                self._input_pb(request_id=request_id)
+            )
+
+        response = await stub.EnqueueBatch(batch)
+
+        self.assertEqual(17, response.batch_id)
+        self.assertEqual([], list(response.successes))
+        self.assertEqual([171, 172], [error.request_id for error in response.errors])
+        self.assertTrue(
+            all(error.error_info.error_code == 8501 for error in response.errors)
+        )
+
+    async def test_no_respond_retains_owner_until_typed_cancel_terminal(self) -> None:
+        prefill_stub = self.pb2_grpc.RpcServiceStub(self.channel)
+        self.prefill.set_injection({"no_respond": True})
+        request_id = 173
+        batch = self.pb2.EnqueueBatchRequestPB(batch_id=18)
+        batch.dp_slots.add(dp_rank=0).requests.add().input.CopyFrom(
+            self._input_pb(request_id=request_id)
+        )
+        await prefill_stub.EnqueueBatch(batch)
+
+        for _ in range(100):
+            if request_id in self.prefill._owned_requests:
+                break
+            await asyncio.sleep(0.01)
+        self.assertIn(request_id, self.prefill._owned_requests)
+
+        response = await prefill_stub.Cancel(
+            self.pb2.CancelRequestPB(request_id=request_id)
+        )
+        self.assertEqual(self.pb2.CANCEL_STATUS_ACCEPTED, response.status)
+
+        terminal = None
+        for _ in range(100):
+            status = await prefill_stub.GetWorkerStatus(
+                self.pb2.StatusVersionPB(latest_finished_version=-1)
+            )
+            terminal = next(
+                (
+                    task
+                    for task in status.finished_task_list
+                    if int(task.request_id) == request_id
+                    and task.priority_preemption_progress
+                    == self.pb2.PRIORITY_PREEMPTION_CANCELED
+                ),
+                None,
+            )
+            if terminal is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        self.assertIsNotNone(terminal)
+        self.assertEqual(8429, terminal.error_info.error_code)
+        self.assertNotIn(request_id, self.prefill._owned_requests)
+
     async def test_cancel_response_maps_accepted_and_not_found(self) -> None:
         prefill_stub = self.pb2_grpc.RpcServiceStub(self.channel)
         self.prefill._register_prefill_owner(self._input_pb(request_id=456))
