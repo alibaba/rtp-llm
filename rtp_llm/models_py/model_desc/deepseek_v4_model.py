@@ -56,8 +56,9 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -837,7 +838,7 @@ class DeepSeekV4Model(GptModelBase):
                 _topk_len_swa = _torch.tensor(
                     [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
                 )
-                if _torch.cuda.get_device_capability(device_str)[0] < 12:
+                if not is_sm12x(device_str):
                     _flash_mla_sparse_fwd(
                         q=_q_swa,
                         kv=_kv_swa,
@@ -846,7 +847,11 @@ class DeepSeekV4Model(GptModelBase):
                         attn_sink=_swa_attn.attn_sink,
                         topk_length=_topk_len_swa,
                     )
-                logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+                    logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
+                else:
+                    logging.info(
+                        "[DeepSeekV4Model] skip flash_mla SWA kv_full prewarm on SM12x"
+                    )
             except Exception:
                 logging.exception(
                     "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"

@@ -195,9 +195,9 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-
-    // Legacy DSV4 fixed-allocation pool block count. Kept for compatibility
-    // with older callers; HCA_STATE has its own explicit sizing knob below.
+    // Deprecated legacy DSV4 fixed-allocation pool block count. Retained for
+    // config serialization/older callers, but ignored by descriptor-based
+    // sizing; use dsv4_hca_state_pool_blocks for HCA_STATE capacity.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
     // DSV4 HCA_STATE is a small active-tail ring, independent of linear_step

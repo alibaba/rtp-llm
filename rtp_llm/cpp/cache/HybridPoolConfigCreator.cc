@@ -279,15 +279,14 @@ void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, uint32_t 
             if (desc.tag != DSV4_HCA_STATE_TAG) {
                 continue;
             }
-            auto capacity = desc.capacity.value_or(CacheCapacityPolicyDesc{});
+            auto capacity               = desc.capacity.value_or(CacheCapacityPolicyDesc{});
             capacity.explicit_block_num = block_num;
             // Explicit HCA sizing is independent from residency.  Host-pinned
             // HCA state must not consume the device paged-cache budget.
-            const bool charge_to_paged_budget = !desc.memory.has_value()
-                || !desc.memory->placement.has_value()
-                || *desc.memory->placement == CacheMemoryPlacement::DEVICE;
+            const bool charge_to_paged_budget = !desc.memory.has_value() || !desc.memory->placement.has_value()
+                                                || *desc.memory->placement == CacheMemoryPlacement::DEVICE;
             capacity.charge_to_paged_budget = charge_to_paged_budget;
-            desc.capacity = capacity;
+            desc.capacity                   = capacity;
         }
     }
 }
@@ -355,8 +354,11 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                                || spec->type == KVCacheSpecType::OpaqueKV
                                                || spec->type == KVCacheSpecType::OpaqueState;
         }
-        for (const auto& layer_descs : stage_model_config.kv_cache_spec_descs) {
-            for (const auto& desc : layer_descs) {
+        // Use the injected descriptor copy consistently below.  In particular,
+        // do not accidentally inspect the model's original descriptors after
+        // HCA_STATE capacity has been applied above.
+        for (const auto& per_layer_descs : layer_descs) {
+            for (const auto& desc : per_layer_descs) {
                 config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::OpaqueKV;
             }
         }

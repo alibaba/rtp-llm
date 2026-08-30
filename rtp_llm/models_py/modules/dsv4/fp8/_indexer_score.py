@@ -96,16 +96,21 @@ def fp8_paged_indexer_score(
 ) -> torch.Tensor:
     """One-shot FP8 paged indexer logits via DeepGEMM.
 
-    Returns ``[B*next_n, max_ctx_len] fp32`` — feed straight to topk.
-    Padded columns past per-row ``context_lens[b, n]`` are left as
-    whatever DeepGEMM writes (use ``clean_logits=True`` if the
-    downstream topk needs ``-inf`` there; default False to save the
-    extra mask).
+    Returns ``[B*next_n, max_ctx_len] fp32`` — feed straight to topk.  The
+    SM120 torch fallback always writes ``-inf`` to columns past each row's
+    ``context_lens[b, n]`` (and to rows whose block-table slot is invalid).
+    DeepGEMM keeps its native padding semantics; its caller applies any
+    required mask before top-k selection.
     """
     if q_fp8.is_cuda and is_sm120(q_fp8.device):
         return _fp8_paged_indexer_score_sm120(
-            q_fp8, w_fold, kv_pool_uint8, block_table, context_lens,
-            block_size, max_ctx_len,
+            q_fp8,
+            w_fold,
+            kv_pool_uint8,
+            block_table,
+            context_lens,
+            block_size,
+            max_ctx_len,
         )
     assert _HAS_DEEP_GEMM, "deep_gemm.fp8_paged_mqa_logits not available"
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
@@ -149,8 +154,36 @@ def _fp8_paged_indexer_score_sm120(
     block_size: int,
     max_ctx_len: int,
 ) -> torch.Tensor:
+    if q_fp8.dim() != 4:
+        raise ValueError(f"q_fp8 must be 4D [B, N, H, D], got {q_fp8.shape}")
+    if w_fold.dim() != 2:
+        raise ValueError(f"w_fold must be 2D [B*N, H], got {w_fold.shape}")
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if max_ctx_len < 0:
+        raise ValueError(f"max_ctx_len must be non-negative, got {max_ctx_len}")
+    if (
+        kv_pool_uint8.dtype != torch.uint8
+        or kv_pool_uint8.dim() != 2
+        or kv_pool_uint8.shape[-1] != INDEXER_ENTRY_BYTES
+    ):
+        raise ValueError(
+            "kv_pool_uint8 must have shape [slots, 132] and dtype uint8, "
+            f"got shape={tuple(kv_pool_uint8.shape)}, dtype={kv_pool_uint8.dtype}"
+        )
+    if block_table.dim() != 2:
+        raise ValueError(
+            f"block_table must be 2D [B, max_blocks], got {block_table.shape}"
+        )
+
     B, next_n, H, D = q_fp8.shape
     rows = B * next_n
+    if w_fold.shape != (rows, H):
+        raise ValueError(
+            f"w_fold shape must be {(rows, H)} for q_fp8, got {tuple(w_fold.shape)}"
+        )
+    if D != INDEXER_HEAD_DIM:
+        raise ValueError(f"q_fp8 head dim must be {INDEXER_HEAD_DIM}, got {D}")
     device = q_fp8.device
     q = q_fp8.float().reshape(rows, H, D)
     weights = w_fold.float().reshape(rows, H)
@@ -160,16 +193,22 @@ def _fp8_paged_indexer_score_sm120(
     if rows % lengths.numel() == 0 and lengths.numel() != rows:
         lengths = lengths.repeat_interleave(rows // lengths.numel())
     if lengths.numel() != rows:
-        raise ValueError(
-            f"context_lens has {lengths.numel()} entries; expected {rows}"
-        )
+        raise ValueError(f"context_lens has {lengths.numel()} entries; expected {rows}")
     lengths = lengths.clamp(min=0, max=max_ctx_len)
 
     # The physical layout is block-major K bytes followed by block-major
     # fp32 scales, not one self-contained 132-byte token.  Address the exact
     # token bytes directly; this avoids copying every full block and avoids
     # host ``.item()`` synchronization for long contexts.
-    num_blocks = kv_pool_uint8.numel() // (block_size * INDEXER_ENTRY_BYTES)
+    block_bytes = block_size * INDEXER_ENTRY_BYTES
+    if kv_pool_uint8.numel() % block_bytes != 0:
+        raise ValueError(
+            f"kv_pool_uint8 has {kv_pool_uint8.numel()} bytes, not divisible by "
+            f"block size {block_bytes}"
+        )
+    num_blocks = kv_pool_uint8.numel() // block_bytes
+    if max_ctx_len > 0 and num_blocks == 0:
+        raise ValueError("kv_pool_uint8 has no physical blocks for a non-empty context")
     flat_pool = kv_pool_uint8.reshape(-1)
     block_table_rows = block_table.to(device=device, dtype=torch.long)
     if block_table_rows.shape[0] == B:
@@ -201,34 +240,38 @@ def _fp8_paged_indexer_score_sm120(
             1, logical_block.unsqueeze(0).expand(rows, -1)
         )
         # Padded positions may carry -1 in the table; route those accesses to
-        # a harmless slot and mask them out below.  Valid positions are still
-        # bounded by the caller's block table and physical pool dimensions.
+        # a harmless slot and mask them out below.  Positive out-of-range ids
+        # are treated the same way instead of silently reading a neighboring
+        # allocation.  Keep the validity mask separate from the clamped index
+        # so a malformed table cannot turn into a real score.
+        table_valid = (block_ids >= 0) & (block_ids < num_blocks)
         block_ids = block_ids.clamp(min=0, max=max(0, num_blocks - 1))
         block_stride_offsets = block_ids * block_stride
         token_offset = positions.remainder(block_size)
         block_base = block_stride_offsets
         k_byte_offsets = (block_base + token_offset.unsqueeze(0) * D).unsqueeze(-1)
         k_byte_offsets = k_byte_offsets + head_offsets
-        k_bytes = flat_pool.index_select(
-            0, k_byte_offsets.reshape(-1)
-        ).view(rows, end - start, D)
+        k_bytes = flat_pool.index_select(0, k_byte_offsets.reshape(-1)).view(
+            rows, end - start, D
+        )
         k_fp8 = k_bytes.contiguous().view(torch.float8_e4m3fn).float()
         scale_offsets = block_base + block_size * D + token_offset.unsqueeze(0) * 4
         scale_offsets = scale_offsets.unsqueeze(-1) + scale_offsets_4
-        scale_bytes = flat_pool.index_select(
-            0, scale_offsets.reshape(-1)
-        ).view(rows, end - start, 4)
+        scale_bytes = flat_pool.index_select(0, scale_offsets.reshape(-1)).view(
+            rows, end - start, 4
+        )
         k_scale = scale_bytes.contiguous().view(torch.float32).view(rows, end - start)
 
         per_head = torch.einsum(
             "rhd,rtd->rht", q, k_fp8 * k_scale.unsqueeze(-1)
         ).relu_()
         score = torch.einsum("rh,rht->rt", weights, per_head)
-        valid = positions.unsqueeze(0) < lengths.unsqueeze(1)
-        out[:, start:end].masked_fill_(~valid, float("-inf"))
+        valid = (positions.unsqueeze(0) < lengths.unsqueeze(1)) & table_valid
         out[:, start:end].copy_(score)
         out[:, start:end].masked_fill_(~valid, float("-inf"))
     return out
+
+
 # ---------------------------------------------------------------------------
 # Prefill (non-paged) wrapper around ``deep_gemm.fp8_mqa_logits``.
 #
@@ -271,10 +314,14 @@ def fp8_mqa_indexer_score(
         from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
             v4_indexer_score,
         )
+
         q_bf16 = q_fp8.to(torch.bfloat16).unsqueeze(0).contiguous()
-        k_bf16 = (k_quant.float() * k_scale.float()[:, None]).to(
-            torch.bfloat16
-        ).unsqueeze(0).contiguous()
+        k_bf16 = (
+            (k_quant.float() * k_scale.float()[:, None])
+            .to(torch.bfloat16)
+            .unsqueeze(0)
+            .contiguous()
+        )
         out = v4_indexer_score(
             q_bf16, k_bf16, w_fold.float().unsqueeze(0).contiguous()
         ).squeeze(0)

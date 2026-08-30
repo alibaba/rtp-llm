@@ -2,29 +2,118 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+    _fp8_paged_indexer_score_sm120,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import canonical_topk
 
 
 class Sm120SparseMlaCanonicalTest(unittest.TestCase):
-    def test_none_length_counts_non_negative_slots(self):
+    def test_none_length_compacts_non_negative_slots(self):
         indices = torch.tensor([[11, -1, 13, -1], [-1, 7, 8, 9]], dtype=torch.int64)
         canonical, lengths = canonical_topk(indices, None, (4, 8))
         self.assertEqual(canonical.dtype, torch.int32)
         self.assertEqual(lengths.tolist(), [2, 3])
-        self.assertEqual(canonical[0, 1].item(), -1)
+        self.assertEqual(canonical.tolist(), [[11, 13, -1, -1], [7, 8, 9, -1]])
 
     def test_short_explicit_length_is_preserved(self):
         indices = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
         canonical, lengths = canonical_topk(indices, torch.tensor([2]), (4, 8))
-        self.assertEqual(canonical.tolist(), [[1, 2, 3, 4]])
+        self.assertEqual(canonical.tolist(), [[1, 2, -1, -1]])
         self.assertEqual(lengths.tolist(), [2])
 
     def test_unsupported_width_padding_keeps_invalid_slots(self):
         indices = torch.tensor([[4, -1, 9]], dtype=torch.int32)
         canonical, lengths = canonical_topk(indices, None, (4, 8))
         self.assertEqual(canonical.shape, (1, 4))
-        self.assertEqual(canonical.tolist(), [[4, -1, 9, -1]])
+        self.assertEqual(canonical.tolist(), [[4, 9, -1, -1]])
         self.assertEqual(lengths.tolist(), [2])
+
+    def test_explicit_length_ignores_holes_and_tail(self):
+        indices = torch.tensor([[5, -1, 7, 8]], dtype=torch.int32)
+        canonical, lengths = canonical_topk(indices, torch.tensor([2]), (4, 8))
+        self.assertEqual(canonical.tolist(), [[5, -1, -1, -1]])
+        self.assertEqual(lengths.tolist(), [1])
+
+    def test_length_is_clamped_to_kernel_width(self):
+        indices = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32)
+        canonical, lengths = canonical_topk(indices, torch.tensor([99]), (4, 8))
+        self.assertEqual(canonical.tolist(), [[1, 2, 3, 4]])
+        self.assertEqual(lengths.tolist(), [4])
+
+    def test_width_overflow_fails_with_actionable_error(self):
+        with self.assertRaisesRegex(RuntimeError, "exceeds the largest"):
+            canonical_topk(torch.zeros(1, 9, dtype=torch.int32), None, (4, 8))
+
+
+class Sm120IndexerFallbackTest(unittest.TestCase):
+    @staticmethod
+    def _pool(num_blocks: int, block_size: int) -> torch.Tensor:
+        # Zero K/scales are sufficient to exercise address/mask logic; the
+        # expected score for every valid token is therefore exactly zero.
+        pool = torch.zeros(
+            num_blocks * block_size,
+            132,
+            dtype=torch.uint8,
+        )
+        return pool
+
+    def test_invalid_block_table_slots_are_masked(self):
+        q = torch.ones(1, 1, 1, 128, dtype=torch.float8_e4m3fn)
+        weights = torch.ones(1, 1, dtype=torch.float32)
+        pool = self._pool(num_blocks=2, block_size=2)
+        # The second logical block is padding.  Its positions must not be
+        # turned into scores by clamping -1 to physical block zero.
+        block_table = torch.tensor([[0, -1]], dtype=torch.int32)
+        lengths = torch.tensor([[4]], dtype=torch.int32)
+
+        out = _fp8_paged_indexer_score_sm120(
+            q,
+            weights,
+            pool,
+            block_table,
+            lengths,
+            block_size=2,
+            max_ctx_len=4,
+        )
+        self.assertTrue(torch.isfinite(out[0, :2]).all())
+        self.assertTrue(torch.isneginf(out[0, 2:]).all())
+
+    def test_context_length_masks_tail_without_large_intermediate(self):
+        q = torch.ones(2, 1, 1, 128, dtype=torch.float8_e4m3fn)
+        weights = torch.ones(2, 1, dtype=torch.float32)
+        pool = self._pool(num_blocks=4, block_size=2)
+        block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32)
+        lengths = torch.tensor([[1], [3]], dtype=torch.int32)
+
+        out = _fp8_paged_indexer_score_sm120(
+            q,
+            weights,
+            pool,
+            block_table,
+            lengths,
+            block_size=2,
+            max_ctx_len=4,
+        )
+        self.assertTrue(torch.isfinite(out[0, :1]).all())
+        self.assertTrue(torch.isneginf(out[0, 1:]).all())
+        self.assertTrue(torch.isfinite(out[1, :3]).all())
+        self.assertTrue(torch.isneginf(out[1, 3:]).all())
+
+    def test_block_table_capacity_is_validated(self):
+        q = torch.ones(1, 1, 1, 128, dtype=torch.float8_e4m3fn)
+        weights = torch.ones(1, 1, dtype=torch.float32)
+        pool = self._pool(num_blocks=1, block_size=2)
+        with self.assertRaisesRegex(ValueError, "block-table capacity"):
+            _fp8_paged_indexer_score_sm120(
+                q,
+                weights,
+                pool,
+                torch.tensor([[0]], dtype=torch.int32),
+                torch.tensor([[2]], dtype=torch.int32),
+                block_size=2,
+                max_ctx_len=3,
+            )
 
 
 if __name__ == "__main__":
