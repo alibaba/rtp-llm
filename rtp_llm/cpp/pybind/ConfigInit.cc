@@ -453,6 +453,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
+        .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("multi_task_prompt", &KVCacheConfig::multi_task_prompt)
         .def_readwrite("multi_task_prompt_str", &KVCacheConfig::multi_task_prompt_str)
@@ -513,7 +514,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      1,
+                                      2,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -568,21 +569,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
                                       self.dsv4_fixed_pool_use_memory,
-                                      self.block_tree_full_prefix_scan_interval_ms);
+                                      self.block_tree_full_prefix_scan_interval_ms,
+                                      self.write_cache_sync);
             },
             [](py::tuple t) {
-                constexpr size_t kFieldCount = 55;
+                constexpr size_t kFieldCount = 56;
                 if (t.size() != kFieldCount + 2 || t[0].cast<std::string>() != "KVCacheConfig"
-                    || t[1].cast<int>() != 1) {
+                    || t[1].cast<int>() != 2) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
                 KVCacheConfig c;
-                const auto value = [&](size_t index) { return t[index + 2]; };
+                const auto    value                    = [&](size_t index) { return t[index + 2]; };
                 c.reuse_cache                          = value(0).cast<bool>();
                 c.multi_task_prompt                    = value(1).cast<std::string>();
                 c.multi_task_prompt_str                = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens = value(3).cast<std::map<std::string, std::vector<int>>>();
+                c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
                 c.reserve_block_ratio                  = value(4).cast<int64_t>();
                 c.max_block_size_per_item              = value(5).cast<int>();
                 c.host_cache_size_mb                   = value(6).cast<int64_t>();
@@ -630,10 +632,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.reco_client_config                   = value(48).cast<std::string>();
                 c.device_cache_min_free_blocks         = value(49).cast<int64_t>();
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
-                c.dsv4_fixed_pool_blocks                         = value(51).cast<uint32_t>();
-                c.dsv4_hca_state_pool_blocks                    = value(52).cast<uint32_t>();
-                c.dsv4_fixed_pool_use_memory                    = value(53).cast<bool>();
-                c.block_tree_full_prefix_scan_interval_ms             = value(54).cast<int64_t>();
+                c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
+                c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
+                c.dsv4_fixed_pool_use_memory                      = value(53).cast<bool>();
+                c.block_tree_full_prefix_scan_interval_ms         = value(54).cast<int64_t>();
+                c.write_cache_sync                                = value(55).cast<bool>();
                 return c;
             }));
 

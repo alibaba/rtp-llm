@@ -634,8 +634,10 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheA
     auto          backend        = std::make_shared<ShutdownCountingStorageBackend>(shutdown_count, resolved_count);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache = true;
+    kv_cache_config.write_cache_sync    = true;
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
     ASSERT_NE(cache, nullptr);
+    EXPECT_TRUE(cache->config().write_cache_sync);
     allocator->attachBlockTreeCache(cache);
 
     std::weak_ptr<KVCacheAllocator> weak_allocator = allocator;
@@ -1279,7 +1281,7 @@ TEST_F(BlockTreeCacheFactoryTest, PhysicallyDifferentGroupsShareGroupSetResource
 
 TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
     const CacheConfig config    = makeHybridConfig(/*independent_pools=*/true);
-    auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto              allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig     kv_cache_config;
     kv_cache_config.enable_host_cache  = true;
     kv_cache_config.host_cache_size_mb = 1;

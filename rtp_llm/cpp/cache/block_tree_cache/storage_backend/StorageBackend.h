@@ -87,7 +87,11 @@ public:
     void             match(StorageRequest request, MatchDone done);
     void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
-    void             write(StorageWriteTask task);
+    // Async mode returns whether the task was admitted. Sync mode returns the
+    // exact write result after source pins have been released. Sync writes
+    // from this backend's own I/O/completion callback are rejected to avoid
+    // self-deadlock.
+    bool write(StorageWriteTask task, bool synchronous = false);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
@@ -118,7 +122,7 @@ private:
     using Operation = std::function<void(Lifecycle outcome)>;
 
     std::shared_ptr<storage_backend_detail::StorageTaskState> prepare(StorageRequest request);
-    void                                                      dispatch(Operation operation);
+    bool                                                      dispatch(Operation operation);
     void                                                      taskFinished();
     std::shared_ptr<const CacheTopology>                      topology_;
     std::vector<DeviceBlockPoolPtr>                           device_pools_;

@@ -77,7 +77,7 @@ bool BlockTreeCache::init() {
     }
     RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
                      "pool_threads=%d, storage_backend=%s, "
-                     "device=%s, host=%s, disk=%s, remote=%s",
+                     "device=%s, host=%s, disk=%s, remote=%s, write_sync=%s",
                      tree_->groupSets().size(),
                      tree_->reusableGroupCount(),
                      config_.task_pool_size,
@@ -85,7 +85,8 @@ bool BlockTreeCache::init() {
                      config_.enable_device_cache ? "on" : "off",
                      config_.enable_host_cache ? "on" : "off",
                      config_.enable_disk_cache ? "on" : "off",
-                     config_.enable_remote_cache ? "on" : "off");
+                     config_.enable_remote_cache ? "on" : "off",
+                     config_.write_cache_sync ? "on" : "off");
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         RTP_LLM_LOG_INFO("  group_set[%zu] type=%s host_pool=%s disk_pool=%s",
                          group_set->groupSetId(),
@@ -158,7 +159,16 @@ void BlockTreeCache::insert(const CacheKeysType&                              ca
         storage_write = storer_.storeLocked(cache_keys, resources, target_tier, write_remote);
     }
     if (storage_write) {
-        storage_backend_->write(std::move(storage_write));
+        const bool success = storage_backend_->write(std::move(storage_write), config_.write_cache_sync);
+        if (config_.write_cache_sync && !success) {
+            RTP_LLM_LOG_WARNING("synchronous remote cache write did not complete successfully");
+        }
+    }
+    if (config_.write_cache_sync && (target_tier == Tier::HOST || target_tier == Tier::DISK)) {
+        // WRITE_CACHE_SYNC is a smoke/compatibility switch, not a per-request
+        // production primitive. HOST/DISK settlement intentionally waits for
+        // every task already admitted to the shared BlockTree pool.
+        task_pool_->waitForIdle();
     }
 }
 

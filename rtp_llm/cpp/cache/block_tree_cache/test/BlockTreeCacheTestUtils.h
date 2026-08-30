@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <condition_variable>
 #include <deque>
@@ -78,6 +79,7 @@ class CallbackBarrier {
 public:
     void enterAndWait();
     void waitUntilEntered(size_t expected_count = 1);
+    bool waitUntilEnteredFor(size_t expected_count, std::chrono::milliseconds timeout);
     void release();
 
 private:
@@ -145,14 +147,14 @@ public:
         bool            armed_{false};
     };
 
-    static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
-                                                     PerRankBlockTransferEnginePtr per_rank_transfer_engine);
+    static void   setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
+                                                       PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void   setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio);
     static void   refreshCandidateForTest(BlockTreeCache& cache, TreeNode* node, size_t group_set_id);
     static void   markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path);
     static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
-    static void runMaintenanceForTest(BlockTreeCache& cache);
-    static void beginStoreShutdownForTest(BlockTreeCache& cache);
+    static void   runMaintenanceForTest(BlockTreeCache& cache);
+    static void   beginStoreShutdownForTest(BlockTreeCache& cache);
     static bool
     demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
@@ -167,7 +169,7 @@ private:
 class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
-                                                bool perform_successful_transfers = true);
+                                                bool                            perform_successful_transfers = true);
 
     std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override;
 

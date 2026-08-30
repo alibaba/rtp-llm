@@ -226,9 +226,10 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     kv_cache_group.add_argument(
         "--write_cache_sync",
         env_name="WRITE_CACHE_SYNC",
+        bind_to=(kv_cache_config, "write_cache_sync"),
         type=str2bool,
-        default=None,
-        help="Deprecated compatibility option. BlockTree cache settlement is always coordinated internally.",
+        default=False,
+        help="Compatibility option: wait for the current remote write and all HOST/DISK BlockTree tasks before insert returns.",
     )
 
     kv_cache_group.add_argument(

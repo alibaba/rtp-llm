@@ -110,6 +110,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_eviction_policy, "fifo")
         self.assertEqual(config.device_cache_min_free_blocks, 0)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        self.assertFalse(config.write_cache_sync)
 
     def test_legacy_kv_cache_cli_aliases(self):
         config = setup_args(
@@ -134,6 +135,7 @@ class GenerateConfigTest(TestCase):
         self.assertTrue(config.enable_disk_cache)
         self.assertEqual(config.disk_cache_paths, "/tmp/legacy-cache")
         self.assertEqual(config.disk_cache_size_mb, 4096)
+        self.assertTrue(config.write_cache_sync)
 
     @patch.dict(
         "os.environ",
@@ -193,10 +195,11 @@ class GenerateConfigTest(TestCase):
         config.dsv4_fixed_pool_use_memory = True
         config.memory_cache_max_descriptors_per_transfer_batch = 17
         config.block_tree_full_prefix_scan_interval_ms = 5000
+        config.write_cache_sync = True
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 57)
-        self.assertEqual(state[:2], ("KVCacheConfig", 1))
+        self.assertEqual(len(state), 58)
+        self.assertEqual(state[:2], ("KVCacheConfig", 2))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -211,6 +214,7 @@ class GenerateConfigTest(TestCase):
         self.assertTrue(restored.dsv4_fixed_pool_use_memory)
         self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 17)
         self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
+        self.assertTrue(restored.write_cache_sync)
 
         config.enable_disk_cache = True
         restored_enabled = pickle.loads(pickle.dumps(config))

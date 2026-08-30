@@ -14,10 +14,13 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
+
+using block_tree_cache_test::BoundedThread;
 
 TEST(StorageBackendExecutorTest, RejectsZeroDimensions) {
     EXPECT_THROW((void)makeStorageBackendExecutor(/*thread_count=*/0, /*queue_size=*/1), std::invalid_argument);
@@ -121,14 +124,17 @@ public:
     }
 
     bool submit(Task task) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (throw_on_submit_) {
-            throw std::runtime_error("submit failed");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (throw_on_submit_) {
+                throw std::runtime_error("submit failed");
+            }
+            if (reject_ || !started_ || stopped_) {
+                return false;
+            }
+            tasks_.push_back(std::move(task));
         }
-        if (reject_ || !started_ || stopped_) {
-            return false;
-        }
-        tasks_.push_back(std::move(task));
+        cv_.notify_all();
         return true;
     }
 
@@ -155,9 +161,48 @@ public:
         return tasks.size();
     }
 
+    bool runNext() {
+        Task task;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (tasks_.empty()) {
+                return false;
+            }
+            task = std::move(tasks_.front());
+            tasks_.pop_front();
+        }
+        task();
+        if (duplicate_) {
+            task();
+        }
+        return true;
+    }
+
+    bool runLast() {
+        Task task;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (tasks_.empty()) {
+                return false;
+            }
+            task = std::move(tasks_.back());
+            tasks_.pop_back();
+        }
+        task();
+        if (duplicate_) {
+            task();
+        }
+        return true;
+    }
+
     size_t pendingCount() {
         std::lock_guard<std::mutex> lock(mutex_);
         return tasks_.size();
+    }
+
+    bool waitForPendingCount(size_t expected) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [&] { return tasks_.size() >= expected; });
     }
 
     void setReject(bool value) {
@@ -176,14 +221,15 @@ public:
     }
 
 private:
-    std::mutex       mutex_;
-    std::deque<Task> tasks_;
-    bool             start_result_{true};
-    bool             started_{false};
-    bool             stopped_{false};
-    bool             reject_{false};
-    bool             duplicate_{false};
-    bool             throw_on_submit_{false};
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    std::deque<Task>        tasks_;
+    bool                    start_result_{true};
+    bool                    started_{false};
+    bool                    stopped_{false};
+    bool                    reject_{false};
+    bool                    duplicate_{false};
+    bool                    throw_on_submit_{false};
 };
 
 class TestBackend: public StorageBackend {
@@ -198,6 +244,12 @@ public:
     void blockMatch() {
         std::lock_guard<std::mutex> lock(mutex_);
         match_released_ = false;
+        match_entered_  = false;
+    }
+
+    bool waitUntilMatchEntered() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(5), [this] { return match_entered_; });
     }
 
     void releaseMatch() {
@@ -263,6 +315,8 @@ protected:
             fail_match_ = false;
             throw std::runtime_error("match failed");
         }
+        match_entered_ = true;
+        cv_.notify_all();
         cv_.wait(lock, [this] { return match_released_; });
         return {request.handles.size(), nullptr};
     }
@@ -296,6 +350,7 @@ private:
     mutable std::mutex      mutex_;
     std::condition_variable cv_;
     bool                    match_released_{true};
+    bool                    match_entered_{false};
     bool                    fail_match_{false};
     bool                    fail_read_{false};
     bool                    fail_write_{false};
@@ -425,7 +480,7 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
     });
     EXPECT_EQ(match_completions, 1u);
 
-    backend.write(backend.prepareWrite(makeRequest(block)));
+    EXPECT_FALSE(backend.write(backend.prepareWrite(makeRequest(block))));
     EXPECT_EQ(pool->refCount(block), 1u);
 
     executor->setReject(false);
@@ -455,7 +510,7 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     EXPECT_EQ(pool->refCount(block), 1u);
 
     backend.failNextWrite();
-    backend.write(backend.prepareWrite(makeRequest(block)));
+    EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
 
@@ -466,6 +521,258 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     EXPECT_FALSE(match_success);
     pool->decRef(block);
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, SynchronousWritesWaitForTheirOwnCompletion) {
+    for (const bool complete_first : {true, false}) {
+        SCOPED_TRACE(complete_first ? "complete A first" : "complete B first");
+        auto pool         = std::make_shared<TestBlockPool>();
+        auto first_block  = pool->malloc().value();
+        auto second_block = pool->malloc().value();
+        pool->incRef(first_block);
+        pool->incRef(second_block);
+        auto executor = std::make_shared<HoldingExecutor>();
+        auto backend  = std::make_shared<TestBackend>(/*init_result=*/true, executor);
+        ASSERT_TRUE(initBackend(*backend, pool));
+
+        BoundedThread<bool> first([backend, first_block] {
+            return backend->write(backend->prepareWrite(makeRequest(first_block)), /*synchronous=*/true);
+        });
+        if (!executor->waitForPendingCount(1)) {
+            executor->runAll();
+            FAIL() << "write A was not submitted";
+        }
+        BoundedThread<bool> second([backend, second_block] {
+            return backend->write(backend->prepareWrite(makeRequest(second_block)), /*synchronous=*/true);
+        });
+        if (!executor->waitForPendingCount(2)) {
+            executor->runAll();
+            FAIL() << "write B was not submitted";
+        }
+        EXPECT_EQ(pool->refCount(first_block), 2u);
+        EXPECT_EQ(pool->refCount(second_block), 2u);
+
+        BoundedThread<bool>* completed       = complete_first ? &first : &second;
+        BoundedThread<bool>* waiting         = complete_first ? &second : &first;
+        const BlockIdxType   completed_block = complete_first ? first_block : second_block;
+        const BlockIdxType   waiting_block   = complete_first ? second_block : first_block;
+        ASSERT_TRUE(complete_first ? executor->runNext() : executor->runLast());
+        if (completed->waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
+            executor->runAll();
+            FAIL() << "completed write did not wake its own waiter";
+        }
+        EXPECT_TRUE(completed->get());
+        EXPECT_EQ(waiting->waitFor(std::chrono::milliseconds(50)), std::future_status::timeout)
+            << "completion of one write must not wake the other synchronous write";
+        EXPECT_EQ(pool->refCount(completed_block), 1u);
+        EXPECT_EQ(pool->refCount(waiting_block), 2u);
+
+        ASSERT_TRUE(executor->runNext());
+        if (waiting->waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
+            FAIL() << "remaining write did not wake after its own completion";
+        }
+        EXPECT_TRUE(waiting->get());
+        EXPECT_EQ(pool->refCount(waiting_block), 1u);
+        pool->decRef(first_block);
+        pool->decRef(second_block);
+        backend->shutdown();
+    }
+}
+
+TEST(StorageBackendTest, SynchronousWriteFailuresNeverHangAndReleasePins) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    auto backend  = std::make_shared<TestBackend>(/*init_result=*/true, executor);
+    ASSERT_TRUE(initBackend(*backend, pool));
+
+    backend->failNextWrite();
+    BoundedThread<bool> io_failure(
+        [backend, block] { return backend->write(backend->prepareWrite(makeRequest(block)), /*synchronous=*/true); });
+    if (!executor->waitForPendingCount(1)) {
+        executor->runAll();
+        FAIL() << "failing write was not submitted";
+    }
+    ASSERT_TRUE(executor->runNext());
+    if (io_failure.waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
+        FAIL() << "writeImpl failure did not wake synchronous waiter";
+    }
+    EXPECT_FALSE(io_failure.get());
+    EXPECT_EQ(pool->refCount(block), 1u);
+
+    const auto synchronous_rejection_finishes = [&](const char* path) {
+        BoundedThread<bool> write([backend, block] {
+            return backend->write(backend->prepareWrite(makeRequest(block)), /*synchronous=*/true);
+        });
+        auto                status = write.waitFor(std::chrono::seconds(5));
+        if (status != std::future_status::ready) {
+            executor->runAll();
+            status = write.waitFor(std::chrono::seconds(5));
+        }
+        if (status != std::future_status::ready) {
+            ADD_FAILURE() << path << " synchronous write did not finish after executor drain";
+            return false;
+        }
+        EXPECT_FALSE(write.get()) << path;
+        EXPECT_EQ(pool->refCount(block), 1u) << path;
+        return true;
+    };
+
+    executor->setReject(true);
+    ASSERT_TRUE(synchronous_rejection_finishes("executor rejection"));
+    executor->setReject(false);
+    executor->setThrowOnSubmit(true);
+    ASSERT_TRUE(synchronous_rejection_finishes("executor throw"));
+    executor->setThrowOnSubmit(false);
+
+    backend->shutdown();
+    ASSERT_TRUE(synchronous_rejection_finishes("stopped backend"));
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, SynchronousWriteDuringStoppingReturnsFalseAndReleasesPins) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    auto backend  = std::make_shared<TestBackend>(/*init_result=*/true, executor);
+    backend->blockMatch();
+    ASSERT_TRUE(initBackend(*backend, pool));
+    backend->match(makeRequest(NULL_BLOCK_IDX), [](size_t, auto, bool success) { EXPECT_TRUE(success); });
+
+    BoundedThread<void> shutdown([backend] { backend->shutdown(); });
+    if (!backend->waitUntilMatchEntered()) {
+        backend->releaseMatch();
+        if (shutdown.waitFor(std::chrono::seconds(5)) == std::future_status::ready) {
+            shutdown.get();
+        }
+        FAIL() << "accepted match did not enter while shutdown was stopping";
+    }
+
+    BoundedThread<bool> stopping_write(
+        [backend, block] { return backend->write(backend->prepareWrite(makeRequest(block)), /*synchronous=*/true); });
+    if (stopping_write.waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
+        backend->releaseMatch();
+        if (shutdown.waitFor(std::chrono::seconds(5)) == std::future_status::ready) {
+            shutdown.get();
+        }
+        executor->runAll();
+        if (stopping_write.waitFor(std::chrono::seconds(5)) == std::future_status::ready) {
+            (void)stopping_write.get();
+        }
+        FAIL() << "synchronous write blocked while backend was stopping";
+    }
+    EXPECT_FALSE(stopping_write.get());
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend->releaseMatch();
+    if (shutdown.waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
+        FAIL() << "shutdown did not finish after releasing the accepted match";
+    }
+    shutdown.get();
+    EXPECT_TRUE(backend->shutdownCalled());
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, SynchronousWriteFromOwnCallbacksIsRejectedWithoutDispatch) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    auto backend  = std::make_shared<TestBackend>(/*init_result=*/true, executor);
+    ASSERT_TRUE(initBackend(*backend, pool));
+
+    struct CallbackResult {
+        std::atomic<bool> called{false};
+        std::atomic<bool> callback_success{false};
+        std::atomic<bool> write_result{true};
+
+        void markEntered() {
+            {
+                std::lock_guard<std::mutex> lock(entry_mutex);
+                entered = true;
+            }
+            entry_cv.notify_all();
+        }
+
+        bool waitUntilEntered() {
+            std::unique_lock<std::mutex> lock(entry_mutex);
+            return entry_cv.wait_for(lock, std::chrono::seconds(5), [this] { return entered; });
+        }
+
+    private:
+        std::mutex              entry_mutex;
+        std::condition_variable entry_cv;
+        bool                    entered{false};
+    };
+    const auto run_callback_task = [&](const char* path, const std::shared_ptr<CallbackResult>& result) {
+        BoundedThread<bool> run([executor] { return executor->runNext(); });
+        auto                status = run.waitFor(std::chrono::seconds(5));
+        if (status != std::future_status::ready) {
+            if (!result->waitUntilEntered()) {
+                ADD_FAILURE() << path << " callback task was not claimed by the bounded worker";
+                return false;
+            }
+            status = run.waitFor(std::chrono::milliseconds(50));
+        }
+        if (status != std::future_status::ready) {
+            if (!executor->waitForPendingCount(1)) {
+                status = run.waitFor(std::chrono::milliseconds(0));
+                if (status != std::future_status::ready) {
+                    ADD_FAILURE() << path << " callback blocked without submitting a nested write";
+                    return false;
+                }
+            } else {
+                BoundedThread<bool> nested([executor] { return executor->runNext(); });
+                if (nested.waitFor(std::chrono::seconds(5)) != std::future_status::ready) {
+                    ADD_FAILURE() << path << " nested write task did not finish during bounded cleanup";
+                    return false;
+                }
+                EXPECT_TRUE(nested.get()) << path;
+                status = run.waitFor(std::chrono::seconds(5));
+            }
+        }
+        if (status != std::future_status::ready) {
+            ADD_FAILURE() << path << " callback remained blocked after confirmed nested write completion";
+            return false;
+        }
+        EXPECT_TRUE(run.get()) << path;
+        return true;
+    };
+
+    auto match_result = std::make_shared<CallbackResult>();
+    backend->match(makeRequest(NULL_BLOCK_IDX), [backend, match_result, block](size_t, auto, bool success) {
+        match_result->callback_success.store(success);
+        match_result->markEntered();
+        match_result->write_result.store(
+            backend->write(backend->prepareWrite(makeRequest(block)), /*synchronous=*/true));
+        match_result->called.store(true);
+    });
+    ASSERT_TRUE(run_callback_task("match", match_result));
+    EXPECT_TRUE(match_result->called.load());
+    EXPECT_TRUE(match_result->callback_success.load());
+    EXPECT_FALSE(match_result->write_result.load());
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+
+    auto read_result = std::make_shared<CallbackResult>();
+    backend->read(makeRequest(block), nullptr, [backend, read_result, block](bool success) {
+        read_result->callback_success.store(success);
+        read_result->markEntered();
+        read_result->write_result.store(
+            backend->write(backend->prepareWrite(makeRequest(block)), /*synchronous=*/true));
+        read_result->called.store(true);
+    });
+    ASSERT_TRUE(run_callback_task("read", read_result));
+    EXPECT_TRUE(read_result->called.load());
+    EXPECT_TRUE(read_result->callback_success.load());
+    EXPECT_FALSE(read_result->write_result.load());
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+
+    backend->shutdown();
+    EXPECT_TRUE(backend->shutdownCalled());
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, DuplicateExecutorInvocationCompletesExactlyOnce) {
@@ -631,7 +938,7 @@ TEST(StorageBackendTest, WritePinsEachPhysicalBlockOnceUntilCompletion) {
 
     auto task = backend.prepareWrite(makeRequest(block, 2));
     EXPECT_EQ(pool->refCount(block), 2u);
-    backend.write(std::move(task));
+    EXPECT_TRUE(backend.write(std::move(task)));
     EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(backend.writeHandleCount(), 2u);
@@ -651,7 +958,7 @@ TEST(StorageBackendTest, SharedPoolPinsAndReleasesPhysicalBlockOnce) {
     }));
 
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{0, block}, {1, block}}}};
-    backend.write(backend.prepareWrite(std::move(request)));
+    EXPECT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
     EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
