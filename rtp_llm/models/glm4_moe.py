@@ -443,6 +443,10 @@ class Glm4Moe(DeepSeekV2):
         config.norm_type = "rmsnorm"
 
         cls._from_hf(config, ckpt_path)
+        resolve_config_dtype(config, ckpt_path)
+        # GLM's reference implementation computes the router projection in fp32;
+        # doing it in bf16 reorders near-ties in the top-8-of-160 selection.
+        config.router_logits_fp32 = True
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0
