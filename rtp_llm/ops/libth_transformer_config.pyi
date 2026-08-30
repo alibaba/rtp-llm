@@ -1136,6 +1136,8 @@ class ParallelismConfig:
     ffn_tp_size: int
     local_rank: int
     local_world_size: int
+    ktp_rank: int
+    ktp_size: int
     pp_size: int
     prefill_cp_config: ...
     tp_rank: int
@@ -1155,6 +1157,10 @@ class ParallelismConfig:
     def get_ffn_tp_rank(self) -> int:
         ...
     def get_ffn_tp_size(self) -> int:
+        ...
+    def get_ktp_rank(self) -> int:
+        ...
+    def get_ktp_size(self) -> int:
         ...
     def to_string(self) -> str:
         ...

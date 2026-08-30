@@ -181,6 +181,7 @@ private:
     const rtp_llm::ExecProperties            device_props_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
+    const int64_t                            ktp_size_;
     const GptModelDescription                description_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>          cache_manager_;  // For cache_store access
@@ -237,6 +238,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
+    ktp_size_(params.parallelism_config.ktp_size),
     description_(params.description),
     cache_manager_(params.cache_manager),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
@@ -335,6 +337,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
+    init_resources.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+    init_resources.max_decode_graph_batch_size = params.concurrency_config.concurrency_limit;
     if (enable_cuda_graph_ && !params.hw_kernel_config.decode_capture_batch_sizes.empty()) {
         init_resources.max_decode_graph_batch_size =
             *std::max_element(params.hw_kernel_config.decode_capture_batch_sizes.begin(),
@@ -478,7 +482,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
     chunk_prefill_token_budget_ = queryChunkPrefillTokenBudget();
-
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
     if (device_props_.enable_prefill_cp) {

@@ -92,7 +92,10 @@ void registerPyOpDefs(pybind11::module& m) {
                       "Max concurrent context (prefill) batches from FIFO scheduler")
         .def_readonly("max_decode_graph_batch_size",
                       &PyModelInitResources::max_decode_graph_batch_size,
-                      "Maximum Decode batch size reserved by CUDA Graph capture");
+                      "Maximum Decode batch size reserved by CUDA Graph capture")
+        .def_readonly("decode_capture_batch_sizes",
+                      &PyModelInitResources::decode_capture_batch_sizes,
+                      "Configured Decode CUDA Graph batch sizes");
 
     pybind11::class_<caffe2::TypeMeta>(m, "TypeMeta").def(pybind11::init<>());
 
@@ -261,7 +264,14 @@ void registerPyOpDefs(pybind11::module& m) {
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
         .def_readwrite("force_disable_sp_run",
                        &PyModelInputs::force_disable_sp_run,
-                       "Disable speculative decoding for this homogeneous request batch");
+                       "Disable speculative decoding for this homogeneous request batch")
+        .def_readwrite("ktp_valid_batch_sizes", &PyModelInputs::ktp_valid_batch_sizes)
+        .def_readwrite("ktp_valid_row_mask", &PyModelInputs::ktp_valid_row_mask)
+        .def_readwrite("ktp_local_real_batch", &PyModelInputs::ktp_local_real_batch)
+        .def_readwrite("ktp_common_physical_batch", &PyModelInputs::ktp_common_physical_batch)
+        .def_readwrite("ktp_common_graph_bucket", &PyModelInputs::ktp_common_graph_bucket)
+        .def_readwrite("ktp_use_cuda_graph", &PyModelInputs::ktp_use_cuda_graph)
+        .def_readwrite("ktp_all_idle", &PyModelInputs::ktp_all_idle);
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
