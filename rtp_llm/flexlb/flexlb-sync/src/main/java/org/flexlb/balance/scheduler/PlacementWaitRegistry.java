@@ -293,12 +293,11 @@ final class PlacementWaitRegistry implements AutoCloseable {
                 removeLaneIfEmpty(key, lane);
                 return null;
             }
+            // scheduleIfEligible validated the capacity edge for this lane.
+            // Keep consuming that opportunity until an authoritative attempt
+            // blocks: a follower may have parked behind the active head after
+            // the edge and therefore has a newer blockedAtVersion of its own.
             Entry entry = lane.waiting.first();
-            if (availability.lastChangedSequence(key)
-                    <= entry.blockedAtVersion) {
-                lane.scheduled = false;
-                return null;
-            }
             lane.waiting.remove(entry);
             lane.active = entry;
             return new Candidate(

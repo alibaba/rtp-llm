@@ -286,6 +286,112 @@ class PlacementWaitRegistryTest {
 
     @Test
     @Timeout(10)
+    void capacityOpportunityContinuesPastWorkParkedBehindActiveHead()
+            throws Exception {
+        PlacementAvailability availability = new PlacementAvailability();
+        try (PlacementWaitRegistry coordinator =
+                     new PlacementWaitRegistry(availability)) {
+            CountDownLatch headRetryEntered = new CountDownLatch(1);
+            CountDownLatch releaseHead = new CountDownLatch(1);
+            CountDownLatch followerRetried = new CountDownLatch(1);
+            AtomicInteger headAttempts = new AtomicInteger();
+            AtomicInteger followerAttempts = new AtomicInteger();
+
+            initialPark(coordinator, work(0, false, () -> {
+                if (headAttempts.incrementAndGet() == 1) {
+                    return blocked(PREFILL);
+                }
+                headRetryEntered.countDown();
+                assertTrue(releaseHead.await(2, TimeUnit.SECONDS));
+                return finished();
+            }));
+
+            availability.capacityChanged(PREFILL);
+            assertTrue(headRetryEntered.await(2, TimeUnit.SECONDS));
+
+            OrderedWork follower = work(0, false, () -> {
+                if (followerAttempts.incrementAndGet() == 1) {
+                    // The real scheduler reaches this state when selection sees
+                    // spare capacity but ordering keeps it behind the active head.
+                    return blocked(PREFILL);
+                }
+                followerRetried.countDown();
+                return finished();
+            });
+            initialPark(coordinator, follower);
+            releaseHead.countDown();
+
+            assertTrue(
+                    followerRetried.await(2, TimeUnit.SECONDS),
+                    "the live capacity opportunity stopped after its active head");
+            assertEquals(2, headAttempts.get());
+            assertEquals(2, followerAttempts.get());
+        }
+    }
+
+    @Test
+    @Timeout(20)
+    void liveCapacityOpportunityDrainsNewFollowersUntilFirstRealMiss()
+            throws Exception {
+        int requests = 10_000;
+        int availableSeats = 128;
+        PlacementAvailability availability = new PlacementAvailability();
+        try (PlacementWaitRegistry coordinator =
+                     new PlacementWaitRegistry(availability)) {
+            CountDownLatch headRetryEntered = new CountDownLatch(1);
+            CountDownLatch releaseHead = new CountDownLatch(1);
+            AtomicInteger headAttempts = new AtomicInteger();
+            initialPark(coordinator, work(0, false, () -> {
+                if (headAttempts.incrementAndGet() == 1) {
+                    return blocked(PREFILL);
+                }
+                headRetryEntered.countDown();
+                assertTrue(releaseHead.await(5, TimeUnit.SECONDS));
+                return finished();
+            }));
+
+            availability.capacityChanged(PREFILL);
+            assertTrue(headRetryEntered.await(2, TimeUnit.SECONDS));
+
+            AtomicInteger seats = new AtomicInteger(availableSeats);
+            AtomicInteger retries = new AtomicInteger();
+            AtomicIntegerArray attempts = new AtomicIntegerArray(requests);
+            List<PlacementWaitRegistry.Handle> handles =
+                    new ArrayList<>(requests);
+            for (int index = 0; index < requests; index++) {
+                int request = index;
+                handles.add(initialPark(coordinator, work(0, false, () -> {
+                    if (attempts.incrementAndGet(request) == 1) {
+                        return blocked(PREFILL);
+                    }
+                    retries.incrementAndGet();
+                    return seats.getAndDecrement() > 0
+                            ? finished() : blocked(PREFILL);
+                })));
+            }
+
+            releaseHead.countDown();
+            assertTrue(awaitAttemptsAtLeast(
+                    retries, availableSeats + 1, 5_000));
+            Thread.sleep(100L);
+
+            assertEquals(2, headAttempts.get());
+            assertEquals(
+                    availableSeats + 1,
+                    retries.get(),
+                    "the opportunity must stop at its first real miss");
+            assertEquals(requests - availableSeats, coordinator.size());
+            for (int index = 0; index < requests; index++) {
+                assertTrue(
+                        attempts.get(index) <= 2,
+                        "request " + index + " was retried more than once");
+            }
+            handles.forEach(PlacementWaitRegistry.Handle::close);
+        }
+    }
+
+    @Test
+    @Timeout(10)
     void cancelledEntriesAreRemovedWithoutWaitingForAnotherSignal()
             throws Exception {
         PlacementAvailability availability = new PlacementAvailability();
