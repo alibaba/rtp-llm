@@ -81,6 +81,7 @@ struct GroupSpec {
 };
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
+    CacheConfig             config;
     std::vector<CacheGroup> topology_groups;
     CacheLayer              layer_tags;
     topology_groups.reserve(groups.size());
@@ -90,7 +91,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         group.tag    = spec.tag;
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
         group.policy = defaultCacheGroupPolicy(spec.tag == "linear" ? CacheGroupType::LINEAR : CacheGroupType::FULL);
-        // This integration fixture exercises boundary association, not tail-only
+        // This integration fixture exercises group-input association, not tail-only
         // transfer policy; retain all four physical rows while using distinct
         // group types so a type/tag permutation bug is observable.
         group.policy.active_tail_blocks = 0;
@@ -101,10 +102,10 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         layer_tags.push_back(spec.tag);
     }
 
-    CacheConfig config(std::move(topology_groups), {std::move(layer_tags)}, /*main_layer_num=*/1);
-    config.dtype                     = DataType::TYPE_INT8;
-    config.block_num                 = kPhysicalBlocks;
-    config.seq_size_per_block        = groups.front().tokens_per_block;
+    config                    = CacheConfig(std::move(topology_groups), {std::move(layer_tags)}, /*main_layer_num=*/1);
+    config.dtype              = DataType::TYPE_INT8;
+    config.block_num          = kPhysicalBlocks;
+    config.seq_size_per_block = groups.front().tokens_per_block;
     config.use_opaque_kv_cache_store = true;
     return config;
 }
@@ -125,8 +126,7 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
         layouts.emplace(group.tag,
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{{std::move(storage), torch::Tensor()}}));
     }
-    auto topology = std::make_shared<const CacheConfig>(config.groups(), config.layers(), config.layer_num);
-    return {GroupedCacheLayerLayout(std::move(topology), std::move(layouts)), std::move(bases)};
+    return {GroupedCacheLayerLayout(config, std::move(layouts)), std::move(bases)};
 }
 
 class RecordingCacheStore: public CacheStore {
@@ -465,12 +465,12 @@ Scenario makeScenario(const std::string& name) {
     if (name == "multi_tag_sorted_declaration") {
         return makeMultiTagScenario(/*declare_in_sorted_order=*/true);
     }
-    if (name == "missing_boundary_tags") {
+    if (name == "missing_group_tags") {
         auto scenario = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
         scenario.inputs.kv_cache_group_tags.clear();
         return scenario;
     }
-    if (name == "reordered_boundary_tags") {
+    if (name == "reordered_group_tags") {
         auto scenario                       = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
         scenario.inputs.kv_cache_group_tags = {"linear", "full"};
         auto order                          = torch::tensor({1, 0}, torch::kInt64);
@@ -482,12 +482,12 @@ Scenario makeScenario(const std::string& name) {
             scenario.inputs.kv_cache_group_types.index_select(0, order).contiguous().pin_memory();
         return scenario;
     }
-    if (name == "duplicate_boundary_tags") {
+    if (name == "duplicate_group_tags") {
         auto scenario                       = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
         scenario.inputs.kv_cache_group_tags = {"full", "full"};
         return scenario;
     }
-    if (name == "unknown_boundary_tag") {
+    if (name == "unknown_group_tag") {
         auto scenario                       = makeMultiTagScenario(/*declare_in_sorted_order=*/false);
         scenario.inputs.kv_cache_group_tags = {"full", "unknown"};
         return scenario;
@@ -617,7 +617,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     return serializeResult(*cache_store, scenario.base_addresses);
 }
 
-py::dict runInvalidBoundaryDiagnostics(py::object py_model, const std::string& scenario_name) {
+py::dict runInvalidGroupInputDiagnostics(py::object py_model, const std::string& scenario_name) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0,
@@ -683,8 +683,8 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),
           py::arg("scenario_name"));
-    m.def("run_invalid_boundary_diagnostics",
-          &rtp_llm::test::runInvalidBoundaryDiagnostics,
+    m.def("run_invalid_group_input_diagnostics",
+          &rtp_llm::test::runInvalidGroupInputDiagnostics,
           py::arg("py_model"),
           py::arg("scenario_name"));
 }

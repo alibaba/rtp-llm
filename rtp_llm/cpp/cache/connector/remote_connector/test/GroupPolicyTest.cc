@@ -139,7 +139,7 @@ public:
         for (const auto& group : topology_->groups()) {
             groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology_->layers().size())));
         }
-        return GroupedCacheLayerLayout(topology_, std::move(groups));
+        return GroupedCacheLayerLayout(*topology_, std::move(groups));
     }
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                               int                            seq_len,

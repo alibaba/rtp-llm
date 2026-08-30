@@ -148,8 +148,7 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     ratios.push_back(0);
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, ratios);
     return mc;
 }
@@ -372,6 +371,22 @@ static void expectSingleManagerPoolCountersEq(const BlockPoolPtr& pool, const Si
     EXPECT_EQ(pool->connectorRefBlocksNum(), expected.connector_refs);
 }
 
+static CacheConfig cloneManagerConfig(const CacheConfig& source) {
+    CacheConfig target(source.groups(), source.layers(), source.layer_num);
+    target.use_typed_cache_regions                  = source.use_typed_cache_regions;
+    target.use_opaque_kv_cache_store                = source.use_opaque_kv_cache_store;
+    target.disable_decode_first_malloc_device_reuse = source.disable_decode_first_malloc_device_reuse;
+    target.dtype                                    = source.dtype;
+    target.use_mla                                  = source.use_mla;
+    target.enable_hybrid_attention                  = source.enable_hybrid_attention;
+    target.is_sparse                                = source.is_sparse;
+    target.block_num                                = source.block_num;
+    target.seq_size_per_block                       = source.seq_size_per_block;
+    target.linear_step                              = source.linear_step;
+    target.mtp_sub_configs                          = source.mtp_sub_configs;
+    return target;
+}
+
 static void expectInvalidSharedTopologyRejectedAtAllocatorConstruction(const CacheConfig& config,
                                                                        const std::string& expected_message) {
     ParallelismConfig parallelism_config;
@@ -379,7 +394,7 @@ static void expectInvalidSharedTopologyRejectedAtAllocatorConstruction(const Cac
     parallelism_config.tp_size                            = 2;
     parallelism_config.prefill_cp_config.kv_cache_sharded = true;
 
-    auto manager = std::make_shared<KVCacheManager>(config,
+    auto manager = std::make_shared<KVCacheManager>(cloneManagerConfig(config),
                                                     /*warmup=*/true,
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
@@ -410,7 +425,7 @@ static void expectOrdinarySingleManagerUsesHybridPoolWithReuseAndRollback(const 
     KVCacheConfig kv_cache_config;
     kv_cache_config.reuse_cache         = true;
     kv_cache_config.reserve_block_ratio = 20;
-    auto manager                        = std::make_shared<KVCacheManager>(roomy_config,
+    auto manager                        = std::make_shared<KVCacheManager>(cloneManagerConfig(roomy_config),
                                                     /*warmup=*/false,
                                                     /*metrics_reporter=*/nullptr,
                                                     kv_cache_config);
@@ -459,7 +474,7 @@ static void expectOrdinarySingleManagerUsesHybridPoolWithReuseAndRollback(const 
     ASSERT_EQ(tight_config.groupNums(), 1);
     const std::string tight_sole_tag = tight_config.soleGroupForLayer(0).tag;
     ASSERT_EQ(tight_config.group(tight_sole_tag).spec->type, expected_spec_type);
-    auto rollback_manager = std::make_shared<KVCacheManager>(tight_config, /*warmup=*/false);
+    auto rollback_manager = std::make_shared<KVCacheManager>(cloneManagerConfig(tight_config), /*warmup=*/false);
     ASSERT_TRUE(rollback_manager->init());
     auto rollback_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(rollback_manager->allocator_);
     ASSERT_NE(rollback_allocator, nullptr);
@@ -539,7 +554,7 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/true);
     ASSERT_TRUE(cache_manager->init());
 
     EXPECT_EQ(cache_manager->cacheConfig().block_num, 1);
@@ -552,7 +567,7 @@ TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_), nullptr);
 }
@@ -566,7 +581,7 @@ TEST_F(KVCacheManagerTest, InitRejectsSingleNullSpecAtAllocatorConstruction) {
 TEST_F(KVCacheManagerTest, InitAcceptsMultiGroupWithoutFullAttention) {
     auto cache_config = makeTwoLinearGroupManagerConfig();
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
     auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
     ASSERT_NE(allocator, nullptr);
@@ -580,7 +595,7 @@ TEST_F(KVCacheManagerTest, ConstructionRematerializesSynchronizedCapacityIntoMtp
         /*layer_num=*/1, /*block_num=*/2, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16));
     cache_config.mtp_sub_configs.push_back(mtp_config);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false);
 
     EXPECT_EQ(cache_manager->cacheConfig().block_num, 4u);
     ASSERT_EQ(cache_manager->cacheConfig().mtp_sub_configs.size(), 1u);
@@ -592,7 +607,7 @@ TEST_F(KVCacheManagerTest, ConstructionRematerializesSynchronizedCapacityIntoMtp
 
 TEST_F(KVCacheManagerTest, IndependentLinearOnlyMultiGroupInsertFreeReusesDeviceCache) {
     auto cache_config = makeTwoLinearGroupManagerConfig();
-    auto manager      = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto manager      = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
     auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
@@ -602,9 +617,9 @@ TEST_F(KVCacheManagerTest, IndependentLinearOnlyMultiGroupInsertFreeReusesDevice
     ASSERT_NE(pool0, pool1);
     const std::map<std::string, BlockPoolPtr> pools{{"linear0", pool0}, {"linear1", pool1}};
 
-    const int  seq_size_per_block = static_cast<int>(cache_config.seq_size_per_block);
+    const int  seq_size_per_block = static_cast<int>(manager->cacheConfig().seq_size_per_block);
     const int  seq_len            = 3 * seq_size_per_block + 1;
-    auto       seed_resource      = makeSingleManagerBatchResource(/*batch_size=*/1, cache_config);
+    auto       seed_resource      = makeSingleManagerBatchResource(/*batch_size=*/1, manager->cacheConfig());
     auto       seed_tokens        = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_len, seq_size_per_block);
     MallocInfo seed_malloc{seed_resource, seed_tokens};
     seed_malloc.enable_device_cache = false;
@@ -621,7 +636,7 @@ TEST_F(KVCacheManagerTest, IndependentLinearOnlyMultiGroupInsertFreeReusesDevice
     EXPECT_EQ(cached_dependency.ordinal, 1u);
 
     std::map<std::string, BlockIdxType> cached_blocks;
-    for (const auto& group : cache_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         const auto& tag    = group.tag;
         const auto& blocks = seed_resource->blocks(0, tag);
         ASSERT_EQ(blocks.size(), 4u) << "group " << tag;
@@ -648,7 +663,7 @@ TEST_F(KVCacheManagerTest, IndependentLinearOnlyMultiGroupInsertFreeReusesDevice
         EXPECT_EQ(pool->blockCacheRefBlocksNum(), 1u) << "group " << tag;
     }
 
-    auto       reuse_resource = makeSingleManagerBatchResource(/*batch_size=*/1, cache_config);
+    auto       reuse_resource = makeSingleManagerBatchResource(/*batch_size=*/1, manager->cacheConfig());
     auto       reuse_tokens   = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_len, seq_size_per_block);
     MallocInfo reuse_malloc{reuse_resource, reuse_tokens};
     reuse_malloc.enable_device_cache = true;
@@ -684,7 +699,7 @@ TEST_F(KVCacheManagerTest, IndependentLinearOnlyMultiGroupInsertFreeReusesDevice
     EXPECT_EQ(evicted_dependency.has_parent, cached_dependency.has_parent);
     EXPECT_EQ(evicted_dependency.parent_key, cached_dependency.parent_key);
     EXPECT_EQ(evicted_dependency.ordinal, cached_dependency.ordinal);
-    for (const auto& group : cache_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         const auto& tag = group.tag;
         ASSERT_EQ(evicted->blocks(0, tag).size(), 1u) << "group " << tag;
         EXPECT_EQ(evicted->blocks(0, tag)[0], cached_blocks.at(tag)) << "group " << tag;
@@ -701,7 +716,7 @@ TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
     auto cache_config = makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/0).kv_addr, nullptr);
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/3).kv_addr, nullptr);
@@ -730,7 +745,7 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     kv_cache_config.test_block_num = 6;
     auto cache_config =
         CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config), /*warmup=*/false);
 
     ASSERT_TRUE(cache_manager->init());
     auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
@@ -784,7 +799,7 @@ TEST_F(KVCacheManagerTest, OrdinarySinglePreservesHybridPoolConstructorAndCudaBa
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::DECODE;
 
-    auto manager = std::make_shared<KVCacheManager>(cache_config,
+    auto manager = std::make_shared<KVCacheManager>(std::move(cache_config),
                                                     /*warmup=*/false,
                                                     reporter,
                                                     kv_cache_config,
@@ -818,7 +833,7 @@ TEST_F(KVCacheManagerTest, OrdinarySinglePreservesLegacyBatchZeroForwardInsertio
     kv_cache_config.reuse_cache            = true;
     kv_cache_config.reserve_block_ratio    = 0;
     kv_cache_config.enable_gpu_prefix_tree = false;
-    auto manager                           = std::make_shared<KVCacheManager>(cache_config,
+    auto manager                           = std::make_shared<KVCacheManager>(std::move(cache_config),
                                                     /*warmup=*/false,
                                                     /*metrics_reporter=*/nullptr,
                                                     kv_cache_config);
@@ -834,8 +849,8 @@ TEST_F(KVCacheManagerTest, OrdinarySinglePreservesLegacyBatchZeroForwardInsertio
 
     const auto blocks = pool->malloc(/*num_blocks=*/6);
     ASSERT_EQ(blocks.size(), 6u);
-    auto              resource = makeSingleManagerBatchResource(/*batch_size=*/2, cache_config);
-    const std::string sole_tag = cache_config.soleGroupForLayer(0).tag;
+    auto              resource = makeSingleManagerBatchResource(/*batch_size=*/2, manager->cacheConfig());
+    const std::string sole_tag = manager->cacheConfig().soleGroupForLayer(0).tag;
     resource->setBatchBlocks(/*batch_id=*/0, sole_tag, {blocks[0], blocks[1], blocks[2]});
     resource->setBatchBlocks(/*batch_id=*/1, sole_tag, {blocks[3], blocks[4], blocks[5]});
     resource->cacheResource(0).setCacheKeysAndBlockDependencies(
@@ -888,7 +903,7 @@ TEST_F(KVCacheManagerTest, MultiGroupRemoteFailsBeforeAllocatorInitialization) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.reuse_cache         = true;
     kv_cache_config.enable_remote_cache = true;
-    auto cache_manager                  = std::make_shared<KVCacheManager>(cache_config,
+    auto cache_manager                  = std::make_shared<KVCacheManager>(std::move(cache_config),
                                                           /*warmup=*/false,
                                                           nullptr,
                                                           kv_cache_config,
@@ -907,7 +922,7 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
         KVCacheConfig kv_cache_config;
-        auto          cache_manager = std::make_shared<KVCacheManager>(config,
+        auto          cache_manager = std::make_shared<KVCacheManager>(std::move(config),
                                                               /*warmup=*/false,
                                                               nullptr,
                                                               kv_cache_config,
@@ -937,7 +952,7 @@ TEST_F(KVCacheManagerTest, MetricsThreadSmoke) {
     auto kmon_tags = kmonitor::MetricsTags();
     auto reporter  = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
 
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true, reporter);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/true, reporter);
 
     ASSERT_TRUE(cache_manager->init());
     EXPECT_TRUE(cache_manager->metrics_reporter_thread_.joinable());
@@ -950,7 +965,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     // Use non-warmup config so we have usable blocks.
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
     auto&        spec    = cache_manager->cacheConfig().soleGroupForLayer(0).spec;
@@ -999,7 +1014,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
 TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
     const int    block_src   = 1;
@@ -1048,7 +1063,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
 TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/10, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
 
     auto&        spec    = cache_manager->cacheConfig().soleGroupForLayer(0).spec;
@@ -1094,12 +1109,12 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
 
 TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
     const size_t free_before = manager->freeBlocksNum();
-    const int    spb         = static_cast<int>(manager_config.seq_size_per_block);
-    auto         resource    = makeDSV4BatchResource(manager_config);
+    const int    spb         = static_cast<int>(manager->cacheConfig().seq_size_per_block);
+    auto         resource    = makeDSV4BatchResource(manager->cacheConfig());
     auto         tokens      = makeDSV4CompleteTokenIds(/*initial_seq_len=*/2 * spb + 17,
                                            /*max_seq_len=*/4 * spb + 32,
                                            spb);
@@ -1111,15 +1126,15 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     ASSERT_TRUE(malloc_result.success);
     ASSERT_EQ(resource->groupNums(), kDsv4PoolNum);
 
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(resource->blocksNum(0, group.tag), 3) << "group " << group.tag;
         const auto& blocks = resource->blocks(0, group.tag);
-        if (isFullGroup(manager_config, group.tag)) {
+        if (isFullGroup(manager->cacheConfig(), group.tag)) {
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << group.tag;
             EXPECT_FALSE(isNullBlockIdx(blocks[1])) << "paged group " << group.tag;
             EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "paged group " << group.tag;
         } else {
-            expectDsv4SwaAllocatedBlocks(manager_config, blocks, group.tag, "tail group");
+            expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), blocks, group.tag, "tail group");
         }
     }
 
@@ -1135,13 +1150,14 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     }
 
     auto layout = manager->getMainModelCacheLayerLayout();
-    ASSERT_EQ(layout.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
+    ASSERT_EQ(layout.groups().size(), static_cast<size_t>(kDsv4PoolNum));
     std::set<std::string> layout_tags;
-    for (const auto& group : layout.topology().groups()) {
-        layout_tags.insert(group.tag);
+    for (const auto& [tag, group_layout] : layout.groups()) {
+        (void)group_layout;
+        layout_tags.insert(tag);
     }
     EXPECT_EQ(layout_tags, kDsv4Tags);
-    EXPECT_EQ(layout.topology().layers().size(), static_cast<size_t>(manager_config.layer_num));
+    EXPECT_EQ(manager_config.layers().size(), static_cast<size_t>(manager_config.layer_num));
 
     const int csa_layer = manager_config.groupLayerIds("csa_kv")[0];
     const int hca_layer = manager_config.groupLayerIds("hca_kv")[0];
@@ -1163,11 +1179,11 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
 
 TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int spb      = static_cast<int>(manager_config.seq_size_per_block);
-    auto      resource = makeDSV4BatchResource(manager_config);
+    const int spb      = static_cast<int>(manager->cacheConfig().seq_size_per_block);
+    auto      resource = makeDSV4BatchResource(manager->cacheConfig());
     auto      tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/3 * spb + 17,
                                            /*max_seq_len=*/4 * spb + 32,
                                            spb);
@@ -1180,7 +1196,8 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
     // A tag declared by a layer must resolve to that layer's group, and the
     // per-layer block view must be the same storage as the whole-group view.
     auto expectTagGroup = [&](int layer_id, const std::string& tag) {
-        EXPECT_EQ(manager_config.groupForLayer(layer_id, tag).tag, tag) << "layer=" << layer_id << " tag=" << tag;
+        EXPECT_EQ(manager->cacheConfig().groupForLayer(layer_id, tag).tag, tag)
+            << "layer=" << layer_id << " tag=" << tag;
         EXPECT_TRUE(resource->layerOwnsTag(/*batch_id=*/0, layer_id, tag)) << "layer=" << layer_id << " tag=" << tag;
         EXPECT_EQ(resource->blocksForLayer(/*batch_id=*/0, layer_id, tag), resource->blocks(0, tag))
             << "layer=" << layer_id << " tag=" << tag;
@@ -1188,24 +1205,24 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
 
     // Flash DSV4 layers 0/1 are SWA-only. Inference resolves typed block tables by semantic tag.
     expectTagGroup(/*layer_id=*/0, "swa_kv");
-    EXPECT_THROW((void)manager_config.groupForLayer(/*layer_id=*/0, "csa_kv"), std::exception);
-    EXPECT_THROW((void)manager_config.groupForLayer(/*layer_id=*/0, "hca_kv"), std::exception);
+    EXPECT_THROW((void)manager->cacheConfig().groupForLayer(/*layer_id=*/0, "csa_kv"), std::exception);
+    EXPECT_THROW((void)manager->cacheConfig().groupForLayer(/*layer_id=*/0, "hca_kv"), std::exception);
 
     // Layer 2 is CSA: CSA_KV + INDEXER_KV + INDEXER_STATE + CSA_STATE + SWA_KV.
-    const int csa_layer = manager_config.groupLayerIds("csa_kv")[0];
+    const int csa_layer = manager->cacheConfig().groupLayerIds("csa_kv")[0];
     expectTagGroup(csa_layer, "csa_kv");
     expectTagGroup(csa_layer, "indexer_kv");
     expectTagGroup(csa_layer, "indexer_state");
     expectTagGroup(csa_layer, "csa_state");
     expectTagGroup(csa_layer, "swa_kv");
-    EXPECT_THROW((void)manager_config.groupForLayer(csa_layer, "hca_kv"), std::exception);
+    EXPECT_THROW((void)manager->cacheConfig().groupForLayer(csa_layer, "hca_kv"), std::exception);
 
     // Layer 3 is HCA: HCA_KV + HCA_STATE + SWA_KV.
-    const int hca_layer = manager_config.groupLayerIds("hca_kv")[0];
+    const int hca_layer = manager->cacheConfig().groupLayerIds("hca_kv")[0];
     expectTagGroup(hca_layer, "hca_kv");
     expectTagGroup(hca_layer, "hca_state");
     expectTagGroup(hca_layer, "swa_kv");
-    EXPECT_THROW((void)manager_config.groupForLayer(hca_layer, "csa_kv"), std::exception);
+    EXPECT_THROW((void)manager->cacheConfig().groupForLayer(hca_layer, "csa_kv"), std::exception);
 
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
@@ -1213,12 +1230,12 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
 
 TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int spb      = static_cast<int>(manager_config.seq_size_per_block);
+    const int spb      = static_cast<int>(manager->cacheConfig().seq_size_per_block);
     const int seq_len  = 3 * spb + 1;
-    auto      resource = makeDSV4BatchResource(manager_config);
+    auto      resource = makeDSV4BatchResource(manager->cacheConfig());
     auto      tokens   = makeDSV4CompleteTokenIds(seq_len, seq_len, spb);
 
     MallocInfo malloc_info{resource, tokens};
@@ -1265,7 +1282,7 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
 
     for (const auto& region_case : cases) {
         const auto [src_block, dst_block] = copy_blocks_by_tag.at(region_case.tag);
-        const size_t bytes                = manager_config.group(region_case.tag).spec->block_size_bytes();
+        const size_t bytes                = manager->cacheConfig().group(region_case.tag).spec->block_size_bytes();
         ASSERT_GT(bytes, 0u);
         writeDsv4RegionPattern(manager, src_block, region_case.layer_id, region_case.tag, bytes, region_case.pattern);
         writeDsv4RegionPattern(manager, dst_block, region_case.layer_id, region_case.tag, bytes, 0);
@@ -1275,8 +1292,8 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
     }
 
     std::vector<TaggedBlockIdPair> copy_mapping;
-    copy_mapping.reserve(manager_config.groups().size());
-    for (const auto& group : manager_config.groups()) {
+    copy_mapping.reserve(manager->cacheConfig().groups().size());
+    for (const auto& group : manager->cacheConfig().groups()) {
         const auto [src_block, dst_block] = copy_blocks_by_tag.at(group.tag);
         copy_mapping.push_back({group.tag, src_block, dst_block});
     }
@@ -1303,13 +1320,13 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
 
 TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int spb     = static_cast<int>(manager_config.seq_size_per_block);
+    const int spb     = static_cast<int>(manager->cacheConfig().seq_size_per_block);
     const int seq_len = 3 * spb + 17;
 
-    auto first_resource = makeDSV4BatchResource(manager_config);
+    auto first_resource = makeDSV4BatchResource(manager->cacheConfig());
     auto first_tokens   = makeDSV4CompleteTokenIds(seq_len, seq_len, spb);
 
     MallocInfo first_malloc{first_resource, first_tokens};
@@ -1318,7 +1335,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
     ASSERT_TRUE(manager->malloc(first_malloc).success);
 
     std::map<std::string, BlockIndicesType> first_blocks;
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         first_blocks[group.tag] = first_resource->blocks(0, group.tag);
     }
 
@@ -1328,7 +1345,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
     FreeInfo first_free{first_resource, first_tokens};
     manager->free(first_free);
 
-    auto second_resource = makeDSV4BatchResource(manager_config);
+    auto second_resource = makeDSV4BatchResource(manager->cacheConfig());
     auto second_tokens   = makeDSV4CompleteTokenIds(seq_len, seq_len, spb);
 
     MallocInfo second_malloc{second_resource, second_tokens};
@@ -1338,13 +1355,13 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
     ASSERT_TRUE(reuse_result.success);
     EXPECT_GE(reuse_result.reuse_len, spb);
 
-    for (const auto& tag : dsv4GroupTagsByType(manager_config, CacheGroupType::FULL)) {
+    for (const auto& tag : dsv4GroupTagsByType(manager->cacheConfig(), CacheGroupType::FULL)) {
         ASSERT_GE(second_resource->blocksNum(0, tag), 3) << "paged group " << tag;
         EXPECT_EQ(second_resource->blocks(0, tag)[0], first_blocks.at(tag)[0]);
         EXPECT_EQ(second_resource->blocks(0, tag)[1], first_blocks.at(tag)[1]);
     }
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        if (manager_config.group(tag).policy.enable_prefix_reuse == false) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
+        if (manager->cacheConfig().group(tag).policy.enable_prefix_reuse == false) {
             continue;
         }
         ASSERT_GE(second_resource->blocksNum(0, tag), 3) << "tail group " << tag;
@@ -1357,12 +1374,12 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
 
 TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/64);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int spb = static_cast<int>(manager_config.seq_size_per_block);
+    const int spb = static_cast<int>(manager->cacheConfig().seq_size_per_block);
 
-    auto first_resource = makeDSV4BatchResource(manager_config);
+    auto first_resource = makeDSV4BatchResource(manager->cacheConfig());
     auto first_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/4 * spb, /*max_seq_len=*/4 * spb + 1, spb);
 
     MallocInfo first_malloc{first_resource, first_tokens};
@@ -1371,9 +1388,9 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     ASSERT_TRUE(manager->malloc(first_malloc).success);
 
     std::map<std::string, BlockIdxType> first_swa_tail_blocks;
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
         ASSERT_EQ(first_resource->blocksNum(0, tag), 4) << "first SWA group " << tag;
-        expectDsv4SwaAllocatedBlocks(manager_config, first_resource->blocks(0, tag), tag, "first SWA");
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), first_resource->blocks(0, tag), tag, "first SWA");
         first_swa_tail_blocks[tag] = first_resource->blocks(0, tag)[3];
     }
 
@@ -1383,7 +1400,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     manager->insertIntoCache(InsertInfo{first_resource, first_tokens, /*is_resident=*/false});
     manager->free(FreeInfo{first_resource, first_tokens});
 
-    auto second_resource = makeDSV4BatchResource(manager_config);
+    auto second_resource = makeDSV4BatchResource(manager->cacheConfig());
     auto second_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/24 * spb, /*max_seq_len=*/24 * spb, spb);
 
     MallocInfo second_malloc{second_resource, second_tokens};
@@ -1394,8 +1411,8 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     ASSERT_TRUE(reuse_result.success);
     EXPECT_EQ(reuse_result.reuse_len, 4 * spb);
 
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        if (manager_config.group(tag).policy.enable_prefix_reuse == false) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
+        if (manager->cacheConfig().group(tag).policy.enable_prefix_reuse == false) {
             continue;
         }
         const auto& blocks = second_resource->blocks(0, tag);
@@ -1411,12 +1428,12 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
 
 TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int spb      = static_cast<int>(manager_config.seq_size_per_block);
+    const int spb      = static_cast<int>(manager->cacheConfig().seq_size_per_block);
     const int seq_len  = 3 * spb + 1;
-    auto      resource = makeDSV4BatchResource(manager_config);
+    auto      resource = makeDSV4BatchResource(manager->cacheConfig());
     auto      tokens   = makeDSV4CompleteTokenIds(seq_len, seq_len, spb);
 
     MallocInfo malloc_info{resource, tokens};
@@ -1433,16 +1450,16 @@ TEST_F(KVCacheManagerTest, DSV4PopCachedBlocksPreservesGroupShape) {
     ASSERT_NE(evicted, nullptr);
     ASSERT_TRUE(evicted->hasCacheKeys());
     EXPECT_EQ(evicted->groupNums(), kDsv4PoolNum);
-    EXPECT_EQ(evicted->cacheResource(0).blocksByGroup().size(), manager_config.groups().size());
+    EXPECT_EQ(evicted->cacheResource(0).blocksByGroup().size(), manager->cacheConfig().groups().size());
 
     bool saw_paged_block = false;
     bool saw_tail_block  = false;
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(evicted->blocksNum(0, group.tag), static_cast<int>(evicted->cacheKeys(0).size()))
             << "group " << group.tag;
         for (auto block : evicted->blocks(0, group.tag)) {
             if (!isNullBlockIdx(block)) {
-                if (isFullGroup(manager_config, group.tag)) {
+                if (isFullGroup(manager->cacheConfig(), group.tag)) {
                     saw_paged_block = true;
                 } else {
                     saw_tail_block = true;
@@ -1461,7 +1478,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache = false;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), false, nullptr, kv_cache_config);
     EXPECT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
     ASSERT_NE(kv_cache_manager->coordinator_->update_thread_, nullptr);
@@ -1475,7 +1492,7 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
     kv_cache_config.memory_cache_size_mb         = 0;
     kv_cache_config.memory_cache_sync_timeout_ms = 1;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
     // KVCacheManager::initConnectorCoordinator assigns coordinator_ before RTP_LLM_CHECK throws.
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
@@ -1490,7 +1507,7 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInval
     kv_cache_config.memory_cache_size_mb         = 10;
     kv_cache_config.memory_cache_sync_timeout_ms = 0;  // mock coordinator init failed
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config), false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
     EXPECT_EQ(kv_cache_manager->coordinator_->update_thread_, nullptr);
@@ -1508,7 +1525,7 @@ TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheEnabledAndConfigValid)
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(
-        cache_config, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
+        std::move(cache_config), false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
     EXPECT_TRUE(kv_cache_manager->init());
 
     auto coordinator = kv_cache_manager->coordinator_;
@@ -1524,7 +1541,7 @@ TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnFromCoordinator_Success) {
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config));
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     auto mock_context       = std::make_shared<MockKVCacheConnectorReadWriteContext>();
@@ -1544,7 +1561,7 @@ TEST_F(KVCacheManagerTest, AsyncStoreCache_ReturnFromCoordinator_Success) {
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config));
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     auto mock_context       = std::make_shared<MockKVCacheConnectorReadWriteContext>();
@@ -1564,7 +1581,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnFalse_CoordinatorReturnFalse) {
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config));
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     FunctionRequestPB request;
@@ -1584,7 +1601,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnTrue_Success) {
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
-    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cache_config);
+    auto kv_cache_manager          = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config));
     kv_cache_manager->coordinator_ = mock_coordinator;
 
     FunctionRequestPB request;
@@ -1602,7 +1619,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     kv_cache_config.enable_memory_cache = false;  // avoid starting real memory connector in coordinator->init()
     kv_cache_config.reuse_cache         = false;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    auto kv_cache_manager =
+        std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config), false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->allocator_, nullptr);
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
@@ -1655,7 +1673,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     kv_cache_config.enable_memory_cache = false;
     kv_cache_config.reuse_cache         = false;
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    auto kv_cache_manager =
+        std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config), false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
     auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
@@ -1705,7 +1724,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config));
     ASSERT_TRUE(kv_cache_manager->init());
 
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
@@ -1733,7 +1752,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
 TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridPoolFullGroups) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 
-    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cloneManagerConfig(cache_config));
     ASSERT_TRUE(kv_cache_manager->init());
 
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
@@ -1771,7 +1790,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(
-        cache_config, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
+        std::move(cache_config), false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
     // With memory cache enabled, getKVCacheInfo() should include memory block pool stats.
@@ -1805,10 +1824,10 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     //
     // The fourth allocation MUST succeed via eviction on FULL groups.
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int    spb         = static_cast<int>(manager_config.seq_size_per_block);
+    const int    spb         = static_cast<int>(manager->cacheConfig().seq_size_per_block);
     const int    seq_len     = 3 * spb;
     const size_t free_before = manager->freeBlocksNum();
     // 7 groups × 7 usable blocks = 49 total free.
@@ -1827,7 +1846,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     };
 
     // --- Request A: allocate, cache, free request reference ---
-    auto       res_a    = makeDSV4BatchResource(manager_config);
+    auto       res_a    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_a = makeTokens(/*offset=*/0);
     MallocInfo malloc_a{res_a, tokens_a};
     malloc_a.reuse_cache         = true;
@@ -1843,7 +1862,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     EXPECT_LT(free_after_a, free_before);
 
     // --- Request B: different tokens → different cache keys ---
-    auto       res_b    = makeDSV4BatchResource(manager_config);
+    auto       res_b    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_b = makeTokens(/*offset=*/10000);
     MallocInfo malloc_b{res_b, tokens_b};
     malloc_b.reuse_cache         = true;
@@ -1859,7 +1878,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     EXPECT_LT(free_after_b, free_after_a);
 
     // --- Request C: still fits, but leaves FULL groups with only one free block ---
-    auto       res_c    = makeDSV4BatchResource(manager_config);
+    auto       res_c    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_c = makeTokens(/*offset=*/20000);
     MallocInfo malloc_c{res_c, tokens_c};
     malloc_c.reuse_cache         = true;
@@ -1875,7 +1894,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     EXPECT_LE(free_after_c, free_after_b);
 
     // --- Request D: triggers eviction on FULL groups ---
-    auto       res_d    = makeDSV4BatchResource(manager_config);
+    auto       res_d    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_d = makeTokens(/*offset=*/30000);
     MallocInfo malloc_d{res_d, tokens_d};
     malloc_d.reuse_cache         = true;
@@ -1887,15 +1906,16 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
 
     // Verify block structure for request D.
     ASSERT_EQ(res_d->groupNums(), kDsv4PoolNum);
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(res_d->blocksNum(0, group.tag), 3) << "group " << group.tag;
         const auto& blocks = res_d->blocks(0, group.tag);
-        if (isFullGroup(manager_config, group.tag)) {
+        if (isFullGroup(manager->cacheConfig(), group.tag)) {
             for (int i = 0; i < 3; ++i) {
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << group.tag << " pos " << i;
             }
         } else {
-            expectDsv4SwaAllocatedBlocks(manager_config, blocks, group.tag, "fixed group", /*enable_reuse_cache=*/true);
+            expectDsv4SwaAllocatedBlocks(
+                manager->cacheConfig(), blocks, group.tag, "fixed group", /*enable_reuse_cache=*/true);
         }
     }
 
@@ -1928,12 +1948,12 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
         ASSERT_EQ(manager_config.group(tag).block_num, expected) << "group " << tag;
     }
 
-    auto manager = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
     const size_t free_before = manager->freeBlocksNum();
     EXPECT_EQ(free_before, 6u * 7u + 11u);
-    const int spb = static_cast<int>(manager_config.seq_size_per_block);
+    const int spb = static_cast<int>(manager->cacheConfig().seq_size_per_block);
 
     auto makeTokens = [&](int seq_len) {
         auto input_ids      = torch::arange(0, seq_len, torch::kInt32);
@@ -1948,16 +1968,16 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
 
     // Seed one reusable SWA/state block per independent pool. For a 2-block request,
     // insertIntoCache keeps only the first full block; the active tail is not cached.
-    auto       seed_res    = makeDSV4BatchResource(manager_config);
+    auto       seed_res    = makeDSV4BatchResource(manager->cacheConfig());
     auto       seed_tokens = makeTokens(2 * spb);
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = false;
     seed_malloc.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(seed_malloc).success);
 
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
         ASSERT_EQ(seed_res->blocksNum(0, tag), 2) << "seed group " << tag;
-        expectDsv4SwaAllocatedBlocks(manager_config, seed_res->blocks(0, tag), tag, "seed group");
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), seed_res->blocks(0, tag), tag, "seed group");
     }
 
     manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
@@ -1966,7 +1986,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     // Same prefix, one more block. This hits one cached independent-pool block and
     // must still have room for the two fresh tail blocks.  The matched block is
     // then skipped out of the active SWA tail by the decode allocation path.
-    auto       reuse_res    = makeDSV4BatchResource(manager_config);
+    auto       reuse_res    = makeDSV4BatchResource(manager->cacheConfig());
     auto       reuse_tokens = makeTokens(3 * spb);
     MallocInfo reuse_malloc{reuse_res, reuse_tokens};
     reuse_malloc.reuse_cache         = true;
@@ -1975,8 +1995,8 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     ASSERT_TRUE(reuse_result.success);
     EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
 
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        if (manager_config.group(tag).policy.enable_prefix_reuse == false) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
+        if (manager->cacheConfig().group(tag).policy.enable_prefix_reuse == false) {
             continue;
         }
         const auto& blocks = reuse_res->blocks(0, tag);
@@ -2011,10 +2031,10 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     //   Phase 3: Decode-phase incrKVBlock triggers further FULL/SWA eviction + removeSkippedBlocks
     //   Phase 4: Free and verify pool recovery
     auto manager_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/8, /*swa_batch_size=*/4);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
-    const int spb     = static_cast<int>(manager_config.seq_size_per_block);
+    const int spb     = static_cast<int>(manager->cacheConfig().seq_size_per_block);
     const int seq_len = 3 * spb;
 
     // Verify differentiated pool sizes.
@@ -2034,7 +2054,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     };
 
     // === Phase 1: Fill caches with 2 completed requests ===
-    auto       res_a    = makeDSV4BatchResource(manager_config);
+    auto       res_a    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_a = makeTokens(/*offset=*/0);
     MallocInfo malloc_a{res_a, tokens_a};
     malloc_a.reuse_cache         = true;
@@ -2044,7 +2064,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     manager->insertIntoCache(insert_a);
     manager->free(FreeInfo{res_a, tokens_a});
 
-    auto       res_b    = makeDSV4BatchResource(manager_config);
+    auto       res_b    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_b = makeTokens(/*offset=*/10000);
     MallocInfo malloc_b{res_b, tokens_b};
     malloc_b.reuse_cache         = true;
@@ -2058,7 +2078,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     EXPECT_LT(free_after_cache, free_before);
 
     // === Phase 2: 3rd request triggers eviction on SWA groups ===
-    auto       res_c    = makeDSV4BatchResource(manager_config);
+    auto       res_c    = makeDSV4BatchResource(manager->cacheConfig());
     auto       tokens_c = makeTokens(/*offset=*/20000);
     MallocInfo malloc_c{res_c, tokens_c};
     malloc_c.reuse_cache         = true;
@@ -2071,15 +2091,16 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
 
     // Verify block structure.
     ASSERT_EQ(res_c->groupNums(), kDsv4PoolNum);
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(res_c->blocksNum(0, group.tag), 3) << "group " << group.tag;
         const auto& blocks = res_c->blocks(0, group.tag);
-        if (isFullGroup(manager_config, group.tag)) {
+        if (isFullGroup(manager->cacheConfig(), group.tag)) {
             for (int i = 0; i < 3; ++i) {
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << group.tag << " pos " << i;
             }
         } else {
-            expectDsv4SwaAllocatedBlocks(manager_config, blocks, group.tag, "SWA group", /*enable_reuse_cache=*/true);
+            expectDsv4SwaAllocatedBlocks(
+                manager->cacheConfig(), blocks, group.tag, "SWA group", /*enable_reuse_cache=*/true);
         }
     }
 
@@ -2095,12 +2116,12 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     incr1.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(incr1).success) << "First incr must succeed via eviction";
 
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(res_c->blocksNum(0, group.tag), 4) << "group " << group.tag << " after incr to 4*spb";
     }
     // SWA/state fixed groups retain the current tail window.
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        expectDsv4SwaAllocatedBlocks(manager_config, res_c->blocks(0, tag), tag, "SWA group");
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), res_c->blocks(0, tag), tag, "SWA group");
     }
 
     // --- Incr to 5*spb ---
@@ -2112,12 +2133,12 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     incr2.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(incr2).success) << "Second incr must succeed (removeSkipped frees block)";
 
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(res_c->blocksNum(0, group.tag), 5) << "group " << group.tag << " after incr to 5*spb";
     }
     // SWA/state fixed groups keep only the active tail window.
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        expectDsv4SwaAllocatedBlocks(manager_config, res_c->blocks(0, tag), tag, "SWA group");
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), res_c->blocks(0, tag), tag, "SWA group");
     }
 
     // === Phase 4: Free all and verify full pool recovery ===
@@ -2137,12 +2158,12 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     //   3. Verify SWA groups free old non-tail blocks during incr
     //   4. Final free returns all blocks to pool
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/32);
-    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(std::move(manager_config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
     const size_t free_before = manager->freeBlocksNum();
-    const int    spb         = static_cast<int>(manager_config.seq_size_per_block);
-    auto         resource    = makeDSV4BatchResource(manager_config);
+    const int    spb         = static_cast<int>(manager->cacheConfig().seq_size_per_block);
+    auto         resource    = makeDSV4BatchResource(manager->cacheConfig());
 
     // --- Phase 1: initKVBlock with 4 blocks (simulates prefill completion) ---
     const int init_seq_len = 4 * spb;
@@ -2157,21 +2178,21 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
 
     // After init: FULL groups (0,1,2) have 4 real blocks each.
     //             SWA groups keep the active tail window; HCA_STATE keeps a one-block tail.
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(resource->blocksNum(0, group.tag), 4) << "group " << group.tag;
         const auto& blocks = resource->blocks(0, group.tag);
-        if (isFullGroup(manager_config, group.tag)) {
+        if (isFullGroup(manager->cacheConfig(), group.tag)) {
             for (int i = 0; i < 4; ++i) {
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << group.tag << " pos " << i;
             }
         } else {
-            expectDsv4SwaAllocatedBlocks(manager_config, blocks, group.tag, "SWA group");
+            expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), blocks, group.tag, "SWA group");
         }
     }
 
     // Record block IDs allocated after init for later validation.
     std::map<std::string, BlockIndicesType> init_blocks;
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         init_blocks[group.tag] = resource->blocks(0, group.tag);
     }
     const size_t free_after_init = manager->freeBlocksNum();
@@ -2185,11 +2206,11 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     incr1_info.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(incr1_info).success);
 
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(resource->blocksNum(0, group.tag), 5) << "group " << group.tag << " after incr1";
     }
     // FULL groups: all 5 blocks should be real.
-    for (const auto& tag : dsv4GroupTagsByType(manager_config, CacheGroupType::FULL)) {
+    for (const auto& tag : dsv4GroupTagsByType(manager->cacheConfig(), CacheGroupType::FULL)) {
         const auto& blocks = resource->blocks(0, tag);
         for (int i = 0; i < 5; ++i) {
             EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << tag << " pos " << i << " after incr1";
@@ -2200,9 +2221,9 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
         }
     }
     // SWA/state fixed groups keep the current tail window.
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
         const auto& blocks = resource->blocks(0, tag);
-        expectDsv4SwaAllocatedBlocks(manager_config, blocks, tag, "SWA group after incr1");
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), blocks, tag, "SWA group after incr1");
         if (!isHcaStateGroup(tag)) {
             EXPECT_EQ(blocks[3], init_blocks.at(tag)[3]) << "SWA group " << tag << " old tail pos 3";
         }
@@ -2214,7 +2235,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
 
     // Record SWA tail blocks after incr1 for the next step.
     std::map<std::string, BlockIdxType> swa_new_C;
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
         swa_new_C[tag] = resource->blocks(0, tag)[4];
     }
 
@@ -2231,12 +2252,12 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     incr2_info.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(incr2_info).success);
 
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(resource->blocksNum(0, group.tag), 6) << "group " << group.tag << " after incr2";
     }
 
     // FULL groups: all 6 blocks real, first 4 unchanged.
-    for (const auto& tag : dsv4GroupTagsByType(manager_config, CacheGroupType::FULL)) {
+    for (const auto& tag : dsv4GroupTagsByType(manager->cacheConfig(), CacheGroupType::FULL)) {
         const auto& blocks = resource->blocks(0, tag);
         for (int i = 0; i < 6; ++i) {
             EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << tag << " pos " << i << " after incr2";
@@ -2247,9 +2268,9 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     }
 
     // SWA/state fixed groups after incr2 keep their configured active tail window.
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
         const auto& blocks = resource->blocks(0, tag);
-        expectDsv4SwaAllocatedBlocks(manager_config, blocks, tag, "SWA group after incr2");
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), blocks, tag, "SWA group after incr2");
         if (!isHcaStateGroup(tag)) {
             EXPECT_EQ(blocks[4], swa_new_C.at(tag)) << "SWA group " << tag << " pos 4 = old C";
         }
@@ -2272,14 +2293,14 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     incr3_info.enable_device_cache = false;
     ASSERT_TRUE(manager->malloc(incr3_info).success);
 
-    for (const auto& group : manager_config.groups()) {
+    for (const auto& group : manager->cacheConfig().groups()) {
         ASSERT_EQ(resource->blocksNum(0, group.tag), 7) << "group " << group.tag << " after incr3";
     }
 
     // SWA/state fixed groups after incr3 keep their configured active tail window.
-    for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
+    for (const auto& tag : dsv4FixedTailGroupTags(manager->cacheConfig())) {
         const auto& blocks = resource->blocks(0, tag);
-        expectDsv4SwaAllocatedBlocks(manager_config, blocks, tag, "SWA group after incr3");
+        expectDsv4SwaAllocatedBlocks(manager->cacheConfig(), blocks, tag, "SWA group after incr3");
     }
 
     // SWA freed 1 block per SWA group (4) and allocated 1 per all groups (7). Net: -7+4 = -3.

@@ -3,11 +3,30 @@
 #include <map>
 #include <sstream>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <cctype>
 #include <regex>
 
 namespace rtp_llm {
+
+std::pair<int, int> resolveCacheCpRankAndSize(const ParallelismConfig& parallelism_config) {
+    const auto& cp_config = parallelism_config.prefill_cp_config;
+    if (!cp_config.kv_cache_sharded) {
+        return {0, 1};
+    }
+    if (parallelism_config.role_type == RoleType::DECODE && cp_config.is_prefill_enabled()) {
+        if (cp_config.prefill_cp_size <= 1) {
+            throw std::invalid_argument(
+                "decode PREFILL_CP sharded cache requires explicit prefill_cp_size greater than one");
+        }
+        return {static_cast<int>(cp_config.prefill_cp_size - 1), static_cast<int>(cp_config.prefill_cp_size)};
+    }
+    if (parallelism_config.tp_size > 1) {
+        return {static_cast<int>(parallelism_config.tp_rank), static_cast<int>(parallelism_config.tp_size)};
+    }
+    return {0, 1};
+}
 
 // NcclCommConfig
 std::string NcclCommConfig::to_string() const {
@@ -189,8 +208,7 @@ std::string LinearAttentionConfig::to_string() const {
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
-        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
     return oss.str();
 }
 

@@ -58,9 +58,9 @@ private:
 
     NormalModelInputGathererConfig config_;
     // Canonical sorted cache tags. Entry i of every group-dimension model-input
-    // payload belongs to boundary_group_tags_[i]; the consuming model derives the
+    // payload belongs to cache_group_tags_[i]; the consuming model derives the
     // same order from its own CacheConfig.
-    std::vector<std::string> boundary_group_tags_;
+    std::vector<std::string> cache_group_tags_;
 };
 
 }  // namespace rtp_llm

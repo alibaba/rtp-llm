@@ -52,18 +52,26 @@ struct LayerKVCache {
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 class KVCache {
 public:
-    explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout):
-        grouped_layout_(std::move(grouped_layout)), group_tags_(buildSortedGroupTags(grouped_layout_)) {}
+    KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout, const rtp_llm::CacheConfig& config):
+        grouped_layout_(std::move(grouped_layout)), config_(config), group_tags_(buildSortedGroupTags(config_)) {}
+
+    KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout, std::shared_ptr<const rtp_llm::CacheConfig> config):
+        grouped_layout_(std::move(grouped_layout)),
+        owned_config_(std::move(config)),
+        config_(*owned_config_),
+        group_tags_(buildSortedGroupTags(config_)) {
+        RTP_LLM_CHECK_WITH_INFO(owned_config_ != nullptr, "KVCache requires a non-null config");
+    }
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
-        const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
+        const auto& group = config_.soleGroupForLayer(layer_id);
         return getLayerCache(layer_id, group.tag);
     }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
         validateLayer(layer_id);
-        const auto& group        = grouped_layout_.topology().groupForLayer(layer_id, tag);
+        const auto& group        = config_.groupForLayer(layer_id, tag);
         const auto& group_layout = grouped_layout_.group(tag);
         const auto  layer        = static_cast<size_t>(layer_id);
         if (group_layout.empty() || !group_layout.hasLayer(layer)) {
@@ -75,7 +83,7 @@ public:
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
         const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.topology().groupsForLayer(layer_id);
+        const auto& tags  = config_.groupsForLayer(layer_id);
 
         std::vector<LayerKVCache> layer_caches;
         layer_caches.reserve(tags.size());
@@ -96,22 +104,22 @@ public:
     }
 
     size_t layerCount() const {
-        return grouped_layout_.topology().layers().size();
+        return config_.layers().size();
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seqSizePerBlock());
+        return static_cast<int>(config_.group(tag).seqSizePerBlock());
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernelSeqSizePerBlock());
+        return static_cast<int>(config_.group(tag).kernelSeqSizePerBlock());
     }
 
 private:
-    static std::vector<std::string> buildSortedGroupTags(const rtp_llm::GroupedCacheLayerLayout& grouped_layout) {
+    static std::vector<std::string> buildSortedGroupTags(const rtp_llm::CacheConfig& config) {
         std::vector<std::string> tags;
-        tags.reserve(grouped_layout.topology().groups().size());
-        for (const auto& group : grouped_layout.topology().groups()) {
+        tags.reserve(config.groups().size());
+        for (const auto& group : config.groups()) {
             tags.push_back(group.tag);
         }
         return rtp_llm::sortedCacheGroupTags(tags, "model KV cache");
@@ -244,8 +252,10 @@ private:
         return result;
     }
 
-    const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
-    const std::vector<std::string>         group_tags_;
+    const rtp_llm::GroupedCacheLayerLayout      grouped_layout_;
+    std::shared_ptr<const rtp_llm::CacheConfig> owned_config_;
+    const rtp_llm::CacheConfig&                 config_;
+    const std::vector<std::string>              group_tags_;
 };
 
 struct PyModelInitResources {

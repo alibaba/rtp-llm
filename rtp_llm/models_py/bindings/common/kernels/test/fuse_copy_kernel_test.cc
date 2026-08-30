@@ -364,6 +364,13 @@ TEST_F(FusedStridedCopyTest, ZeroCopies) {
     CUDA_CHECK(cudaStreamSynchronize(stream_));
 }
 
+TEST_F(FusedStridedCopyTest, RejectsInvalidRowWidth) {
+    rtp_llm::FusedStridedCopyParams params;
+    EXPECT_THROW(params.add(nullptr, nullptr, 1, 0, 16, 16), std::runtime_error);
+    EXPECT_THROW(params.add(nullptr, nullptr, 1, 17, 16, 32), std::runtime_error);
+    EXPECT_THROW(params.add(nullptr, nullptr, 1, 17, 32, 16), std::runtime_error);
+}
+
 // Basic strided copy: src_stride > row_bytes (skip padding bytes in source).
 // Layout: src has rows of src_stride bytes, only row_bytes are valid data.
 //         dst is compact (dst_stride == row_bytes).

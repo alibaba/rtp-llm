@@ -78,19 +78,18 @@ CacheGroup makeGroup(const std::string& tag,
     return group;
 }
 
-GroupedCacheLayerLayout makeLayout(std::vector<CacheGroup>         groups,
-                                   std::vector<std::string>        layer_tags,
-                                   std::vector<BlockBufferPtrInfo> buffers) {
+std::pair<GroupedCacheLayerLayout, std::shared_ptr<const CacheConfig>> makeLayout(
+    std::vector<CacheGroup> groups, std::vector<std::string> layer_tags, std::vector<BlockBufferPtrInfo> buffers) {
     EXPECT_EQ(groups.size(), buffers.size());
     auto config = std::make_shared<CacheConfig>(
-        std::move(groups), std::vector<CacheLayer>{std::move(layer_tags)}, /*main_layer_num=*/1);
+        std::move(groups), std::vector<CacheLayer>{{std::move(layer_tags)}}, /*main_layer_num=*/1);
     GroupedCacheLayerLayout::GroupLayouts layouts;
     size_t                                buffer_ordinal = 0;
     for (const auto& group : config->groups()) {
         layouts.emplace(group.tag,
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[buffer_ordinal++])}));
     }
-    return GroupedCacheLayerLayout(std::move(config), std::move(layouts));
+    return {GroupedCacheLayerLayout(*config, std::move(layouts)), std::move(config)};
 }
 
 CacheConfig createSparseIndexerCacheConfig() {
@@ -125,7 +124,7 @@ GroupedCacheLayerLayout makeIndexerLayout(const CacheConfig& config, torch::Tens
         }
         layouts.emplace(group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(topology, std::move(layouts));
+    return GroupedCacheLayerLayout(*topology, std::move(layouts));
 }
 
 CacheConfig createFp8SparseMlaCacheConfig() {
@@ -171,7 +170,7 @@ makeFp8SparseMlaLayout(const CacheConfig& config, torch::Tensor mla_storage, tor
         }
         layouts.emplace(group.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(topology, std::move(layouts));
+    return GroupedCacheLayerLayout(*topology, std::move(layouts));
 }
 
 TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
@@ -185,7 +184,8 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
                            /*k_elems=*/32,
                            /*v_elems=*/32,
                            /*local_kv_heads=*/1);
-    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, scale}}));
+    auto               layout_and_config = makeLayout({std::move(group)}, {"full"}, {{base, scale}});
+    torch_ext::KVCache cache(std::move(layout_and_config.first), std::move(layout_and_config.second));
 
     const auto layer  = cache.getLayerCache(0);
     const auto by_tag = cache.getLayerCache(0, "full");
@@ -206,14 +206,15 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
         torch::arange(2 * 8 * 6, torch::TensorOptions().dtype(torch::kFloat32)).to(torch::kBFloat16).reshape({2, 8, 6});
     const auto scale =
         torch::arange(2 * 8 * 3, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kUInt8).reshape({2, 8, 3});
-    auto               group = makeGroup("mla",
+    auto               group             = makeGroup("mla",
                            KVCacheSpecType::MultiHeadLatentAttention,
                            CacheGroupType::FULL,
                            8,
                            2,
                            /*k_elems=*/32,
                            /*v_elems=*/16);
-    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"mla"}, {{base, scale}}));
+    auto               layout_and_config = makeLayout({std::move(group)}, {"mla"}, {{base, scale}});
+    torch_ext::KVCache cache(std::move(layout_and_config.first), std::move(layout_and_config.second));
 
     const auto layer = cache.getLayerCache(0, "mla");
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{8, 2, 6}));
@@ -228,8 +229,9 @@ TEST(KVCacheLayoutViewTest, LinearSwaAndStateStayPhysical) {
              {"linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR},
              {"swa", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA},
              {"state", KVCacheSpecType::OpaqueState, CacheGroupType::FULL}}) {
-        auto               group = makeGroup(tag, spec_type, policy, 8, 2, 32, 32);
-        torch_ext::KVCache cache(makeLayout({std::move(group)}, {tag}, {{physical, {}}}));
+        auto               group             = makeGroup(tag, spec_type, policy, 8, 2, 32, 32);
+        auto               layout_and_config = makeLayout({std::move(group)}, {tag}, {{physical, {}}});
+        torch_ext::KVCache cache(std::move(layout_and_config.first), std::move(layout_and_config.second));
         const auto         layer = cache.getLayerCache(0);
         EXPECT_EQ(layer.seq_size_per_block, 8) << tag;
         EXPECT_EQ(layer.kv_cache_base.sizes().vec(), physical.sizes().vec()) << tag;
@@ -259,7 +261,8 @@ TEST(KVCacheLayoutViewTest, SparseIndexerSpecOwnsPhysicalBlockAndOpaqueViewPrese
     const auto physical = torch::arange(kPhysicalBlocks * static_cast<int64_t>(group.kv_block_stride_bytes),
                                         torch::TensorOptions().dtype(torch::kUInt8))
                               .reshape({kPhysicalBlocks, static_cast<int64_t>(group.kv_block_stride_bytes)});
-    torch_ext::KVCache cache(makeIndexerLayout(config, physical));
+    auto               layout = makeIndexerLayout(config, physical);
+    torch_ext::KVCache cache(std::move(layout), config);
     const auto         layer = cache.getLayerCache(0, "indexer_kv");
     EXPECT_EQ(layer.seq_size_per_block, kKernelTokensPerBlock);
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(),
@@ -300,7 +303,8 @@ TEST(KVCacheLayoutViewTest, Fp8MlaAndCompressedSpecsOwnPhysicalBlocksWhileViewsP
         torch::arange(kPhysicalBlocks * kCompressedPhysicalBytes, torch::TensorOptions().dtype(torch::kInt64))
             .to(torch::kUInt8)
             .reshape({kPhysicalBlocks, kCompressedPhysicalBytes});
-    torch_ext::KVCache cache(makeFp8SparseMlaLayout(config, mla_storage, compressed_storage));
+    auto               layout = makeFp8SparseMlaLayout(config, mla_storage, compressed_storage);
+    torch_ext::KVCache cache(std::move(layout), config);
 
     const auto mla_view        = cache.getLayerCache(0, "default");
     const auto compressed_view = cache.getLayerCache(0, "indexer_kv");
@@ -406,7 +410,7 @@ TEST(KVCacheLayoutViewTest, Dsv4Fp8CompressedPhysicalBlocksPreserveAlignedKernel
         buffer.kv_addr = group.tag == "csa_kv" ? csa_storage : hca_storage;
         layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffer)}));
     }
-    torch_ext::KVCache cache(GroupedCacheLayerLayout(topology, std::move(layouts)));
+    torch_ext::KVCache cache(GroupedCacheLayerLayout(*topology, std::move(layouts)), config);
     const auto         csa_view = cache.getLayerCache(0, "csa_kv");
     const auto         hca_view = cache.getLayerCache(0, "hca_kv");
 
@@ -430,9 +434,10 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     auto       full_group = makeGroup("full", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
     auto       linear_group = makeGroup("linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR, 8, 8, 9, 0);
     auto       empty_group  = makeGroup("empty", KVCacheSpecType::OpaqueState, CacheGroupType::LINEAR, 1, 1, 1, 0);
-    torch_ext::KVCache cache(makeLayout({std::move(full_group), std::move(linear_group), std::move(empty_group)},
-                                        {"full", "linear", "empty"},
-                                        {{full, {}}, {linear, {}}, {{}, {}}}));
+    auto       layout_and_config = makeLayout({std::move(full_group), std::move(linear_group), std::move(empty_group)},
+                                              {"full", "linear", "empty"},
+                                              {{full, {}}, {linear, {}}, {{}, {}}});
+    torch_ext::KVCache cache(std::move(layout_and_config.first), std::move(layout_and_config.second));
 
     EXPECT_ANY_THROW(cache.getLayerCache(0));
     const auto groups = cache.getLayerCacheGroups(0);
@@ -457,8 +462,8 @@ TEST(KVCacheLayoutViewTest, SortedBoundaryTagOrderIsCanonicalAndValidated) {
     // Reordering the declaration cannot move an entry.
     EXPECT_EQ(sortedCacheGroupTags({"indexer_kv", "swa_kv", "csa_kv"}), expected);
 
-    for (size_t ordinal = 0; ordinal < expected.size(); ++ordinal) {
-        EXPECT_EQ(groupOrdinalForTag(expected, expected[ordinal]), ordinal);
+    for (size_t index = 0; index < expected.size(); ++index) {
+        EXPECT_EQ(groupOrdinalForTag(expected, expected[index]), index);
     }
     EXPECT_ANY_THROW(groupOrdinalForTag(expected, "missing"));
     EXPECT_ANY_THROW(sortedCacheGroupTags({"full", ""}));
@@ -473,13 +478,15 @@ TEST(KVCacheLayoutViewTest, ModelCacheTagsAreSortedAndBindingIgnoresDeclarationO
         auto swa_group   = makeGroup("swa_kv", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA, 8, 8, 32, 32);
         auto placeholder = makeGroup("indexer_kv", KVCacheSpecType::OpaqueState, CacheGroupType::FULL, 1, 1, 1, 0);
         if (reversed) {
-            return torch_ext::KVCache(makeLayout({std::move(placeholder), std::move(swa_group), std::move(csa_group)},
-                                                 {"indexer_kv", "swa_kv", "csa_kv"},
-                                                 {{{}, {}}, {swa, {}}, {csa, {}}}));
+            auto layout_and_config = makeLayout({std::move(placeholder), std::move(swa_group), std::move(csa_group)},
+                                                {"indexer_kv", "swa_kv", "csa_kv"},
+                                                {{{}, {}}, {swa, {}}, {csa, {}}});
+            return torch_ext::KVCache(std::move(layout_and_config.first), std::move(layout_and_config.second));
         }
-        return torch_ext::KVCache(makeLayout({std::move(csa_group), std::move(swa_group), std::move(placeholder)},
-                                             {"csa_kv", "swa_kv", "indexer_kv"},
-                                             {{csa, {}}, {swa, {}}, {{}, {}}}));
+        auto layout_and_config = makeLayout({std::move(csa_group), std::move(swa_group), std::move(placeholder)},
+                                            {"csa_kv", "swa_kv", "indexer_kv"},
+                                            {{csa, {}}, {swa, {}}, {{}, {}}});
+        return torch_ext::KVCache(std::move(layout_and_config.first), std::move(layout_and_config.second));
     };
 
     const std::vector<std::string> sorted_tags = {"csa_kv", "indexer_kv", "swa_kv"};

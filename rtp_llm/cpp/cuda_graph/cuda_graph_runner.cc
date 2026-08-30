@@ -162,6 +162,45 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
     return inputs.attention_inputs.total_tokens > 0 ? inputs.attention_inputs.total_tokens : 0;
 }
 
+void validateStridedCopy(const torch::Tensor& src, const torch::Tensor& dst, const char* path) {
+    RTP_LLM_CHECK_WITH_INFO(src.defined() && dst.defined(), "%s strided copy requires defined tensors", path);
+    RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(),
+                            "%s strided copy dtype mismatch: src=%s dst=%s",
+                            path,
+                            c10::toString(src.scalar_type()),
+                            c10::toString(dst.scalar_type()));
+    if (src.dim() < 2) {
+        RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
+                                "%s copy source elements %ld exceed destination %ld",
+                                path,
+                                src.numel(),
+                                dst.numel());
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(src.dim() == 2 && dst.dim() == 2,
+                            "%s strided copy supports only matching 2D tensors: src_dim=%ld dst_dim=%ld",
+                            path,
+                            src.dim(),
+                            dst.dim());
+    const size_t row_bytes  = static_cast<size_t>(src.size(1)) * src.element_size();
+    const size_t src_stride = static_cast<size_t>(src.stride(0)) * src.element_size();
+    const size_t dst_stride = static_cast<size_t>(dst.stride(0)) * dst.element_size();
+    RTP_LLM_CHECK_WITH_INFO(row_bytes > 0, "%s strided copy requires positive row width", path);
+    RTP_LLM_CHECK_WITH_INFO(src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
+                            "%s strided copy source shape [%ld,%ld] exceeds destination [%ld,%ld]",
+                            path,
+                            src.size(0),
+                            src.size(1),
+                            dst.size(0),
+                            dst.size(1));
+    RTP_LLM_CHECK_WITH_INFO(row_bytes <= src_stride && row_bytes <= dst_stride,
+                            "%s strided copy row width %zu exceeds strides src=%zu dst=%zu",
+                            path,
+                            row_bytes,
+                            src_stride,
+                            dst_stride);
+}
+
 }  // namespace
 
 // clang-format off
@@ -293,9 +332,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (!src.defined() || src.numel() <= 0)
             return;
         if (src.dim() < 2) {
+            validateStridedCopy(src, dst, "cuda_graph.d2d");
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
+        validateStridedCopy(src, dst, "cuda_graph.d2d");
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),
@@ -316,6 +357,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.is_cuda())
             return;
         if (src.is_cuda()) {
+            validateStridedCopy(src, dst, "cuda_graph.d2h");
             RTP_LLM_PROFILE_SCOPE("stridedCopyHost(D2H)");
             if (src.dim() < 2) {
                 dst.view({-1}).narrow(0, 0, src.numel()).copy_(src, /*non_blocking=*/true);
@@ -326,6 +368,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             return;
         }
         RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
+        validateStridedCopy(src, dst, "cuda_graph.h2h");
         if (src.dim() < 2) {
             memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
             return;
@@ -669,9 +712,11 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             return;
         }
         if (src.dim() < 2) {
+            validateStridedCopy(src, dst, "cuda_graph.update_d2d");
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
+        validateStridedCopy(src, dst, "cuda_graph.update_d2d");
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),

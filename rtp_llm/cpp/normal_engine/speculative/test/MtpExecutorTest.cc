@@ -575,7 +575,7 @@ public:
             test_config.sp_type, sp_config.gen_num_per_cycle, std::move(mtp_model_params));
 
         // Create cache managers
-        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        auto cache_manager = std::make_shared<KVCacheManager>(std::move(cache_config));
         cache_manager->init();
 
         // Create MtpExecutor

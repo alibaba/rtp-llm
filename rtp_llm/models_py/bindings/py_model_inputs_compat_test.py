@@ -47,17 +47,15 @@ class PyModelInputsCompatTest(unittest.TestCase):
     def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
         default_config = HybridAttentionConfig()
         self.assertFalse(default_config.enable_hybrid_attention)
-        self.assertFalse(default_config.enable_independent_kv_cache_pools)
         self.assertEqual(default_config.hybrid_attention_types, [])
 
         attention_types = [HybridAttentionType.NONE, HybridAttentionType.LINEAR]
-        config = HybridAttentionConfig(True, True, attention_types)
+        config = HybridAttentionConfig(True, attention_types)
         self.assertTrue(config.enable_hybrid_attention)
-        self.assertTrue(config.enable_independent_kv_cache_pools)
         self.assertEqual(config.hybrid_attention_types, attention_types)
 
         with self.assertRaises(TypeError):
-            HybridAttentionConfig(True, True)
+            HybridAttentionConfig(True)
 
     def test_sparse_routes_select_exact_tags_independent_of_topology_order(
         self,

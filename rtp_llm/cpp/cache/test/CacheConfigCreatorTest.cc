@@ -43,11 +43,10 @@ ModelConfig makeMlaModel() {
 }
 
 ModelConfig makeSparseMlaModel(int64_t layer_num = 2) {
-    auto config                                                      = makeMlaModel();
-    config.num_layers                                                = layer_num;
-    config.attn_config.is_sparse                                     = true;
-    config.attn_config.indexer_head_dim                              = 128;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config                         = makeMlaModel();
+    config.num_layers                   = layer_num;
+    config.attn_config.is_sparse        = true;
+    config.attn_config.indexer_head_dim = 128;
     config.kv_cache_spec_descs.assign(static_cast<size_t>(layer_num), {});
 
     KVCacheSpecDesc default_desc;
@@ -83,8 +82,7 @@ ModelConfig makeKimiModel() {
 }
 
 ModelConfig makeQwenHybridModel() {
-    auto config                                                      = makeKimiModel();
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config = makeKimiModel();
     // Qwen's retained hybrid descriptor shape is a FULL/LINEAR interleave;
     // tags are business identity and intentionally differ from Kimi's names.
     for (auto& layer_descs : config.kv_cache_spec_descs) {
@@ -97,15 +95,14 @@ ModelConfig makeQwenHybridModel() {
 
 ModelConfig makeDsv4Model() {
     ModelConfig config;
-    config.num_layers                                                = 2;
-    config.data_type                                                 = DataType::TYPE_FP16;
-    config.attn_config.head_num                                      = 128;
-    config.attn_config.kv_head_num                                   = 1;
-    config.attn_config.size_per_head                                 = 512;
-    config.attn_config.indexer_head_dim                              = 128;
-    config.attn_config.tokens_per_block                              = 128;
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.num_layers                                      = 2;
+    config.data_type                                       = DataType::TYPE_FP16;
+    config.attn_config.head_num                            = 128;
+    config.attn_config.kv_head_num                         = 1;
+    config.attn_config.size_per_head                       = 512;
+    config.attn_config.indexer_head_dim                    = 128;
+    config.attn_config.tokens_per_block                    = 128;
+    config.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(config, {128, 4});
     return config;
 }
@@ -123,9 +120,7 @@ CacheConfig createFinalConfig(const ModelConfig& model_config) {
 std::string runtimeErrorMessage(const std::function<void()>& operation) {
     try {
         operation();
-    } catch (const std::runtime_error& error) {
-        return error.what();
-    }
+    } catch (const std::runtime_error& error) { return error.what(); }
     return {};
 }
 
@@ -192,7 +187,10 @@ TEST(CacheConfigCreatorTest, BasicConfigMaterializesResolvedGeometryAndExplicitR
     kv_cache_config.seq_size_per_block        = 256;
     kv_cache_config.kernel_seq_size_per_block = 128;
 
-    const auto config = CacheConfigCreator::createBasicConfig(makeDsv4Model(), ParallelismConfig{}, kv_cache_config, 0);
+    auto model                                = makeDsv4Model();
+    model.attn_config.tokens_per_block        = 256;
+    model.attn_config.kernel_tokens_per_block = 128;
+    const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache_config, 0);
 
     EXPECT_EQ(config.block_num, 0);
     EXPECT_EQ(config.seq_size_per_block, 256u);
@@ -207,8 +205,9 @@ TEST(CacheConfigCreatorTest, BasicSingleConfigUsesTheUnifiedPhysicalAndKernelOve
     kv_cache_config.seq_size_per_block        = 256;
     kv_cache_config.kernel_seq_size_per_block = 128;
 
-    auto model                                                      = makeMhaModel();
-    model.hybrid_attention_config.enable_independent_kv_cache_pools = false;
+    auto model                                = makeMhaModel();
+    model.attn_config.tokens_per_block        = 256;
+    model.attn_config.kernel_tokens_per_block = 128;
     const auto config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache_config, 0);
 
     ASSERT_EQ(config.groupNums(), 1);
@@ -218,25 +217,31 @@ TEST(CacheConfigCreatorTest, BasicSingleConfigUsesTheUnifiedPhysicalAndKernelOve
     EXPECT_EQ(config.group("default").block_num, 0u);
 }
 
-TEST(CacheConfigCreatorTest, ZeroIsTheOnlyUnsetSequenceBlockSize) {
-    auto model                                = makeMhaModel();
-    model.attn_config.tokens_per_block        = 128;
+TEST(CacheConfigCreatorTest, FinalModelGeometryPrecedesKvConfigFallback) {
+    auto model                         = makeMhaModel();
+    model.attn_config.tokens_per_block = 128;
 
     KVCacheConfig kv_cache;
-    auto default_config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    auto          default_config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
     EXPECT_EQ(default_config.seq_size_per_block, 128u);
     EXPECT_EQ(default_config.group("default").kernelSeqSizePerBlock(), 128u);
 
     kv_cache.seq_size_per_block = 64;
-    auto explicit_64 = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
-    EXPECT_EQ(explicit_64.seq_size_per_block, 64u);
-    EXPECT_EQ(explicit_64.group("default").kernelSeqSizePerBlock(), 64u);
+    auto explicit_64            = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(explicit_64.seq_size_per_block, 128u);
+    EXPECT_EQ(explicit_64.group("default").kernelSeqSizePerBlock(), 128u);
 
     kv_cache.seq_size_per_block        = 32;
     kv_cache.kernel_seq_size_per_block = 16;
-    auto explicit_32 = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
-    EXPECT_EQ(explicit_32.seq_size_per_block, 32u);
+    auto explicit_32                   = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(explicit_32.seq_size_per_block, 128u);
     EXPECT_EQ(explicit_32.group("default").kernelSeqSizePerBlock(), 16u);
+
+    model.attn_config.tokens_per_block        = 0;
+    model.attn_config.kernel_tokens_per_block = 0;
+    auto fallback = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(fallback.seq_size_per_block, 32u);
+    EXPECT_EQ(fallback.group("default").kernelSeqSizePerBlock(), 16u);
 
     kv_cache.seq_size_per_block = -1;
     EXPECT_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0), std::runtime_error);
@@ -255,29 +260,33 @@ TEST(CacheConfigCreatorTest, CompressedDescriptorEnforcesKernelBlockAlignment) {
     compressed.kernel_tokens_per_block_alignment = 128;
 
     KVCacheConfig kv_cache;
-    kv_cache.seq_size_per_block        = 64;
-    kv_cache.kernel_seq_size_per_block = 64;
-    const auto error                   = runtimeErrorMessage(
+    kv_cache.seq_size_per_block               = 64;
+    kv_cache.kernel_seq_size_per_block        = 64;
+    model.attn_config.tokens_per_block        = 64;
+    model.attn_config.kernel_tokens_per_block = 64;
+    const auto error                          = runtimeErrorMessage(
         [&]() { (void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0); });
     EXPECT_NE(error.find("must be >= 128 and a multiple of 128"), std::string::npos) << error;
 
-    kv_cache.seq_size_per_block        = 128;
-    kv_cache.kernel_seq_size_per_block = 128;
+    kv_cache.seq_size_per_block               = 128;
+    kv_cache.kernel_seq_size_per_block        = 128;
+    model.attn_config.tokens_per_block        = 128;
+    model.attn_config.kernel_tokens_per_block = 128;
     EXPECT_NO_THROW((void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0));
 }
 
-TEST(CacheConfigCreatorTest, ExplicitSequenceBlockSizeIsSharedBySpeculativeConfigs) {
-    auto score   = makeMhaModel(/*layer_num=*/2, /*tag=*/"default");
-    auto propose = makeMhaModel(/*layer_num=*/1, /*tag=*/"default");
+TEST(CacheConfigCreatorTest, FinalModelSequenceBlockSizeIsSharedBySpeculativeConfigs) {
+    auto score                           = makeMhaModel(/*layer_num=*/2, /*tag=*/"default");
+    auto propose                         = makeMhaModel(/*layer_num=*/1, /*tag=*/"default");
     score.attn_config.tokens_per_block   = 128;
     propose.attn_config.tokens_per_block = 128;
 
-    KVCacheConfig kv_cache = fixedBlockConfig();
+    KVCacheConfig kv_cache      = fixedBlockConfig();
     kv_cache.seq_size_per_block = 64;
     SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
     sp_config.gen_num_per_cycle = 2;
-    const auto config = CacheConfigCreator::createSpConfig(score,
+    const auto config           = CacheConfigCreator::createSpConfig(score,
                                                            propose,
                                                            ParallelismConfig{},
                                                            RuntimeConfig{},
@@ -287,12 +296,12 @@ TEST(CacheConfigCreatorTest, ExplicitSequenceBlockSizeIsSharedBySpeculativeConfi
                                                            /*is_mtp=*/true,
                                                            /*is_eagle=*/false);
 
-    EXPECT_EQ(config.seq_size_per_block, 64u);
+    EXPECT_EQ(config.seq_size_per_block, 128u);
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(sub_config->seq_size_per_block, 64u);
-        EXPECT_EQ(sub_config->group("default").seqSizePerBlock(), 64u);
+        EXPECT_EQ(sub_config->seq_size_per_block, 128u);
+        EXPECT_EQ(sub_config->group("default").seqSizePerBlock(), 128u);
     }
 }
 
@@ -409,10 +418,40 @@ TEST(CacheConfigCreatorTest, SpecBuilderDerivesPhysicalSpanFromCpMapping) {
     EXPECT_EQ(round_robin->kernel_seq_size_per_block, 64u);
     EXPECT_EQ(compact->kernel_seq_size_per_block, 64u);
 
+    parallelism_config.role_type = RoleType::PDFUSION;
+    const auto pdfusion_compact  = SpecBuilder::build(compact_desc, ctx).spec;
+    EXPECT_EQ(pdfusion_compact->seq_size_per_block, 256u);
+    EXPECT_EQ(pdfusion_compact->kernel_seq_size_per_block, 64u);
+
     parallelism_config.prefill_cp_config.kv_cache_sharded = false;
     const auto inactive_compact                           = SpecBuilder::build(compact_desc, ctx).spec;
     EXPECT_EQ(inactive_compact->seq_size_per_block, 128u);
     EXPECT_EQ(inactive_compact->kernel_seq_size_per_block, 64u);
+}
+
+TEST(CacheConfigCreatorTest, ResolveCacheCpRankAndSizeUsesOneRoleAwareGeometry) {
+    ParallelismConfig config;
+    config.tp_rank = 2;
+    config.tp_size = 4;
+
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(0, 1));
+
+    config.prefill_cp_config.kv_cache_sharded = true;
+    config.role_type                          = RoleType::PDFUSION;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.role_type = RoleType::PREFILL;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.role_type = RoleType::DECODE;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(2, 4));
+
+    config.prefill_cp_config.method          = CPRotateMethod::PREFILL_CP;
+    config.prefill_cp_config.prefill_cp_size = 2;
+    EXPECT_EQ(resolveCacheCpRankAndSize(config), std::make_pair(1, 2));
+
+    config.prefill_cp_config.prefill_cp_size = 1;
+    EXPECT_THROW(resolveCacheCpRankAndSize(config), std::invalid_argument);
 }
 
 TEST(CacheConfigCreatorTest, SpecFingerprintIncludesKernelGeometry) {
@@ -569,9 +608,8 @@ TEST(CacheConfigCreatorTest, GenericGroupingPreservesDescriptorFirstSeenOrder) {
 }
 
 TEST(CacheConfigCreatorTest, GroupRecordsOwnHeterogeneousPhysicalAndKernelGeometry) {
-    auto model                                                      = makeMhaModel(/*layer_num=*/1);
-    model.attn_config.tokens_per_block                              = 128;
-    model.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto model                         = makeMhaModel(/*layer_num=*/1);
+    model.attn_config.tokens_per_block = 128;
 
     KVCacheSpecDesc scaled;
     scaled.tag                  = "scaled";
@@ -741,9 +779,8 @@ TEST(CacheConfigCreatorTest, DescriptorPolicyControlsActiveCpGeometry) {
 }
 
 TEST(CacheConfigCreatorTest, CreateConfigPreservesAllLinearExplicitTags) {
-    auto config                                                      = makeKimiModel();
-    config.num_layers                                                = 2;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config                                           = makeKimiModel();
+    config.num_layers                                     = 2;
     config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::LINEAR, HybridAttentionType::LINEAR};
     config.kv_cache_spec_descs.resize(2);
     config.kv_cache_spec_descs[0] = {KVCacheSpecDesc{"recurrent_state", KVCacheSpecType::LinearAttention}};
@@ -802,8 +839,7 @@ TEST(CacheConfigCreatorTest, InvalidInputsKeepDescriptorBoundaries) {
 }
 
 TEST(CacheConfigCreatorTest, DuplicateDescTagsFailDuringIndependentGrouping) {
-    auto config                                                      = makeMhaModel(/*layer_num=*/1);
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config = makeMhaModel(/*layer_num=*/1);
     config.kv_cache_spec_descs[0].push_back(config.kv_cache_spec_descs[0][0]);
 
     const auto error = runtimeErrorMessage([&]() { (void)createFinalConfig(config); });
@@ -812,8 +848,7 @@ TEST(CacheConfigCreatorTest, DuplicateDescTagsFailDuringIndependentGrouping) {
 }
 
 TEST(CacheConfigCreatorTest, SameTagDifferentLayoutsFailDuringIndependentGrouping) {
-    auto config                                                      = makeSparseMlaModel();
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto config = makeSparseMlaModel();
     config.kv_cache_spec_descs[1][1].entry_elems += 1;
 
     const auto error = runtimeErrorMessage([&]() { (void)createFinalConfig(config); });

@@ -102,7 +102,6 @@ def build_default_kv_cache_spec_descs(
         )
         indexer_desc.compression_ratio = 1
         layer_descs.append(indexer_desc)
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = True
 
     return [list(layer_descs) for _ in range(model_config.num_layers)]
 
@@ -116,11 +115,6 @@ class BaseModel(object):
     kv_cache_config: KVCacheConfig
     fmha_config: FMHAConfig
     moe_config: MoeConfig
-
-    @classmethod
-    def default_kv_cache_tokens_per_block(cls) -> int:
-        """Return a model-specific default, or zero to use the platform default."""
-        return 0
 
     def __init__(
         self,

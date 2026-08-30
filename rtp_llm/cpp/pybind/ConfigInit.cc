@@ -895,13 +895,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
         .def(pybind11::init<>())
-        .def(pybind11::init<bool, bool, std::vector<HybridAttentionType>>(),
+        .def(pybind11::init<bool, std::vector<HybridAttentionType>>(),
              pybind11::arg("enable_hybrid_attention"),
-             pybind11::arg("enable_independent_kv_cache_pools"),
              pybind11::arg("hybrid_attention_types"))
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
-        .def_readwrite("enable_independent_kv_cache_pools", &HybridAttentionConfig::enable_independent_kv_cache_pools)
         .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
 
     // Register SpeculativeType enum

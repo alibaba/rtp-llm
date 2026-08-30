@@ -13,7 +13,6 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
@@ -61,30 +60,8 @@ class ServerConfigPortLayoutTest(TestCase):
 class GenerateConfigTest(TestCase):
 
     @patch.dict("os.environ", _jit_env(), clear=True)
-    def test_setup_preserves_sequence_block_size_provenance(self):
+    def test_setup_materializes_platform_sequence_block_size_default(self):
         from rtp_llm.config.server_config_setup import setup_default_args
-
-        configs = PyEnvConfigs()
-        configs.model_args.model_type = "fake_model"
-        setup_default_args(configs)
-        self.assertEqual(configs.kv_cache_config.seq_size_per_block, 0)
-
-        explicit = PyEnvConfigs()
-        explicit.model_args.model_type = "fake_model"
-        explicit.kv_cache_config.seq_size_per_block = 64
-        setup_default_args(explicit)
-        self.assertEqual(explicit.kv_cache_config.seq_size_per_block, 64)
-
-    def test_model_factory_materializes_model_or_platform_block_default(self):
-        class PlatformDefaultModel:
-            @classmethod
-            def default_kv_cache_tokens_per_block(cls):
-                return 0
-
-        class ModelDefault256:
-            @classmethod
-            def default_kv_cache_tokens_per_block(cls):
-                return 256
 
         for device_path, expected in (
             (None, 64),
@@ -93,28 +70,24 @@ class GenerateConfigTest(TestCase):
         ):
             with self.subTest(device_path=device_path):
                 configs = PyEnvConfigs()
+                configs.model_args.model_type = "fake_model"
                 with patch(
-                    "rtp_llm.config.kv_cache_config.os.path.exists",
+                    "rtp_llm.config.server_config_setup.os.path.exists",
                     side_effect=lambda path, selected=device_path: path == selected,
                 ):
-                    ModelFactory._materialize_kv_cache_block_size(
-                        PlatformDefaultModel, configs.kv_cache_config
-                    )
-                self.assertEqual(configs.kv_cache_config.seq_size_per_block, expected)
-
-        model_default = PyEnvConfigs()
-        ModelFactory._materialize_kv_cache_block_size(
-            ModelDefault256, model_default.kv_cache_config
-        )
-        self.assertEqual(model_default.kv_cache_config.seq_size_per_block, 256)
+                    setup_default_args(configs)
+                self.assertEqual(
+                    configs.kv_cache_config.seq_size_per_block, expected
+                )
 
         explicit = PyEnvConfigs()
-        explicit.kv_cache_config.seq_size_per_block = 64
-        with patch("rtp_llm.config.kv_cache_config.os.path.exists", return_value=True):
-            ModelFactory._materialize_kv_cache_block_size(
-                ModelDefault256, explicit.kv_cache_config
-            )
-        self.assertEqual(explicit.kv_cache_config.seq_size_per_block, 64)
+        explicit.model_args.model_type = "fake_model"
+        explicit.kv_cache_config.seq_size_per_block = 128
+        with patch(
+            "rtp_llm.config.server_config_setup.os.path.exists", return_value=True
+        ):
+            setup_default_args(explicit)
+        self.assertEqual(explicit.kv_cache_config.seq_size_per_block, 128)
 
     def _build_block_sizes(
         self,
@@ -130,27 +103,21 @@ class GenerateConfigTest(TestCase):
         model_config = ModelConfig()
         model_config.attn_config.tokens_per_block = model_tokens_per_block
 
-        with patch("rtp_llm.config.kv_cache_config.os.path.exists", return_value=False):
-            build_model_config(
-                model_config,
-                configs.model_args,
-                configs.kv_cache_config,
-                configs.profiling_debug_logging_config,
-            )
+        build_model_config(
+            model_config,
+            configs.model_args,
+            configs.kv_cache_config,
+            configs.profiling_debug_logging_config,
+        )
         return (
             model_config.attn_config.tokens_per_block,
             model_config.attn_config.kernel_tokens_per_block,
         )
 
-    def test_build_model_config_resolves_sequence_block_sizes(self):
+    def test_build_model_config_copies_sequence_block_sizes(self):
         cases = (
-            # The sentinel preserves a positive block size loaded from the model.
-            (128, 0, 0, (128, 128)),
-            # Programmatic callers still receive the platform default.
-            (0, 0, 0, (64, 64)),
-            # Explicit physical geometry overrides model metadata.
+            (128, 64, 0, (64, 64)),
             (128, 256, 0, (256, 256)),
-            # Explicit kernel geometry remains independent.
             (128, 256, 32, (256, 32)),
         )
         for model_size, configured_size, kernel_size, expected in cases:

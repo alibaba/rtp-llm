@@ -71,10 +71,13 @@ public:
                                                   const std::vector<int>&         block_src_batch,
                                                   bool                            copy_last_block,
                                                   std::vector<TaggedBlockIdPair>& block_update_mapping) = 0;
-    virtual int                     seqSizePerBlock() const                                             = 0;
-    virtual int                     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                          int                            seq_len,
-                                                          int                            reserve_step) const                       = 0;
+    const CacheConfig&              cacheConfig() const {
+        return config_;
+    }
+    virtual int seqSizePerBlock() const                       = 0;
+    virtual int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                      int                            seq_len,
+                                      int                            reserve_step) const = 0;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.
     int estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                     int                            seq_len,

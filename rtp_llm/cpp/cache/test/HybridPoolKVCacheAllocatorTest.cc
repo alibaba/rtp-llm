@@ -113,18 +113,17 @@ static CacheConfig makeTinySingleSwaConfig(uint32_t block_num = 8) {
 
 static ModelConfig makeTinyDSV4ModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 5;
-    mc.hidden_size                                               = 32;
-    mc.attn_config.head_num                                      = 4;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 8;
-    mc.attn_config.rope_head_dim                                 = 4;
-    mc.attn_config.indexer_head_dim                              = 8;
-    mc.attn_config.indexer_head_num                              = 2;
-    mc.attn_config.indexer_topk                                  = 16;
-    mc.attn_config.tokens_per_block                              = 128;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.num_layers                                      = 5;
+    mc.hidden_size                                     = 32;
+    mc.attn_config.head_num                            = 4;
+    mc.attn_config.kv_head_num                         = 1;
+    mc.attn_config.size_per_head                       = 8;
+    mc.attn_config.rope_head_dim                       = 4;
+    mc.attn_config.indexer_head_dim                    = 8;
+    mc.attn_config.indexer_head_num                    = 2;
+    mc.attn_config.indexer_topk                        = 16;
+    mc.attn_config.tokens_per_block                    = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
     return mc;
 }
@@ -540,7 +539,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, OrdinarySingleMtpUsesExactMainAndProposeM
     }
     EXPECT_EQ(legacy_contract.total_size_bytes, expected_offset);
 
-    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false);
     ASSERT_TRUE(manager->init());
     auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
     ASSERT_NE(allocator, nullptr);
@@ -931,17 +930,9 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllLayerCacheBaseExposesPerLayerAndPerGro
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    ASSERT_EQ(layout.topology().layers().size(), config.layers().size());
-    for (size_t layer_id = 0; layer_id < config.layers().size(); ++layer_id) {
-        EXPECT_EQ(layout.topology().groupsForLayer(static_cast<int>(layer_id)), config.layers()[layer_id])
-            << "layer " << layer_id;
-    }
-    for (const auto& group : config.groups()) {
-        EXPECT_EQ(layout.topology().group(group.tag).policy.group_type, group.policy.group_type) << group.tag;
-    }
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
     for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num); ++i) {
-        const auto& layer_tags = layout.topology().groupsForLayer(static_cast<int>(i));
+        const auto& layer_tags = config.groupsForLayer(static_cast<int>(i));
         ASSERT_FALSE(layer_tags.empty());
         for (const auto& tag : layer_tags) {
             EXPECT_TRUE(layout.group(tag).hasLayer(i)) << "layer " << i << " tag=" << tag;
@@ -1593,9 +1584,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto mc                                            = makeProModelConfig();
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config        = CacheConfigCreator::createBasicConfig(mc, pc, KVCacheConfig{}, 0);
@@ -1700,7 +1690,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4AllLayerCacheBaseHasPerGroupTensors) 
         EXPECT_TRUE(layout.group("swa_kv").hasLayer(l)) << "layer " << l << " missing SWA_KV tensor";
     }
     EXPECT_EQ(layout.groups().size(), 7u);
-    EXPECT_EQ(layout.topology().groups().size(), 7u);
+    EXPECT_EQ(config.groups().size(), 7u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups) {

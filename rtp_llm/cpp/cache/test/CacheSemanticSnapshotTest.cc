@@ -8,16 +8,15 @@
 namespace rtp_llm::test {
 namespace {
 
-CacheConfig makeKimiHybridConfig(bool legacy_independent_flag = false) {
+CacheConfig makeKimiHybridConfig() {
     ModelConfig config;
-    config.num_layers                                                = 4;
-    config.attn_config.head_num                                      = 4;
-    config.attn_config.kv_head_num                                   = 2;
-    config.attn_config.size_per_head                                 = 32;
-    config.attn_config.tokens_per_block                              = 8;
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = legacy_independent_flag;
-    config.hybrid_attention_config.hybrid_attention_types            = {
+    config.num_layers                                      = 4;
+    config.attn_config.head_num                            = 4;
+    config.attn_config.kv_head_num                         = 2;
+    config.attn_config.size_per_head                       = 32;
+    config.attn_config.tokens_per_block                    = 8;
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {
         HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
     config.linear_attention_config.linear_conv_kernel_dim = 4;
     config.linear_attention_config.linear_key_head_dim    = 16;
@@ -32,14 +31,13 @@ CacheConfig makeKimiHybridConfig(bool legacy_independent_flag = false) {
 
 CacheConfig makeDeepSeekV4HybridPoolConfig() {
     ModelConfig config;
-    config.num_layers                                                = 2;
-    config.attn_config.head_num                                      = 128;
-    config.attn_config.kv_head_num                                   = 1;
-    config.attn_config.size_per_head                                 = 512;
-    config.attn_config.indexer_head_dim                              = 128;
-    config.attn_config.tokens_per_block                              = 128;
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    config.num_layers                                      = 2;
+    config.attn_config.head_num                            = 128;
+    config.attn_config.kv_head_num                         = 1;
+    config.attn_config.size_per_head                       = 512;
+    config.attn_config.indexer_head_dim                    = 128;
+    config.attn_config.tokens_per_block                    = 128;
+    config.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(config, {128, 4});
 
     ParallelismConfig parallelism;
@@ -114,10 +112,8 @@ TEST(CacheSemanticSnapshotTest, KimiHybridMatchesGolden) {
                                              1600,
                                              0}};
 
-    const auto legacy_flag_off = makeKimiHybridConfig(false);
-    const auto legacy_flag_on  = makeKimiHybridConfig(true);
-    EXPECT_EQ(snapshotCacheConfig(legacy_flag_off), expected);
-    EXPECT_EQ(snapshotCacheConfig(legacy_flag_on), expected);
+    const auto config = makeKimiHybridConfig();
+    EXPECT_EQ(snapshotCacheConfig(config), expected);
 }
 
 TEST(CacheSemanticSnapshotTest, DeepSeekV4HybridPoolMatchesGolden) {

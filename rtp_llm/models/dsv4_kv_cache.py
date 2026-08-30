@@ -16,7 +16,7 @@ C++ turns the resulting per-layer desc lists into the cache topology through
 ``CacheConfigCreator`` (``validateHybridPoolDescs`` ->
 ``buildLayerSpecsFromDescs`` -> ``populateGroupsFromLayerSpecs`` ->
 ``setupIndependentPoolSizes``), which is only reached when
-``hybrid_attention_config.enable_independent_kv_cache_pools`` is set.
+the hybrid attention configuration is enabled.
 
 This module is the production twin of
 ``rtp_llm/cpp/cache/test/CacheConfigTestUtils.h`` (``makeDsv4Desc`` /
@@ -32,7 +32,7 @@ true of ``ModelConfig.kv_cache_spec_descs`` (a ``std::vector<std::vector<...>>``
 mutate the Python list first, then assign it once.
 """
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
@@ -261,3 +261,13 @@ def build_dsv4_kv_cache_spec_descs(
         else:
             layer_descs.append([swa_kv])
     return layer_descs
+
+
+def resolve_dsv4_tokens_per_block(
+    tokens_per_block: int,
+    framework_default: int = 64,
+) -> Optional[int]:
+    """Promote the framework default while preserving explicit non-defaults."""
+    if tokens_per_block == framework_default:
+        return DSV4_TOKENS_PER_BLOCK
+    return None

@@ -3,6 +3,7 @@
 #include <string>
 #include <sstream>
 #include <map>
+#include <utility>
 #include <vector>
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -102,6 +103,9 @@ struct ParallelismConfig {
     }
     std::string to_string() const;
 };
+
+// Returns the effective cache CP geometry as {cp_rank, cp_size}.
+std::pair<int, int> resolveCacheCpRankAndSize(const ParallelismConfig& parallelism_config);
 
 struct ConcurrencyConfig {
     bool        concurrency_with_block = false;
@@ -650,8 +654,7 @@ enum class HybridAttentionType {
 };
 
 struct HybridAttentionConfig {
-    bool                             enable_hybrid_attention           = false;
-    bool                             enable_independent_kv_cache_pools = false;
+    bool                             enable_hybrid_attention = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
     std::string                      to_string() const;
 };

@@ -28,7 +28,7 @@ class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
-    KVCacheManager(const CacheConfig&                 config,
+    KVCacheManager(CacheConfig&&                      config,
                    bool                               warmup                     = false,
                    const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
                    const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
@@ -162,6 +162,7 @@ public:
     }
 
 private:
+    void initialize(bool warmup);
     void initConnectorCoordinator();
     void allocateAndSync();
     void reportMetricsLoop();
