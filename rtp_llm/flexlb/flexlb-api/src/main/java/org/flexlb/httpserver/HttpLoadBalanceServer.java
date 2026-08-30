@@ -12,12 +12,15 @@ import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.MasterInfoResponse;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.service.address.FlexlbInstanceAddressService;
+import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
@@ -58,6 +61,8 @@ public class HttpLoadBalanceServer {
     private final EndpointRegistry endpointRegistry;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private final FlexlbInstanceAddressService instanceAddressService;
+    private final FlexlbLogManager flexlbLogManager;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  ConfigService configService,
@@ -65,13 +70,17 @@ public class HttpLoadBalanceServer {
                                  EndpointRegistry endpointRegistry,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
-                                 ServerScheduleLatencyRecorder serverLatencyRecorder) {
+                                 ServerScheduleLatencyRecorder serverLatencyRecorder,
+                                 FlexlbInstanceAddressService instanceAddressService,
+                                 FlexlbLogManager flexlbLogManager) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.instanceAddressService = instanceAddressService;
+        this.flexlbLogManager = flexlbLogManager;
     }
 
     @Bean
@@ -99,10 +108,11 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
         return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(logLevelUpdateRequest -> {
-                    Logger.setLevel(logLevelUpdateRequest.getLogLevel());
+                    flexlbLogManager.setLogLevel(logLevelUpdateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + Logger.getLevel()), String.class);
+                            .body(Mono.just("Success! logLevel="
+                                    + logLevelUpdateRequest.getLogLevel()), String.class);
                 }).onErrorResume(e -> {
                     Logger.error("update logLevel error", e);
                     return ServerResponse.status(500)
@@ -149,16 +159,16 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
-                    Response result = new Response();
+                    MasterInfoResponse result = new MasterInfoResponse();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    result.setPodIp(instanceAddressService.getPodIp());
+                    result.setInstanceIp(instanceAddressService.getInstanceIp());
                     result.setQueueLength(priorityScheduler.getQueuedRequestCount());
-                    result.setCode(200);
-                    result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
                     result.setReady(masterEngineSynchronizer == null || masterEngineSynchronizer.isReady());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(result), Response.class);
+                            .body(Mono.just(result), MasterInfoResponse.class);
                 }).onErrorResume(e -> {
                     Logger.error("responseMasterInfo error", e);
                     Response errorResponse = new Response();
