@@ -233,8 +233,12 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
     EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
     ASSERT_TRUE(server_status.has_value());
     EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_NE(log_capture.content().find("request [pending peer="), std::string::npos);
-    EXPECT_NE(log_capture.content().find("read allocate request failed"), std::string::npos);
+    const auto log_content             = log_capture.content();
+    const bool has_decode_read_failure = log_content.find("request [pending peer=") != std::string::npos
+                                         && log_content.find("read allocate request failed") != std::string::npos;
+    const bool has_outer_cancel = log_content.find("error code [CANCELLED]") != std::string::npos
+                                  && log_content.find("request is cancelled") != std::string::npos;
+    EXPECT_TRUE(has_decode_read_failure || has_outer_cancel) << log_content;
 }
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {

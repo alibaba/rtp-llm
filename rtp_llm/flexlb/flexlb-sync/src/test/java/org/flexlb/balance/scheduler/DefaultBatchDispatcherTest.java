@@ -1,5 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import com.google.protobuf.DescriptorProtos;
+import com.google.protobuf.Descriptors;
+import com.google.protobuf.DynamicMessage;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -477,8 +480,150 @@ class DefaultBatchDispatcherTest {
         assertEquals(RoleType.PREFILL, RoleTypeProtoConverter.fromRoleAddr(addr));
     }
 
+    @Test
+    void dispatchPreservesDistinctPerRequestTraceContextsInOneBatch() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem first = createBatchItem(501L, 500, 200, prefillEp);
+        BatchItem second = createBatchItem(502L, 500, 200, prefillEp);
+        first.ctx().setGenerateInputPbBytes(generateInputWithTraceContext(
+                501L,
+                "00-11111111111111111111111111111111-1111111111111111-01",
+                "vendor=one").toByteArray());
+        second.ctx().setGenerateInputPbBytes(generateInputWithTraceContext(
+                502L,
+                "00-22222222222222222222222222222222-2222222222222222-01",
+                "vendor=two").toByteArray());
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(92L, List.of(501L, 502L)));
+                });
+
+        dispatcher.dispatch(List.of(first, second), prefillEp,
+                92L, 100, "trace_context", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(1, sent.size());
+        List<EngineRpcService.EnqueueBatchExternalInputPB> requests =
+                sent.getFirst().getDpSlots(0).getRequestsList();
+        assertEquals(2, requests.size());
+        EngineRpcService.GenerateInputPB firstSent = requests.stream()
+                .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                .filter(input -> input.getRequestId() == 501L)
+                .findFirst().orElseThrow();
+        EngineRpcService.GenerateInputPB secondSent = requests.stream()
+                .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                .filter(input -> input.getRequestId() == 502L)
+                .findFirst().orElseThrow();
+        assertEquals("00-11111111111111111111111111111111-1111111111111111-01",
+                firstSent.getRequestInfo().getTraceContext().getTraceparent());
+        assertEquals("vendor=one", firstSent.getRequestInfo().getTraceContext().getTracestate());
+        assertEquals("00-22222222222222222222222222222222-2222222222222222-01",
+                secondSent.getRequestInfo().getTraceContext().getTraceparent());
+        assertEquals("vendor=two", secondSent.getRequestInfo().getTraceContext().getTracestate());
+    }
+
+    @Test
+    void oldDescriptorRoundTripPreservesNestedTraceContextUnknownField() throws Exception {
+        EngineRpcService.GenerateInputPB payload = generateInputWithTraceContext(
+                503L,
+                "00-33333333333333333333333333333333-3333333333333333-01",
+                "vendor=legacy");
+        Descriptors.Descriptor legacy = legacyGenerateInputDescriptor();
+
+        DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
+        Descriptors.FieldDescriptor requestInfoField = legacy.findFieldByNumber(9);
+        DynamicMessage oldRequestInfo = (DynamicMessage) oldReader.getField(requestInfoField);
+        assertTrue(!oldRequestInfo.getUnknownFields().getField(6).getLengthDelimitedList().isEmpty());
+
+        DynamicMessage oldWriter = oldReader.toBuilder()
+                .setField(legacy.findFieldByNumber(10), 73)
+                .build();
+        EngineRpcService.GenerateInputPB reparsed =
+                EngineRpcService.GenerateInputPB.parseFrom(oldWriter.toByteArray());
+
+        assertEquals(73, reparsed.getPriority());
+        assertEquals(payload.getRequestInfo().getTraceContext(),
+                reparsed.getRequestInfo().getTraceContext());
+    }
+
     private static EngineRpcService.GenerateInputPB sentInput(EngineRpcService.EnqueueBatchRequestPB request) {
         return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
+    }
+
+    private static EngineRpcService.GenerateInputPB generateInputWithTraceContext(
+            long requestId, String traceparent, String tracestate) {
+        return EngineRpcService.GenerateInputPB.newBuilder()
+                .setRequestId(requestId)
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                .setRequestInfo(EngineRpcService.RequestInfoPB.newBuilder()
+                        .setTraceContext(EngineRpcService.TraceContextPB.newBuilder()
+                                .setTraceparent(traceparent)
+                                .setTracestate(tracestate)
+                                .build())
+                        .build())
+                .build();
+    }
+
+    private static Descriptors.Descriptor legacyGenerateInputDescriptor() throws Exception {
+        DescriptorProtos.DescriptorProto requestInfo = DescriptorProtos.DescriptorProto.newBuilder()
+                .setName("RequestInfoPB")
+                .addField(optionalField("frontend_ip", 1,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
+                .addField(optionalField("dash_ip", 2,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
+                .addField(optionalField("trace_id", 3,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
+                .addField(optionalField("request_id", 4,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
+                .addField(optionalField("source_role", 5,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_STRING, null))
+                .build();
+        DescriptorProtos.DescriptorProto generateConfig = DescriptorProtos.DescriptorProto.newBuilder()
+                .setName("GenerateConfigPB")
+                .build();
+        DescriptorProtos.DescriptorProto generateInput = DescriptorProtos.DescriptorProto.newBuilder()
+                .setName("GenerateInputPB")
+                .addField(optionalField("request_id", 1,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT64, null))
+                .addField(optionalField("generate_config", 4,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                        ".legacy_trace.GenerateConfigPB"))
+                .addField(optionalField("request_info", 9,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_MESSAGE,
+                        ".legacy_trace.RequestInfoPB"))
+                .addField(optionalField("priority", 10,
+                        DescriptorProtos.FieldDescriptorProto.Type.TYPE_INT32, null))
+                .build();
+        DescriptorProtos.FileDescriptorProto file = DescriptorProtos.FileDescriptorProto.newBuilder()
+                .setName("legacy_trace_generate_input.proto")
+                .setPackage("legacy_trace")
+                .setSyntax("proto3")
+                .addMessageType(requestInfo)
+                .addMessageType(generateConfig)
+                .addMessageType(generateInput)
+                .build();
+        return Descriptors.FileDescriptor.buildFrom(file, new Descriptors.FileDescriptor[0])
+                .findMessageTypeByName("GenerateInputPB");
+    }
+
+    private static DescriptorProtos.FieldDescriptorProto optionalField(
+            String name,
+            int number,
+            DescriptorProtos.FieldDescriptorProto.Type type,
+            String typeName) {
+        DescriptorProtos.FieldDescriptorProto.Builder builder =
+                DescriptorProtos.FieldDescriptorProto.newBuilder()
+                        .setName(name)
+                        .setNumber(number)
+                        .setLabel(DescriptorProtos.FieldDescriptorProto.Label.LABEL_OPTIONAL)
+                        .setType(type);
+        if (typeName != null) {
+            builder.setTypeName(typeName);
+        }
+        return builder.build();
     }
 
     // ---- helpers ----

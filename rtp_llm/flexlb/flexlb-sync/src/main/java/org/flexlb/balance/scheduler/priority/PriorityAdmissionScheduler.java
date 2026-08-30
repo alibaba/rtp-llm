@@ -21,6 +21,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -1038,51 +1039,64 @@ public class PriorityAdmissionScheduler {
     private PlacementOutcome tryNormalPlacement(BalanceContext ctx,
                                                 CompletableFuture<Response> future,
                                                 ClusterSnapshot snapshot) {
-        Response routeResponse = router.route(ctx);
-        // P1-4: the exclusion steers exactly one re-route — clear it so later
-        // attempts (or a rescue re-entry) see the full candidate set again.
-        ctx.setExcludedPrefillIpPort(null);
-        if (routeResponse == null || !routeResponse.isSuccess()) {
-            // Parity with the legacy path: a failed route holds no reservation.
-            return PlacementOutcome.infeasible(routeResponse);
+        Response routeResponse;
+        try {
+            routeResponse = router.route(ctx);
+            // P1-4: the exclusion steers exactly one re-route — clear it so later
+            // attempts (or a rescue re-entry) see the full candidate set again.
+            ctx.setExcludedPrefillIpPort(null);
+            if (routeResponse == null || !routeResponse.isSuccess()) {
+                // Parity with the legacy path: a failed route holds no reservation.
+                return PlacementOutcome.infeasible(routeResponse);
+            }
+
+            ServerStatus prefill = FlexlbBatchScheduler.findServer(routeResponse, RoleType.PREFILL);
+            ServerStatus decode = FlexlbBatchScheduler.findServer(routeResponse, RoleType.DECODE);
+            if (prefill != null) {
+                FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(), FlexlbTrace.PREFILL_ADDRESS,
+                        prefill.getServerIp() + ":" + prefill.getHttpPort());
+            }
+            if (decode != null) {
+                FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(), FlexlbTrace.DECODE_ADDRESS,
+                        decode.getServerIp() + ":" + decode.getHttpPort());
+            }
+            if (prefill == null) {
+                rollbackRoute(routeResponse);
+                return PlacementOutcome.infeasible(null);
+            }
+
+            String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+            if (prefillEp == null) {
+                rollbackRoute(routeResponse);
+                return PlacementOutcome.infeasible(null);
+            }
+
+            DecodeEndpoint decodeEp = null;
+            if (decode != null) {
+                decodeEp = endpointRegistry.getDecode(decode.getServerIp() + ":" + decode.getHttpPort());
+            }
+
+            PriorityRequestEnvelope envelope = buildEnvelope(ctx, prefill, prefillEp, decodeEp);
+
+            BatchItem item = new BatchItem(ctx, future, routeResponse,
+                    FlexlbBatchScheduler.copyOf(prefill), FlexlbBatchScheduler.copyOf(decode),
+                    prefillEp, decodeEp, System.currentTimeMillis());
+
+            // Prefill queue version comes from the snapshot (pre-route) when
+            // available; decode admission version is captured post-reserve so only
+            // plan-to-commit interference is detected.
+            PrefillEndpointSnapshot prefillSnapshot = snapshot.prefills().get(prefillIpPort);
+            long prefillQueueVersion = prefillSnapshot != null
+                    ? prefillSnapshot.queueVersion()
+                    : prefillEp.getBatcher().queueVersion();
+            long decodeAdmissionVersion = decodeEp != null ? decodeEp.admissionVersion() : 0;
+
+            return PlacementOutcome.of(new NormalPlacementPlan(
+                    envelope, item, routeResponse, prefillQueueVersion, decodeAdmissionVersion));
+        } catch (RuntimeException | Error routeFailure) {
+            throw routeFailure;
         }
-
-        ServerStatus prefill = FlexlbBatchScheduler.findServer(routeResponse, RoleType.PREFILL);
-        ServerStatus decode = FlexlbBatchScheduler.findServer(routeResponse, RoleType.DECODE);
-        if (prefill == null) {
-            rollbackRoute(routeResponse);
-            return PlacementOutcome.infeasible(null);
-        }
-
-        String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-        PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
-        if (prefillEp == null) {
-            rollbackRoute(routeResponse);
-            return PlacementOutcome.infeasible(null);
-        }
-
-        DecodeEndpoint decodeEp = null;
-        if (decode != null) {
-            decodeEp = endpointRegistry.getDecode(decode.getServerIp() + ":" + decode.getHttpPort());
-        }
-
-        PriorityRequestEnvelope envelope = buildEnvelope(ctx, prefill, prefillEp, decodeEp);
-
-        BatchItem item = new BatchItem(ctx, future, routeResponse,
-                FlexlbBatchScheduler.copyOf(prefill), FlexlbBatchScheduler.copyOf(decode),
-                prefillEp, decodeEp, System.currentTimeMillis());
-
-        // Prefill queue version comes from the snapshot (pre-route) when
-        // available; decode admission version is captured post-reserve so only
-        // plan-to-commit interference is detected.
-        PrefillEndpointSnapshot prefillSnapshot = snapshot.prefills().get(prefillIpPort);
-        long prefillQueueVersion = prefillSnapshot != null
-                ? prefillSnapshot.queueVersion()
-                : prefillEp.getBatcher().queueVersion();
-        long decodeAdmissionVersion = decodeEp != null ? decodeEp.admissionVersion() : 0;
-
-        return PlacementOutcome.of(new NormalPlacementPlan(
-                envelope, item, routeResponse, prefillQueueVersion, decodeAdmissionVersion));
     }
 
     private PriorityRequestEnvelope buildEnvelope(BalanceContext ctx,

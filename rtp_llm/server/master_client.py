@@ -30,6 +30,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.worker_status import _coerce_role_type
+from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
 route_logger = logging.getLogger("route_logger")
@@ -203,7 +204,32 @@ class MasterClient:
                 request_id,
                 request_pb.priority,
             )
-            response = await stub.Schedule(request_pb, timeout=timeout_s)
+            client_span, trace_metadata = start_client_span(
+                "rtp_llm.flexlb.schedule", target
+            )
+            if client_span is not None:
+                client_span.set_attribute("rtp_llm.request_id", request_id)
+            try:
+                response = await stub.Schedule(
+                    request_pb,
+                    timeout=timeout_s,
+                    metadata=trace_metadata or None,
+                )
+            except BaseException as error:
+                if client_span is not None:
+                    if isinstance(error, grpc.aio.AioRpcError):
+                        client_span.set_attribute(
+                            "rpc.grpc.status_code", error.code().name
+                        )
+                        client_span.finish(error=error, error_type="RpcError")
+                    elif isinstance(error, asyncio.CancelledError):
+                        client_span.finish(error=error, error_type="Cancelled")
+                    else:
+                        client_span.finish(error=error, error_type="RpcError")
+                raise
+            if client_span is not None:
+                client_span.set_attribute("flexlb.schedule.code", int(response.code))
+                client_span.finish()
             return response
         except grpc.aio.AioRpcError as e:
             elapsed = time.time() - start
