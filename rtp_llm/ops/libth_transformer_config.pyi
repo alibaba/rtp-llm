@@ -629,13 +629,12 @@ class HWKernelConfig:
         ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
-    enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
     @typing.overload
     def __init__(self) -> None:
         ...
     @typing.overload
-    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
+    def __init__(self, enable_hybrid_attention: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...

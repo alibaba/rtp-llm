@@ -35,7 +35,7 @@ makeP2PTestCacheConfig(int group_num, int layer_num, const std::vector<std::vect
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBufferByTag(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
         return {};
     }
 
@@ -237,6 +237,15 @@ TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesCacheKeyTimelineIns
 
     P2PConnectorAsyncMatchContext ctx(resource);
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+}
+
+TEST(P2PConnectorAsyncMatchContextTest, CanonicalTimelineReportsGlobalCacheKeyBlocks) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({101, 103, 105, 107});
+    resource->setCacheKeysAreCpCanonical(true);
+
+    P2PConnectorAsyncMatchContext ctx(resource, /*cp_size=*/2);
+    EXPECT_EQ(ctx.matchedBlockCount(), 8u);
 }
 
 TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountIsZeroForNullOrEmptyTimeline) {

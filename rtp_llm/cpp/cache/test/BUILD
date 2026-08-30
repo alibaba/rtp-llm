@@ -232,9 +232,9 @@ cc_test(
 )
 
 cc_test(
-    name = "full_kv_cache_group_test",
+    name = "full_cache_manager_test",
     srcs = [
-        "FullKVCacheGroupTest.cc",
+        "FullCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -246,15 +246,15 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_single_path_test",
+    name = "coordinator_cache_manager_single_path_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorSinglePathTest.cc",
+        "CoordinatorCacheManagerSinglePathTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_cache_manager_lib",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},
@@ -269,7 +269,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_cache_manager_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
@@ -294,9 +294,9 @@ cc_test(
 )
 
 cc_test(
-    name = "linear_kv_cache_group_test",
+    name = "linear_cache_manager_test",
     srcs = [
-        "LinearKVCacheGroupTest.cc",
+        "LinearCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -308,9 +308,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_hybrid_path_test",
+    name = "coordinator_cache_manager_hybrid_path_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorHybridPathTest.cc",
+        "CoordinatorCacheManagerHybridPathTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -322,9 +322,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_cp_shard_test",
+    name = "coordinator_cache_manager_cp_shard_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorCPShardTest.cc",
+        "CoordinatorCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -336,9 +336,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_test",
+    name = "coordinator_cache_manager_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "CoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -350,9 +350,9 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_test",
+    name = "swa_cache_manager_test",
     srcs = [
-        "SWAKVCacheGroupTest.cc",
+        "SWACacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -364,14 +364,14 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_malloc_range_test",
+    name = "swa_cache_manager_malloc_range_test",
     srcs = [
-        "SWAKVCacheGroupMallocRangeTest.cc",
+        "SWACacheManagerMallocRangeTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:kv_cache_group",
+        "//rtp_llm/cpp/cache:single_type_cache_manager",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,

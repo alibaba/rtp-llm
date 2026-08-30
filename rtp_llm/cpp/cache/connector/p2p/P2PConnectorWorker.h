@@ -55,7 +55,7 @@ public:
 
 private:
     P2PConnectorWorkerConfig             config_;
-    const CacheConfig&                   cache_config_;
+    const CacheConfig                    cache_config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 

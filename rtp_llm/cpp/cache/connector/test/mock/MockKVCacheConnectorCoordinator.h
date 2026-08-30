@@ -8,13 +8,13 @@ namespace rtp_llm {
 
 class MockKVCacheConnectorCoordinator: public KVCacheConnectorCoordinator {
 public:
-    MockKVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
-                                    const KVCacheConfig&                     kv_cache_config,
-                                    const RuntimeConfig&                     runtime_config,
-                                    const std::shared_ptr<KVCacheAllocator>& allocator,
-                                    const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr):
+    MockKVCacheConnectorCoordinator(const CacheConfig&                              cache_config,
+                                    const KVCacheConfig&                            kv_cache_config,
+                                    const RuntimeConfig&                            runtime_config,
+                                    const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                                    const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr):
         KVCacheConnectorCoordinator(
-            cache_config, kv_cache_config, runtime_config, {}, {}, allocator, metrics_reporter) {}
+            cache_config, kv_cache_config, runtime_config, {}, {}, coordinator_cache_manager, metrics_reporter) {}
     ~MockKVCacheConnectorCoordinator() override = default;
 
 public:

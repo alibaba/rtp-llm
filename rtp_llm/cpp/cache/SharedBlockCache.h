@@ -85,13 +85,12 @@ public:
 
     void init(const CacheConfig& config, const std::map<std::string, BlockPoolPtr>& group_pools);
 
-    void put(CacheKeyType cache_key, const std::map<std::string, BlockIdxType>& group_block_ids, bool is_resident);
     void put(CacheKeyType                               cache_key,
-             const std::map<std::string, BlockIdxType>& group_block_ids,
+             const std::map<std::string, BlockIdxType>& blocks_by_group,
              const std::map<std::string, bool>&         group_matchable,
              bool                                       is_resident,
-             NamespaceId                                namespace_id,
-             const BlockDependency&                     dependency);
+             const BlockDependency&                     dependency,
+             NamespaceId                                namespace_id = kGpuLogicalNamespace);
 
     BlockIdxType matchGroup(CacheKeyType cache_key, std::string_view tag);
 
@@ -117,8 +116,8 @@ public:
     void    setIndependentGroupEviction(bool enabled, const std::vector<std::string>& tags);
 
 protected:
-    virtual void blockCacheReferenceByTag(std::string_view tag, BlockIdxType block_id);
-    virtual void blockCacheFreeByTag(std::string_view tag, BlockIdxType block_id);
+    virtual void blockCacheReferenceForGroup(std::string_view tag, BlockIdxType block_id);
+    virtual void blockCacheFreeForGroup(std::string_view tag, BlockIdxType block_id);
 
 private:
     static const size_t kCacheMaxCapacity = 10000000;

@@ -7,7 +7,7 @@ test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/cuda:no_block_copy",
-    "//rtp_llm/cpp/cache:kv_cache_allocator",
+    "//rtp_llm/cpp/cache:coordinator_cache_manager",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/utils:core_utils",
@@ -49,7 +49,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache:block_pool",
         "//rtp_llm/cpp/cache:cache_core",
-        "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager_hdr",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/config:config_modules",

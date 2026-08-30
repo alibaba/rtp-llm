@@ -44,6 +44,26 @@ CacheConfig makeDeepSeekV4HybridPoolConfig() {
     return CacheConfigCreator::createBasicConfig(config, parallelism, KVCacheConfig{}, /*gen_num_per_cycle=*/0);
 }
 
+TEST(CacheSemanticSnapshotTest, HybridAttentionConfigLogsCompressedLayerTypes) {
+    HybridAttentionConfig config;
+    config.enable_hybrid_attention = true;
+    config.hybrid_attention_types  = {HybridAttentionType::NONE,
+                                      HybridAttentionType::NONE,
+                                      HybridAttentionType::LINEAR,
+                                      HybridAttentionType::SLIDING_WINDOW,
+                                      HybridAttentionType::SLIDING_WINDOW,
+                                      HybridAttentionType::SLIDING_WINDOW};
+
+    EXPECT_EQ(config.to_string(),
+              "enable_hybrid_attention: 1\n"
+              "hybrid_attention_types: [NONE x 2, LINEAR, SLIDING_WINDOW x 3]");
+
+    config.hybrid_attention_types.clear();
+    EXPECT_EQ(config.to_string(),
+              "enable_hybrid_attention: 1\n"
+              "hybrid_attention_types: []");
+}
+
 TEST(CacheSemanticSnapshotTest, SingleMhaMatchesGolden) {
     const auto config = makeSimpleMhaCacheConfig(/*layer_num=*/2,
                                                  /*block_num=*/7,

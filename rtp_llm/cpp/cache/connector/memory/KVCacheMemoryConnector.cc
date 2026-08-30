@@ -3,12 +3,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -98,26 +100,29 @@ static CacheBlockKind copyItemBlockKind(const MemoryOperationRequestPB::CopyItem
     }
 }
 
-KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                                               const KVCacheConfig&                     kv_cache_config,
-                                               const ParallelismConfig&                 parallelism_config,
-                                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                                               const std::vector<std::string>&          tp_addrs,
-                                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
+KVCacheMemoryConnector::KVCacheMemoryConnector(
+    const CacheConfig&                              cache_config,
+    const KVCacheConfig&                            kv_cache_config,
+    const ParallelismConfig&                        parallelism_config,
+    const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+    const std::vector<std::string>&                 tp_addrs,
+    const kmonitor::MetricsReporterPtr&             metrics_reporter):
     cache_config_(cache_config),
     pool_block_memory_layout_(buildPoolBlockMemoryLayout(cache_config)),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
-    allocator_(allocator),
+    coordinator_cache_manager_(coordinator_cache_manager),
     tp_addrs_(tp_addrs),
     metrics_reporter_(metrics_reporter) {}
 
-KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                                               const KVCacheConfig&                     kv_cache_config,
-                                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                                               const std::vector<std::string>&          tp_addrs,
-                                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
-    KVCacheMemoryConnector(cache_config, kv_cache_config, ParallelismConfig{}, allocator, tp_addrs, metrics_reporter) {}
+KVCacheMemoryConnector::KVCacheMemoryConnector(
+    const CacheConfig&                              cache_config,
+    const KVCacheConfig&                            kv_cache_config,
+    const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+    const std::vector<std::string>&                 tp_addrs,
+    const kmonitor::MetricsReporterPtr&             metrics_reporter):
+    KVCacheMemoryConnector(
+        cache_config, kv_cache_config, ParallelismConfig{}, coordinator_cache_manager, tp_addrs, metrics_reporter) {}
 
 KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     RTP_LLM_LOG_INFO("KVCacheMemoryConnector destructor");
@@ -640,7 +645,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         return nullptr;
     }
 
-    const size_t already_reuse_num = resource->reuseBlockNum();
+    const size_t already_reuse_global_blocks = resource->reuseBlockNum();
+    const size_t already_reuse_num           = connectorEntryCount(*resource, already_reuse_global_blocks);
     if (already_reuse_num >= cache_keys_size) {
         // gpu has already matched all cache keys, no need to match in memory
         RTP_LLM_LOG_DEBUG(
@@ -698,7 +704,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
         reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
         reportDiskMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_disk ? matched_num : 0);
         return std::make_shared<MemoryAsyncMatchContext>(
-            matched_num, start_read_block_index, read_block_num, copy_plan);
+            globalKeyBlockCount(*resource, matched_num), start_read_block_index, read_block_num, copy_plan);
     }
 
     // matched_num must end at a key that satisfies BOTH:
@@ -754,7 +760,8 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
                       cache_keys_size);
     reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
     reportDiskMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_disk ? matched_num : 0);
-    return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
+    return std::make_shared<MemoryAsyncMatchContext>(
+        globalKeyBlockCount(*resource, matched_num), start_read_block_index, read_block_num, copy_plan);
 }
 
 bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerTagPoolBlockTables&   layer_tag_block_ids,
@@ -839,6 +846,23 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
         return nullptr;
     }
 
+    if (start_read_block_index < 0 || read_block_num <= 0) {
+        RTP_LLM_LOG_WARNING("async read failed, global cache-key range must be positive, start=%d count=%d",
+                            start_read_block_index,
+                            read_block_num);
+        return nullptr;
+    }
+    const size_t global_read_block_num = static_cast<size_t>(read_block_num);
+    const size_t connector_start_index = connectorEntryCount(*resource, static_cast<size_t>(start_read_block_index));
+    const size_t connector_read_num    = connectorEntryCount(*resource, global_read_block_num);
+    RTP_LLM_CHECK_WITH_INFO(connector_start_index <= static_cast<size_t>(std::numeric_limits<int>::max())
+                                && connector_read_num <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "memory connector canonical read range exceeds int: start=%zu count=%zu",
+                            connector_start_index,
+                            connector_read_num);
+    start_read_block_index = static_cast<int>(connector_start_index);
+    read_block_num         = static_cast<int>(connector_read_num);
+
     autil::ScopedTime2 timer;
 
     const bool  use_prefix_tree     = usePrefixTreeMemoryCache();
@@ -896,7 +920,8 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     }
 
     const auto total_block_num = cache_keys_size;
-    auto       read_done = [resource, copy_plan, total_block_num, read_block_num, timer, this](bool success) mutable {
+    auto       read_done = [resource, copy_plan, total_block_num, read_block_num, global_read_block_num, timer, this](
+                         bool success) mutable {
         RTP_LLM_LOG_DEBUG("async read done, success: %d", success);
         int64_t disk_read_block_num = 0;
         for (const auto& copy_info : copy_plan->copy_infos) {
@@ -905,7 +930,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
             }
         }
         if (success) {
-            resource->setMemoryReuseBlockNum(read_block_num);
+            resource->setMemoryReuseBlockNum(global_read_block_num);
             for (const auto& copy_info : copy_plan->copy_infos) {
                 if (copy_info.kind == CacheBlockKind::COMPRESSED_KV || copy_info.kind == CacheBlockKind::STATE_SWA_KV) {
                     const auto removed_item = prefix_block_cache_->detachIfMatch(copy_info.cache_key,
@@ -1828,7 +1853,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
     if (isDualPool() && !complete_pool_) {
         return false;
     }
-    if (allocator_ == nullptr) {
+    if (coordinator_cache_manager_ == nullptr) {
         return false;
     }
 
@@ -1884,8 +1909,9 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
                 continue;
             }
 
-            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
-            size_t     within_layer_off = 0;
+            const auto gpu_buffers =
+                coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
+            size_t within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
                     within_layer_off += gpu_buffer.size_bytes;
@@ -1977,7 +2003,7 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
     if (isDualPool() && !complete_pool_) {
         return false;
     }
-    if (allocator_ == nullptr) {
+    if (coordinator_cache_manager_ == nullptr) {
         return false;
     }
 
@@ -2024,8 +2050,9 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
                 continue;
             }
 
-            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
-            size_t     within_layer_off = 0;
+            const auto gpu_buffers =
+                coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
+            size_t within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (gpu_buffer.addr == nullptr || gpu_buffer.size_bytes == 0) {
                     within_layer_off += gpu_buffer.size_bytes;
@@ -2181,8 +2208,9 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&   
                 byte_off += slot.stride_bytes;
                 continue;
             }
-            const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
-            size_t     within_layer_off = 0;
+            const auto gpu_buffers =
+                coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
+            size_t within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (within_layer_off + gpu_buffer.size_bytes > slot.stride_bytes
                     || byte_off + within_layer_off + gpu_buffer.size_bytes > backing_buffer.size_bytes) {
@@ -2283,7 +2311,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&        item,
             byte_off += slot.stride_bytes;
             continue;
         }
-        const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+        const auto gpu_buffers = coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
         size_t     within_layer_off = 0;
         for (const auto& gpu_buffer : gpu_buffers) {
             const auto off = byte_off + within_layer_off;
@@ -2359,7 +2387,7 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                mem_
             continue;
         }
 
-        const auto gpu_buffers      = allocator_->convertIndexToBufferByTag(slot.layer_id, slot.tag, gpu_block);
+        const auto gpu_buffers = coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
         size_t     within_layer_off = 0;
         for (const auto& gpu_buffer : gpu_buffers) {
             if (within_layer_off + gpu_buffer.size_bytes > layer_stride) {
@@ -3350,7 +3378,7 @@ void KVCacheMemoryConnector::reportDiskWriteMetrics(bool    success,
     metrics_reporter_->report<RtpLLMDiskCacheMetrics, RtpLLMDiskCacheWriteMetricsCollector>(nullptr, &collector);
 }
 
-int KVCacheMemoryConnector::cpSizeForMetrics() const {
+int KVCacheMemoryConnector::connectorCpSize() const {
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
     if (!cp_cfg.kv_cache_sharded) {
         return 1;
@@ -3365,8 +3393,28 @@ int KVCacheMemoryConnector::cpSizeForMetrics() const {
     return 1;
 }
 
+size_t KVCacheMemoryConnector::connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const {
+    if (!resource.cacheKeysAreCpCanonical()) {
+        return global_key_blocks;
+    }
+    const int cp_size = connectorCpSize();
+    RTP_LLM_CHECK_WITH_INFO(cp_size > 1, "CP-canonical memory resource requires active cache CP");
+    return CPSlotMapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block))
+        .canonicalEntryCountFromGlobalKeyBlocks(global_key_blocks);
+}
+
+size_t KVCacheMemoryConnector::globalKeyBlockCount(const KVCacheResource& resource, size_t connector_entries) const {
+    if (!resource.cacheKeysAreCpCanonical()) {
+        return connector_entries;
+    }
+    const int cp_size = connectorCpSize();
+    RTP_LLM_CHECK_WITH_INFO(cp_size > 1, "CP-canonical memory resource requires active cache CP");
+    return CPSlotMapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block))
+        .globalKeyBlockCountFromCanonicalEntries(connector_entries);
+}
+
 int KVCacheMemoryConnector::cacheKeyTokensPerBlockForMetrics() const {
-    return static_cast<int>(cache_config_.seq_size_per_block) * cpSizeForMetrics();
+    return static_cast<int>(cache_config_.seq_size_per_block) * connectorCpSize();
 }
 
 void KVCacheMemoryConnector::reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction) {

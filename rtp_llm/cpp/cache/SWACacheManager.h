@@ -2,37 +2,38 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 
 namespace rtp_llm {
 
-class SWAKVCacheGroup: public KVCacheGroup {
+class SWACacheManager: public SingleTypeCacheManager {
 public:
-    SWAKVCacheGroup(const CacheGroup&                   cache_group,
+    SWACacheManager(const CacheGroup&                   cache_group,
                     std::vector<int>                    layer_ids,
                     BlockPoolPtr                        block_pool,
                     int                                 linear_step      = 0,
                     SharedBlockCache*                   shared_cache     = nullptr,
                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(cache_group, std::move(layer_ids), std::move(block_pool), shared_cache, metrics_reporter),
+        SingleTypeCacheManager(
+            cache_group, std::move(layer_ids), std::move(block_pool), shared_cache, metrics_reporter),
         linear_step_(linear_step) {}
 
-    SWAKVCacheGroup(const CacheGroup&                   cache_group,
+    SWACacheManager(const CacheGroup&                   cache_group,
                     BlockPoolPtr                        block_pool,
                     int                                 linear_step      = 0,
                     SharedBlockCache*                   shared_cache     = nullptr,
                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        SWAKVCacheGroup(cache_group, {0}, std::move(block_pool), linear_step, shared_cache, metrics_reporter) {}
+        SWACacheManager(cache_group, {0}, std::move(block_pool), linear_step, shared_cache, metrics_reporter) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
-    bool        malloc(PoolBlockIds&        block_ids,
+    bool        malloc(BlockIds&            block_ids,
                        int                  seq_len,
                        bool                 enable_reuse_cache   = false,
                        int                  reserve_step         = 0,
                        std::vector<size_t>* backfilled_positions = nullptr) override;
-    void removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void free(const BlockIndicesType& block_indices) override;
-    void reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
+    void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
@@ -56,11 +57,11 @@ private:
     int  activeTailBlockCount() const;
     bool effectiveReuseCacheForAllocation(bool enable_reuse_cache) const;
     bool shouldCheckSWATailBlockIds() const;
-    void checkSWATailBlockIds(const PoolBlockIds& block_ids, const char* caller) const;
+    void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
 
     int linear_step_ = 0;
 };
 
-using SWAKVCacheGroupPtr = std::shared_ptr<SWAKVCacheGroup>;
+using SWACacheManagerPtr = std::shared_ptr<SWACacheManager>;
 
 }  // namespace rtp_llm

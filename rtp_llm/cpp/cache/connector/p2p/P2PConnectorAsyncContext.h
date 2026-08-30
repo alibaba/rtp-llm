@@ -19,7 +19,8 @@ namespace rtp_llm {
 /// @brief PD 分离场景下的匹配上下文，始终全量匹配
 class P2PConnectorAsyncMatchContext: public AsyncMatchContext {
 public:
-    P2PConnectorAsyncMatchContext(const KVCacheResourcePtr& resource): resource_(resource) {}
+    P2PConnectorAsyncMatchContext(const KVCacheResourcePtr& resource, int cp_size = 1):
+        resource_(resource), cp_size_(cp_size) {}
     virtual ~P2PConnectorAsyncMatchContext() {}
 
 public:
@@ -30,6 +31,7 @@ public:
 
 private:
     const KVCacheResourcePtr resource_;
+    const int                cp_size_;
 };
 
 class P2PConnectorAsyncReadContext: public AsyncContext {

@@ -593,9 +593,9 @@ void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resour
     *batch_kv_cache_resource_ = kv_cache_resource;
 }
 
-bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
+bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, int previous_seq_len) {
     return resource_context_.cache_manager->updateKVBlock(
-        batch_kv_cache_resource_, block_src_batch, copy_last_block, block_update_mapping_);
+        batch_kv_cache_resource_, block_src_batch, previous_seq_len, block_update_mapping_);
 }
 
 bool StreamCacheResource::hasCacheKeys() const {
@@ -700,7 +700,8 @@ void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>&
 }
 
 void StreamCacheResource::updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context) {
-    const int block_tokens     = reuseBlockTokens();
+    // KVCacheResource counters are global cache-key blocks regardless of CP projection.
+    const int block_tokens     = seqSizePerBlock();
     const int total_reuse_len  = read_context->resource()->reuseBlockNum() * block_tokens;
     const int memory_reuse_len = read_context->resource()->memoryReuseBlockNum() * block_tokens;
     const int remote_reuse_len = read_context->resource()->remoteReuseBlockNum() * block_tokens;

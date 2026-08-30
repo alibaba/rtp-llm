@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 
 #include <algorithm>
-#include <new>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,14 +88,6 @@ CacheConfig::CacheConfig(std::vector<CacheGroup> new_groups,
     layers_.swap(new_layers);
     tag_to_idx_.swap(new_tag_to_idx);
     tag_to_layer_ids_.swap(new_tag_to_layer_ids);
-}
-
-CacheConfig& CacheConfig::operator=(CacheConfig&& other) noexcept {
-    if (this != &other) {
-        this->~CacheConfig();
-        new (this) CacheConfig(std::move(other));
-    }
-    return *this;
 }
 
 void CacheConfig::validateAndBuildIndex(std::vector<CacheGroup>&                           groups,

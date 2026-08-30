@@ -1130,7 +1130,7 @@ def cp_gather_request_pool_blocks(
       local_block_table_for_req: ``[L]`` int64 / int32 — physical pool block
                   ids, one per locally-owned logical position. Must be the
                   rank's view of the request's block table after Stage 5a's
-                  ``HybridPoolKVCacheAllocator`` allocation
+                  ``CoordinatorCacheManager`` allocation
                   (``L = ceil(total_logical_blocks / cp_size)``).
       cp_size, cp_rank: CP geometry.
       total_logical_blocks: logical block count for the request, used to
