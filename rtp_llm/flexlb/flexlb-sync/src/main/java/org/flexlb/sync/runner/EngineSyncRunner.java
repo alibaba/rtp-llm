@@ -51,6 +51,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final boolean cacheFullSnapshotDebugMode;
 
+    private final boolean kvcmEnabled;
+
     private final PriorityScheduler priorityScheduler;
 
     private final EndpointRegistry endpointRegistry;
@@ -66,6 +68,7 @@ public class EngineSyncRunner implements Runnable {
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
+                            boolean kvcmEnabled,
                             boolean cacheFullSnapshotDebugMode,
                             PriorityScheduler priorityScheduler,
                             EndpointRegistry endpointRegistry) {
@@ -81,6 +84,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.kvcmEnabled = kvcmEnabled;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
         this.priorityScheduler = priorityScheduler;
         this.endpointRegistry = endpointRegistry;
@@ -159,21 +163,23 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
-                    try {
-                        logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
-                        GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                                = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                                workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                cacheFullSnapshotDebugMode, statusCheckExecutor);
-                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
-                    } catch (RejectedExecutionException e) {
-                        workerStatus.getCacheCheckInProgress().set(false);
-                        logger.debug("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
+                if (!kvcmEnabled) {
+                    if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+                        try {
+                            logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
+                            GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
+                                    = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                                    workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                                    syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                                    cacheFullSnapshotDebugMode, statusCheckExecutor);
+                            statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                        } catch (RejectedExecutionException e) {
+                            workerStatus.getCacheCheckInProgress().set(false);
+                            logger.debug("Cache check rejected for worker: {}, reset flag for retry", workerIpPort);
+                        }
+                    } else {
+                        logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
                     }
-                } else {
-                    logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
                 }
             }
             logger.debug("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
