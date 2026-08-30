@@ -33,6 +33,13 @@ public:
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         max_seq_len_(graph_params.max_seq_len),
         cache_config_(graph_params.cache_config),
+        seq_size_per_block_(graph_params.cache_config ?
+                                static_cast<int>(graph_params.cache_config->seq_size_per_block) :
+                                graph_params.tokens_per_block),
+        kernel_seq_size_per_block_(graph_params.cache_config ?
+                                       static_cast<int>(
+                                           graph_params.cache_config->groups().front().kernelSeqSizePerBlock()) :
+                                       graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
@@ -45,30 +52,18 @@ public:
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (!cache_config_ || cache_config_->seq_size_per_block == 0) {
+        if (seq_size_per_block_ <= 0 || kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error(
-                "CudaGraphRunner constructor: CacheConfig with positive logical block size required.");
+                "CudaGraphRunner constructor: positive logical and kernel block sizes required.");
         }
-        std::vector<std::string> tags;
-        tags.reserve(cache_config_->groups().size());
-        for (const auto& group : cache_config_->groups()) {
-            tags.push_back(group.tag);
-        }
-        for (size_t module_idx = 0; module_idx < cache_config_->mtp_sub_configs.size(); ++module_idx) {
-            const auto& sub_config = cache_config_->mtp_sub_configs[module_idx];
-            RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "CUDA graph cache has null MTP sub-config %zu", module_idx);
+        if (cache_config_) {
+            std::vector<std::string> tags;
+            tags.reserve(cache_config_->groups().size());
             for (const auto& group : cache_config_->groups()) {
-                const auto& sub_group = sub_config->group(group.tag);
-                RTP_LLM_CHECK_WITH_INFO(
-                    sub_group.block_num == group.block_num,
-                    "CUDA graph shared MTP pool block count mismatch: module=%zu tag=%s main=%u sub=%u",
-                    module_idx,
-                    group.tag.c_str(),
-                    group.block_num,
-                    sub_group.block_num);
+                tags.push_back(group.tag);
             }
+            kv_cache_group_tags_ = sortedCacheGroupTags(tags, "CUDA graph KV cache");
         }
-        kv_cache_group_tags_  = sortedCacheGroupTags(tags, "CUDA graph KV cache");
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
@@ -162,7 +157,7 @@ private:
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
-    BlockIdxType            safeKernelBlockIdForTag(std::string_view tag) const;
+    BlockIdxType            safeKernelBlockIdForGroup(std::string_view tag) const;
     BlockIdxType            safeKernelBlockIdForFlatTable() const;
     BlockIdxType            safeKernelBlockIdForPrimaryTable() const;
     py::object              py_forward_method_;
@@ -177,6 +172,8 @@ private:
     int                     max_num_token_{1};
     int                     max_seq_len_{0};
     std::shared_ptr<const CacheConfig> cache_config_;
+    int                                seq_size_per_block_{0};
+    int                                kernel_seq_size_per_block_{0};
     int                                hidden_size_{0};
     size_t                             input_hidden_size_{0};
     int                                hc_mult_{1};
@@ -200,6 +197,7 @@ private:
     std::vector<std::string>      kv_cache_group_tags_;
     int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    mutable std::atomic<uint64_t> block_table_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

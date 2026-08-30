@@ -6,7 +6,7 @@
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -23,11 +23,11 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 }  // namespace
 
 void validateRemoteCacheTopology(const CacheConfig& cache_config) {
-    const auto& groups         = cache_config.groups();
-    const auto  full_group_num = std::count_if(groups.begin(), groups.end(), [](const CacheGroup& group) {
+    const auto& groups                    = cache_config.groups();
+    const auto  full_group_num            = std::count_if(groups.begin(), groups.end(), [](const CacheGroup& group) {
         return group.policy.group_type == CacheGroupType::FULL;
     });
-    const bool remote_topology_supported = groups.size() == 1 && full_group_num == 1;
+    const bool  remote_topology_supported = groups.size() == 1 && full_group_num == 1;
     if (!remote_topology_supported) {
         RTP_LLM_LOG_ERROR("remote cache initialization rejected: remote cache now supports exactly one FULL cache "
                           "group; multi-group remote cache support has been removed. Disable remote cache or configure "
@@ -102,7 +102,7 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    const auto& topology           = allocator_->cacheConfig();
+    const auto& topology           = coordinator_cache_manager_->cacheConfig();
     uint64_t    group_name_bithash = 1;
     const auto& layers             = topology.layers();
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
@@ -216,7 +216,7 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<std::string>& ta
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
             // if support scale, block_infos: {kv_info, scale_info}
-            const auto& block_infos = allocator_->convertIndexToBufferByTag(layer_ids[j], tag, block_ids[i]);
+            const auto& block_infos = coordinator_cache_manager_->convertIndexToBuffer(layer_ids[j], tag, block_ids[i]);
             if (block_infos.empty()) {
                 RTP_LLM_LOG_WARNING("convertIndexToBuffer returned empty for layer_id [%d] tag [%s] block_id[%d]",
                                     layer_ids[j],

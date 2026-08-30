@@ -40,7 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     update_decode_metadata_in_place_fp8,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    as_attention_inputs_by_tag,
+    as_attention_inputs_by_group,
     primary_attention_inputs,
 )
 
@@ -129,20 +129,20 @@ class DSv4DecodeFmhaImplFP8:
         """
         if not self._paged_entries_per_block:
             return None
-        by_tag = as_attention_inputs_by_tag(attn_inputs)
-        if not by_tag:
+        inputs_by_group = as_attention_inputs_by_group(attn_inputs)
+        if not inputs_by_group:
             return None
-        if len(by_tag) == 1 and len(self.config.group_tags) == 1:
+        if len(inputs_by_group) == 1 and len(self.config.group_tags) == 1:
             # Single-group cache: C++ collapses the mapping to a bare
             # PyAttentionInputs, so re-key with the snapshotted tag.
-            by_tag = {self.config.group_tags[0]: next(iter(by_tag.values()))}
+            inputs_by_group = {
+                self.config.group_tags[0]: next(iter(inputs_by_group.values()))
+            }
         paged_block_tables: Dict[str, torch.Tensor] = {}
-        for tag, tagged_inputs in by_tag.items():
+        for tag, group_inputs in inputs_by_group.items():
             if tag not in self.config.paged_pool_specs:
                 continue
-            block_table = getattr(
-                tagged_inputs, "kv_cache_kernel_block_id_device", None
-            )
+            block_table = getattr(group_inputs, "kv_cache_kernel_block_id_device", None)
             if block_table is None or block_table.numel() == 0:
                 continue
             paged_block_tables[tag] = block_table

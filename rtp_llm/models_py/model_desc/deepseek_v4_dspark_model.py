@@ -55,7 +55,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     SWA_KV,
-    as_attention_inputs_by_tag,
+    as_attention_inputs_by_group,
     build_block_tables_for_tags,
     primary_attention_inputs,
 )
@@ -245,7 +245,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if table is None:
             raise RuntimeError(
                 "DSpark could not find the %s KV block table; available tags=%r"
-                % (SWA_KV, list(as_attention_inputs_by_tag(attention_inputs)))
+                % (SWA_KV, list(as_attention_inputs_by_group(attention_inputs)))
             )
         if int(table.shape[0]) < batch_size:
             raise RuntimeError(

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -148,10 +149,62 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
     EXPECT_EQ(custom_swa[0].offset_index, 2);
 }
 
+TEST_F(CPSlotMapperTest, CacheKeyBlockPlanUsesGroupKeyNamespaceAndPhysicalGeometry) {
+    CacheConfig config;
+    config.seq_size_per_block = 4;
+
+    auto rr_spec                       = std::make_shared<MHAKVCacheSpec>();
+    rr_spec->seq_size_per_block        = 4;
+    rr_spec->kernel_seq_size_per_block = 4;
+    CacheGroup rr;
+    rr.tag               = "rr";
+    rr.spec              = std::move(rr_spec);
+    rr.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    rr.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+
+    auto logical_spec                       = std::make_shared<MHAKVCacheSpec>();
+    logical_spec->seq_size_per_block        = 8;
+    logical_spec->kernel_seq_size_per_block = 8;
+    CacheGroup logical;
+    logical.tag               = "logical";
+    logical.spec              = std::move(logical_spec);
+    logical.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    logical.policy.cp_mapping = CpBlockMappingMode::NONE;
+    config = CacheConfig({std::move(rr), std::move(logical)}, {{"rr", "logical"}}, /*main_layer_num=*/1);
+    config.seq_size_per_block = 4;
+
+    CPSlotMapper mapper(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    EXPECT_EQ(mapper.cacheKeysPerPhysicalBlock(config, "rr"), 1u);
+    EXPECT_EQ(mapper.cacheKeysPerPhysicalBlock(config, "logical"), 2u);
+    EXPECT_EQ(mapper.reuseScanAlignmentKeyBlocks(config), 2u);
+    EXPECT_EQ(mapper.canonicalEntryCountFromGlobalKeyBlocks(8), 4u);
+    EXPECT_EQ(mapper.globalKeyBlockCountFromCanonicalEntries(1), 2u);
+    EXPECT_ANY_THROW(mapper.canonicalEntryCountFromGlobalKeyBlocks(7));
+    EXPECT_ANY_THROW(mapper.globalKeyBlockCountFromCanonicalEntries(std::numeric_limits<size_t>::max()));
+    EXPECT_EQ(mapper.physicalBlocksForCacheKeyPrefix(config, "rr", 4), 2u);
+    EXPECT_EQ(mapper.physicalBlocksForCacheKeyPrefix(config, "logical", 4), 2u);
+    EXPECT_ANY_THROW(mapper.physicalBlocksForCacheKeyPrefix(config, "logical", 3));
+
+    const auto rr_plan = mapper.buildCacheKeyBlockPlan(config, "rr", /*total_cache_key_blocks=*/6, 2);
+    ASSERT_EQ(rr_plan.size(), 2u);
+    EXPECT_EQ(rr_plan[0].key_index, 1);
+    EXPECT_EQ(rr_plan[0].offset_index, 0);
+    EXPECT_EQ(rr_plan[1].key_index, 3);
+    EXPECT_EQ(rr_plan[1].offset_index, 1);
+
+    const auto logical_plan = mapper.buildCacheKeyBlockPlan(config, "logical", /*total_cache_key_blocks=*/6, 3);
+    ASSERT_EQ(logical_plan.size(), 3u);
+    EXPECT_EQ(logical_plan[0].key_index, 1);
+    EXPECT_EQ(logical_plan[0].offset_index, 0);
+    EXPECT_EQ(logical_plan[1].key_index, 3);
+    EXPECT_EQ(logical_plan[1].offset_index, 1);
+    EXPECT_EQ(logical_plan[2].key_index, 5);
+    EXPECT_EQ(logical_plan[2].offset_index, 2);
+}
+
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 8;
@@ -183,7 +236,6 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistinct) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 24;
@@ -219,7 +271,6 @@ TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistin
 TEST_F(CPSlotMapperTest, TaggedGroupMethodsRejectMissingIdentity) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block        = 8;
@@ -250,7 +301,6 @@ TEST_F(CPSlotMapperTest, TransferPlannerReturnsDirectTailPositions) {
 TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDummyTail) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 8;
@@ -281,19 +331,68 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
 
     EXPECT_EQ(projected.cacheKeys(), (CacheKeysType{11, 13, 14}));
     ASSERT_EQ(projected.blockDependencies().size(), 3u);
-    EXPECT_EQ(projected.blockDependencies()[0].parent_key, 901);
-    EXPECT_EQ(projected.blockDependencies()[0].ordinal, 13u);
-    EXPECT_EQ(projected.blockDependencies()[1].parent_key, 777);
-    EXPECT_EQ(projected.blockDependencies()[1].ordinal, 34u);
+    EXPECT_FALSE(projected.blockDependencies()[0].has_parent);
+    EXPECT_EQ(projected.blockDependencies()[0].ordinal, 0u);
+    EXPECT_TRUE(projected.blockDependencies()[1].has_parent);
+    EXPECT_EQ(projected.blockDependencies()[1].parent_key, 11);
+    EXPECT_EQ(projected.blockDependencies()[1].ordinal, 1u);
+    EXPECT_TRUE(projected.blockDependencies()[2].has_parent);
     EXPECT_EQ(projected.blockDependencies()[2].parent_key, 13);
-    EXPECT_EQ(projected.blockDependencies()[2].ordinal, 55u);
+    EXPECT_EQ(projected.blockDependencies()[2].ordinal, 2u);
     EXPECT_FALSE(projected.lastBlockAligned());
+}
+
+TEST_F(CPSlotMapperTest, ConnectorProjectionKeepsGlobalReuseCounters) {
+    CacheConfig config;
+    config.seq_size_per_block = 4;
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block        = 4;
+    spec->kernel_seq_size_per_block = 4;
+    CacheGroup group;
+    group.tag               = "full";
+    group.spec              = std::move(spec);
+    group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    config                  = CacheConfig({std::move(group)}, {{"full"}}, /*main_layer_num=*/1);
+    config.seq_size_per_block = 4;
+
+    KVCacheResource source;
+    source.initGroups(config);
+    source.setCacheKeys({100, 101, 102, 103, 104, 105, 106, 107});
+    source.mutableBlockIds("full").assign({10, 11, 12, 13, 14, 15, 16, 17});
+    source.setDeviceReuseBlockNum(8);
+    source.setLastBlockAligned(true);
+
+    CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*block_size=*/4);
+    auto projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(source.cacheKeys()));
+    EXPECT_TRUE(projected.cacheKeysAreCpCanonical());
+    EXPECT_EQ(projected.cacheKeys().size(), 4u);
+    EXPECT_EQ(projected.deviceReuseBlockNum(), 8u);
+    EXPECT_EQ(mapper.canonicalEntryCountFromGlobalKeyBlocks(projected.deviceReuseBlockNum()), 4u);
+
+    source.setDeviceReuseBlockNum(7);
+    EXPECT_ANY_THROW(
+        (void)mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(source.cacheKeys())));
+}
+
+TEST_F(CPSlotMapperTest, CanonicalDependenciesFormContinuousProjectedChain) {
+    CPSlotMapper mapper(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8);
+    const auto   dependencies = mapper.canonicalBlockDependencies(CacheKeysType{11, 13, 15});
+
+    ASSERT_EQ(dependencies.size(), 3u);
+    EXPECT_FALSE(dependencies[0].has_parent);
+    EXPECT_EQ(dependencies[0].ordinal, 0u);
+    EXPECT_TRUE(dependencies[1].has_parent);
+    EXPECT_EQ(dependencies[1].parent_key, 11);
+    EXPECT_EQ(dependencies[1].ordinal, 1u);
+    EXPECT_TRUE(dependencies[2].has_parent);
+    EXPECT_EQ(dependencies[2].parent_key, 13);
+    EXPECT_EQ(dependencies[2].ordinal, 2u);
 }
 
 TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 8;

@@ -2,6 +2,19 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "cache_block_mapper",
+    srcs = ["CacheBlockMapper.cc"],
+    hdrs = ["CacheBlockMapper.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        ":cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
     name = "cp_slot_mapper",
     srcs = ["CPSlotMapper.cc"],
     hdrs = ["CPSlotMapper.h"],
@@ -9,6 +22,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
+        ":cache_block_mapper",
         ":cache_config",
         ":cache_group_type",
         "//rtp_llm/cpp/utils:core_utils",
@@ -215,18 +229,18 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_group",
+    name = "single_type_cache_manager",
     srcs = [
-        "FullKVCacheGroup.cc",
-        "KVCacheGroup.cc",
-        "LinearKVCacheGroup.cc",
-        "SWAKVCacheGroup.cc",
+        "FullCacheManager.cc",
+        "SingleTypeCacheManager.cc",
+        "LinearCacheManager.cc",
+        "SWACacheManager.cc",
     ],
     hdrs = [
-        "FullKVCacheGroup.h",
-        "KVCacheGroup.h",
-        "LinearKVCacheGroup.h",
-        "SWAKVCacheGroup.h",
+        "FullCacheManager.h",
+        "SingleTypeCacheManager.h",
+        "LinearCacheManager.h",
+        "SWACacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -237,9 +251,9 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_allocator_hdr",
+    name = "coordinator_cache_manager_hdr",
     hdrs = [
-        "KVCacheAllocator.h",
+        "CoordinatorCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -247,27 +261,26 @@ cc_library(
         ":block_pool",
         ":cache_types",
         ":cp_slot_mapper",
+        ":single_type_cache_manager",
         "//rtp_llm/cpp/metrics:metrics",
     ] + torch_deps(),
 )
 
 cc_library(
-    name = "kv_cache_allocator",
+    name = "coordinator_cache_manager",
     srcs = [
-        "HybridPoolKVCacheAllocator.cc",
-        "HybridPoolKVCacheAllocatorCoordinator.cc",
-        "KVCacheAllocator.cc",
+        "CoordinatorCacheManager.cc",
     ],
     hdrs = [
-        "HybridPoolKVCacheAllocator.h",
-        "KVCacheAllocator.h",
+        "CoordinatorCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_block_mapper",
         ":cp_slot_mapper",
-        ":kv_cache_allocator_hdr",
-        ":kv_cache_group",
+        ":coordinator_cache_manager_hdr",
+        ":single_type_cache_manager",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
@@ -306,7 +319,7 @@ cc_library(
     deps = [
         ":batch_kv_cache_resource",
         ":cache_types",
-        ":kv_cache_allocator",
+        ":coordinator_cache_manager",
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",

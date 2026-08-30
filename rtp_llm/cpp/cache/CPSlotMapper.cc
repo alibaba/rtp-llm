@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -113,21 +114,85 @@ CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) c
     return local;
 }
 
-BlockDependenciesType CPSlotMapper::canonicalBlockDependencies(const BlockDependenciesType& full_dependencies) const {
-    if (!isSharded()) {
-        return full_dependencies;
+BlockDependenciesType CPSlotMapper::canonicalBlockDependencies(const CacheKeysType& canonical_keys) const {
+    BlockDependenciesType dependencies;
+    dependencies.reserve(canonical_keys.size());
+    for (size_t i = 0; i < canonical_keys.size(); ++i) {
+        BlockDependency dependency;
+        dependency.ordinal = static_cast<uint32_t>(i);
+        if (i > 0) {
+            dependency.has_parent = true;
+            dependency.parent_key = canonical_keys[i - 1];
+        }
+        dependencies.push_back(dependency);
     }
-    BlockDependenciesType local;
-    const size_t          stride = static_cast<size_t>(cp_size_);
-    for (size_t i = stride - 1; i < full_dependencies.size(); i += stride) {
-        local.push_back(full_dependencies[i]);
-    }
-    return local;
+    return dependencies;
 }
 
 CacheKeysType
 CPSlotMapper::localCacheKeys(const CacheConfig& config, std::string_view tag, const CacheKeysType& full_keys) const {
     return usesCpCanonicalKeys(config, tag) ? canonicalCacheKeys(full_keys) : full_keys;
+}
+
+size_t CPSlotMapper::cacheKeysPerPhysicalBlock(const CacheConfig& config, std::string_view tag) const {
+    return CacheBlockMapper::cacheKeysPerPhysicalBlock(config, tag);
+}
+
+size_t CPSlotMapper::reuseScanAlignmentKeyBlocks(const CacheConfig& config) const {
+    size_t unit_key_blocks = 1;
+    for (const auto& group : config.groups()) {
+        const bool participates = group.policy.group_type != CacheGroupType::SWA || group.policy.enable_prefix_reuse;
+        if (!participates) {
+            continue;
+        }
+        const size_t group_key_blocks = usesCpCanonicalKeys(config, group.tag) ?
+                                            static_cast<size_t>(cp_size_) :
+                                            cacheKeysPerPhysicalBlock(config, group.tag);
+        unit_key_blocks = CacheBlockMapper::checkedLeastCommonMultiple(unit_key_blocks, group_key_blocks, group.tag);
+    }
+    return unit_key_blocks;
+}
+
+size_t CPSlotMapper::canonicalEntryCountFromGlobalKeyBlocks(size_t global_key_blocks) const {
+    const size_t cp_size = static_cast<size_t>(cp_size_);
+    RTP_LLM_CHECK_WITH_INFO(global_key_blocks % cp_size == 0,
+                            "global cache-key blocks=%zu are not divisible by cp_size=%zu",
+                            global_key_blocks,
+                            cp_size);
+    return global_key_blocks / cp_size;
+}
+
+size_t CPSlotMapper::globalKeyBlockCountFromCanonicalEntries(size_t canonical_entries) const {
+    const size_t cp_size = static_cast<size_t>(cp_size_);
+    RTP_LLM_CHECK_WITH_INFO(canonical_entries <= std::numeric_limits<size_t>::max() / cp_size,
+                            "canonical cache entry count=%zu overflows global cache-key blocks at cp_size=%zu",
+                            canonical_entries,
+                            cp_size);
+    return canonical_entries * cp_size;
+}
+
+size_t CPSlotMapper::physicalBlocksForCacheKeyPrefix(const CacheConfig& config,
+                                                     std::string_view   tag,
+                                                     size_t             cache_key_blocks) const {
+    if (cache_key_blocks == 0) {
+        return 0;
+    }
+    const size_t keys_per_physical =
+        usesCpCanonicalKeys(config, tag) ? static_cast<size_t>(cp_size_) : cacheKeysPerPhysicalBlock(config, tag);
+    return CacheBlockMapper::physicalBlocksForCacheKeyPrefix(cache_key_blocks, keys_per_physical, tag);
+}
+
+std::vector<CacheStoreBlockPair> CPSlotMapper::buildCacheKeyBlockPlan(const CacheConfig& config,
+                                                                      std::string_view   tag,
+                                                                      size_t             total_cache_key_blocks,
+                                                                      size_t             physical_block_count) const {
+    if (total_cache_key_blocks == 0 || physical_block_count == 0) {
+        return {};
+    }
+    const size_t keys_per_physical =
+        usesCpCanonicalKeys(config, tag) ? static_cast<size_t>(cp_size_) : cacheKeysPerPhysicalBlock(config, tag);
+    return CacheBlockMapper::buildCacheKeyBlockPlan(
+        total_cache_key_blocks, physical_block_count, keys_per_physical, tag);
 }
 
 std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig& config,
@@ -213,11 +278,18 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
                             "connector projection requires the canonical CP key subsequence: selected=%zu expected=%zu",
                             selected_keys.size(),
                             expected_keys.size());
+    RTP_LLM_CHECK_WITH_INFO(source.reuseBlockNum() <= source.cacheKeys().size(),
+                            "connector projection reuse blocks=%zu exceed global cache-key blocks=%zu",
+                            source.reuseBlockNum(),
+                            source.cacheKeys().size());
+    (void)canonicalEntryCountFromGlobalKeyBlocks(source.deviceReuseBlockNum());
+    (void)canonicalEntryCountFromGlobalKeyBlocks(source.memoryReuseBlockNum());
+    (void)canonicalEntryCountFromGlobalKeyBlocks(source.remoteReuseBlockNum());
 
     KVCacheResource selected = source;
     selected.initGroups(config);
     CacheKeysType         projected_keys         = selected_keys;
-    BlockDependenciesType projected_dependencies = canonicalBlockDependencies(source.blockDependencies());
+    BlockDependenciesType projected_dependencies = canonicalBlockDependencies(projected_keys);
     RTP_LLM_CHECK(projected_dependencies.size() == projected_keys.size());
     const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size_);
     selected.setLastBlockAligned(selected_aligned);
@@ -228,8 +300,14 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     // original partial key as a connector-only dummy tail so the drop-last
     // contract discards the dummy, not the usable selected key.
     if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
+        BlockDependency dummy_dependency;
+        dummy_dependency.ordinal = static_cast<uint32_t>(projected_keys.size());
+        if (!projected_keys.empty()) {
+            dummy_dependency.has_parent = true;
+            dummy_dependency.parent_key = projected_keys.back();
+        }
         projected_keys.push_back(source.cacheKeys().back());
-        projected_dependencies.push_back(source.blockDependencies().back());
+        projected_dependencies.push_back(dummy_dependency);
         selected.setLastBlockAligned(false);
     }
     selected.setCacheKeysAndBlockDependencies(std::move(projected_keys), std::move(projected_dependencies));

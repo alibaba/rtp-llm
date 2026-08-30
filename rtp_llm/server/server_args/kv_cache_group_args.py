@@ -1,17 +1,7 @@
-import logging
-import os
-
 from rtp_llm.server.server_args.util import str2bool
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
-    removed_host_pool_env = "DSV4_FIXED_POOL_USE_MEMORY"
-    if removed_host_pool_env in os.environ:
-        logging.warning(
-            "%s is deprecated and ignored: the DSV4 fixed pool only supports device memory",
-            removed_host_pool_env,
-        )
-
     ##############################################################################################################
     # KV Cache 相关配置
     ##############################################################################################################
@@ -476,4 +466,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=0,
         help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
         "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv4_fixed_pool_use_memory",
+        env_name="DSV4_FIXED_POOL_USE_MEMORY",
+        deprecated_ignored_warning=(
+            "DSV4_FIXED_POOL_USE_MEMORY/--dsv4_fixed_pool_use_memory is deprecated and ignored: "
+            "the DSV4 fixed pool only supports device memory"
+        ),
+        type=str2bool,
+        default=False,
+        help="[deprecated] 已忽略；DSV4 固定池仅支持 device memory。",
     )

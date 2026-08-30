@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/CacheBlockMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 
@@ -62,9 +63,27 @@ public:
     int effectiveSeqLenForAlloc(const CacheConfig& config, std::string_view tag, int seq_len) const;
 
     CacheKeysType         canonicalCacheKeys(const CacheKeysType& full_keys) const;
-    BlockDependenciesType canonicalBlockDependencies(const BlockDependenciesType& full_dependencies) const;
+    BlockDependenciesType canonicalBlockDependencies(const CacheKeysType& canonical_keys) const;
     size_t                logicalSeqSizePerBlock(const CacheConfig& config, std::string_view tag) const;
     CacheKeysType localCacheKeys(const CacheConfig& config, std::string_view tag, const CacheKeysType& full_keys) const;
+
+    size_t cacheKeysPerPhysicalBlock(const CacheConfig& config, std::string_view tag) const;
+    // Number of global cache-key blocks per safe reuse scan step. This is only
+    // an alignment span; reuse counters never use this as their unit.
+    size_t reuseScanAlignmentKeyBlocks(const CacheConfig& config) const;
+    // Connector resources retain global cache-key-block counters even when
+    // their key/block arrays are projected to the CP-canonical timeline.
+    size_t canonicalEntryCountFromGlobalKeyBlocks(size_t global_key_blocks) const;
+    size_t globalKeyBlockCountFromCanonicalEntries(size_t canonical_entries) const;
+    size_t
+    physicalBlocksForCacheKeyPrefix(const CacheConfig& config, std::string_view tag, size_t cache_key_blocks) const;
+    // Translate tag-local physical slots to stable ordinals in the complete
+    // logical cache-key timeline. CP-canonical groups use each virtual block's
+    // last ordinal; logical groups use each physical block's last ordinal.
+    std::vector<CacheStoreBlockPair> buildCacheKeyBlockPlan(const CacheConfig& config,
+                                                            std::string_view   tag,
+                                                            size_t             total_cache_key_blocks,
+                                                            size_t             physical_block_count) const;
 
     std::vector<CacheStoreBlockPair> buildStorePlan(const CacheConfig& config,
                                                     std::string_view   tag,

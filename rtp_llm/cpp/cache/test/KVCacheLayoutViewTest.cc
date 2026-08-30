@@ -463,9 +463,9 @@ TEST(KVCacheLayoutViewTest, SortedBoundaryTagOrderIsCanonicalAndValidated) {
     EXPECT_EQ(sortedCacheGroupTags({"indexer_kv", "swa_kv", "csa_kv"}), expected);
 
     for (size_t index = 0; index < expected.size(); ++index) {
-        EXPECT_EQ(groupOrdinalForTag(expected, expected[index]), index);
+        EXPECT_EQ(groupIndexForTag(expected, expected[index]), index);
     }
-    EXPECT_ANY_THROW(groupOrdinalForTag(expected, "missing"));
+    EXPECT_ANY_THROW(groupIndexForTag(expected, "missing"));
     EXPECT_ANY_THROW(sortedCacheGroupTags({"full", ""}));
     EXPECT_ANY_THROW(sortedCacheGroupTags({"full", "full"}));
 }

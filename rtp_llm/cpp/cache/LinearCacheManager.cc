@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/LinearCacheManager.h"
 
 #include <algorithm>
 #include <numeric>
@@ -42,7 +42,7 @@ int estimatePeakFromSlotCosts(std::vector<int> block_costs,
 
 }  // namespace
 
-void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
+void LinearCacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();
     out.reserve(in.size());
     for (auto b : in) {
@@ -52,21 +52,21 @@ void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndi
     }
 }
 
-int LinearKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
+int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     int       extra_blocks = reserve_step ? reserve_step - 1 : 0;
     const int block_size   = seqSizePerBlock();
     return std::max((seq_len + block_size - 1) / block_size + extra_blocks - current_blocks, 0);
 }
 
-int LinearKVCacheGroup::materializedTailBlockCount() const {
+int LinearCacheManager::materializedTailBlockCount() const {
     return std::max(1, static_cast<int>(activeTailBlocks()));
 }
 
-int LinearKVCacheGroup::retainedTailBlockCount() const {
+int LinearCacheManager::retainedTailBlockCount() const {
     return std::max(2, materializedTailBlockCount());
 }
 
-bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
+bool LinearCacheManager::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
     if (pos < 0) {
         return false;
     }
@@ -82,7 +82,7 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
     return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
 }
 
-int LinearKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
+int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                const BlockIndicesType& current_block_indices,
                                                int                     remaining_tokens,
                                                int                     reserve_step,
@@ -115,7 +115,7 @@ int LinearKVCacheGroup::estimatePeakNeedBlocks(int                     seq_len,
     return std::max(peak_blocks - current_physical_blocks, 0);
 }
 
-int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
+int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                            int  common_seq_len,
                                                            int  remaining_tokens,
                                                            int  reserve_step,
@@ -151,7 +151,7 @@ int LinearKVCacheGroup::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                      step);
 }
 
-NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
+NeedBlocksInfo LinearCacheManager::getNeedBlocks(
     int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
     NeedBlocksInfo info;
 
@@ -186,7 +186,7 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
+MatchResult LinearCacheManager::matchSingleKey(CacheKeyType cache_key) const {
     MatchResult result;
     if (!shared_cache_) {
         return result;
@@ -198,7 +198,7 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-bool LinearKVCacheGroup::malloc(PoolBlockIds&        block_ids,
+bool LinearCacheManager::malloc(BlockIds&            block_ids,
                                 int                  seq_len,
                                 bool                 enable_reuse_cache,
                                 int                  reserve_step,
@@ -235,7 +235,7 @@ bool LinearKVCacheGroup::malloc(PoolBlockIds&        block_ids,
         const auto free_blocks_num = freeBlocksNum();
         if (free_blocks_num < static_cast<size_t>(need_alloc_blocks)) {
             if (!ensureFreeBlocks(need_alloc_blocks)) {
-                RTP_LLM_LOG_WARNING("Insufficient free blocks for LinearKVCacheGroup: need %d, have %zu",
+                RTP_LLM_LOG_WARNING("Insufficient free blocks for LinearCacheManager: need %d, have %zu",
                                     need_alloc_blocks,
                                     free_blocks_num);
                 return false;
@@ -281,7 +281,7 @@ bool LinearKVCacheGroup::malloc(PoolBlockIds&        block_ids,
     return true;
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
@@ -308,7 +308,7 @@ void LinearKVCacheGroup::removeSkippedBlocks(PoolBlockIds& block_ids, bool enabl
     }
 }
 
-void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void LinearCacheManager::free(const BlockIndicesType& block_indices) {
     if (block_indices.empty()) {
         return;
     }
@@ -320,7 +320,7 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->requestFree(valid);
 }
 
-void LinearKVCacheGroup::reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void LinearCacheManager::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);

@@ -56,12 +56,7 @@ public:
         grouped_layout_(std::move(grouped_layout)), config_(config), group_tags_(buildSortedGroupTags(config_)) {}
 
     KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout, std::shared_ptr<const rtp_llm::CacheConfig> config):
-        grouped_layout_(std::move(grouped_layout)),
-        owned_config_(std::move(config)),
-        config_(*owned_config_),
-        group_tags_(buildSortedGroupTags(config_)) {
-        RTP_LLM_CHECK_WITH_INFO(owned_config_ != nullptr, "KVCache requires a non-null config");
-    }
+        KVCache(std::move(grouped_layout), checkedConfig(config)) {}
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
@@ -116,6 +111,11 @@ public:
     }
 
 private:
+    static const rtp_llm::CacheConfig& checkedConfig(const std::shared_ptr<const rtp_llm::CacheConfig>& config) {
+        RTP_LLM_CHECK_WITH_INFO(config != nullptr, "KVCache requires a non-null config");
+        return *config;
+    }
+
     static std::vector<std::string> buildSortedGroupTags(const rtp_llm::CacheConfig& config) {
         std::vector<std::string> tags;
         tags.reserve(config.groups().size());
@@ -252,10 +252,9 @@ private:
         return result;
     }
 
-    const rtp_llm::GroupedCacheLayerLayout      grouped_layout_;
-    std::shared_ptr<const rtp_llm::CacheConfig> owned_config_;
-    const rtp_llm::CacheConfig&                 config_;
-    const std::vector<std::string>              group_tags_;
+    const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    const rtp_llm::CacheConfig             config_;
+    const std::vector<std::string>         group_tags_;
 };
 
 struct PyModelInitResources {
@@ -361,7 +360,7 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
-using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+using AttnInputsByGroup = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
     torch::Tensor      input_ids;
@@ -370,14 +369,10 @@ struct PyModelInputs {
     PyEmbeddingInputs  embedding_inputs;
     PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
-    // property which returns either this object or attention_inputs_by_tag.
-    PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
-    BertEmbeddingInputs  bert_embedding_inputs;
-
-    bool hasAttentionInputsByTag() const {
-        return !attention_inputs_by_tag.empty();
-    }
+    // property which returns either this object or attention_inputs_by_group.
+    PyAttentionInputs   attention_inputs;
+    AttnInputsByGroup   attention_inputs_by_group;
+    BertEmbeddingInputs bert_embedding_inputs;
 };
 
 struct PyModelOutputs {
