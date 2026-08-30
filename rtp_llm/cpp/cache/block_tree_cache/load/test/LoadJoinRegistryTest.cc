@@ -54,6 +54,18 @@ protected:
     std::shared_ptr<LoadContextCoordinator> coordinator_;
 };
 
+bool finishAndNotifyJoinedContexts(LoadJoinRegistry& registry, TreeNode* node, size_t group_set_id, bool success) {
+    std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
+    if (!registry.finish(node, group_set_id, joined_contexts)) {
+        return false;
+    }
+    bool all_completed = true;
+    for (const std::shared_ptr<LoadAsyncContext>& context : joined_contexts) {
+        all_completed = context->completeOne(success) && all_completed;
+    }
+    return all_completed;
+}
+
 TEST_F(LoadJoinRegistryTest, JoinSkipsNonJoinedDescriptors) {
     LoadJoinRegistry                        registry(tree_.get());
     const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
@@ -76,10 +88,12 @@ TEST_F(LoadJoinRegistryTest, FinishNotifiesJoinedContext) {
     EXPECT_EQ(joined_context->loadDescs()[0].target_blocks, target_blocks);
     EXPECT_EQ(device_pool_->refCount(target_blocks[0]), 2u);
     EXPECT_EQ(device_pool_->treeRefCount(target_blocks[0]), 1u);
-    EXPECT_TRUE(registry.finish(&node, 0, true));
-    EXPECT_TRUE(first_context->success());
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
+    EXPECT_FALSE(first_context->done());
     EXPECT_TRUE(joined_context->success());
-    EXPECT_FALSE(registry.finish(&node, 0, true));
+    EXPECT_FALSE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
+    EXPECT_TRUE(first_context->completeOne(true));
+    EXPECT_TRUE(first_context->success());
     device_pool_->decRef(target_blocks[0]);
     device_pool_->decTreeRef(target_blocks[0], BlockTreeRefType::LOAD);
 }
@@ -93,22 +107,42 @@ TEST_F(LoadJoinRegistryTest, FailureIsPerContext) {
     ASSERT_TRUE(registry.start(&node, 0, {target_blocks_[3]}, first_context));
     ASSERT_TRUE(registry.join(joined_context));
     ASSERT_TRUE(first_context->onTaskFail());
-    EXPECT_FALSE(registry.finish(&node, 0, true));
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
     EXPECT_FALSE(first_context->success());
     EXPECT_TRUE(joined_context->success());
 }
 
 TEST_F(LoadJoinRegistryTest, ContextAggregatesMultipleRecords) {
-    LoadJoinRegistry                        registry(tree_.get());
-    TreeNode                                node;
-    const std::shared_ptr<LoadAsyncContext> context = makeContext(2);
+    LoadJoinRegistry                registry(tree_.get());
+    TreeNode                        first_node;
+    TreeNode                        second_node;
+    auto                            first_owner  = makeContext(1);
+    auto                            second_owner = makeContext(1);
+    std::vector<TransferDescriptor> joined_descs(2);
+    joined_descs[0].node         = &first_node;
+    joined_descs[0].group_set_id = 0;
+    joined_descs[0].source_tier  = Tier::HOST;
+    joined_descs[0].target_tier  = Tier::DEVICE;
+    joined_descs[1].node         = &second_node;
+    joined_descs[1].group_set_id = 0;
+    joined_descs[1].source_tier  = Tier::HOST;
+    joined_descs[1].target_tier  = Tier::DEVICE;
+    auto context                 = coordinator_->create(std::move(joined_descs), {true, true}, 1);
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(coordinator_->registerContext(context));
+    ASSERT_TRUE(context->commit());
 
-    ASSERT_TRUE(registry.start(&node, 0, {5}, context));
-    ASSERT_TRUE(registry.start(&node, 1, {6}, context));
-    EXPECT_TRUE(registry.finish(&node, 0, true));
+    ASSERT_TRUE(registry.start(&first_node, 0, {target_blocks_[1]}, first_owner));
+    ASSERT_TRUE(registry.start(&second_node, 0, {target_blocks_[2]}, second_owner));
+    ASSERT_TRUE(registry.join(context));
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &first_node, 0, true));
     EXPECT_FALSE(context->done());
-    EXPECT_TRUE(registry.finish(&node, 1, false));
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &second_node, 0, false));
     EXPECT_FALSE(context->success());
+    EXPECT_TRUE(first_owner->completeOne(true));
+    EXPECT_TRUE(second_owner->completeOne(false));
+    device_pool_->decRef(target_blocks_[1]);
+    device_pool_->decRef(target_blocks_[2]);
 }
 
 TEST_F(LoadJoinRegistryTest, EraseForContextPreservesOtherContexts) {
@@ -121,9 +155,11 @@ TEST_F(LoadJoinRegistryTest, EraseForContextPreservesOtherContexts) {
     ASSERT_TRUE(registry.join(second_context));
     EXPECT_TRUE(registry.eraseForContext(&node, 0, second_context->contextId()));
     EXPECT_FALSE(registry.eraseForContext(&node, 0, second_context->contextId()));
-    EXPECT_TRUE(registry.finish(&node, 0, true));
-    EXPECT_TRUE(first_context->success());
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
+    EXPECT_FALSE(first_context->done());
     EXPECT_FALSE(second_context->done());
+    EXPECT_TRUE(first_context->completeOne(true));
+    EXPECT_TRUE(first_context->success());
 }
 
 TEST_F(LoadJoinRegistryTest, ExpiredJoinedContextIsNotKeptAlive) {
@@ -140,7 +176,9 @@ TEST_F(LoadJoinRegistryTest, ExpiredJoinedContextIsNotKeptAlive) {
     }
 
     EXPECT_TRUE(weak_joined_context.expired());
-    EXPECT_TRUE(registry.finish(&node, 0, true));
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
+    EXPECT_FALSE(first_context->done());
+    EXPECT_TRUE(first_context->completeOne(true));
     EXPECT_TRUE(first_context->success());
 }
 
@@ -171,7 +209,7 @@ TEST_F(LoadJoinRegistryTest, EraseLastContextRemovesRecord) {
     ASSERT_TRUE(registry.start(&node, 0, {10}, context));
     EXPECT_TRUE(registry.eraseForContext(&node, 0, context->contextId()));
     EXPECT_FALSE(registry.join(context));
-    EXPECT_FALSE(registry.finish(&node, 0, true));
+    EXPECT_FALSE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
 }
 
 }  // namespace

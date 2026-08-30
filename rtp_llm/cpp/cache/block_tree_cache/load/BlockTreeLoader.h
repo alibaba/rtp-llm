@@ -66,8 +66,12 @@ private:
                                          uint64_t                               context_id,
                                          bool                                   release_transferred_refs);
     void                 runLoadTask(const LoadTaskRunner::TaskPtr& task);
-    void                 scheduleLoadSettlement(const LoadTaskRunner::TaskPtr& task, ErrorInfo error);
-    bool                 settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
+    void                 scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
+                                                   const std::shared_ptr<LoadAsyncContext>& context);
+    bool                 validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
+    bool                 settleLoadLocked(LoadTaskRunner::Task&                           task,
+                                          bool                                            aggregate_success,
+                                          std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,

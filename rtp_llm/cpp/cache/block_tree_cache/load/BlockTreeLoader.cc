@@ -319,6 +319,9 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             return false;
         }
     }
+    context->setSettlementReadyCallback([this, task](const std::shared_ptr<LoadAsyncContext>& ready_context) {
+        scheduleContextSettlement(task, ready_context);
+    });
 
     rollback_guard.dismiss();
     return true;
@@ -388,56 +391,73 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
+    const auto complete = [task](ErrorInfo error) {
+        if (!task->context->completeTransfers(task->load_descs.size(), error.ok())) {
+            RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", task->load_descs.size());
+        }
+    };
     try {
         load_task_runner_.runTransfer(
-            task,
-            *transfer_dispatcher_,
-            metrics_reporter_,
-            disk_timeout_ms_,
-            host_timeout_ms_,
-            [this, task](ErrorInfo error) { scheduleLoadSettlement(task, std::move(error)); });
+            task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_, complete);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("load task runner failed with exception: %s", error.what());
-        scheduleLoadSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+        complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
     } catch (...) {
         RTP_LLM_LOG_ERROR("load task runner failed with unknown exception");
-        scheduleLoadSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load task runner exception"));
+        complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown load task runner exception"));
     }
 }
 
-void BlockTreeLoader::scheduleLoadSettlement(const LoadTaskRunner::TaskPtr& task, ErrorInfo error) {
-    auto settle = [this, task, error = std::move(error)]() mutable {
-        block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
-        std::lock_guard<std::mutex>            lock(mutex_);
-        if (!settleLoadLocked(*task, error.ok())) {
-            RTP_LLM_LOG_DEBUG("load task settled unsuccessfully");
+void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
+                                                const std::shared_ptr<LoadAsyncContext>& context) {
+    auto settle = [this, task, context]() {
+        bool                                           settlement_success = context->aggregateSuccess();
+        std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
+        if (task) {
+            block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
+            }
+            for (const std::shared_ptr<LoadAsyncContext>& joined_context : joined_contexts) {
+                if (!joined_context->completeOne(settlement_success)) {
+                    RTP_LLM_LOG_WARNING("failed to complete joined load context");
+                }
+            }
+        }
+        if (!context->settle(settlement_success)) {
+            RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
         }
     };
     if (!task_pool_->submitCompletion(settle)) {
-        RTP_LLM_LOG_WARNING("load completion queue is closed; settling inline");
+        RTP_LLM_LOG_WARNING("load completion queue is closed; settling context inline");
         settle();
     }
 }
 
-bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success) {
-    bool settlement_success = copy_success;
-    bool state_settled      = false;
-    bool tree_data_mutated  = false;
-
-    if (copy_success) {
-        for (const TransferDescriptor& desc : task.load_descs) {
-            const GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
-            if (resource.transfer_detached) {
-                RTP_LLM_LOG_WARNING("load transfer detached before completion, group_set=%zu", desc.group_set_id);
-                settlement_success = false;
-                continue;
-            }
-            if (resource.transfer_state != GroupSetTransferState::LOADING) {
-                RTP_LLM_LOG_ERROR("load state mismatch during settlement, group_set_id=%zu", desc.group_set_id);
-                settlement_success = false;
-            }
+bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) const {
+    bool valid = true;
+    for (const TransferDescriptor& desc : task.load_descs) {
+        const GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
+        if (resource.transfer_detached) {
+            RTP_LLM_LOG_WARNING("load transfer detached before completion, group_set=%zu", desc.group_set_id);
+            valid = false;
+            continue;
+        }
+        if (resource.transfer_state != GroupSetTransferState::LOADING) {
+            RTP_LLM_LOG_ERROR("load state mismatch during settlement, group_set_id=%zu", desc.group_set_id);
+            valid = false;
         }
     }
+    return valid;
+}
+
+bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
+                                       bool                                            aggregate_success,
+                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
+    const bool settlement_success = aggregate_success && validateLoadTaskLocked(task);
+    bool       state_settled      = false;
+    bool       tree_data_mutated  = false;
 
     for (size_t desc_index = 0; desc_index < task.load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc      = task.load_descs[desc_index];
@@ -489,7 +509,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
     settled_(tree_data_mutated, state_settled);
     load_task_runner_.releaseTaskResources(task);
     for (const TransferDescriptor& desc : task.load_descs) {
-        if (!load_join_registry_.finish(desc.node, desc.group_set_id, settlement_success)) {
+        if (!load_join_registry_.finish(desc.node, desc.group_set_id, joined_contexts)) {
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
         }
     }
