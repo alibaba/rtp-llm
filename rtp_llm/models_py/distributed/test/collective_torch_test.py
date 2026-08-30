@@ -496,13 +496,14 @@ class TestDistributedEnvironment(unittest.TestCase):
             local_world_size=8,
         )
         ktp_group = object()
+        ktp_control_group = object()
         old_group_map = collective_torch._group_map
         collective_torch._group_map = {}
         try:
             with patch.object(
                 collective_torch.torch.distributed,
                 "new_group",
-                return_value=ktp_group,
+                side_effect=[ktp_group, ktp_control_group],
             ) as new_group, patch.object(
                 collective_torch.torch.distributed,
                 "barrier",
@@ -513,9 +514,14 @@ class TestDistributedEnvironment(unittest.TestCase):
                     timeout=None,
                 )
             self.assertIs(collective_torch._group_map[Group.KTP], ktp_group)
+            self.assertIs(
+                collective_torch._group_map[Group.KTP_CONTROL], ktp_control_group
+            )
             self.assertIs(collective_torch._group_map[Group.EP], ktp_group)
-            new_group.assert_called_once()
-            barrier.assert_called_once()
+            self.assertEqual(new_group.call_count, 2)
+            self.assertEqual(new_group.call_args_list[0].kwargs["backend"], "nccl")
+            self.assertEqual(new_group.call_args_list[1].kwargs["backend"], "gloo")
+            barrier.assert_called_once_with(group=ktp_control_group)
         finally:
             collective_torch._group_map = old_group_map
 

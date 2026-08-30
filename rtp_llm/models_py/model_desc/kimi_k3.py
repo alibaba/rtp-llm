@@ -599,11 +599,12 @@ class KimiK3Model(GptModelBase):
                 int(getattr(self.parallelism_config, "ktp_rank", 0)),
                 ktp_size,
             )
-            # Keep graph-external capture synchronization on the same
-            # communicator as Projection-KTP and multi-host EP collectives.
-            # Mixing WORLD here with the graph's dedicated full-world KTP
-            # communicator can form a cross-communicator GPU wait cycle.
-            barrier(Group.KTP)
+            # Keep graph-external capture synchronization on a CPU control
+            # communicator.  The KTP NCCL communicator is captured by both
+            # projection and EP operations; issuing a post-capture NCCL
+            # barrier on it can spin indefinitely even after every rank has
+            # reached this callsite.
+            barrier(Group.KTP_CONTROL)
 
     def coordinate_ktp_step(
         self,

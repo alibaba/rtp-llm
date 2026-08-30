@@ -26,6 +26,7 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     KTP = "KTP"
+    KTP_CONTROL = "KTP_CONTROL"
     EP = "EP"
     DP_AND_TP = "DP_AND_TP"
 
@@ -300,7 +301,24 @@ def _create_process_groups(
             world_rank,
             ktp_ranks,
         )
-        torch.distributed.barrier()
+        # CUDA Graph capture uses the KTP communicator for both projection
+        # collectives and the multi-host EP fallback.  Keep graph-external
+        # lifecycle synchronization off that communicator: a NCCL barrier
+        # issued after multiple captured graphs can spin forever even when all
+        # ranks reached the same Python callsite, because the captured NCCL
+        # operation sequence is not a safe control-plane rendezvous.
+        ktp_control_group = torch.distributed.new_group(
+            ranks=ktp_ranks,
+            backend="gloo",
+            timeout=timedelta(days=36500),
+        )
+        _group_map[Group.KTP_CONTROL] = ktp_control_group
+        logging.info(
+            "[rank: %s] Created dedicated Gloo KTP control group with ranks: %s",
+            world_rank,
+            ktp_ranks,
+        )
+        torch.distributed.barrier(group=ktp_control_group)
 
     if use_dedicated_ep:
         if ktp_size > 1:
@@ -734,7 +752,7 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
     world_size = _parallelism_config.world_size
-    if group in (Group.KTP, Group.EP):
+    if group in (Group.KTP, Group.KTP_CONTROL, Group.EP):
         group_key = group
     elif group == Group.DP and dp_size > 1 and world_size != dp_size:
         tp_rank = torch.distributed.get_rank() % tp_size
