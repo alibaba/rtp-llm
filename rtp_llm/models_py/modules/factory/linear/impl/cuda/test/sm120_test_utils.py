@@ -3,7 +3,21 @@
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.test.utils.numeric_util import per_block_cast_to_fp8
+
+
+def per_output_channel_kblock_cast_to_fp8(weight: torch.Tensor, block: int = 128):
+    """Reference quantizer for physical (N, K) CUTLASS weights."""
+    n, k = weight.shape
+    padded_k = (k + block - 1) // block * block
+    padded = torch.zeros(n, padded_k, dtype=torch.float32, device=weight.device)
+    padded[:, :k] = weight
+    view = padded.reshape(n, padded_k // block, block)
+    scale = view.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4) / 448.0
+    quant = (view / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    return (
+        quant.reshape(n, padded_k)[:, :k].contiguous(),
+        scale.squeeze(-1).contiguous(),
+    )
 
 
 def make_blockwise_op_inputs(M: int, K: int, N: int, device: str = "cuda"):
@@ -19,6 +33,6 @@ def make_blockwise_op_inputs(M: int, K: int, N: int, device: str = "cuda"):
         scale_tma_aligned=False,
         scale_ue8m0=False,
     )
-    B, B_sf = per_block_cast_to_fp8(weight_bf16, use_ue8m0=False)
+    B, B_sf = per_output_channel_kblock_cast_to_fp8(weight_bf16)
     D = torch.empty(M, N, dtype=torch.bfloat16, device=device)
     return D, A, B, A_sf, B_sf
