@@ -286,6 +286,17 @@ py_test(
 )
 
 py_test(
+    name="glm4_moe_nextn_test",
+    srcs=[
+        "glm4_moe_nextn_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)
+
+py_test(
     name="qwen3_coder_detector_test",
     srcs=[
         "qwen3_coder_detector_test.py",
