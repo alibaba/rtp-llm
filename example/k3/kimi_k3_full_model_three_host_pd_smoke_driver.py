@@ -235,6 +235,12 @@ def role_launch_parts(args: argparse.Namespace, role: str) -> tuple[str, str, st
                 "SMOKE_DECODE_NODE_INDEX": str(node_index),
                 "WORLD_RANK": str(node_index * 8),
                 "GANG_CONFIG_STRING": gang_config(args),
+                # L20-a RoCE rails expose link-local and routed GIDs. NCCL's
+                # automatic choice can select index 0 (link-local), which is
+                # not routable between the two Decode hosts. Keep this
+                # overrideable for other fabrics while making the supported
+                # three-host topology select the routed RoCE v2 GID.
+                "NCCL_IB_GID_INDEX": env_default("NCCL_IB_GID_INDEX", "3"),
             }
         )
     if role == "decode1":

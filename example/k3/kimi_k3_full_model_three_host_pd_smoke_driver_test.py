@@ -69,14 +69,17 @@ class ThreeHostDriverTest(unittest.TestCase):
         self.assertEqual(addresses[8], "10.0.0.3:28188:28189")
         self.assertEqual(addresses[15], "10.0.0.3:28251:28252")
 
-    def test_decode_gang_roles_have_world_rank_and_common_plan(self):
+    def test_decode_gang_roles_have_world_rank_common_plan_and_routed_gid(self):
         args = make_args()
-        _, _, _, decode0 = driver.role_launch_parts(args, "decode0")
-        _, _, _, decode1 = driver.role_launch_parts(args, "decode1")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _, _, _, decode0 = driver.role_launch_parts(args, "decode0")
+            _, _, _, decode1 = driver.role_launch_parts(args, "decode1")
         joined0 = " ".join(decode0)
         joined1 = " ".join(decode1)
         self.assertIn("WORLD_RANK=0", decode0)
         self.assertIn("WORLD_RANK=8", decode1)
+        self.assertIn("NCCL_IB_GID_INDEX=3", decode0)
+        self.assertIn("NCCL_IB_GID_INDEX=3", decode1)
         self.assertIn("SMOKE_DECODE_NODE_INDEX=0", decode0)
         self.assertIn("SMOKE_DECODE_NODE_INDEX=1", decode1)
         self.assertIn("SMOKE_DECODE_TOPOLOGY=dp16_ktp16_ep16", joined0)
@@ -85,6 +88,11 @@ class ThreeHostDriverTest(unittest.TestCase):
         self.assertIn("SMOKE_PRIMARY_READY_FILE=", joined0)
         self.assertIn("SMOKE_PRIMARY_COMPLETION_FILE=", joined0)
         self.assertIn("SMOKE_SECONDARY_COMPLETION_FILE=", joined1)
+
+    def test_decode_routed_gid_can_be_overridden(self):
+        with mock.patch.dict(os.environ, {"NCCL_IB_GID_INDEX": "5"}, clear=True):
+            _, _, _, decode0 = driver.role_launch_parts(make_args(), "decode0")
+        self.assertIn("NCCL_IB_GID_INDEX=5", decode0)
 
     def test_prefill_receives_all_sixteen_ordered_role_endpoints(self):
         _, _, _, command = driver.role_launch_parts(make_args(), "prefill")
