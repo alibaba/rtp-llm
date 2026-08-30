@@ -431,13 +431,18 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         // policy owns the key/offset projection for both legacy and sharded cases.
         // Clamp by cache_keys_per_batch (global width) -- NOT max_blocks_per_batch,
         // which under CP shard is the local-compact width for FULL groups.
-        const auto block_plan = buildCacheStorePlan(
+        // CP projection is valid only when a physical group block can be
+        // expressed as an integral number of canonical CP blocks. Smaller
+        // tag-local blocks keep their full key/offset namespace.
+        const int  plan_cp_rank = uses_cp_canonical_keys ? cp_rank : 0;
+        const int  plan_cp_size = uses_cp_canonical_keys ? cp_size : 1;
+        const auto block_plan   = buildCacheStorePlan(
             group.policy,
             static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
             /*reuse_block_size=*/0,
             use_group_cache_transfer_policy,
-            cp_rank,
-            cp_size);
+            plan_cp_rank,
+            plan_cp_size);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }
@@ -667,8 +672,9 @@ void execBroadcastCpu(const BroadcastParams& params) {
     auto& broadcaster = CpuTpBroadcaster::instance();
     if (broadcaster.isInitialized()) {
         for (auto& tensor : params.buffers) {
-            RTP_LLM_CHECK_WITH_INFO(
-                tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_cpu(),
+                                    "execBroadcastCpu requires CPU tensors (got device=%s)",
+                                    tensor.device().str().c_str());
             auto contiguous = tensor.contiguous();
             broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
             if (!contiguous.is_same(tensor)) {
@@ -848,12 +854,10 @@ void registerExecCtxOps(pybind11::module& m) {
         py::arg("tp_size"),
         py::arg("base_path"));
 
-    m.def(
-        "destroy_cpu_tp_broadcaster",
-        []() {
-            py::gil_scoped_release release;
-            CpuTpBroadcaster::instance().reset();
-        });
+    m.def("destroy_cpu_tp_broadcaster", []() {
+        py::gil_scoped_release release;
+        CpuTpBroadcaster::instance().reset();
+    });
 }
 
 }  // namespace rtp_llm

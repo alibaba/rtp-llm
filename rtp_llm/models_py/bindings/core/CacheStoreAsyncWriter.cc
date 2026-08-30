@@ -6,7 +6,6 @@
 #include <utility>
 
 #include "autil/LockFreeThreadPool.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -23,19 +22,24 @@ CacheStoreAsyncWriter::PendingTaskGuard::~PendingTaskGuard() {
 CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             device_id,
                                              std::shared_ptr<KVCacheManager> cache_manager,
                                              size_t                          cache_model_id,
-                                             std::optional<int>              mtp_cache_config_index):
-    device_id_(device_id), cache_manager_(std::move(cache_manager)), cache_model_id_(cache_model_id) {
+                                             std::optional<int>              mtp_cache_config_index,
+                                             int                             forward_cp_rank,
+                                             int                             forward_cp_size):
+    device_id_(device_id),
+    cache_manager_(std::move(cache_manager)),
+    cache_model_id_(cache_model_id),
+    cp_rank_(forward_cp_rank),
+    cp_size_(forward_cp_size) {
+    RTP_LLM_CHECK_WITH_INFO(cp_size_ > 0 && cp_rank_ >= 0 && cp_rank_ < cp_size_,
+                            "CacheStoreAsyncWriter: invalid forward CP topology rank=%d size=%d",
+                            cp_rank_,
+                            cp_size_);
     if (cache_manager_) {
         const CacheConfig* selected_config = &cache_manager_->cacheConfig();
         if (mtp_cache_config_index.has_value()) {
             selected_config = &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index);
         }
         cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
-
-        if (const auto cp_slot_mapper = cache_manager_->cpSlotMapper()) {
-            cp_rank_ = cp_slot_mapper->cpRank();
-            cp_size_ = cp_slot_mapper->cpSize();
-        }
     }
 
     constexpr size_t kThreadCount = 3;

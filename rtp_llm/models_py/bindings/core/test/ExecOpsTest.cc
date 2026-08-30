@@ -707,6 +707,42 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     }
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreCpKeepsUnshardableBlockNamespace) {
+    constexpr size_t tokens_per_block = 1;
+    constexpr size_t block_stride     = 16;
+    constexpr size_t block_num        = 6;
+
+    auto cache_store = std::make_shared<MockCacheStore>();
+    auto inputs      = makePyCacheStoreInputs(tokens_per_block, block_num);
+    auto config      = makeCacheConfig(tokens_per_block,
+                                  block_stride,
+                                  /*physical_scale_stride=*/0,
+                                  block_num,
+                                  "default",
+                                  /*layer_id=*/0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base =
+        torch::zeros({static_cast<int64_t>(block_num), static_cast<int64_t>(block_stride)}, torch::kUInt8);
+    layer_cache.seq_size_per_block = tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    ASSERT_NO_THROW(runtimeWriteCacheStore(
+        inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/1, /*cp_size=*/2, nullptr));
+
+    ASSERT_EQ(cache_store->records.size(), 1u);
+    const auto& record = cache_store->records.front();
+    ASSERT_EQ(record.blocks.size(), block_num);
+    for (size_t block = 0; block < block_num; ++block) {
+        const auto key = "kv_" + cacheKeyAt(inputs, block, layer_cache.layer_id, layer_cache.tag);
+        EXPECT_NE(record.blocks.find(key), record.blocks.end()) << "missing block " << key;
+    }
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesCanonicalKeyCount) {
     constexpr size_t physical_tokens_per_block = 4;
     constexpr size_t physical_row_stride       = 16;

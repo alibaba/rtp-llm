@@ -381,11 +381,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
+    // Forward CP controls cache-key projection even when the KV allocator is
+    // not physically sharded, so pass this topology independently of CPSlotMapper.
     cache_store_async_writer_ =
         std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
                                                 cache_manager_,
                                                 model_id_,
-                                                params.mtp_cache_config_index);
+                                                params.mtp_cache_config_index,
+                                                enable_prefill_cp_ ? static_cast<int>(device_props_.tp_rank) : 0,
+                                                enable_prefill_cp_ ? static_cast<int>(device_props_.tp_size) : 1);
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
@@ -415,9 +419,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // counts happen to be equal.
         context_parallel_processor_ = ContextParallelProcessorFactory::create(
             ProcessorType::ZIG_ZAG, params.parallelism_config, has_mtp_hidden_buffer_);
-        RTP_LLM_LOG_INFO(
-            "Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
-            static_cast<int>(has_mtp_hidden_buffer_));
+        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
+                         static_cast<int>(has_mtp_hidden_buffer_));
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

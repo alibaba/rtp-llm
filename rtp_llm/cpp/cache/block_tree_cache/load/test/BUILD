@@ -27,6 +27,7 @@ test_deps = [
 
 cc_test(
     name = "block_tree_loader_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["BlockTreeLoaderTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
@@ -36,6 +37,7 @@ cc_test(
 
 cc_test(
     name = "load_async_context_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["LoadAsyncContextTest.cc"],
     copts = test_copts,
     deps = test_deps,
@@ -43,6 +45,7 @@ cc_test(
 
 cc_test(
     name = "load_task_runner_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["LoadTaskRunnerTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
@@ -50,6 +53,7 @@ cc_test(
 
 cc_test(
     name = "load_join_registry_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["LoadJoinRegistryTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],

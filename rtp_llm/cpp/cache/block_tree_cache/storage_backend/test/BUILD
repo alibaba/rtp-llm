@@ -3,6 +3,7 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test_wrapper(
     name = "storage_backend_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["StorageBackendTest.cc"],
     copts = copts(),

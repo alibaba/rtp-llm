@@ -151,6 +151,7 @@ cc_test(
 
 cc_test(
     name = "tree_workload_generator_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["TreeWorkloadGeneratorTest.cc"],
     copts = copts() + ["-fno-access-control"],
     deps = [

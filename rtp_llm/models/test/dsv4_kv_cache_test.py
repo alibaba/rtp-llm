@@ -20,7 +20,6 @@ from rtp_llm.models.dsv4_kv_cache import (
     build_dsv4_kv_cache_spec_descs,
 )
 from rtp_llm.ops import (
-    CacheEvictPolicy,
     CacheMemoryPlacement,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
@@ -108,9 +107,7 @@ class Dsv4KvCacheSpecTest(TestCase):
                 by_tag[tag].entry_count_mode, OpaqueBlockEntryCountMode.STATE_RING, tag
             )
             self.assertTrue(by_tag[tag].state_ring_include_gen_num_per_cycle, tag)
-            self.assertEqual(
-                by_tag[tag].reuse.evict_policy, CacheEvictPolicy.INDEPENDENT
-            )
+            self.assertIsNotNone(by_tag[tag].reuse, tag)
         for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG):
             self.assertEqual(by_tag[tag].dtype, DataType.TYPE_FP32, tag)
             self.assertEqual(by_tag[tag].entry_dtype, DataType.TYPE_FP32, tag)

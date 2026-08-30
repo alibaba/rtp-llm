@@ -2,6 +2,7 @@ load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test_wrapper(
     name = "client_wrapper_lifecycle_test",
+    exec_properties = {"gpu": "A10"},
     srcs = [
         "ClientWrapperLifecycleTest.cc",
         "MockKVCMClient.h",
@@ -21,6 +22,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "group_policy_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["GroupPolicyTest.cc"],
     copts = copts(),
     target_compatible_with = select({

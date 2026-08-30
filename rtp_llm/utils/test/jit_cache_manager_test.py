@@ -915,6 +915,9 @@ class BackendTest(JitCacheTestBase):
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
         configs.parallelism_config.world_size = world_size
+        configs.parallelism_config.world_rank = 0
+        configs.parallelism_config.dp_size = 1
+        configs.parallelism_config.tp_size = world_size
         return configs
 
     def patched_backend(self, *, cuda=True, device_count=1, signal_handler=None):
@@ -1032,9 +1035,10 @@ class BackendTest(JitCacheTestBase):
         class FakeBackendManager:
             instance = None
 
-            def __init__(self, _configs):
+            def __init__(self, _configs, shutdown_ready_event=None):
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
+                self.shutdown_ready_event = shutdown_ready_event
                 FakeBackendManager.instance = self
 
             def start(self):

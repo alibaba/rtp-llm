@@ -34,6 +34,7 @@ scenario_test_deps = [
 
 cc_test(
     name = "eviction_heap_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["EvictionHeapTest.cc"],
     copts = test_copts,
     deps = test_deps,
@@ -42,6 +43,7 @@ cc_test(
 
 cc_test(
     name = "block_tree_evictor_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["BlockTreeEvictorTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
@@ -51,6 +53,7 @@ cc_test(
 
 cc_test(
     name = "eviction_task_runner_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["EvictionTaskRunnerTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
@@ -58,6 +61,7 @@ cc_test(
 
 cc_test(
     name = "full_eviction_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["FullEvictionTest.cc"],
     copts = test_copts,
@@ -67,6 +71,7 @@ cc_test(
 
 cc_test(
     name = "full_swa_eviction_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["FullSWAEvictionTest.cc"],
     copts = test_copts,
@@ -76,6 +81,7 @@ cc_test(
 
 cc_test(
     name = "full_linear_eviction_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["FullLinearEvictionTest.cc"],
     copts = test_copts,
@@ -85,6 +91,7 @@ cc_test(
 
 cc_test(
     name = "full_swa_linear_eviction_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["FullSWALinearEvictionTest.cc"],
     copts = test_copts,

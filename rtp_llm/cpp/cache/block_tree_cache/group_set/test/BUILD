@@ -27,6 +27,7 @@ test_deps = [
 
 cc_test(
     name = "group_set_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["GroupSetTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
@@ -35,6 +36,7 @@ cc_test(
 
 cc_test(
     name = "full_group_set_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["FullGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
@@ -44,6 +46,7 @@ cc_test(
 
 cc_test(
     name = "swa_group_set_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["SWAGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
@@ -53,6 +56,7 @@ cc_test(
 
 cc_test(
     name = "linear_group_set_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["LinearGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],

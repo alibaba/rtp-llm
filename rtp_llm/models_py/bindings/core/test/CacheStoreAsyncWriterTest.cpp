@@ -246,6 +246,18 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     EXPECT_EQ(writer.cp_size_, 1);
 }
 
+TEST_F(CacheStoreAsyncWriterTest, UsesExplicitForwardCpTopology) {
+    CacheStoreAsyncWriter writer(/*device_id=*/-1,
+                                 /*cache_manager=*/nullptr,
+                                 /*cache_model_id=*/0,
+                                 /*mtp_cache_config_index=*/std::nullopt,
+                                 /*forward_cp_rank=*/1,
+                                 /*forward_cp_size=*/2);
+
+    EXPECT_EQ(writer.cp_rank_, 1);
+    EXPECT_EQ(writer.cp_size_, 2);
+}
+
 TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     CacheStoreAsyncWriter writer;
     writer.init();
