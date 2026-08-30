@@ -452,10 +452,16 @@ class FlexlbServiceImplTest {
     void testSchedule_forwardFailureIsTerminalAndNeverRoutesLocally() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(
-                        FlexlbGrpcForwarder.MasterForwardResult.failed(
-                                "DEADLINE_EXCEEDED", "10.0.0.2:7001")));
+        CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> pendingForward =
+                new CompletableFuture<>();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(pendingForward);
+        when(grpcForwarder.forwardCancelToMaster(any())).thenAnswer(invocation -> {
+            // The schedule RPC inherited the cancelled inbound Context. Its
+            // reconciliation must not inherit that cancellation as well.
+            assertFalse(Context.current().isCancelled());
+            return CompletableFuture.completedFuture(
+                    FlexlbGrpcForwarder.CancelForwardResult.noMaster());
+        });
 
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -465,9 +471,22 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
 
-        service.schedule(request, observer);
+        Context.CancellableContext inbound = Context.current().withCancellation();
+        inbound.run(() -> service.schedule(request, observer));
+        inbound.cancel(null);
+        inbound.run(() -> pendingForward.complete(
+                FlexlbGrpcForwarder.MasterForwardResult.failed(
+                        "CANCELLED", "10.0.0.2:7001")));
 
         verify(routeService, never()).route(any());
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelRequestPB> cancel =
+                ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbCancelRequestPB.class);
+        verify(grpcForwarder).forwardCancelToMaster(cancel.capture());
+        assertEquals(request.getRequestId(), cancel.getValue().getRequestId());
+        assertEquals(
+                FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
+                cancel.getValue().getReason());
         ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
                 ArgumentCaptor.forClass(
                         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
@@ -480,6 +499,23 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"FORWARD_FAILED\"");
         assertPvContains("\"requestExpiresAtMs\":");
         assertPvContains("\"realMasterHost\":\"10.0.0.2:7001\"");
+    }
+
+    @Test
+    void testSchedule_guardFailureDoesNotStartCancellationReconciliation() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.failed(
+                                "FORWARD_HOP_LIMIT", "10.0.0.2:7001")));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12_349L)
+                .build(), mock(StreamObserver.class));
+
+        verify(grpcForwarder, never()).forwardCancelToMaster(any());
+        verify(routeService, never()).route(any());
     }
 
     @Test

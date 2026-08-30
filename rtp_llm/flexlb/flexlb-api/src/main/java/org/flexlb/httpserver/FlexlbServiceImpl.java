@@ -184,7 +184,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
 
             // Once a Master was selected, delivery is ambiguous. A local
-            // decision could dispatch the same request twice.
+            // decision could dispatch the same request twice. The Master may
+            // also have committed the route before its response was lost, so
+            // reconcile that ownership through the existing cancel reducer.
+            reconcileAmbiguousForward(request, forwardResult);
             completeOnce(
                     request.getRequestId(),
                     context,
@@ -210,6 +213,42 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     ScheduleOrigin.FORWARD_FAILED,
                     token,
                     completionClaimed);
+        }
+    }
+
+    private void reconcileAmbiguousForward(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            FlexlbGrpcForwarder.MasterForwardResult forwardResult) {
+        if (forwardResult == null || !forwardResult.masterFound()) {
+            return;
+        }
+        if ("FORWARD_HOP_LIMIT".equals(forwardResult.failure())
+                || "SELF_FORWARD_BLOCKED".equals(forwardResult.failure())) {
+            return;
+        }
+        FlexlbScheduleProtocol.CancelReasonPB reason =
+                "DEADLINE_EXCEEDED".equals(forwardResult.failure())
+                        ? FlexlbScheduleProtocol.CancelReasonPB
+                                .CANCEL_REASON_DEADLINE_EXCEEDED
+                        : FlexlbScheduleProtocol.CancelReasonPB
+                                .CANCEL_REASON_CLIENT_CANCELLED;
+        FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest =
+                FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                        .setRequestId(request.getRequestId())
+                        .setReason(reason)
+                        .build();
+        try {
+            // The Schedule forward inherited the caller's cancelled Context.
+            // Start reconciliation from ROOT or the Cancel RPC would be
+            // cancelled before it could reach the lifecycle-owning Master.
+            Context.ROOT.call(() -> {
+                grpcForwarder.forwardCancelToMaster(cancelRequest);
+                return null;
+            });
+        } catch (Exception error) {
+            Logger.warn(
+                    "FlexlbService.schedule cancellation reconciliation failed to start, request_id={}",
+                    request.getRequestId(), error);
         }
     }
 
