@@ -4,8 +4,8 @@ This module owns two things:
 
 1. The canonical DSV4 cache-group **tags**. The framework KV cache API is
    tag-driven: a cache group is identified by a string tag ("swa_kv",
-   "csa_kv", ...) which is the same string used by ``CacheConfig`` /
-   ``CacheTopology`` on the C++ side, by ``KVCache.get_layer_cache(layer, tag)``
+   "csa_kv", ...) which is the same string used by ``CacheConfig`` ownership
+   on the C++ side, by ``KVCache.get_layer_cache(layer, tag)``
    / ``KVCache.get_seq_size_per_block(tag)``, and as the key of
    ``PyModelInputs.attention_inputs`` when the model owns several groups.
    These constants replace the old int ``attn_type`` ids that mirrored the
@@ -30,7 +30,7 @@ import torch
 # ---------------------------------------------------------------------------
 # Canonical cache-group tags. These are the *consumer* side of the tags that
 # ``rtp_llm/models/dsv4_kv_cache.py`` (``CSA_KV_TAG`` ... ``SWA_KV_TAG``) hands
-# to ``ModelConfig.kv_cache_spec_descs`` and that CacheConfig/CacheTopology then
+# to ``ModelConfig.kv_cache_spec_descs`` and that CacheConfig then
 # publishes as ``KVCache.group_tags``. They are duplicated rather than imported
 # on purpose: ``rtp_llm.models.dsv4_kv_cache`` pulls in ``rtp_llm.ops`` (the
 # compiled .so), while this module must stay importable from kernel-level code

@@ -79,7 +79,7 @@ private:
     bool isPdInvertMode() const;
 
 private:
-    const CacheConfig                 cache_config_;
+    const CacheConfig&                cache_config_;
     const KVCacheConfig               kv_cache_config_;
     const RuntimeConfig               runtime_config_;
     const ParallelismConfig           parallelism_config_;

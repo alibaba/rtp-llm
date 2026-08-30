@@ -1,7 +1,7 @@
 """DSV4 FP8 compressor pool layout constants.
 
 Shared by ``compressor_fp8.py`` (writer) and ``_indexer_score_fp8.py``
-(reader). Mirrors the C++ side (``DSV4CacheConfig.h``):
+(reader). These model-side constants feed the cache-neutral spec descriptors:
 
   * ``KV_HEAD_DIM=512`` / ``KV_ENTRY_BYTES=584`` — CSA / HCA FP8 KV slot
     (448 fp8 NoPE + 64 bf16 RoPE + 8 UE8M0 scales).

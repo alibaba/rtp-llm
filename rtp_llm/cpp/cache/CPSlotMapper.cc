@@ -98,7 +98,7 @@ size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, std::stri
     if (blockRoundRobinGroup(config, tag)) {
         return static_cast<size_t>(virtual_block_size_);
     }
-    return group.seq_size_per_block;
+    return group.seqSizePerBlock();
 }
 
 CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {
@@ -234,7 +234,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     }
     selected.setCacheKeysAndBlockDependencies(std::move(projected_keys), std::move(projected_dependencies));
 
-    for (const auto& [tag, block_ids] : source.blocksByTag()) {
+    for (const auto& [tag, block_ids] : source.blocksByGroup()) {
         const auto&      src_blocks = block_ids.blocks();
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());

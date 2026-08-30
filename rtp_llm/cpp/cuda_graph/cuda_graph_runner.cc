@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -15,6 +16,22 @@
 #endif
 using namespace torch_ext;
 namespace rtp_llm {
+
+BlockIdxType CudaGraphRunner::safeKernelBlockIdForTag(std::string_view tag) const {
+    return cudaGraphSafeKernelBlockId(cache_config_->group(tag));
+}
+
+BlockIdxType CudaGraphRunner::safeKernelBlockIdForFlatTable() const {
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_group_tags_.size() == 1,
+                            "flat CUDA graph block table requires one cache group, got %zu",
+                            kv_cache_group_tags_.size());
+    return safeKernelBlockIdForTag(kv_cache_group_tags_.front());
+}
+
+BlockIdxType CudaGraphRunner::safeKernelBlockIdForPrimaryTable() const {
+    RTP_LLM_CHECK_WITH_INFO(!kv_cache_group_tags_.empty(), "CUDA graph cache requires at least one group");
+    return safeKernelBlockIdForTag(kv_cache_group_tags_.front());
+}
 
 namespace {
 
@@ -337,15 +354,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
                                           0,
                                           py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.numel(),
-                                          0);
+                                          safeKernelBlockIdForFlatTable());
         } else {
             for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
-                (void)tag;
                 addCudaGraphPrepareFillRegion(fill_params,
                                               dst_inputs.kv_cache_kernel_block_id_device,
                                               0,
                                               dst_inputs.kv_cache_kernel_block_id_device.numel(),
-                                              0);
+                                              safeKernelBlockIdForTag(tag));
             }
         }
         if (is_prefill_cuda_graph_mode_) {
@@ -378,11 +394,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 #else
     if (!has_tagged_cache) {
-        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+        py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(safeKernelBlockIdForFlatTable());
     } else {
         for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
-            (void)tag;
-            dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
+            dst_inputs.kv_cache_kernel_block_id_device.fill_(safeKernelBlockIdForTag(tag));
         }
     }
 #endif
@@ -471,7 +486,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
             if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
-                dst_inputs.kv_cache_kernel_block_id.zero_();
+                dst_inputs.kv_cache_kernel_block_id.fill_(safeKernelBlockIdForTag(tag));
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
@@ -521,6 +536,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
         if (!has_tagged_cache) {
             // Common H2H strided copies for kv_cache block tables (both decode & prefill)
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id.fill_(safeKernelBlockIdForFlatTable());
             stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id,
                             py_model_inputs_.attention_inputs.kv_cache_kernel_block_id);
         }
@@ -582,6 +598,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (has_tagged_cache) {
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
+                dst_inputs.kv_cache_kernel_block_id.fill_(safeKernelBlockIdForTag(tag));
                 stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
             }
         }
@@ -664,6 +681,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     };
 
     if (inputs.attention_inputs_by_tag.empty()) {
+        py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device.fill_(safeKernelBlockIdForFlatTable());
         add_block_table(inputs.attention_inputs.kv_cache_kernel_block_id_device,
                         py_model_inputs.attention_inputs.kv_cache_kernel_block_id_device);
     } else {
@@ -674,6 +692,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
+            dst_it->second.kv_cache_kernel_block_id_device.fill_(safeKernelBlockIdForTag(tag));
             add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
@@ -916,8 +935,30 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
-    const int64_t max_kv_blocks =
-        static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
+    const auto logical_tokens_per_block = cache_config_->seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len_ >= 0 && sp_steps_ >= 0,
+                            "CUDA graph requires non-negative max_seq_len/sp_steps, got %d/%d",
+                            max_seq_len_,
+                            sp_steps_);
+    const auto max_seq_len = static_cast<size_t>(max_seq_len_);
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len <= std::numeric_limits<size_t>::max() - (logical_tokens_per_block - 1),
+                            "CUDA graph logical block count overflow");
+    const size_t base_logical_blocks = (max_seq_len + logical_tokens_per_block - 1) / logical_tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(base_logical_blocks <= std::numeric_limits<size_t>::max() - static_cast<size_t>(sp_steps_),
+                            "CUDA graph logical block slack overflow");
+    const size_t logical_blocks  = base_logical_blocks + static_cast<size_t>(sp_steps_);
+    size_t       max_group_ratio = 1;
+    for (const auto& group : cache_config_->groups()) {
+        max_group_ratio = std::max(max_group_ratio, group.storedKernelBlocksPerKvBlock());
+    }
+    RTP_LLM_CHECK_WITH_INFO(logical_blocks <= std::numeric_limits<size_t>::max() / max_group_ratio,
+                            "CUDA graph kernel block capacity overflow: logical_blocks=%zu ratio=%zu",
+                            logical_blocks,
+                            max_group_ratio);
+    const size_t max_blocks_size = logical_blocks * max_group_ratio;
+    RTP_LLM_CHECK_WITH_INFO(max_blocks_size <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                            "CUDA graph kernel block capacity exceeds int64: %zu",
+                            max_blocks_size);
 
     // Allocate combo_position_ids capture buffer only when the model actually uses
     // combo position ids (Mrope etc.). The factor is sourced from the C++ rope_config
@@ -929,13 +970,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
-    const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
+    const int64_t max_blocks = static_cast<int64_t>(max_blocks_size);
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
-        torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+        torch::full({int(max_bs_), max_blocks}, safeKernelBlockIdForPrimaryTable(), options_cuda_int32_);
 
     inputs.attention_inputs.kv_cache_kernel_block_id =
-        torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+        torch::full({int(max_bs_), max_blocks}, safeKernelBlockIdForPrimaryTable(), options_cpu_int32_).pin_memory();
 
     // Target verify keeps multi-token attention geometry while selecting
     // graphs by batch.
@@ -982,10 +1023,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         for (size_t group_ordinal = 0; group_ordinal < sorted_tags.size(); ++group_ordinal) {
             auto tagged_inputs = inputs.attention_inputs;
             if (group_ordinal > 0) {
+                const auto safe_kernel_id = safeKernelBlockIdForTag(sorted_tags[group_ordinal]);
                 tagged_inputs.kv_cache_kernel_block_id_device =
-                    torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+                    torch::full({int(max_bs_), max_blocks}, safe_kernel_id, options_cuda_int32_);
                 tagged_inputs.kv_cache_kernel_block_id =
-                    torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+                    torch::full({int(max_bs_), max_blocks}, safe_kernel_id, options_cpu_int32_).pin_memory();
             }
             const auto [it, inserted] =
                 inputs.attention_inputs_by_tag.emplace(sorted_tags[group_ordinal], std::move(tagged_inputs));

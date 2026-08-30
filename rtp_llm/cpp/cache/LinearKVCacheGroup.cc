@@ -198,7 +198,7 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
+bool LinearKVCacheGroup::malloc(PoolBlockIds&        block_ids,
                                 int                  seq_len,
                                 bool                 enable_reuse_cache,
                                 int                  reserve_step,
@@ -281,7 +281,7 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
     return true;
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void LinearKVCacheGroup::removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;
@@ -320,7 +320,7 @@ void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
     block_pool_->requestFree(valid);
 }
 
-void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void LinearKVCacheGroup::reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);

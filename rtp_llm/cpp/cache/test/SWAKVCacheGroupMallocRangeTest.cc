@@ -70,8 +70,9 @@ BlockPoolPtr createHostBlockPool() {
 }
 
 std::shared_ptr<MHAKVCacheSpec> makeMHASpec(int seq_size_per_block) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = seq_size_per_block;
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block        = seq_size_per_block;
+    spec->kernel_seq_size_per_block = seq_size_per_block;
     return spec;
 }
 
@@ -83,18 +84,16 @@ TEST(SWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenUpTo1M)
 
     ScopedEnvVar disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
     auto         block_pool = createHostBlockPool();
-    GroupBase    group_config;
-    group_config.tag                       = "swa";
-    group_config.spec                      = makeMHASpec(kSeqSizePerBlock);
-    group_config.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    group_config.seq_size_per_block        = kSeqSizePerBlock;
-    group_config.kernel_seq_size_per_block = kSeqSizePerBlock;
-    group_config.kv_block_stride_bytes     = group_config.spec->block_size_bytes();
-    group_config.kv_scale_stride_bytes     = group_config.spec->scale_block_size_bytes();
+    CacheGroup   group_config;
+    group_config.tag                   = "swa";
+    group_config.spec                  = makeMHASpec(kSeqSizePerBlock);
+    group_config.policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    group_config.kv_block_stride_bytes = group_config.spec->block_size_bytes();
+    group_config.kv_scale_stride_bytes = group_config.spec->scale_block_size_bytes();
     SWAKVCacheGroup group(std::move(group_config), block_pool, 0);
 
     auto check_seq_len = [&](int seq_len) {
-        BlockIds block_ids;
+        PoolBlockIds block_ids;
         ASSERT_EQ(block_ids.blocksNum(), 0u) << "seq_len=" << seq_len;
 
         ASSERT_TRUE(group.malloc(block_ids, seq_len, /*enable_reuse_cache=*/false, /*reserve_step=*/0))

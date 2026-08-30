@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -14,6 +15,34 @@ namespace rtp_llm {
 // depending on torch's registered CustomClassHolder type.
 class CudaGraphTestRunner {
 public:
+    static std::shared_ptr<const CacheConfig>
+    makeCacheConfig(int64_t tokens_per_block, int64_t kernel_tokens_per_block, std::vector<std::string> group_tags) {
+        constexpr uint32_t           kTestBlockNum = 17;
+        std::shared_ptr<CacheConfig> config;
+        if (group_tags.empty()) {
+            group_tags.push_back("default");
+        }
+        std::vector<CacheGroup> groups;
+        CacheLayer              layer;
+        for (const auto& tag : group_tags) {
+            auto spec                       = std::make_shared<MHAKVCacheSpec>();
+            spec->seq_size_per_block        = static_cast<uint32_t>(tokens_per_block);
+            spec->kernel_seq_size_per_block = static_cast<uint32_t>(kernel_tokens_per_block);
+            CacheGroup group;
+            group.tag               = tag;
+            group.spec              = std::move(spec);
+            group.policy.group_type = CacheGroupType::FULL;
+            group.block_num         = kTestBlockNum;
+            groups.push_back(std::move(group));
+            layer.push_back(tag);
+        }
+        config = std::make_shared<CacheConfig>(
+            std::move(groups), std::vector<CacheLayer>{std::move(layer)}, /*main_layer_num=*/1);
+        config->block_num          = kTestBlockNum;
+        config->seq_size_per_block = static_cast<size_t>(tokens_per_block);
+        return config;
+    }
+
     void init_prefill(py::object               py_instance,
                       int64_t                  max_context_batch_size,
                       int64_t                  max_seq_len,
@@ -27,15 +56,13 @@ public:
         params.enable_cuda_graph_debug_mode = true;
         params.is_prefill_cuda_graph_mode   = true;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
-        params.tokens_per_block             = static_cast<int>(tokens_per_block);
-        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
+        params.cache_config                 = makeCacheConfig(tokens_per_block, kernel_tokens_per_block, group_tags);
         params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags          = std::move(group_tags);
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -54,15 +81,13 @@ public:
         params.enable_cuda_graph_debug_mode = false;
         params.is_prefill_cuda_graph_mode   = false;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
-        params.tokens_per_block             = static_cast<int>(tokens_per_block);
-        params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
+        params.cache_config                 = makeCacheConfig(tokens_per_block, kernel_tokens_per_block, group_tags);
         params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_group_tags          = std::move(group_tags);
         params.is_target_verify             = is_target_verify;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));

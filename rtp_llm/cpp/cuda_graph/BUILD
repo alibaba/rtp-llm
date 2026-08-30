@@ -6,6 +6,7 @@ cc_library(
         "cuda_graph_base.h",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],
@@ -51,6 +52,8 @@ cc_library(
         "cuda_graph_runner.h",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],

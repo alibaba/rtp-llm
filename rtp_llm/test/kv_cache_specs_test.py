@@ -3,7 +3,6 @@ from unittest import TestCase, main
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
-from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen2_vl import QWen2_VL
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
@@ -12,6 +11,7 @@ from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
+    CacheGroupType,
     DataType,
     HybridAttentionType,
     KVCacheSpecDesc,
@@ -243,12 +243,9 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(
             config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
         )
-
-    def test_calculate_group_layer_num_uses_full_count_fallback(self):
-        self.assertEqual(calculate_hybrid_group_layer_num(30, 10), 10)
-        self.assertEqual(calculate_hybrid_group_layer_num(4, 6), 6)
-        self.assertEqual(calculate_hybrid_group_layer_num(3, 0), 3)
-        self.assertEqual(calculate_hybrid_group_layer_num(0, 3), 3)
+        self.assertEqual(
+            config.kv_cache_spec_descs[0][0].group_type, CacheGroupType.FULL
+        )
 
     def test_qwen3_next_40_layers_uses_one_homogeneous_linear_tag(self):
         layer_types = [
@@ -265,6 +262,12 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(tags[11], "full")
         self.assertEqual(tags[12], "linear")
         self.assertEqual(tags[13], "linear")
+        self.assertEqual(
+            config.kv_cache_spec_descs[11][0].group_type, CacheGroupType.FULL
+        )
+        self.assertEqual(
+            config.kv_cache_spec_descs[12][0].group_type, CacheGroupType.LINEAR
+        )
 
     def test_qwen35_defaults_missing_mrope_interleaved_to_true(self):
         config = ModelConfig()
@@ -514,6 +517,9 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "full")
         self.assertEqual(
             config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MLA
+        )
+        self.assertEqual(
+            config.kv_cache_spec_descs[0][0].group_type, CacheGroupType.FULL
         )
 
     def test_kimi_linear_does_not_override_existing_descs(self):

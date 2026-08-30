@@ -105,7 +105,7 @@ KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&               
                                                const std::vector<std::string>&          tp_addrs,
                                                const kmonitor::MetricsReporterPtr&      metrics_reporter):
     cache_config_(cache_config),
-    layer_tag_slots_(buildLayerTagSlots(cache_config)),
+    pool_block_memory_layout_(buildPoolBlockMemoryLayout(cache_config)),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
     allocator_(allocator),
@@ -193,7 +193,7 @@ bool KVCacheMemoryConnector::init() {
 }
 
 void KVCacheMemoryConnector::checkLayerBlockStrideBytes() const {
-    const auto& slots = layerTagSlots();
+    const auto& slots = poolBlockMemoryLayout();
     RTP_LLM_CHECK_WITH_INFO(!slots.empty(), "layer-attn slots must not be empty");
     for (const auto& slot : slots) {
         RTP_LLM_CHECK_WITH_INFO(slot.stride_bytes > 0,
@@ -208,7 +208,7 @@ bool KVCacheMemoryConnector::isDualPool() const {
     return complete_pool_ != nullptr;
 }
 
-bool KVCacheMemoryConnector::isFullOnlySlot(const LayerTagSlot& slot) const {
+bool KVCacheMemoryConnector::isFullOnlyLayoutEntry(const LayerTagSlot& slot) const {
     return slot.is_full_only;
 }
 
@@ -218,7 +218,7 @@ void KVCacheMemoryConnector::initBlockPool() {
                             "init block pool failed, memory size is invalid, memory size: %ld MB",
                             memory_cache_size_mb);
 
-    const auto slots                 = layerTagSlots();
+    const auto slots                 = poolBlockMemoryLayout();
     const bool prefix_tree_requested = kv_cache_config_.enable_prefix_tree_memory_cache;
     const bool prefix_tree_supported = supportsTypedPrefixCacheLayout(slots);
     const bool typed_opaque_layout   = cache_config_.use_typed_cache_regions && cache_config_.use_opaque_kv_cache_store;
@@ -236,7 +236,7 @@ void KVCacheMemoryConnector::initBlockPool() {
     size_t state_swa_size       = 0;
     for (const auto& slot : slots) {
         total_block_size += slot.stride_bytes;
-        if (isFullOnlySlot(slot)) {
+        if (isFullOnlyLayoutEntry(slot)) {
             full_only_block_size += slot.stride_bytes;
         }
         if (slot.block_kind == CacheBlockKind::COMPRESSED_KV) {
@@ -365,7 +365,7 @@ void KVCacheMemoryConnector::initBlockPool() {
 
 size_t KVCacheMemoryConnector::memoryCacheBlockSizeBytes() const {
     size_t block_size = 0;
-    for (const auto& slot : layerTagSlots()) {
+    for (const auto& slot : poolBlockMemoryLayout()) {
         block_size += slot.stride_bytes;
     }
     return block_size;
@@ -500,7 +500,7 @@ void KVCacheMemoryConnector::initDiskBlockPools() {
 }
 
 std::vector<KVCacheMemoryConnector::LayerTagSlot>
-KVCacheMemoryConnector::buildLayerTagSlots(const CacheConfig& cache_config) {
+KVCacheMemoryConnector::buildPoolBlockMemoryLayout(const CacheConfig& cache_config) {
     std::vector<LayerTagSlot> slots;
     for (size_t layer = 0; layer < cache_config.layer_all_num; ++layer) {
         auto sorted_tags = cache_config.groupsForLayer(static_cast<int>(layer));
@@ -531,21 +531,18 @@ KVCacheMemoryConnector::buildLayerTagSlots(const CacheConfig& cache_config) {
                                          group.kv_block_stride_bytes,
                                          group.kv_scale_stride_bytes,
                                          stride,
-                                         group.policy,
                                          kind,
-                                         group.spec->type,
-                                         group.spec,
                                          group.policy.group_type == CacheGroupType::FULL});
         }
     }
     return slots;
 }
 
-const std::vector<KVCacheMemoryConnector::LayerTagSlot>& KVCacheMemoryConnector::layerTagSlots() const {
-    return layer_tag_slots_;
+const std::vector<KVCacheMemoryConnector::LayerTagSlot>& KVCacheMemoryConnector::poolBlockMemoryLayout() const {
+    return pool_block_memory_layout_;
 }
 
-bool KVCacheMemoryConnector::hasTypedLayerTagSlots(const std::vector<LayerTagSlot>& slots) const {
+bool KVCacheMemoryConnector::hasTypedPoolBlockMemoryLayout(const std::vector<LayerTagSlot>& slots) const {
     if (slots.size() != cache_config_.layer_all_num) {
         return true;
     }
@@ -561,19 +558,18 @@ bool KVCacheMemoryConnector::usesTypedMemoryPoolLayout(const std::vector<LayerTa
     // Semantic tags identify resources in every layout, but only physical multi-group layouts
     // use the typed pool/copy algorithms. FULL+LINEAR hybrids split across layers remain a
     // one-group-per-layer layout even though their tags are non-default.
-    return supportsTypedPrefixCacheLayout(slots) || !cache_config_.topology().hasOneGroupPerLayer();
+    return supportsTypedPrefixCacheLayout(slots) || !cache_config_.hasOneGroupPerLayer();
 }
 
 bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<LayerTagSlot>& slots) const {
-    if (slots.empty() || !hasTypedLayerTagSlots(slots)) {
+    if (slots.empty() || !hasTypedPoolBlockMemoryLayout(slots)) {
         return false;
     }
-    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store
-        || !cache_config_.use_independent_block_pools) {
+    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store) {
         return false;
     }
-    const auto& groups = cache_config_.topology().groups();
-    if (groups.empty() || cache_config_.topology().layers().size() < cache_config_.layer_all_num) {
+    const auto& groups = cache_config_.groups();
+    if (groups.empty() || cache_config_.layers().size() < cache_config_.layer_all_num) {
         return false;
     }
 
@@ -610,7 +606,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
         const auto& group = cache_config_.groupForLayer(slot.layer_id, slot.tag);
         if (slot.stride_bytes != group.kv_block_stride_bytes + group.kv_scale_stride_bytes
             || slot.kv_block_stride_bytes != group.kv_block_stride_bytes
-            || slot.kv_scale_stride_bytes != group.kv_scale_stride_bytes || slot.spec_type != group.spec->type) {
+            || slot.kv_scale_stride_bytes != group.kv_scale_stride_bytes) {
             return false;
         }
     }
@@ -637,9 +633,9 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     }
 
     const bool  use_prefix_tree     = usePrefixTreeMemoryCache();
-    const auto& slots               = layerTagSlots();
-    auto        layer_tag_block_ids = resourceLayerTagBlocks(*resource, slots);
-    if (!checkLayerTagBlocks(layer_tag_block_ids, slots, cache_keys_size)) {
+    const auto& slots               = poolBlockMemoryLayout();
+    auto        layer_tag_block_ids = resourceLayerTagPoolBlockTables(*resource, slots);
+    if (!checkLayerTagPoolBlockTables(layer_tag_block_ids, slots, cache_keys_size)) {
         RTP_LLM_LOG_WARNING("async match failed, invalid layer_tag_block_ids, cache_keys_size=%zu", cache_keys_size);
         return nullptr;
     }
@@ -761,7 +757,7 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
     return std::make_shared<MemoryAsyncMatchContext>(matched_num, start_read_block_index, read_block_num, copy_plan);
 }
 
-bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerTagBlockIds&          layer_tag_block_ids,
+bool KVCacheMemoryConnector::gpuBlocksAllValid(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                const std::vector<LayerTagSlot>& slots,
                                                size_t                           key_index) const {
     for (const auto& slot : slots) {
@@ -785,7 +781,7 @@ bool KVCacheMemoryConnector::usePrefixTreeMemoryCache() const {
     return use_prefix_tree_memory_cache_;
 }
 
-bool KVCacheMemoryConnector::kindRequiredAt(const LayerTagBlockIds&          layer_tag_block_ids,
+bool KVCacheMemoryConnector::kindRequiredAt(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                             const std::vector<LayerTagSlot>& slots,
                                             size_t                           key_index,
                                             CacheBlockKind                   kind) const {
@@ -793,7 +789,7 @@ bool KVCacheMemoryConnector::kindRequiredAt(const LayerTagBlockIds&          lay
     return std::any_of(mask.begin(), mask.end(), [](uint8_t valid) { return valid != 0; });
 }
 
-std::vector<uint8_t> KVCacheMemoryConnector::prefixSlotValidMask(const LayerTagBlockIds&          layer_tag_block_ids,
+std::vector<uint8_t> KVCacheMemoryConnector::prefixSlotValidMask(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                                  const std::vector<LayerTagSlot>& slots,
                                                                  size_t                           key_index,
                                                                  CacheBlockKind                   kind) const {
@@ -846,9 +842,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
     autil::ScopedTime2 timer;
 
     const bool  use_prefix_tree     = usePrefixTreeMemoryCache();
-    const auto& slots               = layerTagSlots();
-    auto        layer_tag_block_ids = resourceLayerTagBlocks(*resource, slots);
-    if (!checkLayerTagBlocks(layer_tag_block_ids, slots, cache_keys_size)) {
+    const auto& slots               = poolBlockMemoryLayout();
+    auto        layer_tag_block_ids = resourceLayerTagPoolBlockTables(*resource, slots);
+    if (!checkLayerTagPoolBlockTables(layer_tag_block_ids, slots, cache_keys_size)) {
         reportReadMetrics(false, timer.done_us(), cache_keys_size, 0);
         return nullptr;
     }
@@ -954,7 +950,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncRead(const std::share
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
 KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&             cache_keys,
-                                             const LayerTagBlockIds&          layer_tag_block_ids,
+                                             const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                              const std::vector<LayerTagSlot>& slots,
                                              int                              start_index,
                                              int                              read_num) {
@@ -1004,7 +1000,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&             ca
         for (const auto& slot : slots) {
             const auto layer = static_cast<size_t>(slot.layer_id);
             copy_info.tagged_gpu_blocks.push_back(
-                LayerTagBlock{slot, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
+                LayerTagBlock{slot.layer_id, slot.tag, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
         }
         copy_info.is_complete = match_result.is_complete;
         copy_infos.emplace_back(std::move(copy_info));
@@ -1025,7 +1021,7 @@ KVCacheMemoryConnector::buildCopyPlanForRead(const CacheKeysType&             ca
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
 KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&             cache_keys,
                                                    const BlockDependenciesType&     dependencies,
-                                                   const LayerTagBlockIds&          layer_tag_block_ids,
+                                                   const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                    const std::vector<LayerTagSlot>& slots,
                                                    int                              start_index,
                                                    int                              read_num) {
@@ -1089,7 +1085,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForRead(const CacheKeysType&         
             for (const auto& slot : slots) {
                 const auto layer = static_cast<size_t>(slot.layer_id);
                 copy_info.tagged_gpu_blocks.push_back(
-                    LayerTagBlock{slot, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
+                    LayerTagBlock{slot.layer_id, slot.tag, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
             }
             copy_infos.emplace_back(std::move(copy_info));
         }
@@ -1124,9 +1120,9 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
     autil::ScopedTime2 timer;
 
     const bool  use_prefix_tree     = usePrefixTreeMemoryCache();
-    const auto& slots               = layerTagSlots();
-    auto        layer_tag_block_ids = resourceLayerTagBlocks(*resource, slots);
-    if (!checkLayerTagBlocks(layer_tag_block_ids, slots, cache_keys_size)) {
+    const auto& slots               = poolBlockMemoryLayout();
+    auto        layer_tag_block_ids = resourceLayerTagPoolBlockTables(*resource, slots);
+    if (!checkLayerTagPoolBlockTables(layer_tag_block_ids, slots, cache_keys_size)) {
         RTP_LLM_LOG_WARNING("async write failed, invalid layer_tag_block_ids, cache_keys_size=%zu resource_keys=%zu",
                             cache_keys_size,
                             cache_keys.size());
@@ -1255,7 +1251,7 @@ std::shared_ptr<AsyncContext> KVCacheMemoryConnector::asyncWrite(const std::shar
 
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
 KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&             cache_keys,
-                                              const LayerTagBlockIds&          layer_tag_block_ids,
+                                              const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                               const std::vector<LayerTagSlot>& slots,
                                               int                              start_index,
                                               int                              write_num,
@@ -1281,7 +1277,7 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&             c
             if (isNullBlockIdx(gpu_block_idx)) {
                 ++null_block_num;
             }
-            tagged_gpu_blocks.push_back(LayerTagBlock{slot, gpu_block_idx});
+            tagged_gpu_blocks.push_back(LayerTagBlock{slot.layer_id, slot.tag, gpu_block_idx});
         }
 
         const bool is_complete = null_block_num == 0;
@@ -1337,7 +1333,7 @@ KVCacheMemoryConnector::buildCopyPlanForWrite(const CacheKeysType&             c
 std::shared_ptr<KVCacheMemoryConnector::CopyPlan>
 KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&             cache_keys,
                                                     const BlockDependenciesType&     dependencies,
-                                                    const LayerTagBlockIds&          layer_tag_block_ids,
+                                                    const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,
                                                     int                              start_index,
                                                     int                              write_num,
@@ -1367,7 +1363,7 @@ KVCacheMemoryConnector::buildPrefixCopyPlanForWrite(const CacheKeysType&        
             for (const auto& slot : slots) {
                 const auto layer = static_cast<size_t>(slot.layer_id);
                 copy_info.tagged_gpu_blocks.push_back(
-                    LayerTagBlock{slot, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
+                    LayerTagBlock{slot.layer_id, slot.tag, layer_tag_block_ids.at(layer).at(slot.tag)->blocks().at(i)});
             }
             copy_infos.emplace_back(std::move(copy_info));
         }
@@ -1491,7 +1487,7 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
                                                                             MemoryOperationRequestPB::D2H);
     for (const auto& copy_info : copy_plan->copy_infos) {
         auto* item = mem_req.add_copy_items();
-        item->set_mem_block(copy_info.mem_block);
+        item->set_mem_block(toLegacyBlockIdx(copy_info.mem_block));
         if (!isNullBlockIdx(copy_info.src_mem_block)) {
             item->set_src_mem_block(copy_info.src_mem_block);
         }
@@ -1516,25 +1512,24 @@ KVCacheMemoryConnector::sendCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan)
         if (copy_info.backing_type == CacheBackingType::DISK) {
             item->set_disk_slot(copy_info.disk_slot);
         }
-        const auto& slots = layerTagSlots();
+        const auto& slots = poolBlockMemoryLayout();
         RTP_LLM_CHECK_WITH_INFO(copy_info.tagged_gpu_blocks.size() == slots.size(),
                                 "cannot encode incomplete memory copy tag records: blocks=%zu slots=%zu",
                                 copy_info.tagged_gpu_blocks.size(),
                                 slots.size());
         for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
             const auto& tagged = copy_info.tagged_gpu_blocks[slot_idx];
-            RTP_LLM_CHECK_WITH_INFO(tagged.slot.layer_id == slots[slot_idx].layer_id
-                                        && tagged.slot.tag == slots[slot_idx].tag,
+            RTP_LLM_CHECK_WITH_INFO(tagged.layer_id == slots[slot_idx].layer_id && tagged.tag == slots[slot_idx].tag,
                                     "memory copy plan tag order mismatch at slot=%zu: plan=(%d,%s) local=(%d,%s)",
                                     slot_idx,
-                                    tagged.slot.layer_id,
-                                    tagged.slot.tag.c_str(),
+                                    tagged.layer_id,
+                                    tagged.tag.c_str(),
                                     slots[slot_idx].layer_id,
                                     slots[slot_idx].tag.c_str());
             auto* tagged_block = item->add_tagged_gpu_blocks();
-            tagged_block->set_layer_id(tagged.slot.layer_id);
-            tagged_block->set_tag(tagged.slot.tag);
-            tagged_block->set_block_id(tagged.block_id);
+            tagged_block->set_layer_id(tagged.layer_id);
+            tagged_block->set_tag(tagged.tag);
+            tagged_block->set_block_id(toLegacyBlockIdx(tagged.pool_block_id));
         }
         for (const auto valid : copy_info.slot_valid_mask) {
             item->add_slot_valid_mask(valid);
@@ -1573,7 +1568,7 @@ void KVCacheMemoryConnector::printCopyPlan(const std::shared_ptr<CopyPlan>& copy
             << ", mem block: " << copy_info.mem_block << ", disk slot: " << copy_info.disk_slot
             << ", gpu layer blocks: [";
         for (const auto& tagged : copy_info.tagged_gpu_blocks) {
-            oss << "(" << tagged.slot.layer_id << "," << tagged.slot.tag << "," << tagged.block_id << "), ";
+            oss << "(" << tagged.layer_id << "," << tagged.tag << "," << tagged.pool_block_id << "), ";
         }
         oss << "]\n";
     }
@@ -1588,7 +1583,7 @@ bool KVCacheMemoryConnector::copyCache(const MemoryOperationRequestPB& wire_requ
     if (wire_request.copy_direction() == MemoryOperationRequestPB::H2D) {
         copy_direction = CopyDirection::H2D;
     }
-    const auto slots            = layerTagSlots();
+    const auto slots            = poolBlockMemoryLayout();
     bool       has_disk_items   = false;
     bool       has_memory_items = false;
     bool       has_prefix_items = false;
@@ -1673,7 +1668,11 @@ KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(const MemoryOperationRequestP
     std::map<std::pair<int, std::string>, BlockIdxType> tagged_blocks;
     for (const auto& tagged_block : item.tagged_gpu_blocks()) {
         const auto key = std::make_pair(static_cast<int>(tagged_block.layer_id()), tagged_block.tag());
-        RTP_LLM_CHECK_WITH_INFO(tagged_blocks.emplace(key, tagged_block.block_id()).second,
+        RTP_LLM_CHECK_WITH_INFO(tagged_block.block_id() >= 0,
+                                "memory copy wire block id must be nonnegative, got %d",
+                                tagged_block.block_id());
+        const auto block_id = tagged_block.block_id() == 0 ? NULL_BLOCK_IDX : tagged_block.block_id();
+        RTP_LLM_CHECK_WITH_INFO(tagged_blocks.emplace(key, block_id).second,
                                 "duplicate memory copy block for layer=%d tag=%s",
                                 tagged_block.layer_id(),
                                 tagged_block.tag().c_str());
@@ -1686,7 +1685,7 @@ KVCacheMemoryConnector::normalizeCopyItemGpuBlocks(const MemoryOperationRequestP
                                 "memory copy request missing local layer=%d tag=%s",
                                 slot.layer_id,
                                 slot.tag.c_str());
-        tagged_gpu_blocks.push_back(LayerTagBlock{slot, it->second});
+        tagged_gpu_blocks.push_back(LayerTagBlock{slot.layer_id, slot.tag, it->second});
     }
     RTP_LLM_CHECK_WITH_INFO(tagged_blocks.size() == slots.size(),
                             "memory copy tag topology mismatch: peer=%zu local=%zu",
@@ -1699,7 +1698,8 @@ KVCacheMemoryConnector::NormalizedCopyItem
 KVCacheMemoryConnector::normalizeCopyItem(const MemoryOperationRequestPB::CopyItem& item,
                                           const std::vector<LayerTagSlot>&          slots) {
     NormalizedCopyItem normalized;
-    normalized.mem_block         = static_cast<BlockIdxType>(item.mem_block());
+    RTP_LLM_CHECK_WITH_INFO(item.mem_block() >= 0, "memory copy wire mem block must be nonnegative");
+    normalized.mem_block         = item.mem_block() == 0 ? NULL_BLOCK_IDX : static_cast<BlockIdxType>(item.mem_block());
     normalized.tagged_gpu_blocks = normalizeCopyItemGpuBlocks(item, slots);
     normalized.is_complete       = copyItemIsComplete(item);
     normalized.layer_kind        = item.cache_block_kind() == MemoryOperationRequestPB::COMPLETE_KV
@@ -1737,7 +1737,7 @@ bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationReques
             return false;
         }
     } else if (item.backing_type() == MemoryOperationRequestPB::DISK) {
-        if (!isNullBlockIdx(static_cast<BlockIdxType>(item.mem_block()))) {
+        if (item.mem_block() > 0) {
             RTP_LLM_LOG_WARNING("disk copy item has non-null mem_block=%d", item.mem_block());
             return false;
         }
@@ -1773,8 +1773,7 @@ bool KVCacheMemoryConnector::validateCopyItemBacking(const MemoryOperationReques
             return false;
         }
     } else if (has_src_mem_block) {
-        if (item.src_backing_type() != MemoryOperationRequestPB::MEMORY
-            || isNullBlockIdx(static_cast<BlockIdxType>(item.src_mem_block()))) {
+        if (item.src_backing_type() != MemoryOperationRequestPB::MEMORY || item.src_mem_block() <= 0) {
             RTP_LLM_LOG_WARNING("memory source copy item has null src_mem_block");
             return false;
         }
@@ -1805,7 +1804,7 @@ bool KVCacheMemoryConnector::copyMemoryItemsGeneric(const NormalizedCopyItems&  
     if (!dst_buffers.empty()) {
         MultiCopyParams mc{dst_buffers, src_buffers};
         const bool      can_use_split_kv_copy =
-            kv_cache_config_.enable_memory_cache_sm_copy && !hasTypedLayerTagSlots(slots) && !slots.empty();
+            kv_cache_config_.enable_memory_cache_sm_copy && !hasTypedPoolBlockMemoryLayout(slots) && !slots.empty();
         if (can_use_split_kv_copy) {
             mc.split_kv_layer_num          = static_cast<int>(slots.size());
             mc.split_kv_cache_stride_bytes = slots.front().kv_block_stride_bytes;
@@ -1868,11 +1867,15 @@ bool KVCacheMemoryConnector::tryCopyCacheWithStagedMemoryCopy(const NormalizedCo
         size_t byte_off = 0;
         for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
             const auto& tagged       = tagged_gpu_blocks.at(slot_idx);
-            const auto& slot         = tagged.slot;
-            const auto  gpu_block    = tagged.block_id;
+            const auto& slot         = slots[slot_idx];
+            const auto  gpu_block    = tagged.pool_block_id;
             const auto  layer_stride = slot.stride_bytes;
 
-            if (!item_is_complete && !isFullOnlySlot(slot)) {
+            if (tagged.layer_id != slot.layer_id || tagged.tag != slot.tag) {
+                return false;
+            }
+
+            if (!item_is_complete && !isFullOnlyLayoutEntry(slot)) {
                 continue;
             }
 
@@ -2004,11 +2007,15 @@ bool KVCacheMemoryConnector::tryCopyCacheWithBatchedMemoryCopy(const NormalizedC
         size_t byte_off = 0;
         for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
             const auto& tagged       = tagged_gpu_blocks.at(slot_idx);
-            const auto& slot         = tagged.slot;
-            const auto  gpu_block    = tagged.block_id;
+            const auto& slot         = slots[slot_idx];
+            const auto  gpu_block    = tagged.pool_block_id;
             const auto  layer_stride = slot.stride_bytes;
 
-            if (!item_is_complete && !isFullOnlySlot(slot)) {
+            if (tagged.layer_id != slot.layer_id || tagged.tag != slot.tag) {
+                return false;
+            }
+
+            if (!item_is_complete && !isFullOnlyLayoutEntry(slot)) {
                 continue;
             }
 
@@ -2162,11 +2169,14 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&   
         size_t                     byte_off = 0;
         for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
             const auto& tagged = item.tagged_gpu_blocks[slot_idx];
-            const auto& slot   = tagged.slot;
+            const auto& slot   = slots[slot_idx];
+            if (tagged.layer_id != slot.layer_id || tagged.tag != slot.tag) {
+                return false;
+            }
             if (slot.block_kind != kind) {
                 continue;
             }
-            const auto gpu_block = tagged.block_id;
+            const auto gpu_block = tagged.pool_block_id;
             if (!isUsableBlockIdx(gpu_block)) {
                 byte_off += slot.stride_bytes;
                 continue;
@@ -2258,10 +2268,14 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&        item,
     const bool item_is_complete = item.is_complete;
     for (size_t slot_idx = 0; slot_idx < slots.size(); ++slot_idx) {
         const auto& tagged    = item.tagged_gpu_blocks[slot_idx];
-        const auto& slot      = tagged.slot;
-        const auto  gpu_block = tagged.block_id;
+        const auto& slot      = slots[slot_idx];
+        const auto  gpu_block = tagged.pool_block_id;
 
-        if (!item_is_complete && !isFullOnlySlot(slot)) {
+        if (tagged.layer_id != slot.layer_id || tagged.tag != slot.tag) {
+            return false;
+        }
+
+        if (!item_is_complete && !isFullOnlyLayoutEntry(slot)) {
             continue;
         }
 
@@ -2319,18 +2333,24 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                mem_
                             mem_block,
                             direction == CopyDirection::H2D ? "H2D" : "D2H");
 
-    RTP_LLM_CHECK_WITH_INFO(tagged_gpu_blocks.size() == layerTagSlots().size(),
+    const auto& layout = poolBlockMemoryLayout();
+    RTP_LLM_CHECK_WITH_INFO(tagged_gpu_blocks.size() == layout.size(),
                             "gpu_blocks must contain all layer-attn slots, got=%zu need=%zu",
                             tagged_gpu_blocks.size(),
-                            layerTagSlots().size());
+                            layout.size());
 
     size_t byte_off = 0;
-    for (const auto& tagged : tagged_gpu_blocks) {
-        const auto& slot         = tagged.slot;
-        const auto  gpu_block    = tagged.block_id;
+    for (size_t layout_idx = 0; layout_idx < layout.size(); ++layout_idx) {
+        const auto& tagged       = tagged_gpu_blocks[layout_idx];
+        const auto& slot         = layout[layout_idx];
+        const auto  gpu_block    = tagged.pool_block_id;
         const auto  layer_stride = slot.stride_bytes;
 
-        if (!is_complete && !isFullOnlySlot(slot)) {
+        RTP_LLM_CHECK_WITH_INFO(tagged.layer_id == slot.layer_id && tagged.tag == slot.tag,
+                                "gpu block binding does not match memory layout at entry=%zu",
+                                layout_idx);
+
+        if (!is_complete && !isFullOnlyLayoutEntry(slot)) {
             continue;
         }
 
@@ -2399,18 +2419,18 @@ bool KVCacheMemoryConnector::appendCopyBytesToBuffers(const BlockInfo&          
     return true;
 }
 
-KVCacheMemoryConnector::LayerTagBlockIds
-KVCacheMemoryConnector::resourceLayerTagBlocks(const KVCacheResource&           resource,
-                                               const std::vector<LayerTagSlot>& slots) const {
-    LayerTagBlockIds layer_blocks(static_cast<size_t>(cache_config_.layer_all_num));
-    const auto&      blocks_by_tag = resource.blocksByTag();
+KVCacheMemoryConnector::LayerTagPoolBlockTables
+KVCacheMemoryConnector::resourceLayerTagPoolBlockTables(const KVCacheResource&           resource,
+                                                        const std::vector<LayerTagSlot>& slots) const {
+    LayerTagPoolBlockTables layer_blocks(static_cast<size_t>(cache_config_.layer_all_num));
+    const auto&             blocks_by_group = resource.blocksByGroup();
     for (const auto& slot : slots) {
         RTP_LLM_CHECK_WITH_INFO(slot.layer_id >= 0 && static_cast<size_t>(slot.layer_id) < layer_blocks.size(),
                                 "KVCacheMemoryConnector invalid slot layer=%d tag=%s",
                                 slot.layer_id,
                                 slot.tag.c_str());
-        const auto record = blocks_by_tag.find(slot.tag);
-        if (record == blocks_by_tag.end()) {
+        const auto record = blocks_by_group.find(slot.tag);
+        if (record == blocks_by_group.end()) {
             continue;
         }
         const auto inserted = layer_blocks[static_cast<size_t>(slot.layer_id)].emplace(slot.tag, &record->second);
@@ -2420,9 +2440,9 @@ KVCacheMemoryConnector::resourceLayerTagBlocks(const KVCacheResource&           
     return layer_blocks;
 }
 
-bool KVCacheMemoryConnector::checkLayerTagBlocks(const LayerTagBlockIds&          layer_tag_block_ids,
-                                                 const std::vector<LayerTagSlot>& slots,
-                                                 size_t                           required_len) const {
+bool KVCacheMemoryConnector::checkLayerTagPoolBlockTables(const LayerTagPoolBlockTables&   layer_tag_block_ids,
+                                                          const std::vector<LayerTagSlot>& slots,
+                                                          size_t                           required_len) const {
     if (layer_tag_block_ids.empty()) {
         RTP_LLM_LOG_WARNING("check layer-tag blocks failed, layer_tag_block_ids is empty (required_len=%zu)",
                             required_len);

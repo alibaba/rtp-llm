@@ -231,20 +231,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     torch_ext::PyModelInitResources init_resources;
 
     if (params.kv_cache_layer_layout.has_value()) {
-        // Block geometry travels on GptModelInitParams (filled from
-        // cache_manager->cacheConfig() in NormalExecutor/MtpExecutor) rather
-        // than the model-static attention_conf — for DSV4 the cache manager
-        // promotes seq_size_per_block to a 256-token physical block while
-        // attention_conf still reflects the 64-token --seq_size_per_block
-        // CLI flag, causing the fused compressor to index state block_table
-        // with the wrong stride and trap on unallocated ring slots.
-        RTP_LLM_CHECK_WITH_INFO(params.tokens_per_block > 0 && params.kernel_tokens_per_block > 0
-                                    && params.tokens_per_block % params.kernel_tokens_per_block == 0,
-                                "GptModelInitParams must carry valid tokens_per_block / kernel_tokens_per_block "
-                                "from CacheConfig before constructing PyWrappedModel KVCache; got tokens_per_block=%zu "
-                                "kernel_tokens_per_block=%zu",
-                                params.tokens_per_block,
-                                params.kernel_tokens_per_block);
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
@@ -261,24 +247,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
-    const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
-                                             || py_model_class_name == "DeepSeekV4MtpModel"
-                                             || py_model_class_name == "DeepSeekV4DSparkModel";
-    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
+    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(
             "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
-        enable_cuda_graph_ = false;
-    } else if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
-        // DeepSeekV4 also refuses to capture prefill graphs during warmup: the
-        // real executor captures once the CacheManager exists.
-        RTP_LLM_LOG_WARNING(
-            "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
-            "CacheManager is initialized.");
         enable_cuda_graph_ = false;
     }
     if (enable_cuda_graph_) {
@@ -291,10 +266,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
-        graph_params.tokens_per_block             = params.tokens_per_block;
-        graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
-        graph_params.hidden_size                  = params.hidden_size;
-        graph_params.hc_mult                      = params.hc_mult;
+        RTP_LLM_CHECK_WITH_INFO(params.kv_cache_layer_layout.has_value(),
+                                "CUDA graph requires model-local cache layout");
+        graph_params.cache_config = params.kv_cache_layer_layout->topologyPtr();
+        graph_params.hidden_size  = params.hidden_size;
+        graph_params.hc_mult      = params.hc_mult;
         // Default input_hiddens row width for MTP: hc_mult * hidden_size. DSpARK
         // consumes len(target_layer_ids) * hidden_size instead, which only the
         // Python model knows.
@@ -308,9 +284,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
-        if (params.kv_cache_layer_layout.has_value()) {
-            graph_params.kv_cache_group_tags = kv_cache_boundary_group_tags_;
-        }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style

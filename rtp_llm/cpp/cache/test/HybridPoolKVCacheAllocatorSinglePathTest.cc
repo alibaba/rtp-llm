@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <numeric>
 #include <vector>
 #include <set>
 #include <optional>
@@ -23,13 +24,28 @@
 namespace rtp_llm {
 namespace test {
 
-CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-    return makeSimpleMhaCacheConfig(/*layer_num=*/layer_num,
-                                    /*block_num=*/block_num,
-                                    /*tokens_per_block=*/static_cast<size_t>(seq_size_per_block),
-                                    rtp_llm::DataType::TYPE_FP16,
-                                    /*local_head_num_kv=*/8,
-                                    /*size_per_head=*/128);
+CacheConfig createSingleTypeTestConfig(int  layer_num           = 4,
+                                       int  block_num           = 10,
+                                       int  seq_size_per_block  = 8,
+                                       bool enable_prefix_reuse = true) {
+    auto        spec = makeMhaSpec("default",
+                            static_cast<size_t>(seq_size_per_block),
+                            rtp_llm::DataType::TYPE_FP16,
+                            /*local_head_num_kv=*/8,
+                            /*size_per_head=*/128);
+    CacheConfig config;
+    config.dtype               = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num           = static_cast<uint32_t>(layer_num);
+    config.block_num           = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block  = static_cast<size_t>(seq_size_per_block);
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse = enable_prefix_reuse;
+    std::vector<int> layer_ids(static_cast<size_t>(layer_num));
+    std::iota(layer_ids.begin(), layer_ids.end(), 0);
+    rtp_llm::test::assignCacheConfigFromGroupedSpecs(
+        config, config.layer_num, {spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"}, {policy});
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
+    return config;
 }
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
@@ -188,7 +204,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, ConstructorAndInit) {
     EXPECT_TRUE(init_result);
 
     EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, InitWithDifferentLayerNum) {
@@ -390,7 +406,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, MallocMultipleBatches) {
     for (int i = 0; i < batch_size; ++i) {
         EXPECT_EQ(batch_resource->blocksNum(i, "default"), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 6);  // 2 shared + 3 batches * 1 block + 1 dummy
 }
 
 // TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, MallocWithInsufficientBlocks) {
@@ -444,7 +460,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, FreeMultipleBatches) {
 
     FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);
 }
 
 // Test malloc free cycle
@@ -465,7 +481,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, MallocFreeCycle) {
         FreeInfo free_info{batch_resource, complete_token_ids};
         allocator_->free(free_info);
 
-        EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+        EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);
     }
 }
 
@@ -503,14 +519,8 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, InsertIntoCacheAsResident) {
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, PrefixReuseDisabledSkipsMatchAndInsert) {
-    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4);
-    std::vector<CacheGroupPolicy> policies;
-    for (const auto& group : config.topology().groups()) {
-        policies.push_back(group.policy);
-    }
-    ASSERT_EQ(policies.size(), 1u);
-    policies[0].enable_prefix_reuse = false;
-    config.setGroupPolicies(policies);
+    auto config = createSingleTypeTestConfig(
+        /*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4, /*enable_prefix_reuse=*/false);
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator_        = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -728,8 +738,9 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, LayerCacheBase) {
     auto layout = allocator_->allLayerCacheBase();
     ASSERT_EQ(layout.groups().size(), 1u);
     ASSERT_EQ(layout.topology().layers().size(), 4u);
-    for (const auto& layer : layout.topology().layers()) {
-        EXPECT_EQ(layer.group_tags, std::vector<std::string>{"default"}) << "layer " << layer.layer_id;
+    for (size_t layer_id = 0; layer_id < layout.topology().layers().size(); ++layer_id) {
+        EXPECT_EQ(layout.topology().groupsForLayer(static_cast<int>(layer_id)), std::vector<std::string>{"default"})
+            << "layer " << layer_id;
     }
     EXPECT_EQ(layout.topology().groups().size(), 1u);
     EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
@@ -918,17 +929,16 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, BlockBatchCopyCopiesCompleteSpa
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
-    auto config                = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
+    auto config = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, KVCacheConfig{}, 0);
     config.finalizeBlockNums(/*global_block_num=*/4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);
-    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
-    ASSERT_EQ(config.kv_scale_stride_bytes, config.group("default").kv_scale_stride_bytes);
+    ASSERT_GT(config.group("default").kv_scale_stride_bytes, 0u);
 
     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    const auto stride   = config.kv_scale_stride_bytes;
+    const auto stride   = config.group("default").kv_scale_stride_bytes;
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(config.block_num, std::vector<uint8_t>(stride));
         for (uint32_t block = 0; block < config.block_num; ++block) {
@@ -1077,7 +1087,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, FreeBlocksNums) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, AvailableBlocksNums) {
@@ -1085,7 +1095,7 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, AvailableBlocksNums) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->availableBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->availableBlocksNum(), config.block_num - 1);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {
@@ -1112,24 +1122,27 @@ TEST_F(HybridPoolKVCacheAllocatorSinglePathTest, IncrKVCacheRefReferencesMatched
     };
     resource.setCacheKeysAndBlockDependencies(CacheKeysType{100, 101, 102, 103}, dependencies);
     resource.setCacheKeysAreCpCanonical(true);
-    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
+    ASSERT_EQ(blocks[0], 1);
+    resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX, blocks[2]});
     resource.setDeviceReuseBlockNum(3);
 
-    // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
-    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
+    // Positive pool bindings are referenced; NULL_BLOCK_IDX is skipped.
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{100, 101, 999, 102, 103});
     ASSERT_NE(ref_resource, nullptr);
     // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
     EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
-    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103}));
-    ASSERT_EQ(ref_resource->blockDependencies().size(), 2u);
-    EXPECT_EQ(ref_resource->blockDependencies()[0].parent_key, 100);
-    EXPECT_EQ(ref_resource->blockDependencies()[0].ordinal, 13u);
-    EXPECT_EQ(ref_resource->blockDependencies()[1].parent_key, 777);
-    EXPECT_EQ(ref_resource->blockDependencies()[1].ordinal, 34u);
+    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{100, 101, 103}));
+    ASSERT_EQ(ref_resource->blockDependencies().size(), 3u);
+    EXPECT_EQ(ref_resource->blockDependencies()[0].parent_key, 900);
+    EXPECT_EQ(ref_resource->blockDependencies()[0].ordinal, 7u);
+    EXPECT_EQ(ref_resource->blockDependencies()[1].parent_key, 100);
+    EXPECT_EQ(ref_resource->blockDependencies()[1].ordinal, 13u);
+    EXPECT_EQ(ref_resource->blockDependencies()[2].parent_key, 777);
+    EXPECT_EQ(ref_resource->blockDependencies()[2].ordinal, 34u);
     EXPECT_TRUE(ref_resource->cacheKeysAreCpCanonical());
 
     block_pool->requestFree(blocks);
-    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
+    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 3);  // blocks[0..2] are still referenced
     // incrKVCacheRef returns a resource with a custom deleter that calls decrKVCacheRef().
     // Release it to drop ref-counts and unblock the pending frees.
     ref_resource.reset();

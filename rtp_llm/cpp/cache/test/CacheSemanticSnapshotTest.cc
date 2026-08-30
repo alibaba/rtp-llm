@@ -8,15 +8,16 @@
 namespace rtp_llm::test {
 namespace {
 
-CacheConfig makeKimiHybridConfig() {
+CacheConfig makeKimiHybridConfig(bool legacy_independent_flag = false) {
     ModelConfig config;
-    config.num_layers                                      = 4;
-    config.attn_config.head_num                            = 4;
-    config.attn_config.kv_head_num                         = 2;
-    config.attn_config.size_per_head                       = 32;
-    config.attn_config.tokens_per_block                    = 8;
-    config.hybrid_attention_config.enable_hybrid_attention = true;
-    config.hybrid_attention_config.hybrid_attention_types  = {
+    config.num_layers                                                = 4;
+    config.attn_config.head_num                                      = 4;
+    config.attn_config.kv_head_num                                   = 2;
+    config.attn_config.size_per_head                                 = 32;
+    config.attn_config.tokens_per_block                              = 8;
+    config.hybrid_attention_config.enable_hybrid_attention           = true;
+    config.hybrid_attention_config.enable_independent_kv_cache_pools = legacy_independent_flag;
+    config.hybrid_attention_config.hybrid_attention_types            = {
         HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
     config.linear_attention_config.linear_conv_kernel_dim = 4;
     config.linear_attention_config.linear_key_head_dim    = 16;
@@ -26,7 +27,7 @@ CacheConfig makeKimiHybridConfig() {
     setHybridAttentionKvCacheSpecs(config);
 
     ParallelismConfig parallelism;
-    return CacheConfigCreator::createBasicConfig(config, parallelism, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    return CacheConfigCreator::createBasicConfig(config, parallelism, KVCacheConfig{}, /*gen_num_per_cycle=*/0);
 }
 
 CacheConfig makeDeepSeekV4HybridPoolConfig() {
@@ -42,7 +43,7 @@ CacheConfig makeDeepSeekV4HybridPoolConfig() {
     setDsv4KvCacheSpecs(config, {128, 4});
 
     ParallelismConfig parallelism;
-    return CacheConfigCreator::createBasicConfig(config, parallelism, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    return CacheConfigCreator::createBasicConfig(config, parallelism, KVCacheConfig{}, /*gen_num_per_cycle=*/0);
 }
 
 TEST(CacheSemanticSnapshotTest, SingleMhaMatchesGolden) {
@@ -113,9 +114,10 @@ TEST(CacheSemanticSnapshotTest, KimiHybridMatchesGolden) {
                                              1600,
                                              0}};
 
-    const auto config = makeKimiHybridConfig();
-    EXPECT_TRUE(config.use_independent_block_pools);
-    EXPECT_EQ(snapshotCacheConfig(config), expected);
+    const auto legacy_flag_off = makeKimiHybridConfig(false);
+    const auto legacy_flag_on  = makeKimiHybridConfig(true);
+    EXPECT_EQ(snapshotCacheConfig(legacy_flag_off), expected);
+    EXPECT_EQ(snapshotCacheConfig(legacy_flag_on), expected);
 }
 
 TEST(CacheSemanticSnapshotTest, DeepSeekV4HybridPoolMatchesGolden) {

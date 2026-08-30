@@ -49,6 +49,20 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class TaggedPaddingModel:
+    """Expose the untouched tail column after replay copies shorter live rows."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs
+        full_padding = attention_inputs["full"].kv_cache_kernel_block_id_device[0, -1]
+        aux_padding = attention_inputs["aux"].kv_cache_kernel_block_id_device[0, -1]
+        signature = (full_padding + 32 * aux_padding).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -291,11 +305,34 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             52,
         )
 
+    def test_decode_replay_clears_tagged_tail_to_safe_kernel_block(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedPaddingModel(),
+            HIDDEN_SIZE,
+            2 * TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+        )
+
+        # Physical block 0 is the graph-safe dummy. The live rows contain one
+        # column, so both untouched tail columns must be reset to kernel block 0.
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(GROUP_TAGS, {"full": 2, "aux": 1}),
+            0,
+        )
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+            0,
+        )
+
     def test_duplicate_capture_tag_is_rejected(self) -> None:
         runner = CudaGraphRunner()
-        with self.assertRaisesRegex(
-            RuntimeError, "duplicate CUDA graph KV cache tag=full"
-        ):
+        with self.assertRaisesRegex(RuntimeError, "duplicate group tag=full"):
             runner.init_decode(
                 TaggedBlockTableModel(),
                 HIDDEN_SIZE,
@@ -308,7 +345,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
 
     def test_empty_capture_tag_is_rejected(self) -> None:
         runner = CudaGraphRunner()
-        with self.assertRaisesRegex(RuntimeError, "must not be empty"):
+        with self.assertRaisesRegex(RuntimeError, "requires tag for group 1"):
             runner.init_decode(
                 TaggedBlockTableModel(),
                 HIDDEN_SIZE,

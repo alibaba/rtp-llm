@@ -35,7 +35,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             auto& kv_cache = stream->kvCacheMutable();
             // System prompt cache is a single-FULL-group path; resolve that group
             // from the authoritative cache configuration, then access runtime allocation by tag.
-            const auto& groups = cache_manager->cacheConfig().topology().groups();
+            const auto& groups = cache_manager->cacheConfig().groups();
             RTP_LLM_CHECK(groups.size() == 1);
             auto& blocks = kv_cache.blocks(0, groups.front().tag);
             RTP_LLM_CHECK(blocks.size() > 0);

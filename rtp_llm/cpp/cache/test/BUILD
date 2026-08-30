@@ -62,11 +62,12 @@ cc_library(
 )
 
 cc_test(
-    name = "cache_topology_test",
-    srcs = ["CacheTopologyTest.cc"],
+    name = "cache_config_ownership_test",
+    srcs = ["CacheConfigOwnershipTest.cc"],
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:cache_config",
+        ":cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

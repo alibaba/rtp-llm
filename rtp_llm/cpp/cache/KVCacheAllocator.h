@@ -36,12 +36,15 @@ struct KVCachePoolMetricsSnapshot {
 };
 
 class KVCacheAllocator {
+private:
+    static CacheConfig cloneConfig(const CacheConfig& config);
+
 public:
     KVCacheAllocator(const CacheConfig&                 config,
                      AllocationType                     allocation_type     = AllocationType::DEVICE,
                      const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                      int64_t                            reserve_block_ratio = 0):
-        config_(config),
+        config_(cloneConfig(config)),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
         reserve_block_ratio_(reserve_block_ratio) {}

@@ -140,6 +140,30 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         self.assertEqual(specs[HCA_KV][1], 128)
         self.assertEqual(specs[SWA_KV][1], 128)
 
+    def test_build_paged_pool_specs_sizes_each_unequal_kernel_geometry(self) -> None:
+        cache = _FakeTagKVCache(
+            group_tags=[HCA_KV, SWA_KV],
+            seq_size_per_block={HCA_KV: 256, SWA_KV: 1024},
+            kernel_seq_size_per_block={HCA_KV: 128, SWA_KV: 1024},
+        )
+
+        class FakeAttn:
+            _kv_cache = None
+
+            def _pool_entries_per_block(self, tag: str) -> int:
+                return {HCA_KV: 2, SWA_KV: 32}.get(tag, 0)
+
+        class FakeLayer:
+            attn = FakeAttn()
+
+        class FakeV4:
+            layers = [FakeLayer()]
+
+        specs = build_paged_pool_specs(cache, FakeV4(), max_seq_len=2048)
+
+        self.assertEqual(specs[HCA_KV], (2, 128, 17))
+        self.assertEqual(specs[SWA_KV], (32, 1024, 3))
+
     def test_require_pool_tokens_per_block_rejects_unknown_tag(self) -> None:
         cache = _FakeTagKVCache(
             group_tags=["mystery"],

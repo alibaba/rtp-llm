@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.config.kv_cache_config import resolve_seq_size_per_block
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
@@ -898,11 +899,15 @@ def build_model_config(
     model_config.init_precision_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
-    model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    tokens_per_block = resolve_seq_size_per_block(
+        kv_cache_config.seq_size_per_block,
+        model_config.attn_config.tokens_per_block,
+    )
+    model_config.attn_config.tokens_per_block = tokens_per_block
     model_config.attn_config.kernel_tokens_per_block = (
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0
-        else kv_cache_config.seq_size_per_block
+        else tokens_per_block
     )
     model_config.linear_attention_config.ssm_state_dtype = (
         ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)

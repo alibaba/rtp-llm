@@ -64,7 +64,7 @@ private:
 
 private:
     const P2PConnectorSchedulerConfig                    config_;
-    const CacheConfig                                    cache_config_;
+    const CacheConfig&                                   cache_config_;
     kmonitor::MetricsReporterPtr                         metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>                  tp_broadcast_client_;
     std::shared_ptr<PrefillLoadCaller>                   server_caller_;

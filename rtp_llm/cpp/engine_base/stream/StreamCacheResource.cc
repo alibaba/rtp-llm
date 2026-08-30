@@ -3,7 +3,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/HashUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
@@ -26,18 +26,15 @@ const CacheConfig& warmupCacheConfig() {
         constexpr auto kWarmupCacheTag = "__warmup__";
         auto           spec            = std::make_shared<MHAKVCacheSpec>();
 
-        GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
+        spec->seq_size_per_block        = 1;
+        spec->kernel_seq_size_per_block = 1;
 
-        CacheConfig config;
-        config.layer_num = 1;
-        config.setTopology({std::move(group)}, {{0, {kWarmupCacheTag}}});
-        return config;
+        CacheGroup group;
+        group.tag    = kWarmupCacheTag;
+        group.spec   = std::move(spec);
+        group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+
+        return CacheConfig({std::move(group)}, {{kWarmupCacheTag}}, /*main_layer_num=*/1);
     }();
     return config;
 }
@@ -797,7 +794,7 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    const auto& topology = resource_context_.cache_manager->cacheConfig().topology();
+    const auto& topology = resource_context_.cache_manager->cacheConfig();
     for (const auto& group : topology.groups()) {
         if (group.policy.group_type == CacheGroupType::LINEAR) {
             batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);

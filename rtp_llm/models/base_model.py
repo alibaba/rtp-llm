@@ -117,6 +117,11 @@ class BaseModel(object):
     fmha_config: FMHAConfig
     moe_config: MoeConfig
 
+    @classmethod
+    def default_kv_cache_tokens_per_block(cls) -> int:
+        """Return a model-specific default, or zero to use the platform default."""
+        return 0
+
     def __init__(
         self,
         model_config: ModelConfig,

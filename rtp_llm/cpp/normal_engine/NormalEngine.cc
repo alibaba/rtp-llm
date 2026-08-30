@@ -84,6 +84,23 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
     });
 }
 
+class ScopedCacheManagerOverride {
+public:
+    ScopedCacheManagerOverride(ResourceContext& resource_context, std::shared_ptr<KVCacheManager> cache_manager):
+        resource_context_(resource_context),
+        previous_cache_manager_(std::exchange(resource_context.cache_manager, std::move(cache_manager))) {}
+
+    ~ScopedCacheManagerOverride() {
+        resource_context_.cache_manager = std::move(previous_cache_manager_);
+    }
+
+    ScopedCacheManagerOverride(const ScopedCacheManagerOverride&)            = delete;
+    ScopedCacheManagerOverride& operator=(const ScopedCacheManagerOverride&) = delete;
+
+private:
+    ResourceContext&                resource_context_;
+    std::shared_ptr<KVCacheManager> previous_cache_manager_;
+};
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -361,33 +378,20 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    // Do NOT override seq_size_per_block here. createBasicConfig already
-    // returns the correct value: model_config.attn_config.tokens_per_block
-    // for non-independent single-group and hybrid-attention configurations,
-    // and the 256-token physical block for DSV4. Forcing
-    // it back to attn_config.tokens_per_block would clobber DSV4's promoted
-    // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config =
-        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
-    cache_config.block_num = 5;
-    // createBasicConfig's non-independent single-group and hybrid-attention
-    // paths can leave kernel_seq_size_per_block at 0 (only the real createConfig
-    // path runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
-    // > 0, so apply the same default here: kernel block == physical block.
-    if (cache_config.kernel_seq_size_per_block == 0) {
-        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
-    }
-    ParallelismConfig temp_parallelism_config;
-    RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
-        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    auto cache_config = CacheConfigCreator::createBasicConfig(
+        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
+    auto cache_manager =
+        make_shared<KVCacheManager>(cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+    {
+        ScopedCacheManagerOverride cache_manager_override(resource_context_, cache_manager);
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
+    }
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
@@ -470,7 +474,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,
-                         result.block_size_bytes / 1024);
+                         result.totalGroupBlockSizeBytes() / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
         resource_context_.cache_manager = make_shared<KVCacheManager>(result,
                                                                       false,

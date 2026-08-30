@@ -27,11 +27,7 @@ namespace {
 
 CacheConfig
 makeP2PTestCacheConfig(int group_num, int layer_num, const std::vector<std::vector<std::string>>& layer_group_tags) {
-    const auto  topology = test::makeTestCacheTopologyByTag(group_num, layer_num, layer_group_tags);
-    CacheConfig config;
-    config.layer_num = static_cast<uint32_t>(layer_num);
-    config.setTopology(topology->groups(), topology->layers());
-    return config;
+    return test::makeTestCacheConfigByTag(group_num, layer_num, layer_group_tags);
 }
 
 }  // namespace
@@ -77,8 +73,7 @@ protected:
 
         config_ = P2PConnectorConfig::create(
             runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
-        cache_config_ = test::makeTestCacheConfig(
-            test::makeTestCacheTopologyByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
+        cache_config_ = test::makeTestCacheConfigByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}});
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 

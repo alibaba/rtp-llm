@@ -37,7 +37,7 @@ int SWAKVCacheGroup::activeTailBlockCount() const {
     return static_cast<int>(std::max(1u, policy().active_tail_blocks));
 }
 
-void SWAKVCacheGroup::checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const {
+void SWAKVCacheGroup::checkSWATailBlockIds(const PoolBlockIds& block_ids, const char* caller) const {
     if (!shouldCheckSWATailBlockIds()) {
         return;
     }
@@ -138,7 +138,7 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return result;
 }
 
-bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
+bool SWAKVCacheGroup::malloc(PoolBlockIds&        block_ids,
                              int                  seq_len,
                              bool                 enable_reuse_cache,
                              int                  reserve_step,
@@ -209,7 +209,7 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
     return true;
 }
 
-void SWAKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+void SWAKVCacheGroup::removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::removeSkippedBlocks");
@@ -250,7 +250,7 @@ void SWAKVCacheGroup::free(const BlockIndicesType& block_indices) {
     }
 }
 
-void SWAKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+void SWAKVCacheGroup::reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices) {
     block_ids.add(new_block_indices);
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
