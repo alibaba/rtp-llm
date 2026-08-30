@@ -18,10 +18,14 @@ cc_library(
 cc_library(
     name = "cache_group_type",
     hdrs = [
+        "CacheGroupTagOrder.h",
         "CacheGroupType.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
 )
 
 cc_library(
@@ -163,13 +167,11 @@ cc_library(
 cc_library(
     name = "block_pool",
     srcs = [
-        "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
     ],
     hdrs = [
-        "BlockCache.h",
         "BlockPool.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",
@@ -209,6 +211,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_group_type",
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 

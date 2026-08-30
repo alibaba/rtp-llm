@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include <c10/core/Event.h>
 #include <optional>
@@ -27,6 +28,7 @@ namespace rtp_llm {
 class P2PConnectorWorkerPrefill {
 public:
     P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig                    config,
+                              const CacheConfig&                          cache_config,
                               const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                               const kmonitor::MetricsReporterPtr&         metrics_reporter,
                               const transfer::IKVCacheSenderPtr&          sender);
@@ -104,6 +106,7 @@ private:
     // initializer list. config_ MUST be declared before asymmetric_tp_util_ because
     // the constructor reads config_.tp_size/tp_rank to initialize asymmetric_tp_util_.
     P2PConnectorWorkerConfig                                            config_;
+    const CacheConfig                                                   cache_config_;
     std::shared_ptr<LayerBlockConverter>                                layer_block_converter_;
     kmonitor::MetricsReporterPtr                                        metrics_reporter_;
     transfer::IKVCacheSenderPtr                                         sender_;

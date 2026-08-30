@@ -9,11 +9,12 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t         block_num,
                                                    bool           use_hybrid,
                                                    CacheGroupType group_type,
                                                    bool           hybrid_full_from_begin) {
+    const auto policy = defaultCacheGroupPolicy(group_type);
     return blockPositionsForCacheTransfer(block_num,
                                           reuse_block_size,
                                           use_hybrid,
-                                          /*transfer_tail_blocks=*/group_type != CacheGroupType::FULL,
-                                          static_cast<size_t>(defaultCacheGroupPolicy(group_type).active_tail_blocks),
+                                          policy.active_tail_blocks > 0,
+                                          static_cast<size_t>(policy.active_tail_blocks),
                                           hybrid_full_from_begin);
 }
 

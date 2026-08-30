@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -31,7 +32,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -39,14 +39,12 @@ struct LayerKVCache {
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
                  int           layer_id      = -1,
-                 int           group_id      = -1,
                  std::string   tag           = "default",
                  torch::Tensor kv_scale_base = {}):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        group_id(group_id),
         tag(std::move(tag)) {}
 };
 
@@ -54,7 +52,8 @@ struct LayerKVCache {
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 class KVCache {
 public:
-    explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
+    explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout):
+        grouped_layout_(std::move(grouped_layout)), group_tags_(buildSortedGroupTags(grouped_layout_)) {}
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
@@ -90,8 +89,10 @@ public:
         return layer_caches;
     }
 
+    // Canonical (sorted unique) tag order. Callers must treat this as a set of
+    // identities; the position of a tag carries no meaning.
     const std::vector<std::string>& groupTags() const {
-        return grouped_layout_.topology().groupTagsSnapshot();
+        return group_tags_;
     }
 
     size_t layerCount() const {
@@ -107,6 +108,15 @@ public:
     }
 
 private:
+    static std::vector<std::string> buildSortedGroupTags(const rtp_llm::GroupedCacheLayerLayout& grouped_layout) {
+        std::vector<std::string> tags;
+        tags.reserve(grouped_layout.topology().groups().size());
+        for (const auto& group : grouped_layout.topology().groups()) {
+            tags.push_back(group.tag);
+        }
+        return rtp_llm::sortedCacheGroupTags(tags, "model KV cache");
+    }
+
     void validateLayer(int layer_id) const {
         if (layer_id < 0 || static_cast<size_t>(layer_id) >= layerCount()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(layer_id));
@@ -156,13 +166,8 @@ private:
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
-        LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
-                            layer_id,
-                            group_id,
-                            group.tag,
-                            buffers.kv_scale_addr);
+        LayerKVCache result(
+            buffers.kv_addr, static_cast<int>(group.seq_size_per_block), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -240,6 +245,7 @@ private:
     }
 
     const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    const std::vector<std::string>         group_tags_;
 };
 
 struct PyModelInitResources {

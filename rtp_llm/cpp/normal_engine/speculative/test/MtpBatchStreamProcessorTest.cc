@@ -98,7 +98,7 @@ public:
             query->generate_config->in_think_mode       = true;
             query->generate_config->max_thinking_tokens = 1024;
         }
-        query->generate_config->num_return_sequences  = num_return_sequences;
+        query->generate_config->num_return_sequences = num_return_sequences;
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         if (!end_think_token_ids.empty()) {
@@ -110,10 +110,10 @@ public:
             }
         }
         BatchKVCacheResource addr;
-        // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
+        // BatchKVCacheResource maps [batch_id][group tag] -> block_indices.
         addr.resetBatchSize(1);
-        addr.initGroups(makeProcessorCacheConfig().topologyPtr());
-        addr.setBatchBlocks(0, 0, {block_id});
+        addr.initGroups(makeProcessorCacheConfig());
+        addr.setBatchBlocks(0, "default", {block_id});
         stream->setKVCache(addr);
 
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
@@ -293,10 +293,10 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     // exactly the way MtpExecutor::buildSpecLogitsVerifyInline wires it.
     SpecLogitsVerifyRunner             runner;
     SpecLogitsVerifyRunner::LaunchTask task;
-    task.total_streams   = 1;
-    task.propose_step    = static_cast<int>(sp_config.gen_num_per_cycle);
-    task.vocab_size      = model_config.vocab_size;
-    task.draft_tokens    = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    task.total_streams = 1;
+    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
     for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
         ASSERT_NE(processor_ptr, nullptr);
         ASSERT_EQ(processor_ptr->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);

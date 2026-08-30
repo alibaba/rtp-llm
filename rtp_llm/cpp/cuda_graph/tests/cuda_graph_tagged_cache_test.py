@@ -108,9 +108,7 @@ def _build_decode_inputs(
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
     attention_inputs.is_target_verify = False
-    attention_inputs.prefix_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.input_lengths = torch.ones(
         batch_size, dtype=torch.int32
     ).pin_memory()
@@ -186,16 +184,12 @@ def _build_target_verify_inputs(
     attention_inputs.prefix_lengths = torch.full(
         (batch_size,), prefix_len, dtype=torch.int32
     ).pin_memory()
-    attention_inputs.sequence_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.sequence_lengths_plus_1_device = (
         attention_inputs.prefix_lengths.cuda() + 1
     )
 
-    cu_q = torch.arange(
-        0, token_count + 1, query_len, dtype=torch.int32
-    ).pin_memory()
+    cu_q = torch.arange(0, token_count + 1, query_len, dtype=torch.int32).pin_memory()
     attention_inputs.cu_seqlens = cu_q
     attention_inputs.cu_seqlens_device = cu_q.cuda()
     attention_inputs.cu_kv_seqlens_device = torch.arange(
@@ -212,13 +206,9 @@ def _build_target_verify_inputs(
         attention_inputs.decode_cu_seqlens.cuda()
     )
 
-    attention_inputs.context_total_kv_length = batch_size * (
-        query_len + prefix_len
-    )
+    attention_inputs.context_total_kv_length = batch_size * (query_len + prefix_len)
 
-    block_count = (
-        prefix_len + query_len + TOKENS_PER_BLOCK - 1
-    ) // TOKENS_PER_BLOCK
+    block_count = (prefix_len + query_len + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
     return _build_common_inputs(
         attention_inputs,
         tags,
@@ -315,6 +305,41 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 [1],
                 ["full", "full"],
             )
+
+    def test_empty_capture_tag_is_rejected(self) -> None:
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(RuntimeError, "must not be empty"):
+            runner.init_decode(
+                TaggedBlockTableModel(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                [1],
+                ["full", ""],
+            )
+
+    def test_capture_tag_declaration_order_does_not_change_replay(self) -> None:
+        # Capture buffers are addressed by an adapter-local group_ordinal taken
+        # from the sorted tag order, so declaring the same tags in the reverse
+        # order must replay to exactly the same per-tag values.
+        for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
+            with self.subTest(tags=tags):
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    TaggedBlockTableModel(),
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    [2],
+                    tags,
+                )
+                self._assert_replay_signature(
+                    runner,
+                    _build_decode_inputs(GROUP_TAGS, {"full": 5, "aux": 3}),
+                    53,
+                )
 
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()

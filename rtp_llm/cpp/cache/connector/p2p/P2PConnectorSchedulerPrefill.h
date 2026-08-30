@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
@@ -15,6 +16,7 @@ namespace rtp_llm {
 class P2PConnectorSchedulerPrefill {
 public:
     P2PConnectorSchedulerPrefill(P2PConnectorSchedulerConfig                config,
+                                 const CacheConfig&                         cache_config,
                                  const kmonitor::MetricsReporterPtr&        metrics_reporter,
                                  const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
     ~P2PConnectorSchedulerPrefill() = default;
@@ -40,6 +42,7 @@ private:
 
 private:
     const P2PConnectorSchedulerConfig   config_;
+    const CacheConfig                   cache_config_;
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient> tp_broadcast_client_;
 };

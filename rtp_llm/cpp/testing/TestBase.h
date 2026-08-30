@@ -203,7 +203,7 @@ protected:
 
         auto batch_kv_cache = std::make_shared<rtp_llm::BatchKVCacheResource>();
         batch_kv_cache->resetBatchSize(batch_size);
-        batch_kv_cache->initGroups(cache_config.topologyPtr());
+        batch_kv_cache->initGroups(cache_config);
 
         auto complete_token_ids =
             std::make_shared<rtp_llm::CompleteTokenIds>(static_cast<int>(batch_size),
@@ -233,12 +233,13 @@ protected:
             std::memcpy(row_ptr, indices.data(), indices.size() * sizeof(int));
             if (kvCache.dim() == 5) {
                 // [layernum, batch, 2, max_pad_seq, dim]
-                auto       max_pad_seq    = kvCache.sizes()[3];
-                auto       k_indexs       = indices;
-                const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
-                const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
-                const auto spec           = cache_config.specForGroup(0);
-                const auto local_kv_heads = cache_config.localKvHeadNumForGroup(0);
+                auto        max_pad_seq    = kvCache.sizes()[3];
+                auto        k_indexs       = indices;
+                const auto  max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
+                const auto  blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
+                const auto& sole_group     = cache_config.topology().groups().front();
+                const auto  spec           = sole_group.spec;
+                const auto  local_kv_heads = cache_config.localKvHeadNum(sole_group.tag);
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");
                 const auto elems_per_kv_block   = spec->k_block_size();
                 const auto elems_per_head_block = static_cast<size_t>(local_kv_heads) * cache_config.seq_size_per_block;

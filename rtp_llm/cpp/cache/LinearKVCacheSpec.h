@@ -44,7 +44,6 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_value_head_dim);
 
         auto spec                  = std::make_shared<LinearKVCacheSpec>();
-        spec->tag                  = desc.tag;
         spec->seq_size_per_block   = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
