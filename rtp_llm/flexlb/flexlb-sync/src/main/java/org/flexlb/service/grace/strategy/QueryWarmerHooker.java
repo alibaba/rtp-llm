@@ -3,6 +3,7 @@ package org.flexlb.service.grace.strategy;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.listener.AppOnlineHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 @Slf4j
@@ -14,6 +15,7 @@ public class QueryWarmerHooker implements AppOnlineHooker {
     private final GracefulLifecycleReporter lifecycleReporter;
     private final long warmUpWaitMs;
 
+    @Autowired
     public QueryWarmerHooker(GracefulLifecycleReporter lifecycleReporter) {
         this(lifecycleReporter, DEFAULT_WARM_UP_WAIT_MS);
     }
