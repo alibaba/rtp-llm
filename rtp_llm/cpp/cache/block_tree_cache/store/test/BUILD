@@ -30,16 +30,18 @@ test_deps = [
 
 cc_test(
     name = "block_tree_storer_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["BlockTreeStorerTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps,
     env = {},
 )
 
 cc_test(
     name = "store_task_runner_test",
+    exec_properties = {"gpu": "A10"},
     testonly = True,
     srcs = ["StoreTaskRunnerTest.cc"],
     copts = test_copts,
