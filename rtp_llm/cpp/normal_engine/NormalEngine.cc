@@ -382,8 +382,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
     auto cache_config = CacheConfigCreator::createBasicConfig(
         model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
-    auto cache_manager =
-        make_shared<KVCacheManager>(cache_config, true, nullptr, kv_cache_config, parallelism_config, runtime_config);
+    auto cache_manager = make_shared<KVCacheManager>(
+        std::move(cache_config), true, nullptr, kv_cache_config, parallelism_config, runtime_config);
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
@@ -441,17 +441,16 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
     if (propose_params_ && propose_params_->draftModel()) {
-        auto config = CacheConfigCreator::createSpConfig(model_config_,
-                                                         propose_params_->getEngineInitParams().model_config_,
-                                                         parallelism_config,
-                                                         runtime_config,
-                                                         kv_cache_config,
-                                                         sp_config,
-                                                         warm_up_result,
-                                                         isMTPEagle(),
-                                                         isEagle());
-
-        resource_context_.cache_manager = make_shared<KVCacheManager>(config,
+        auto cache_config               = CacheConfigCreator::createSpConfig(model_config_,
+                                                               propose_params_->getEngineInitParams().model_config_,
+                                                               parallelism_config,
+                                                               runtime_config,
+                                                               kv_cache_config,
+                                                               sp_config,
+                                                               warm_up_result,
+                                                               isMTPEagle(),
+                                                               isEagle());
+        resource_context_.cache_manager = make_shared<KVCacheManager>(std::move(cache_config),
                                                                       false,
                                                                       metrics_reporter_,
                                                                       kv_cache_config,
@@ -469,14 +468,14 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_   = cache_cfg.groupNums();
     } else {
-        auto result = CacheConfigCreator::createConfig(
+        auto cache_config = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
-        RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
+        RTP_LLM_LOG_INFO("create cache manager with config %s", cache_config.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.totalGroupBlockSizeBytes() / 1024);
-        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
+                         cache_config.block_num,
+                         cache_config.totalGroupBlockSizeBytes() / 1024);
+        RTP_LLM_LOG_INFO("create cache manager with linear step %d", cache_config.linear_step);
+        resource_context_.cache_manager = make_shared<KVCacheManager>(std::move(cache_config),
                                                                       false,
                                                                       metrics_reporter_,
                                                                       kv_cache_config,

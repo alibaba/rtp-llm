@@ -70,11 +70,11 @@ public:
         return batch_resource[batch_id].layerOwnsTag(layer_id, tag);
     }
 
-    PoolBlockIds& mutableBlockIds(int batch_id, std::string_view tag) {
+    BlockIds& mutableBlockIds(int batch_id, std::string_view tag) {
         return cacheResource(batch_id).mutableBlockIds(tag);
     }
 
-    PoolBlockIds& mutableBlockIdsForLayer(int batch_id, int layer_id, std::string_view tag) {
+    BlockIds& mutableBlockIdsForLayer(int batch_id, int layer_id, std::string_view tag) {
         return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag);
     }
 
@@ -83,7 +83,7 @@ public:
         return batch_resource[0].layerOwnsTag(layer_id, tag);
     }
 
-    const std::map<std::string, PoolBlockIds>& blocksByGroup(int batch_id = 0) const {
+    const std::map<std::string, BlockIds>& blocksByGroup(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].blocksByGroup();
     }

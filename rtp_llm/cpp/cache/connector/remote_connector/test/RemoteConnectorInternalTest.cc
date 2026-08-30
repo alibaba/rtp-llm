@@ -438,7 +438,7 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     auto first_policy  = std::make_shared<FullLayerGroupPolicy>(
         first_manager, std::vector<std::string>{"full_a", "full_b"}, std::vector<std::string>{});
     ASSERT_TRUE(first_policy->init());
-    ASSERT_EQ(first_manager->allLayerCacheBaseCallCount(), 1u);
+    ASSERT_EQ(first_manager->allLayerCacheBaseCallCount(), 0u);
     EXPECT_EQ(first_policy->groups().at("full_a").group_name, "Ffull_a");
     EXPECT_EQ(first_policy->groups().at("full_b").group_name, "Ffull_b");
     EXPECT_EQ(first_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b11}));
@@ -450,7 +450,7 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     ASSERT_TRUE(first_policy->genBlockBuffers({"full_b", "full_a"}, {7, 9}, first_buffers));
     EXPECT_EQ(first_manager->taggedBufferRequests(),
               (std::vector<std::tuple<int, std::string, int>>{{0, "full_b", 7}, {0, "full_a", 9}}));
-    EXPECT_EQ(first_manager->allLayerCacheBaseCallCount(), 1u);
+    EXPECT_EQ(first_manager->allLayerCacheBaseCallCount(), 0u);
 
     CacheConfig reversed_config;
     rtp_llm::test::assignCacheConfigFromGroupedSpecs(reversed_config,
@@ -463,7 +463,7 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     auto reversed_policy  = std::make_shared<FullLayerGroupPolicy>(
         reversed_manager, std::vector<std::string>{"full_a", "full_b"}, std::vector<std::string>{});
     ASSERT_TRUE(reversed_policy->init());
-    ASSERT_EQ(reversed_manager->allLayerCacheBaseCallCount(), 1u);
+    ASSERT_EQ(reversed_manager->allLayerCacheBaseCallCount(), 0u);
     EXPECT_EQ(reversed_policy->groups().at("full_a").group_name, "Ffull_a");
     EXPECT_EQ(reversed_policy->groups().at("full_b").group_name, "Ffull_b");
 
@@ -471,7 +471,7 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     ASSERT_TRUE(reversed_policy->genBlockBuffers({"full_b", "full_a"}, {7, 9}, reversed_buffers));
     EXPECT_EQ(reversed_manager->taggedBufferRequests(),
               (std::vector<std::tuple<int, std::string, int>>{{0, "full_b", 7}, {0, "full_a", 9}}));
-    EXPECT_EQ(reversed_manager->allLayerCacheBaseCallCount(), 1u);
+    EXPECT_EQ(reversed_manager->allLayerCacheBaseCallCount(), 0u);
 }
 
 TEST(RemoteConnectorBlockBufferValidationTest, RejectsManagerBufferSizeThatDoesNotMatchTopology) {

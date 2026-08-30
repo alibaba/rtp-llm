@@ -258,7 +258,7 @@ GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
         }
         groups.emplace(group_config.tag, CacheLayerLayout(std::move(layers)));
     }
-    return GroupedCacheLayerLayout(topology, std::move(groups));
+    return GroupedCacheLayerLayout(*topology, std::move(groups));
 }
 
 BlockAddrInfo HybridPoolKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {

@@ -307,22 +307,21 @@ protected:
                                uint32_t seq_size_per_block      = kDsv4TokensPerBlock,
                                uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock) {
         ModelConfig mc;
-        mc.num_layers                                                = 43;
-        mc.hidden_size                                               = 4096;
-        mc.attn_config.head_num                                      = 64;
-        mc.attn_config.kv_head_num                                   = 1;
-        mc.attn_config.size_per_head                                 = 512;
-        mc.attn_config.rope_head_dim                                 = 64;
-        mc.attn_config.sliding_window                                = 128;
-        mc.attn_config.indexer_head_dim                              = 128;
-        mc.attn_config.indexer_head_num                              = 64;
-        mc.attn_config.indexer_topk                                  = 512;
-        mc.attn_config.o_groups                                      = 8;
-        mc.attn_config.o_lora_rank                                   = 1024;
-        mc.attn_config.tokens_per_block                              = seq_size_per_block;
-        mc.hybrid_attention_config.enable_hybrid_attention           = true;
-        mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-        std::vector<int> ratios                                      = {0, 0};
+        mc.num_layers                                      = 43;
+        mc.hidden_size                                     = 4096;
+        mc.attn_config.head_num                            = 64;
+        mc.attn_config.kv_head_num                         = 1;
+        mc.attn_config.size_per_head                       = 512;
+        mc.attn_config.rope_head_dim                       = 64;
+        mc.attn_config.sliding_window                      = 128;
+        mc.attn_config.indexer_head_dim                    = 128;
+        mc.attn_config.indexer_head_num                    = 64;
+        mc.attn_config.indexer_topk                        = 512;
+        mc.attn_config.o_groups                            = 8;
+        mc.attn_config.o_lora_rank                         = 1024;
+        mc.attn_config.tokens_per_block                    = seq_size_per_block;
+        mc.hybrid_attention_config.enable_hybrid_attention = true;
+        std::vector<int> ratios                            = {0, 0};
         for (int i = 2; i < 43; ++i) {
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
@@ -357,10 +356,10 @@ protected:
     }
 
     void prepareStreamWithConfig(const std::vector<int>& input_tokens,
-                                 const CacheConfig&      cache_config,
+                                 CacheConfig             cache_config,
                                  int                     tokens_per_block,
                                  RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr);
+        cache_manager_ = std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, nullptr);
         ASSERT_TRUE(cache_manager_->init());
         initial_free_blocks_ = cache_manager_->freeBlocksNum();
 
@@ -650,14 +649,15 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     // linear_step=4: with the default step of 1 every slot is a step hit and all
     // blocks materialize, defeating the tail-only assertions below.
     config.linear_step = 4;
-    prepareStreamWithConfig(tokens, config, spb, RoleType::PREFILL);
+    prepareStreamWithConfig(tokens, std::move(config), spb, RoleType::PREFILL);
     allocateAndFinish();
 
     auto& resource = stream_->streamCacheResource();
     ASSERT_EQ(resource.kvCache().groupNums(), kDsv4PoolNum);
     ASSERT_GT(resource.curBlocksNum(), 0);
-    ASSERT_EQ(config.groupNums(), kDsv4PoolNum);
-    for (const auto& group : config.groups()) {
+    const auto& active_config = cache_manager_->cacheConfig();
+    ASSERT_EQ(active_config.groupNums(), kDsv4PoolNum);
+    for (const auto& group : active_config.groups()) {
         const auto& tag = group.tag;
         ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
         const auto&  blocks = resource.kvCache().blocks(0, tag);
@@ -788,8 +788,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
         return complete_token_ids;
     };
 
-    auto prefill_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
-    auto decode_manager  = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto prefill_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false, nullptr);
+    auto decode_manager = std::make_shared<KVCacheManager>(makeDsv4Config(/*block_num=*/24), /*warmup=*/false, nullptr);
     ASSERT_TRUE(prefill_manager->init());
     ASSERT_TRUE(decode_manager->init());
 
@@ -934,8 +934,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
         return complete_token_ids;
     };
 
-    auto prefill_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
-    auto decode_manager  = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto prefill_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false, nullptr);
+    auto decode_manager =
+        std::make_shared<KVCacheManager>(makeDsv4Config(/*block_num=*/8, spb, kernel_spb), /*warmup=*/false, nullptr);
     ASSERT_TRUE(prefill_manager->init());
     ASSERT_TRUE(decode_manager->init());
 
@@ -1072,8 +1073,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
         return complete_token_ids;
     };
 
-    auto prefill_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
-    auto decode_manager  = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto prefill_manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false, nullptr);
+    auto decode_manager = std::make_shared<KVCacheManager>(makeDsv4Config(/*block_num=*/24), /*warmup=*/false, nullptr);
     ASSERT_TRUE(prefill_manager->init());
     ASSERT_TRUE(decode_manager->init());
 
@@ -1203,7 +1204,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 // =============================================================================
 TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEvent) {
     auto config  = makeConfig();  // 3 layers, 16 blocks, 8 tokens/block, INT8
-    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    auto manager = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false, nullptr);
     ASSERT_TRUE(manager->init());
 
     const int spb            = 8;
@@ -1235,7 +1236,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
             auto bid       = resource->blocks(0, default_tag)[b];
-            auto kv_stride = config.group(default_tag).kv_block_stride_bytes;
+            auto kv_stride = manager->cacheConfig().group(default_tag).kv_block_stride_bytes;
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},

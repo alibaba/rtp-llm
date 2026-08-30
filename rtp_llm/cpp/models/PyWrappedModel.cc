@@ -495,7 +495,11 @@ std::vector<size_t> PyWrappedModel::validateTaggedCacheBoundary(const GptModelIn
                 input_it != inputs.kv_cache_group_tags.end(), "validated cache tag=%s has no input row", tag.c_str());
             input_idx = static_cast<size_t>(std::distance(inputs.kv_cache_group_tags.begin(), input_it));
         }
-        const auto expected_type = kv_cache_layer_layout_->topology().group(tag).policy.group_type;
+        RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "KV cache layout requires a cache manager");
+        const auto& cache_config  = mtp_cache_config_index_.has_value() ?
+                                        cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index_) :
+                                        cache_manager_->cacheConfig();
+        const auto  expected_type = cache_config.group(tag).policy.group_type;
         RTP_LLM_CHECK_WITH_INFO(input_types[input_idx] == static_cast<int32_t>(expected_type),
                                 "cache group type mismatch for tag=%s: input=%d expected=%d",
                                 tag.c_str(),

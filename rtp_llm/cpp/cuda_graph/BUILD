@@ -7,6 +7,7 @@ cc_library(
     ],
     deps = [
         "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],

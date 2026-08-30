@@ -105,8 +105,7 @@ inline GroupedCacheLayerLayout makeTopologyOnlyLayerLayout(const CacheConfig& co
     for (const auto& group : config.groups()) {
         groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(config.layers().size())));
     }
-    auto topology = std::make_shared<CacheConfig>(config.groups(), config.layers(), config.layer_num);
-    return GroupedCacheLayerLayout(std::move(topology), std::move(groups));
+    return GroupedCacheLayerLayout(config, std::move(groups));
 }
 
 inline CacheSemanticSnapshot snapshotCacheConfig(const CacheConfig& config) {

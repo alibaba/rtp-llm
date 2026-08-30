@@ -71,11 +71,12 @@ protected:
                                        role_type);
     }
 
-    void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
+    void prepareResourceWithCacheConfig(CacheConfig             cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+        cache_manager_ =
+            std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
         // Every cache group owns an independent block pool sized to its own block_num, and each
         // pool keeps block 0 back as the null block, so the free count is sum(block_num - 1) over

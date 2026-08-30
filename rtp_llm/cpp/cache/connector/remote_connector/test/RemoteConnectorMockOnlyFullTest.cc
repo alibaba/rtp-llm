@@ -239,7 +239,7 @@ TEST_F(RemoteConnectorMockOnlyFullTest, ManagerRegistersOrdinarySingleFullHybrid
     KVCacheConfig manager_kv_config       = kv_cache_config_;
     manager_kv_config.reuse_cache         = true;
     manager_kv_config.enable_remote_cache = true;
-    auto manager                          = std::make_shared<KVCacheManager>(cache_config_,
+    auto manager                          = std::make_shared<KVCacheManager>(std::move(cache_config_),
                                                     /*warmup=*/false,
                                                     /*metrics_reporter=*/nullptr,
                                                     manager_kv_config,

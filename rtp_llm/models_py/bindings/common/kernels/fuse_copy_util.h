@@ -72,6 +72,9 @@ struct FusedStridedCopyParams {
     int         num_copies = 0;
 
     void add(const void* src_ptr, void* dst_ptr, size_t rows, size_t row_b, size_t src_stride, size_t dst_stride) {
+        copyParamsAssert(row_b > 0, "FusedStridedCopyParams: row_bytes must be positive");
+        copyParamsAssert(row_b <= src_stride, "FusedStridedCopyParams: row_bytes exceeds source row stride");
+        copyParamsAssert(row_b <= dst_stride, "FusedStridedCopyParams: row_bytes exceeds destination row stride");
         copyParamsAssert(num_copies < MAX_FUSED_STRIDED_COPIES,
                          "FusedStridedCopyParams: num_copies (" + std::to_string(num_copies + 1)
                              + ") exceeds MAX_FUSED_STRIDED_COPIES (" + std::to_string(MAX_FUSED_STRIDED_COPIES)

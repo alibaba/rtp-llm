@@ -123,7 +123,7 @@ cc_test(
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps(),
+    ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )

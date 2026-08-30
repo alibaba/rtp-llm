@@ -189,8 +189,7 @@ std::string LinearAttentionConfig::to_string() const {
 // HybridAttentionConfig
 std::string HybridAttentionConfig::to_string() const {
     std::ostringstream oss;
-    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n"
-        << "enable_independent_kv_cache_pools: " << enable_independent_kv_cache_pools << "\n";
+    oss << "enable_hybrid_attention: " << enable_hybrid_attention << "\n";
     return oss.str();
 }
 

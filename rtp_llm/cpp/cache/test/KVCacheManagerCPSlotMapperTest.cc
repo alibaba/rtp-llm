@@ -67,7 +67,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
     // warmup=true skips allocateAndSync (which would NCCL all-gather across the
     // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
     // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
@@ -84,7 +84,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
     // warmup=true skips allocateAndSync (which would NCCL all-gather across the
     // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
     // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
@@ -103,7 +103,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     // warmup=true skips allocateAndSync (which would NCCL all-gather across the
     // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
     // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     auto mapper = mgr->cpSlotMapper();
@@ -124,7 +124,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtual
     par.tp_size                            = 4;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     auto info = mgr->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
@@ -140,10 +140,10 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
 
     ParallelismConfig par;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    auto resource  = makeResource(1, config);
+    auto resource  = makeResource(1, mgr->cacheConfig());
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -179,11 +179,11 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     // warmup=true skips allocateAndSync (which would NCCL all-gather across the
     // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
     // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config);
+    auto      resource  = makeResource(1, mgr->cacheConfig());
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -210,11 +210,11 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     // warmup=true skips allocateAndSync (which would NCCL all-gather across the
     // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
     // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config);
+    auto      resource  = makeResource(1, mgr->cacheConfig());
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
@@ -240,11 +240,11 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     // warmup=true skips allocateAndSync (which would NCCL all-gather across the
     // tp_size process group; in single-process UT there are no peers).  cp_slot_mapper_
     // is constructed regardless of warmup, so cpSlotMapper() check is unaffected.
-    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
     const int seq_len   = 64;
-    auto      resource  = makeResource(1, config);
+    auto      resource  = makeResource(1, mgr->cacheConfig());
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
@@ -275,13 +275,13 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     kv_cfg.reuse_cache         = true;
     kv_cfg.enable_device_cache = true;
 
-    auto mgr = std::make_shared<KVCacheManager>(config, false, nullptr, kv_cfg, par);
+    auto mgr = std::make_shared<KVCacheManager>(std::move(config), false, nullptr, kv_cfg, par);
     ASSERT_TRUE(mgr->init());
     // virtual_block_size = 4 * 2 = 8
     // effectiveSeqLenForAlloc(16) = ceil(16/8) * 4 = 8 tokens worth => ceil(8/4) = 2 blocks
 
     const int seq_len   = 16;
-    auto      resource  = makeResource(1, config);
+    auto      resource  = makeResource(1, mgr->cacheConfig());
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo malloc_info{resource, token_ids};
@@ -296,7 +296,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     EXPECT_NO_THROW(mgr->insertIntoCache(insert_info));
 
     // Now try to malloc again with the same token_ids -- should get reuse hit.
-    auto       resource2 = makeResource(1, config);
+    auto       resource2 = makeResource(1, mgr->cacheConfig());
     MallocInfo malloc_info2{resource2, token_ids};
     malloc_info2.reuse_cache         = true;
     malloc_info2.enable_device_cache = true;
