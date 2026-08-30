@@ -52,13 +52,13 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, pinned_i32);
     auto prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
 
-    const bool has_hidden_states   = total_hidden_states.defined() && total_hidden_states.numel() > 0;
-    bool       split_hidden_states = false;
+    const bool    has_hidden_states   = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    bool          split_hidden_states = false;
+    const int64_t global_token_num    = total_input_tokens.numel();
     if (has_hidden_states) {
         RTP_LLM_CHECK_WITH_INFO(
             total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
-        const int64_t global_token_num = total_input_tokens.numel();
-        const int64_t local_token_num  = cp_split_input_tokens.numel();
+        const int64_t local_token_num = cp_split_input_tokens.numel();
         if (total_hidden_states.size(0) == global_token_num) {
             split_hidden_states = true;
         } else {
@@ -76,8 +76,12 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     // and combo_tokens_type_ids. Without splitting the mask/type_ids, the embedding
     // op would read a global-length mask misaligned with this rank's token chunk
     // (multimodal placeholder ids stay -1 but get unmasked -> out-of-bounds).
-    const bool need_token_remap =
-        split_hidden_states || model_input.text_tokens_mask.defined() || model_input.combo_tokens_type_ids.defined();
+    const bool has_multimodal_input = hasMultimodalModelInputs(model_input);
+    const bool has_explicit_position_ids =
+        model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
+    const bool need_token_remap = split_hidden_states || model_input.text_tokens_mask.defined()
+                                  || model_input.combo_tokens_type_ids.defined()
+                                  || (has_multimodal_input && has_explicit_position_ids);
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
     if (need_token_remap) {
@@ -186,15 +190,39 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         remap_token_field(model_input.text_tokens_mask);
         remap_token_field(model_input.combo_tokens_type_ids);
 
+        // Position IDs are token-aligned too, but this extra remap is deliberately
+        // limited to multimodal requests. Text-only CP keeps its existing path.
+        if (has_multimodal_input && has_explicit_position_ids) {
+            auto source = model_input.combo_position_ids.is_cuda() ? model_input.combo_position_ids.cpu() :
+                                                                     model_input.combo_position_ids;
+            source      = source.contiguous();
+            RTP_LLM_CHECK_WITH_INFO(global_token_num > 0 && source.numel() % global_token_num == 0,
+                                    "combo_position_ids numel (%ld) must be divisible by global token count (%ld)",
+                                    source.numel(),
+                                    global_token_num);
+            const int64_t position_id_factor = source.numel() / global_token_num;
+            auto output = source.reshape({global_token_num, position_id_factor}).index_select(0, select_indices);
+            output.masked_fill_(valid_mask.logical_not().unsqueeze(1), 0);
+            output                         = output.reshape({-1}).contiguous();
+            model_input.combo_position_ids = output.is_pinned() ? output : output.pin_memory();
+        }
+
         // CP-split multimodal features + locs. The injector overwrites local rows
         // [loc, loc+feature_rows) with feature rows; with CP, each global image
         // ends up at the local positions where cp_select_indices falls in the
         // image's global range. Zigzag CP gives each rank up to 2 contiguous local
         // runs per image (one from the even half, one from the odd half), so we
         // emit one (sliced_feature, local_loc) per run and keep the injector's
-        // contiguous-narrow contract intact.
-        if (model_input.multimodal_features.has_value() && !model_input.multimodal_features.value().empty()
-            && model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0) {
+        // contiguous-narrow contract intact. This block is never entered for a
+        // text-only request.
+        const bool has_multimodal_features =
+            model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
+        const bool has_multimodal_locs =
+            model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0;
+        const bool has_mm_extra_input = model_input.mm_extra_input.has_value() && !model_input.mm_extra_input->empty();
+        RTP_LLM_CHECK_WITH_INFO(!has_mm_extra_input || has_multimodal_features,
+                                "mm_extra_input requires multimodal_features");
+        if (has_multimodal_features && has_multimodal_locs) {
             auto&      orig_features = model_input.multimodal_features.value();
             auto       orig_locs_cpu = model_input.mm_features_locs.is_cuda() ?
                                            model_input.mm_features_locs.cpu().contiguous() :
@@ -205,18 +233,63 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                                     "multimodal_features (%zu) and mm_features_locs (%ld) length mismatch",
                                     num_features,
                                     static_cast<int64_t>(orig_locs_cpu.size(0)));
+            if (has_mm_extra_input) {
+                RTP_LLM_CHECK_WITH_INFO(model_input.mm_extra_input->size() == num_features,
+                                        "mm_extra_input (%zu) and multimodal_features (%zu) length mismatch",
+                                        model_input.mm_extra_input->size(),
+                                        num_features);
+            }
 
             const int64_t              local_tokens = static_cast<int64_t>(cp_select_indices.size());
             std::vector<torch::Tensor> new_features;
+            std::vector<torch::Tensor> new_extra_input;
+            std::vector<torch::Tensor> deepstack_features(has_mm_extra_input ? num_features : 0);
             std::vector<int32_t>       new_locs;
             // Reserve worst-case 2 runs per image (zigzag's even + odd halves).
             new_features.reserve(num_features * 2);
             new_locs.reserve(num_features * 2);
+            if (has_mm_extra_input) {
+                new_extra_input.reserve(num_features * 2);
+            }
+
+            auto reshape_extra_input = [](const torch::Tensor& extra_input, const torch::Tensor& feature) {
+                RTP_LLM_CHECK_WITH_INFO(feature.dim() == 2,
+                                        "multimodal feature must be 2-D when mm_extra_input is present");
+                const int64_t feature_len = feature.size(0);
+                const int64_t hidden_size = feature.size(1);
+                RTP_LLM_CHECK_WITH_INFO(feature_len > 0 && hidden_size > 0,
+                                        "multimodal feature tokens and hidden size must be positive");
+                const int64_t feature_numel = feature_len * hidden_size;
+                RTP_LLM_CHECK_WITH_INFO(extra_input.numel() % feature_numel == 0,
+                                        "mm_extra_input numel (%ld) is not divisible by tokens * hidden (%ld)",
+                                        extra_input.numel(),
+                                        feature_numel);
+                return extra_input.reshape({extra_input.numel() / feature_numel, feature_len, hidden_size});
+            };
+            auto slice_extra_input = [](const torch::Tensor& deepstack, int64_t token_start, int64_t token_end) {
+                RTP_LLM_CHECK_WITH_INFO(deepstack.dim() == 3, "reshaped mm_extra_input must be 3-D");
+                RTP_LLM_CHECK_WITH_INFO(token_start >= 0 && token_start <= token_end && token_end <= deepstack.size(1),
+                                        "mm_extra_input token slice [%ld, %ld) is outside [0, %ld)",
+                                        token_start,
+                                        token_end,
+                                        deepstack.size(1));
+                return deepstack.slice(1, token_start, token_end).contiguous().reshape({-1});
+            };
 
             for (size_t f = 0; f < num_features; ++f) {
-                const int     g_start = orig_locs_acc[f];
+                RTP_LLM_CHECK_WITH_INFO(orig_features[f].dim() == 2,
+                                        "multimodal feature %zu must be 2-D, got dim=%ld",
+                                        f,
+                                        orig_features[f].dim());
+                const int64_t g_start = orig_locs_acc[f];
                 const int64_t g_len   = orig_features[f].size(0);
-                const int64_t g_end   = static_cast<int64_t>(g_start) + g_len;
+                const int64_t g_end   = g_start + g_len;
+                RTP_LLM_CHECK_WITH_INFO(
+                    g_len > 0 && orig_features[f].size(1) > 0, "multimodal feature %zu must have positive shape", f);
+                if (has_mm_extra_input) {
+                    deepstack_features[f] =
+                        reshape_extra_input(model_input.mm_extra_input.value()[f], orig_features[f]);
+                }
 
                 int64_t i = 0;
                 while (i < local_tokens) {
@@ -240,12 +313,19 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                     const int64_t run_len = j - run_local_start;
                     new_features.push_back(
                         orig_features[f].slice(0, run_feat_start, run_feat_start + run_len).contiguous());
+                    if (has_mm_extra_input) {
+                        new_extra_input.push_back(
+                            slice_extra_input(deepstack_features[f], run_feat_start, run_feat_start + run_len));
+                    }
                     new_locs.push_back(static_cast<int32_t>(run_local_start));
                     i = j;
                 }
             }
 
             orig_features = std::move(new_features);
+            if (has_mm_extra_input) {
+                model_input.mm_extra_input = std::move(new_extra_input);
+            }
             if (new_locs.empty()) {
                 model_input.mm_features_locs = torch::empty({0}, pinned_i32);
             } else {

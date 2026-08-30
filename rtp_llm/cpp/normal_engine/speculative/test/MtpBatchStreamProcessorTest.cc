@@ -916,6 +916,72 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testPrefillMetadataShiftOnlyForMultimodal) {
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.gen_num_per_cycle = 1;
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder    holder;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
+    sampler_output.token_ids = torch::tensor({{30}, {40}}, torch::kInt32);
+
+    GptModelInputs multimodal_input;
+    multimodal_input.combo_tokens       = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);
+    multimodal_input.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    multimodal_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11}, torch::kInt32);
+    multimodal_input.text_tokens_mask   = torch::tensor({1, 0, 1, 1, 0}, torch::kInt32);
+    multimodal_input.mm_features_locs   = torch::tensor({1, 4}, torch::kInt32);
+    multimodal_input.multimodal_features =
+        std::vector<torch::Tensor>{torch::ones({1, 4}, torch::kFloat32), torch::ones({1, 4}, torch::kFloat32)};
+
+    processor.updatePrefillPostDraftModelInput(multimodal_input, model_output, sampler_output, holder);
+    EXPECT_EQ(std::vector<int>({11, 12, 30, 21, 40}), toVec<int>(multimodal_input.combo_tokens));
+    EXPECT_EQ(std::vector<int>({0, 1, 1, 0, 1}), toVec<int>(multimodal_input.text_tokens_mask));
+    EXPECT_EQ(std::vector<int>({6, 7, 8, 11, 12}), toVec<int>(multimodal_input.combo_position_ids));
+    EXPECT_EQ(std::vector<int>({0, 2}), toVec<int>(multimodal_input.mm_features_locs));
+
+    // A feature beginning at token zero becomes a negative loc after MTP
+    // removes the first token; the injector drops the reused feature head.
+    GptModelInputs image_first_input;
+    image_first_input.combo_tokens       = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);
+    image_first_input.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    image_first_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11}, torch::kInt32);
+    image_first_input.text_tokens_mask   = torch::tensor({1, 1, 1, 1, 1}, torch::kInt32);
+    image_first_input.mm_features_locs   = torch::tensor({0, 4}, torch::kInt32);
+    image_first_input.multimodal_features =
+        std::vector<torch::Tensor>{torch::ones({2, 4}, torch::kFloat32), torch::ones({1, 4}, torch::kFloat32)};
+    processor.updatePrefillPostDraftModelInput(image_first_input, model_output, sampler_output, holder);
+    EXPECT_EQ(std::vector<int>({-1, 2}), toVec<int>(image_first_input.mm_features_locs));
+
+    // MROPE-style position IDs are flattened [tokens, 3] rows. Each appended
+    // row follows the same max-component rule as the position generator.
+    GptModelInputs mrope_input;
+    mrope_input.combo_tokens       = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);
+    mrope_input.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    mrope_input.combo_position_ids = torch::tensor({0, 0, 0, 1, 2, 3, 4, 5, 6, 10, 10, 10, 11, 12, 13}, torch::kInt32);
+    mrope_input.text_tokens_mask   = torch::tensor({1, 1, 1, 1, 1}, torch::kInt32);
+    mrope_input.mm_features_locs   = torch::tensor({1, 4}, torch::kInt32);
+    mrope_input.multimodal_features =
+        std::vector<torch::Tensor>{torch::ones({1, 4}, torch::kFloat32), torch::ones({1, 4}, torch::kFloat32)};
+    processor.updatePrefillPostDraftModelInput(mrope_input, model_output, sampler_output, holder);
+    EXPECT_EQ(std::vector<int>({1, 2, 3, 4, 5, 6, 7, 7, 7, 11, 12, 13, 14, 14, 14}),
+              toVec<int>(mrope_input.combo_position_ids));
+    // Pure text keeps the existing token update, but does not enter the new
+    // multimodal metadata shift path even when explicit positions are present.
+    GptModelInputs text_input;
+    text_input.combo_tokens       = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);
+    text_input.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
+    text_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11}, torch::kInt32);
+    processor.updatePrefillPostDraftModelInput(text_input, model_output, sampler_output, holder);
+    EXPECT_EQ(std::vector<int>({11, 12, 30, 21, 40}), toVec<int>(text_input.combo_tokens));
+    EXPECT_EQ(std::vector<int>({5, 6, 7, 10, 11}), toVec<int>(text_input.combo_position_ids));
+}
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

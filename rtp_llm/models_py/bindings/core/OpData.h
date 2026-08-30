@@ -115,6 +115,17 @@ public:
     std::string debugString(bool force = false) const;
 };
 
+// A multimodal batch carries at least one of the side inputs that must stay
+// aligned with the CP-local token layout. Keep this predicate next to the
+// input contract so the target and MTP paths use the same definition.
+inline bool hasMultimodalModelInputs(const GptModelInputs& inputs) {
+    const bool has_features = inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
+    const bool has_extra    = inputs.mm_extra_input.has_value() && !inputs.mm_extra_input->empty();
+    const bool has_locs     = inputs.mm_features_locs.defined() && inputs.mm_features_locs.numel() > 0;
+    const bool has_mask     = inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0;
+    return has_features || has_extra || has_locs || has_mask;
+}
+
 struct GptModelOutputs {
     torch::Tensor logits;
     torch::Tensor hidden_states;

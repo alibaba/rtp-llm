@@ -67,6 +67,183 @@ void syncPinnedCpuCopies(bool need_sync) {
     }
 }
 
+torch::Tensor shiftedMtpTokenField(const torch::Tensor& field,
+                                   const torch::Tensor& input_lengths_cpu,
+                                   int32_t              append_value,
+                                   bool                 append_last_value) {
+    if (!field.defined() || field.numel() == 0) {
+        return field;
+    }
+    RTP_LLM_CHECK_WITH_INFO(field.scalar_type() == torch::kInt32,
+                            "MTP multimodal token field must be int32, got %s",
+                            c10::toString(field.scalar_type()));
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_cpu.dim() == 1 && input_lengths_cpu.scalar_type() == torch::kInt32,
+                            "MTP input_lengths must be a 1-D int32 tensor");
+    auto source                = field.is_cuda() ? field.cpu() : field;
+    source                     = source.contiguous();
+    const int64_t total_tokens = source.numel();
+    int64_t       length_sum   = 0;
+    const auto*   lengths      = input_lengths_cpu.data_ptr<int32_t>();
+    for (int64_t i = 0; i < input_lengths_cpu.numel(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(
+            lengths[i] > 0, "MTP input length must be positive, got %d at request %ld", lengths[i], i);
+        length_sum += lengths[i];
+    }
+    RTP_LLM_CHECK_WITH_INFO(length_sum == total_tokens,
+                            "MTP token field length mismatch: field=%ld input_lengths=%ld",
+                            total_tokens,
+                            length_sum);
+
+    auto output =
+        torch::empty({total_tokens}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+    const auto* src    = source.data_ptr<int32_t>();
+    auto*       dst    = output.data_ptr<int32_t>();
+    int64_t     offset = 0;
+    for (int64_t request = 0; request < input_lengths_cpu.numel(); ++request) {
+        const int64_t length = lengths[request];
+        if (length > 1) {
+            std::memcpy(dst + offset, src + offset + 1, static_cast<size_t>(length - 1) * sizeof(int32_t));
+        }
+        dst[offset + length - 1] = append_last_value ? src[offset + length - 1] : append_value;
+        offset += length;
+    }
+    return field.is_cuda() ? output.to(field.device(), /*non_blocking=*/true) : output;
+}
+
+torch::Tensor shiftedMtpPositionIds(const torch::Tensor& field, const torch::Tensor& input_lengths_cpu) {
+    if (!field.defined() || field.numel() == 0) {
+        return field;
+    }
+    RTP_LLM_CHECK_WITH_INFO(field.scalar_type() == torch::kInt32,
+                            "MTP position ids must be int32, got %s",
+                            c10::toString(field.scalar_type()));
+    auto source            = field.is_cuda() ? field.cpu() : field;
+    source                 = source.contiguous();
+    int64_t     length_sum = 0;
+    const auto* lengths    = input_lengths_cpu.data_ptr<int32_t>();
+    for (int64_t i = 0; i < input_lengths_cpu.numel(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(
+            lengths[i] > 0, "MTP input length must be positive, got %d at request %ld", lengths[i], i);
+        length_sum += lengths[i];
+    }
+    RTP_LLM_CHECK_WITH_INFO(length_sum > 0 && source.numel() % length_sum == 0,
+                            "MTP position ids numel=%ld is not divisible by token count=%ld",
+                            source.numel(),
+                            length_sum);
+    const int64_t factor = source.numel() / length_sum;
+    auto          output =
+        torch::empty({source.numel()}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+    const auto* src    = source.data_ptr<int32_t>();
+    auto*       dst    = output.data_ptr<int32_t>();
+    int64_t     offset = 0;
+    for (int64_t request = 0; request < input_lengths_cpu.numel(); ++request) {
+        const int64_t length = lengths[request];
+        if (length > 1) {
+            std::memcpy(dst + offset * factor,
+                        src + (offset + 1) * factor,
+                        static_cast<size_t>(length - 1) * static_cast<size_t>(factor) * sizeof(int32_t));
+        }
+        int32_t next_position = src[(offset + length - 1) * factor];
+        for (int64_t component = 1; component < factor; ++component) {
+            next_position = std::max(next_position, src[(offset + length - 1) * factor + component]);
+        }
+        ++next_position;
+        for (int64_t component = 0; component < factor; ++component) {
+            dst[(offset + length - 1) * factor + component] = next_position;
+        }
+        offset += length;
+    }
+    return field.is_cuda() ? output.to(field.device(), /*non_blocking=*/true) : output;
+}
+
+void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tensor& input_lengths_cpu) {
+    const bool has_features = model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
+    const bool has_locs     = model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0;
+    if (!has_features && !has_locs) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(has_features && has_locs,
+                            "MTP multimodal features and mm_features_locs must be provided together");
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_cpu.scalar_type() == torch::kInt32 && input_lengths_cpu.dim() == 1,
+                            "MTP input_lengths must be a 1-D int32 tensor");
+
+    auto locs =
+        model_input.mm_features_locs.is_cuda() ? model_input.mm_features_locs.cpu() : model_input.mm_features_locs;
+    locs = locs.contiguous();
+    RTP_LLM_CHECK_WITH_INFO(locs.scalar_type() == torch::kInt32 && locs.dim() == 1,
+                            "MTP mm_features_locs must be a 1-D int32 tensor");
+    const auto& features = model_input.multimodal_features.value();
+    RTP_LLM_CHECK_WITH_INFO(locs.numel() == static_cast<int64_t>(features.size()),
+                            "MTP multimodal feature/location count mismatch: features=%zu locs=%ld",
+                            features.size(),
+                            locs.numel());
+
+    std::vector<int64_t> request_starts(input_lengths_cpu.numel() + 1, 0);
+    const auto*          lengths = input_lengths_cpu.data_ptr<int32_t>();
+    for (int64_t request = 0; request < input_lengths_cpu.numel(); ++request) {
+        RTP_LLM_CHECK_WITH_INFO(lengths[request] > 0,
+                                "MTP input length must be positive, got %d at request %ld",
+                                lengths[request],
+                                request);
+        request_starts[request + 1] = request_starts[request] + lengths[request];
+    }
+
+    auto output =
+        torch::empty({locs.numel()}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+    const auto* src_locs = locs.data_ptr<int32_t>();
+    auto*       dst_locs = output.data_ptr<int32_t>();
+    for (int64_t feature_idx = 0; feature_idx < locs.numel(); ++feature_idx) {
+        const int64_t feature_start = src_locs[feature_idx];
+        const int64_t feature_len   = features[feature_idx].size(0);
+        const int64_t feature_end   = feature_start + feature_len;
+        int64_t       owner         = -1;
+        for (int64_t request = 0; request < input_lengths_cpu.numel(); ++request) {
+            if (feature_start < request_starts[request + 1] && feature_end > request_starts[request]) {
+                owner = request;
+                break;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(owner >= 0,
+                                "MTP multimodal feature %ld [%ld,%ld) does not overlap any request",
+                                feature_idx,
+                                feature_start,
+                                feature_end);
+        RTP_LLM_CHECK_WITH_INFO(feature_end <= request_starts[owner + 1],
+                                "MTP multimodal feature %ld crosses request boundary: [%ld,%ld), request=%ld [%ld,%ld)",
+                                feature_idx,
+                                feature_start,
+                                feature_end,
+                                owner,
+                                request_starts[owner],
+                                request_starts[owner + 1]);
+        // Each request loses its first token. The global offset also loses one
+        // token for every preceding request, hence owner + 1 total positions.
+        dst_locs[feature_idx] = static_cast<int32_t>(feature_start - owner - 1);
+    }
+    model_input.mm_features_locs = model_input.mm_features_locs.is_cuda() ?
+                                       output.to(model_input.mm_features_locs.device(), /*non_blocking=*/true) :
+                                       output;
+}
+
+void shiftMtpMultimodalMetadata(GptModelInputs& model_input, const torch::Tensor& input_lengths) {
+    if (!hasMultimodalModelInputs(model_input)) {
+        return;
+    }
+    auto input_lengths_cpu = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
+    input_lengths_cpu      = input_lengths_cpu.contiguous();
+    if (model_input.text_tokens_mask.defined() && model_input.text_tokens_mask.numel() > 0) {
+        model_input.text_tokens_mask = shiftedMtpTokenField(model_input.text_tokens_mask, input_lengths_cpu, 1, false);
+    }
+    if (model_input.combo_tokens_type_ids.defined() && model_input.combo_tokens_type_ids.numel() > 0) {
+        model_input.combo_tokens_type_ids =
+            shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0, true);
+    }
+    if (model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0) {
+        model_input.combo_position_ids = shiftedMtpPositionIds(model_input.combo_position_ids, input_lengths_cpu);
+    }
+    shiftMtpMultimodalLocations(model_input, input_lengths_cpu);
+}
+
 }  // namespace
 
 namespace {
@@ -765,6 +942,11 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
 #else
     RTP_LLM_CHECK_WITH_INFO(false, "updatePrefillPostDraftModelInput requires CUDA");
 #endif
+
+    // The target hidden rows intentionally keep their original alignment for MTP.
+    // Only multimodal requests need their token-aligned side inputs shifted with
+    // combo_tokens; text-only requests stay on the existing zero-copy path.
+    shiftMtpMultimodalMetadata(model_input, input_lengths_d);
 
     model_input.input_lengths = input_lengths_d;
     model_input.combo_tokens  = combo_tokens_out;

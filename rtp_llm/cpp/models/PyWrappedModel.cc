@@ -1114,37 +1114,60 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+        const bool              has_context_request   = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        const bool              has_multimodal_inputs = hasMultimodalModelInputs(inputs);
+        GptModelInputs          cp_local_inputs;
+        const GptModelInputs*   forward_inputs_ptr = &inputs;
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
-            context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            if (has_multimodal_inputs) {
+                // Keep the global multimodal view intact for the MTP hand-off. CP
+                // owns only this request-local view, so a later draft forward
+                // cannot split the same features and locs a second time.
+                cp_local_inputs = inputs;
+                if (cp_local_inputs.input_lengths.defined()) {
+                    cp_local_inputs.input_lengths = cp_local_inputs.input_lengths.clone();
+                    if (!cp_local_inputs.input_lengths.is_cuda()) {
+                        cp_local_inputs.input_lengths = cp_local_inputs.input_lengths.pin_memory();
+                    }
+                }
+                context_parallel_processor_->handleInputs(cp_local_inputs, cp_params);
+                holdInputsHostBuffers(cp_local_inputs);
+                forward_inputs_ptr = &cp_local_inputs;
+            } else {
+                // Preserve the existing text-only CP path. It still owns the
+                // normal token/hidden split, but does not create MM side-inputs.
+                context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            }
         }
+        const GptModelInputs& forward_inputs = *forward_inputs_ptr;
 
         // Direct async H2D for combo_tokens (the only tensorHoldHostAndToCuda call site that
         // used to live on this code path). Bypass d2d_copies_ so forward() does not depend on
         // the fused-copy queue — that queue is now an internal detail of prepareAttentionInputs.
         // Host buffer is already kept alive by holdInputsHostBuffers() above.
         torch::Tensor token_ids;
-        if (inputs.combo_tokens.device().is_cuda()) {
-            checkRuntimeCudaDevice(inputs.combo_tokens, "forward combo_tokens");
-            token_ids = inputs.combo_tokens;
+        if (forward_inputs.combo_tokens.device().is_cuda()) {
+            checkRuntimeCudaDevice(forward_inputs.combo_tokens, "forward combo_tokens");
+            token_ids = forward_inputs.combo_tokens;
         } else {
-            buffer_holder_.hold_host(inputs.combo_tokens);
-            token_ids = inputs.combo_tokens.to(getTorchCudaDevice(), /*non_blocking=*/true);
+            buffer_holder_.hold_host(forward_inputs.combo_tokens);
+            token_ids = forward_inputs.combo_tokens.to(getTorchCudaDevice(), /*non_blocking=*/true);
         }
 
         torch::Tensor input_hiddens =
-            inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
+            forward_inputs.last_hidden_states.defined() ? forward_inputs.last_hidden_states : torch::empty({0});
 
-        torch::Tensor combo_position_ids = inputs.combo_position_ids.defined() ?
-                                               tensorHoldHostAndToCuda(inputs.combo_position_ids) :
+        torch::Tensor combo_position_ids = forward_inputs.combo_position_ids.defined() ?
+                                               tensorHoldHostAndToCuda(forward_inputs.combo_position_ids) :
                                                torch::empty({0});
 
-        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        auto embedding_inputs      = buildPyEmbeddingInputs(forward_inputs);
+        auto multimodal_inputs     = buildPyMultimodalInputs(forward_inputs);
+        auto bert_embedding_inputs = buildBertEmbeddingInputs(forward_inputs);
 
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
+            prepareAttentionInputs(forward_inputs, /*skip_forward_event_sync=*/true);
         }
 
         if (device_props_.enable_prefill_cp) {
@@ -1198,7 +1221,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             cache_store_async_writer_->waitAllDone();
         }
 
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (!(device_props_.enable_prefill_cp && has_context_request) && inputs.mtp_iteration_step == 0
             && inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.numel() > 0 && hidden_states.defined()
             && hidden_states.dim() > 0) {

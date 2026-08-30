@@ -137,6 +137,37 @@ def _report_preprocess_timing(total_ms: float, download_ms: float) -> None:
     )
 
 
+def _report_preprocess_queue_size(queue_size: int) -> None:
+    """Report the number of preprocessing work items not yet completed."""
+    try:
+        kmonitor.report(
+            GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC, max(0, int(queue_size))
+        )
+    except Exception:
+        # Telemetry must never change the preprocessing result.
+        logging.exception("Failed to report ViT preprocess queue size")
+
+
+def _count_images(mm_inputs: List[MultimodalInput]) -> int:
+    """Count image-like inputs without treating videos or audio as images."""
+    return sum(
+        mm_input.mm_type in (MMUrlType.DEFAULT, MMUrlType.IMAGE)
+        for mm_input in mm_inputs
+    )
+
+
+def _report_image_count(mm_inputs: List[MultimodalInput]) -> None:
+    """Report the image count once for the current logical request."""
+    try:
+        kmonitor.report(
+            GaugeMetrics.VIT_IMAGE_COUNT_METRIC,
+            _count_images(mm_inputs),
+        )
+    except Exception:
+        # Telemetry must never change the multimodal request result.
+        logging.exception("Failed to report ViT image count")
+
+
 class PreprocessExecutor:
     """预处理执行器抽象基类，封装预处理逻辑"""
 
@@ -162,6 +193,7 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         self.preprocess_func = preprocess_func
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
+        _report_preprocess_queue_size(0)
 
     def submit(self, work_item: "MMWorkItem") -> None:
         if not work_item.should_preprocess:
@@ -222,10 +254,16 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        # Track accepted work items independently of multiprocessing.Pool's
+        # private task queue. The gauge includes both running and waiting tasks.
+        self._preprocess_queue_lock = threading.Lock()
+        self._pending_preprocess_tasks: Set[int] = set()
+        self._next_preprocess_task_id = 0
         # Serializes timeout-counter updates and pool rebuilds — without it
         # concurrent get_result/submit callers can race to _rebuild_pool, double
         # tear down the pool, or miscount consecutive timeouts.
         self._pool_lock = threading.Lock()
+        _report_preprocess_queue_size(0)
         self._create_pool()
 
     def _create_pool(self) -> None:
@@ -243,6 +281,38 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             ),
         )
 
+    def _track_preprocess_task(self) -> int:
+        with self._preprocess_queue_lock:
+            self._next_preprocess_task_id += 1
+            task_id = self._next_preprocess_task_id
+            self._pending_preprocess_tasks.add(task_id)
+            queue_size = len(self._pending_preprocess_tasks)
+        _report_preprocess_queue_size(queue_size)
+        return task_id
+
+    def _finish_preprocess_task(self, task_id: int) -> None:
+        with self._preprocess_queue_lock:
+            if task_id not in self._pending_preprocess_tasks:
+                return
+            self._pending_preprocess_tasks.remove(task_id)
+            queue_size = len(self._pending_preprocess_tasks)
+        _report_preprocess_queue_size(queue_size)
+
+    def _clear_preprocess_tasks(self) -> None:
+        with self._preprocess_queue_lock:
+            if not self._pending_preprocess_tasks:
+                return
+            self._pending_preprocess_tasks.clear()
+        _report_preprocess_queue_size(0)
+
+    def _apply_async(self, work_item: "MMWorkItem", task_id: int) -> Any:
+        return self.pool.apply_async(
+            _worker_process_task,
+            args=(work_item.mm_inputs,),
+            callback=lambda _result: self._finish_preprocess_task(task_id),
+            error_callback=lambda _error: self._finish_preprocess_task(task_id),
+        )
+
     def _rebuild_pool(self) -> None:
         """Tear down the current pool and create a fresh one.
 
@@ -251,6 +321,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         """
         old = self.pool
         self.pool = None
+        self._clear_preprocess_tasks()
         try:
             if old is not None:
                 old.terminate()
@@ -263,22 +334,34 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         if not work_item.should_preprocess:
             return
 
+        task_id: Optional[int] = None
         try:
-            work_item.future = self.pool.apply_async(
-                _worker_process_task, args=(work_item.mm_inputs,)
-            )
+            # Serialize submission with pool rebuilds. This keeps a task from
+            # being submitted to an old pool while its queue accounting resets.
+            with self._pool_lock:
+                # Track only after taking the rebuild lock. Otherwise a pool
+                # rebuild can clear the task between accounting and submit.
+                task_id = self._track_preprocess_task()
+                try:
+                    work_item.future = self._apply_async(work_item, task_id)
+                except (BrokenPipeError, OSError, EOFError) as e:
+                    # multiprocessing.Pool surfaces broken state via these —
+                    # rebuild and retry once.
+                    logging.error(
+                        f"Pool broken on submit, rebuilding: {e}", exc_info=True
+                    )
+                    self._finish_preprocess_task(task_id)
+                    self._rebuild_pool()
+                    task_id = self._track_preprocess_task()
+                    work_item.future = self._apply_async(work_item, task_id)
             return
         except (BrokenPipeError, OSError, EOFError) as e:
-            # multiprocessing.Pool surfaces broken state via these — rebuild and retry once.
-            # Keep both rebuild and the retry submission under _pool_lock so another thread
-            # cannot tear self.pool down between our rebuild and the apply_async call.
-            logging.error(f"Pool broken on submit, rebuilding: {e}", exc_info=True)
-            with self._pool_lock:
-                self._rebuild_pool()
-                work_item.future = self.pool.apply_async(
-                    _worker_process_task, args=(work_item.mm_inputs,)
-                )
+            if task_id is not None:
+                self._finish_preprocess_task(task_id)
+            raise
         except Exception as e:
+            if task_id is not None:
+                self._finish_preprocess_task(task_id)
             logging.error(f"Unexpected error during submission: {e}", exc_info=True)
             raise
 
@@ -346,6 +429,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             logging.warning("Preprocessing pool join exceeded 10s, terminating workers")
             pool.terminate()
             pool.join()
+        self._clear_preprocess_tasks()
         logging.info("Preprocessing pool shut down.")
 
 
@@ -674,7 +758,8 @@ class MMProcessEngine:
         caller waiting on its cache entry. The cache-entry claim handles
         different exception objects representing the same result; the
         exception marker covers RPC/wrapper layers that re-raise the same
-        object. Proxy workers still leave accounting to the proxy layer.
+        object. Worker RPC responses carry a marker so a proxy can suppress
+        the corresponding duplicate report.
         """
         if entry is not None:
             try:
@@ -699,12 +784,14 @@ class MMProcessEngine:
                 # __dict__. Reporting is still more useful than failing the
                 # request because deduplication was unavailable.
                 pass
-        if not self.is_proxy_mode:
-            try:
-                kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
-            except Exception:
-                # Metrics must never mask the original ViT request failure.
-                logging.exception("Failed to report ViT error QPS")
+        try:
+            # Report at the process where the failure is first observed. In a
+            # proxy deployment the RPC response carries a marker, allowing the
+            # proxy to report transport-only failures without double counting.
+            kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+        except Exception:
+            # Metrics must never mask the original ViT request failure.
+            logging.exception("Failed to report ViT error QPS")
 
     # ------------------------------------------------------------------
     # GreenNet (content safety) plumbing
@@ -1020,6 +1107,7 @@ class MMProcessEngine:
         defer_cache_complete: bool = False,
         request_id: int = 0,
         report_embedding_length: bool = True,
+        report_image_count: bool = True,
         report_vit_error: bool = True,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
@@ -1034,6 +1122,8 @@ class MMProcessEngine:
         query_started = False
         try:
             self.mm_part.validate_inputs(mm_inputs)
+            if report_image_count:
+                _report_image_count(mm_inputs)
             with self.profiler.profile_request():
                 with torch.profiler.record_function("mm_embedding_impl"):
                     if not self.is_proxy_mode:
@@ -1214,6 +1304,7 @@ class MMProcessEngine:
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         try:
             self.mm_part.validate_inputs(mm_inputs)
+            _report_image_count(mm_inputs)
             claims = self._claim_and_submit_async(
                 mm_inputs,
                 request_id=request_id,
@@ -1563,6 +1654,7 @@ class MMProcessEngine:
                 defer_cache_complete=True,
                 request_id=request_id,
                 report_embedding_length=False,
+                report_image_count=False,
                 report_vit_error=False,
             )
             if verdict_future is not None:

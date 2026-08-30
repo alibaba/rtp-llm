@@ -35,9 +35,14 @@ def _embedding_result_cost(result: Any) -> Tuple[int, int]:
                 return 0
             if value.ndim >= 2 and value.shape[-1] > 0:
                 return value.numel() // value.shape[-1]
-            return value.numel()
+            # A one-dimensional embedding is one token vector, not a sequence
+            # of scalar tokens. Keep this consistent with the request-level
+            # embedding length metric.
+            return 1
         if isinstance(value, (list, tuple)):
             return sum(output_tokens(item) for item in value)
+        if isinstance(value, dict):
+            return sum(output_tokens(item) for item in value.values())
         return 0
 
     primary = result[0] if isinstance(result, tuple) and result else result
@@ -174,6 +179,7 @@ class MMEmbeddingCache:
         )
 
     def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
+        resident_metrics = None
         with self._lock:
             if not self.enabled:
                 self._stats["miss"] += 1
@@ -191,8 +197,13 @@ class MMEmbeddingCache:
                 entry = self._new_entry(cache_key)
                 self._entries[cache_key] = entry
                 self._stats["miss"] += 1
-                self._evict_locked()
+                if self._evict_locked():
+                    resident_metrics = (self._resident_tokens, self._resident_bytes)
                 state = "miss"
+        if resident_metrics is not None:
+            # Insertion can evict a completed entry while the new entry is
+            # still pending. Publish the lower resident total immediately.
+            self._report_resident_metrics(*resident_metrics)
         self._report_access_metric(state)
         return state, entry
 
@@ -223,25 +234,28 @@ class MMEmbeddingCache:
         self._resident_tokens -= entry.charge_tokens
         self._resident_bytes -= entry.charge_bytes
 
-    def _evict_locked(self) -> None:
+    def _evict_locked(self) -> bool:
+        evicted = False
         while True:
             if self._max_bytes is not None:
                 over_limit = self._resident_bytes > self._max_bytes
             else:
                 over_limit = len(self._entries) > self._max_size
             if not over_limit:
-                return
+                return evicted
 
             evict_key = next(
                 (key for key, entry in self._entries.items() if entry.is_done),
                 None,
             )
             if evict_key is None:
-                return
+                return evicted
             self._remove_entry_locked(evict_key)
             self._stats["eviction"] += 1
+            evicted = True
             if self._report_metrics_enabled:
                 kmonitor.report(AccMetrics.VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC, 1)
+        return evicted
 
     def _remove_if_same(self, cache_key: str, expected: MMEmbeddingCacheEntry) -> bool:
         with self._lock:

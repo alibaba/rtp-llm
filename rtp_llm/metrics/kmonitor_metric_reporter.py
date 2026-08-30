@@ -91,6 +91,7 @@ class GaugeMetrics(Enum):
     VIT_PREPROCESS_RT_METRIC = "py_rtp_vit_preprocess_rt"
     VIT_DOWNLOAD_RT_METRIC = "py_rtp_vit_download_rt"
     VIT_PREPROCESS_OTHER_RT_METRIC = "py_rtp_vit_preprocess_other_rt"
+    VIT_PREPROCESS_QUEUE_SIZE_METRIC = "py_rtp_vit_preprocess_queue_size"
     VIT_EMBEDDING_RT_METRIC = "py_rtp_vit_embedding_rt"
     # End-to-end embedding latency via the GPU batch scheduler (queue wait +
     # batch-collect wait + forward). Diff against VIT_EMBEDDING_RT (forward only)
@@ -99,12 +100,16 @@ class GaugeMetrics(Enum):
     # Number of visual tokens produced by one user request. For a multi-image
     # request this is the sum of the leading dimensions of all embeddings.
     VIT_EMBEDDING_LENGTH_METRIC = "py_rtp_vit_embedding_length"
+    # Number of image inputs carried by one multimodal request.
+    VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
     # Number of scheduler chunks waiting for a GPU forward. The carried-over
     # pending chunk is included in this point-in-time gauge.
     VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
     # Time from scheduler enqueue until the chunk is about to enter a forward.
     VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
     VIT_CUDA_GRAPH_PADDING_RATIO_METRIC = "py_rtp_vit_cuda_graph_padding_ratio"
+    # Visual-token and tensor bytes currently retained by completed cache entries.
+    # Pending entries are intentionally excluded until their result is complete.
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
 

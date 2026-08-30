@@ -17,12 +17,42 @@ from rtp_llm.server.vit_proxy_server import (
     LoadBalancer,
     VitProxyRpcServer,
     WorkerConnectionPool,
+    _report_vit_error_qps,
     _resolve_rpc_timeout_seconds,
 )
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
 class VitErrorQpsTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_worker_reported_error_is_not_counted_again(self, report):
+        class WorkerRpcError(grpc.RpcError):
+            def trailing_metadata(self):
+                return ((VIT_ERROR_REPORTED_METADATA_KEY, "1"),)
+
+        error = WorkerRpcError()
+
+        _report_vit_error_qps(error)
+
+        report.assert_not_called()
+
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
+    def test_worker_marks_generic_rpc_error_as_reported(self, _trans_mm_input):
+        engine = MagicMock()
+        engine.async_submit.side_effect = RuntimeError("preprocess submit failed")
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        context = MagicMock()
+        context.abort.side_effect = RuntimeError("worker aborted")
+
+        with self.assertRaises(RuntimeError):
+            servicer.AsyncSubmitEmbedding(MultimodalInputsPB(), context)
+
+        metadata = context.set_trailing_metadata.call_args.args[0]
+        self.assertIn((VIT_ERROR_REPORTED_METADATA_KEY, "1"), metadata)
+
     @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
     def test_wait_greennet_worker_rpc_error_reports_error_qps(self, report):
         class WorkerRpcError(grpc.RpcError):

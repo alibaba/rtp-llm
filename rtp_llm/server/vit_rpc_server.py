@@ -36,6 +36,7 @@ from rtp_llm.multimodal.multimodal_util import (
 )
 from rtp_llm.ops import MMPreprocessConfig, MMRdmaEncoderOp, MultimodalInput
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 
 def trans_output(res: MMEmbeddingRes):
@@ -53,14 +54,25 @@ def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
     return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None)
 
 
+def _mark_vit_error_reported(context, status_details=None) -> None:
+    """Tell an optional proxy that the worker already counted this error."""
+    metadata = [(VIT_ERROR_REPORTED_METADATA_KEY, "1")]
+    if status_details is not None:
+        metadata.insert(0, ("grpc-status-details-bin", status_details))
+    try:
+        context.set_trailing_metadata(tuple(metadata))
+    except Exception:
+        # Metadata is only for metric de-duplication; never mask the request
+        # failure if a custom gRPC context rejects it.
+        logging.exception("Failed to attach ViT error metadata")
+
+
 def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
     details = ErrorDetailsPB(
         error_code=int(error.exception_type),
         error_message=error.message,
     )
-    context.set_trailing_metadata(
-        (("grpc-status-details-bin", details.SerializeToString()),)
-    )
+    _mark_vit_error_reported(context, details.SerializeToString())
     if error.exception_type == ExceptionType.CONCURRENCY_LIMIT_ERROR:
         status = grpc.StatusCode.RESOURCE_EXHAUSTED
     elif error.exception_type == ExceptionType.GENERATE_TIMEOUT:
@@ -173,6 +185,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         except Exception as error:
             self.engine.report_vit_error(error)
+            _mark_vit_error_reported(context)
             logging.exception("AsyncSubmitEmbedding failed")
             context.abort(
                 grpc.StatusCode.INTERNAL,
@@ -200,6 +213,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             return EmptyPB()
         except Exception as error:
             self.engine.report_vit_error(error)
+            _mark_vit_error_reported(context)
             logging.exception("WaitGreenNetVerdict failed")
             context.abort(
                 grpc.StatusCode.INTERNAL,
@@ -219,15 +233,14 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     error_code=int(error_code),
                     error_message=verdict.message or "data inspection failed",
                 )
-                context.set_trailing_metadata(
-                    (("grpc-status-details-bin", details.SerializeToString()),)
-                )
+                _mark_vit_error_reported(context, details.SerializeToString())
                 context.set_code(grpc.StatusCode.PERMISSION_DENIED)
                 context.set_details(verdict.message or "data inspection failed")
         except Exception as error:
             # A malformed verdict or response-metadata failure is also an
             # exceptional result and must be visible in the error QPS.
             self.engine.report_vit_error(error)
+            _mark_vit_error_reported(context)
             logging.exception("Failed to serialize ViT GreenNet verdict")
             context.abort(
                 grpc.StatusCode.INTERNAL,
@@ -267,6 +280,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         except Exception as e:
             self.engine.report_vit_error(e)
+            _mark_vit_error_reported(context)
             logging.exception("RemoteMultimodalEmbedding failed")
             context.abort(
                 grpc.StatusCode.INTERNAL, f"[MM_PROCESS_ERROR] {type(e).__name__}: {e}"
@@ -279,6 +293,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             return EmptyPB()
         except Exception as error:
             self.engine.report_vit_error(error)
+            _mark_vit_error_reported(context)
             logging.exception("ReleaseMultimodalEmbedding failed")
             raise
 

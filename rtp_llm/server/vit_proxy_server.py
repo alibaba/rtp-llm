@@ -31,6 +31,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 # Default per-request gRPC timeout for proxy → worker forwarding. Per-request
 # override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
@@ -38,7 +39,37 @@ DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0
 RDMA_HANDLE_ROUTE_TTL_SECONDS = 120.0
 
 
-def _report_vit_error_qps() -> None:
+def _worker_already_reported_vit_error(error: Optional[BaseException]) -> bool:
+    if error is None:
+        return False
+    try:
+        metadata = error.trailing_metadata()
+    except Exception:
+        return False
+    return any(
+        key == VIT_ERROR_REPORTED_METADATA_KEY and value in ("1", b"1")
+        for key, value in (metadata or ())
+    )
+
+
+def _forward_worker_error_metadata(context, error: BaseException) -> None:
+    """Forward public worker error details without exposing the dedupe marker."""
+    try:
+        metadata = error.trailing_metadata()
+    except Exception:
+        return
+    public_metadata = tuple(
+        (key, value)
+        for key, value in (metadata or ())
+        if key != VIT_ERROR_REPORTED_METADATA_KEY
+    )
+    if public_metadata:
+        context.set_trailing_metadata(public_metadata)
+
+
+def _report_vit_error_qps(error: Optional[BaseException] = None) -> None:
+    if _worker_already_reported_vit_error(error):
+        return
     try:
         kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
     except Exception:
@@ -264,15 +295,13 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             logging.error(
                 f"RPC error when forwarding to worker {worker_address}: {e.code()} - {e.details()}"
             )
-            _report_vit_error_qps()
-            trailing_metadata = e.trailing_metadata()
-            if trailing_metadata:
-                context.set_trailing_metadata(trailing_metadata)
+            _report_vit_error_qps(e)
+            _forward_worker_error_metadata(context, e)
             context.abort(e.code(), e.details())
         except Exception as e:
             request_failed = True
             logging.error(f"Error forwarding request to worker {worker_address}: {e}")
-            _report_vit_error_qps()
+            _report_vit_error_qps(e)
             raise
         finally:
             self._decrement_connections(worker_address, report_error=not request_failed)
@@ -305,10 +334,8 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 error.code(),
                 error.details(),
             )
-            _report_vit_error_qps()
-            trailing_metadata = error.trailing_metadata()
-            if trailing_metadata:
-                context.set_trailing_metadata(trailing_metadata)
+            _report_vit_error_qps(error)
+            _forward_worker_error_metadata(context, error)
             context.abort(error.code(), error.details())
         except Exception as error:
             request_failed = True
@@ -317,7 +344,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 worker_address,
                 error,
             )
-            _report_vit_error_qps()
+            _report_vit_error_qps(error)
             raise
         finally:
             self._decrement_connections(worker_address, report_error=not request_failed)
@@ -349,8 +376,8 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 stub.ReleaseMultimodalEmbedding(
                     ReleaseEmbeddingPB(handle=handles), timeout=1.0
                 )
-            except Exception:
-                _report_vit_error_qps()
+            except Exception as error:
+                _report_vit_error_qps(error)
                 logging.exception(
                     "Failed to release RDMA handles on VIT worker %s; worker GC will reclaim them",
                     worker_address,
@@ -370,17 +397,15 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             logging.error(
                 f"RPC error when forwarding AsyncSubmit to worker {worker_address}: {e.code()} - {e.details()}"
             )
-            _report_vit_error_qps()
-            trailing_metadata = e.trailing_metadata()
-            if trailing_metadata:
-                context.set_trailing_metadata(trailing_metadata)
+            _report_vit_error_qps(e)
+            _forward_worker_error_metadata(context, e)
             context.abort(e.code(), e.details())
         except Exception as e:
             request_failed = True
             logging.error(
                 f"Error forwarding AsyncSubmit to worker {worker_address}: {e}"
             )
-            _report_vit_error_qps()
+            _report_vit_error_qps(e)
             raise
         finally:
             self._decrement_connections(worker_address, report_error=not request_failed)

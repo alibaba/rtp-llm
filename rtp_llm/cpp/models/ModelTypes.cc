@@ -180,6 +180,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
+        // Optional multimodal fields may disappear on the next batch. Clear
+        // old storage before conditional allocation, otherwise a text-only
+        // batch can inherit stale MM metadata and enter the MM CP path.
+        if (!combo_position_ids_size) {
+            inputs.combo_position_ids = torch::Tensor();
+        }
+        if (!text_tokens_mask_size) {
+            inputs.text_tokens_mask = torch::Tensor();
+        }
+        if (!mm_features_locs_size) {
+            inputs.mm_features_locs = torch::Tensor();
+        }
+        if (!mm_features_num) {
+            inputs.multimodal_features.reset();
+        }
+        if (!mm_extra_input_num) {
+            inputs.mm_extra_input.reset();
+        }
         auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
 
         // Respect the root-side device bitmap so all ranks classify tensors the

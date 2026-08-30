@@ -635,8 +635,9 @@ class ModelLoader:
         return device
 
     def _load_from_scratch(self, device: str):
-        if self._load_config.force_cpu_load_weights:
-            device = "cpu"
+        # force_cpu_load_weights controls CPU staging/conversion only. Runtime
+        # Python kernels, including the embedding kernel, still require the
+        # resulting weights on the active CUDA device.
         weights = self._create_model_weights(device)
         convert_device = self._choose_weight_convert_device(
             device

@@ -233,6 +233,13 @@ class MMProcessEngineTest(TestCase):
         ]
         self.assertEqual(lengths, [3])
 
+        image_counts = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args and call.args[0] == GaugeMetrics.VIT_IMAGE_COUNT_METRIC
+        ]
+        self.assertEqual(image_counts, [2])
+
     def test_timeout(self):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceSlow())
         vit_config = VitConfig()
@@ -498,6 +505,63 @@ class MMProcessEngineTest(TestCase):
         engine.stop()
 
 
+class PreprocessMetricTest(TestCase):
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_preprocess_queue_metric_tracks_pending_tasks(self, report):
+        from rtp_llm.multimodal.mm_process_engine import MultiprocessPreprocessExecutor
+
+        class FakePool:
+            def __init__(self):
+                self.callbacks = []
+
+            def apply_async(self, *args, **kwargs):
+                self.callbacks.append((kwargs["callback"], kwargs["error_callback"]))
+                return object()
+
+        executor = object.__new__(MultiprocessPreprocessExecutor)
+        executor.pool = FakePool()
+        executor._pool_lock = threading.Lock()
+        executor._preprocess_queue_lock = threading.Lock()
+        executor._pending_preprocess_tasks = set()
+        executor._next_preprocess_task_id = 0
+
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        work_items = [
+            MMWorkItem(
+                [
+                    MultimodalInput(
+                        f"fake://queue-{index}",
+                        MMUrlType.IMAGE,
+                        torch.empty(0),
+                        config,
+                    )
+                ],
+                mm_timeout_ms=30000,
+            )
+            for index in range(2)
+        ]
+
+        executor.submit(work_items[0])
+        executor.submit(work_items[1])
+        depth_values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args
+            and call.args[0] == GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC
+        ]
+        self.assertEqual(depth_values[-1], 2)
+
+        executor.pool.callbacks[0][0](None)
+        executor.pool.callbacks[1][1](RuntimeError("preprocess failed"))
+        depth_values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args
+            and call.args[0] == GaugeMetrics.VIT_PREPROCESS_QUEUE_SIZE_METRIC
+        ]
+        self.assertEqual(depth_values[-1], 0)
+
+
 class FakeSlowEmbeddingInterface(FakeMultiModalEmbeddingInterface):
     """Embedding that takes a configurable delay, for testing async concurrency."""
 
@@ -617,6 +681,52 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         self.assertEqual(stats["resident_bytes"], 32)
         self.assertEqual(stats["resident_tokens"], 4)
         self.assertEqual(stats["eviction"], 1)
+
+    @patch("rtp_llm.multimodal.mm_embedding_cache.kmonitor.report")
+    def test_cache_token_metric_tracks_eviction_and_one_dimensional_embedding(
+        self, report
+    ):
+        from rtp_llm.multimodal.mm_embedding_cache import _embedding_result_cost
+
+        # The cache stores embedding vectors; a [hidden] tensor represents one
+        # token rather than hidden scalar tokens.
+        self.assertEqual(
+            _embedding_result_cost((torch.zeros(4), None))[0],
+            1,
+        )
+
+        cache = MMEmbeddingAsyncCache(max_size=1, report_metrics=True)
+        _, first = cache.try_acquire("first")
+        first.complete((torch.zeros((2, 4)), None))
+
+        # Inserting a pending entry evicts the completed entry. The resident
+        # gauge must drop immediately instead of waiting for the next result.
+        cache.try_acquire("second")
+        token_values = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args
+            and call.args[0] == GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC
+        ]
+        self.assertEqual(token_values, [2, 0])
+
+
+class VitErrorReportingTest(TestCase):
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_proxy_worker_reports_each_error_once(self, report):
+        engine = object.__new__(MMProcessEngine)
+        engine.is_proxy_mode = True
+        error = RuntimeError("worker preprocessing failed")
+
+        engine.report_vit_error(error)
+        engine.report_vit_error(error)
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
 
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
