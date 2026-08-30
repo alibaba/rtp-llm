@@ -83,6 +83,12 @@ void LoadAsyncContext::setMatchCallback(MatchCallback callback) {
     match_callback_ = std::move(callback);
 }
 
+void LoadAsyncContext::setSettlementReadyCallback(SettlementReadyCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    RTP_LLM_CHECK(callback && state_.load() == State::PENDING && !settlement_ready_ && !settlement_ready_callback_);
+    settlement_ready_callback_ = std::move(callback);
+}
+
 void LoadAsyncContext::startBackendMatch() {
     RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
     backend_started_                     = true;
@@ -176,20 +182,22 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
 }
 
 void LoadAsyncContext::onBackendRead(bool success) {
-    if (!success) {
-        onTaskFail();
-        return;
-    }
-    bool notify = false;
+    bool                    notify = false;
+    SettlementReadyCallback settlement_ready_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        matched_blocks_  = backend_matched_blocks_;
+        if (state_.load() != State::PENDING || !backend_pending_) {
+            return;
+        }
+        if (success) {
+            matched_blocks_ = backend_matched_blocks_;
+        } else {
+            has_failure_ = true;
+        }
         backend_pending_ = false;
-        finishIfReadyLocked(notify);
+        finishIfReadyLocked(notify, settlement_ready_callback);
     }
-    if (notify) {
-        notifyCompletion();
-    }
+    dispatchCompletion(notify, std::move(settlement_ready_callback));
 }
 
 void LoadAsyncContext::failBeforeCommit() {
@@ -214,15 +222,14 @@ bool LoadAsyncContext::commit() {
         failCommit();
         return false;
     }
-    bool notify = false;
+    bool                    notify = false;
+    SettlementReadyCallback settlement_ready_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         committed_ = true;
-        finishIfReadyLocked(notify);
+        finishIfReadyLocked(notify, settlement_ready_callback);
     }
-    if (notify) {
-        notifyCompletion();
-    }
+    dispatchCompletion(notify, std::move(settlement_ready_callback));
     return true;
 }
 
@@ -250,20 +257,40 @@ bool LoadAsyncContext::abortPending() {
 }
 
 bool LoadAsyncContext::completeOne(bool success) {
-    bool notify = false;
+    return completeTransfers(1, success);
+}
+
+bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
+    bool                    notify = false;
+    SettlementReadyCallback settlement_ready_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const State                 state = state_.load();
-        if (state != State::PENDING || remaining_transfer_count_ == 0) {
+        if (state != State::PENDING || count == 0 || count > remaining_transfer_count_) {
             return false;
         }
         has_failure_ = has_failure_ || !success;
-        --remaining_transfer_count_;
-        finishIfReadyLocked(notify);
+        remaining_transfer_count_ -= count;
+        finishIfReadyLocked(notify, settlement_ready_callback);
     }
-    if (notify) {
-        notifyCompletion();
+    dispatchCompletion(notify, std::move(settlement_ready_callback));
+    return true;
+}
+
+bool LoadAsyncContext::aggregateSuccess() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return settlement_ready_ && !has_failure_;
+}
+
+bool LoadAsyncContext::settle(bool success) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_.load() != State::PENDING || !settlement_ready_) {
+            return false;
+        }
+        state_.store(success && !has_failure_ ? State::SUCCEEDED : State::FAILED);
     }
+    notifyCompletion();
     return true;
 }
 
@@ -282,16 +309,30 @@ bool LoadAsyncContext::onTaskFail() {
     return true;
 }
 
-void LoadAsyncContext::finishIfReadyLocked(bool& notify) {
+void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback) {
     if (!committed_ || remaining_transfer_count_ != 0 || backend_pending_) {
         return;
     }
     const State state = state_.load();
-    if (state != State::PENDING) {
+    if (state != State::PENDING || settlement_ready_) {
+        return;
+    }
+    if (settlement_ready_callback_) {
+        settlement_ready_         = true;
+        settlement_ready_callback = std::move(settlement_ready_callback_);
         return;
     }
     state_.store(has_failure_ ? State::FAILED : State::SUCCEEDED);
     notify = true;
+}
+
+void LoadAsyncContext::dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback) {
+    if (notify) {
+        notifyCompletion();
+    }
+    if (settlement_ready_callback) {
+        settlement_ready_callback(shared_from_this());
+    }
 }
 
 void LoadAsyncContext::waitDone() {
