@@ -5,7 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -292,19 +292,22 @@ protected:
                                uint32_t seq_size_per_block      = kDsv4TokensPerBlock,
                                uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock) {
         ModelConfig mc;
-        mc.num_layers                   = 43;
-        mc.hidden_size                  = 4096;
-        mc.attn_config.head_num         = 64;
-        mc.attn_config.kv_head_num      = 1;
-        mc.attn_config.size_per_head    = 512;
-        mc.attn_config.rope_head_dim    = 64;
-        mc.attn_config.sliding_window   = 128;
-        mc.attn_config.indexer_head_dim = 128;
-        mc.attn_config.indexer_head_num = 64;
-        mc.attn_config.indexer_topk     = 512;
-        mc.attn_config.o_groups         = 8;
-        mc.attn_config.o_lora_rank      = 1024;
-        std::vector<int> ratios         = {0, 0};
+        mc.num_layers                                                = 43;
+        mc.hidden_size                                               = 4096;
+        mc.attn_config.head_num                                      = 64;
+        mc.attn_config.kv_head_num                                   = 1;
+        mc.attn_config.size_per_head                                 = 512;
+        mc.attn_config.rope_head_dim                                 = 64;
+        mc.attn_config.sliding_window                                = 128;
+        mc.attn_config.indexer_head_dim                              = 128;
+        mc.attn_config.indexer_head_num                              = 64;
+        mc.attn_config.indexer_topk                                  = 512;
+        mc.attn_config.o_groups                                      = 8;
+        mc.attn_config.o_lora_rank                                   = 1024;
+        mc.attn_config.tokens_per_block                              = seq_size_per_block;
+        mc.hybrid_attention_config.enable_hybrid_attention           = true;
+        mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+        std::vector<int> ratios                                      = {0, 0};
         for (int i = 2; i < 43; ++i) {
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
@@ -321,7 +324,8 @@ protected:
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
-        auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+        kv_config.test_block_num            = block_num;
+        auto config                         = CacheConfigCreator::createConfig(mc, pc, RuntimeConfig{}, kv_config);
         // KVCacheManager::init() calls finalizeBlockNums(block_num), which fans the
         // global block count out to every group according to its capacity policy.
         config.block_num = block_num;

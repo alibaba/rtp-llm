@@ -83,6 +83,7 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
         return stream && !stream->isFakeStream() && stream->isContextStream();
     });
 }
+
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -362,8 +363,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 
     // Do NOT override seq_size_per_block here. createBasicConfig already
     // returns the correct value: model_config.attn_config.tokens_per_block
-    // for non-DSV4 (via SingleConfigCreator / HybridConfigCreator), and the
-    // 256-token physical block for DSV4 (via DSV4CacheConfigHelper). Forcing
+    // for non-independent single-group and hybrid-attention configurations,
+    // and the 256-token physical block for DSV4. Forcing
     // it back to attn_config.tokens_per_block would clobber DSV4's promoted
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
@@ -371,9 +372,9 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     auto cache_config =
         CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
-    // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
-    // leave kernel_seq_size_per_block at 0 (only the real createConfig path
-    // runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
+    // createBasicConfig's non-independent single-group and hybrid-attention
+    // paths can leave kernel_seq_size_per_block at 0 (only the real createConfig
+    // path runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
     // > 0, so apply the same default here: kernel block == physical block.
     if (cache_config.kernel_seq_size_per_block == 0) {
         cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;

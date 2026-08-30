@@ -625,7 +625,7 @@ TEST_F(SWAKVCacheGroupTest, PutIntoCache_SkipsNullBlocks) {
 // repeatedly inside a loop. If a later iteration failed (e.g. concurrent allocators raced for
 // the last free blocks), the previously allocated blocks were leaked because they had only
 // been recorded in a stack-local vector and were never written back to block_ids; the upper
-// rollback in HybridKVCacheAllocator::initMallocForCommonLen could not see them.
+// rollback in HybridPoolKVCacheAllocator::initMallocForCommonLen could not see them.
 //
 // After the fix, SWAKVCacheGroup::malloc performs a single atomic batch malloc on the pool,
 // so a failed allocation must leave the pool's free counter unchanged.

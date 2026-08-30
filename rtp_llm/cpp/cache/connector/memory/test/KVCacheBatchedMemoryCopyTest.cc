@@ -13,7 +13,6 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -22,12 +21,6 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
-
-namespace rtp_llm {
-
-void execBatchCopy(const BatchCopyParams&) {}
-
-}  // namespace rtp_llm
 
 namespace rtp_llm::test {
 namespace {
@@ -228,8 +221,8 @@ CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
     kv_config.seq_size_per_block        = 128;
     kv_config.kernel_seq_size_per_block = 128;
     kv_config.dsv4_fixed_pool_blocks    = 512;
-    auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
-    config.block_num                    = 512;
+    kv_config.test_block_num            = 512;
+    auto config                         = CacheConfigCreator::createConfig(mc, pc, RuntimeConfig{}, kv_config);
     return config;
 }
 
@@ -540,7 +533,7 @@ TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout)
         compact_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     EXPECT_TRUE(compact_connector->supportsTypedPrefixCacheLayout(compact_connector->layerTagSlots()));
 
-    // Real DSv4 Flash/Pro configs built by HybridPoolConfigCreator are eligible.
+    // Real DSv4 Flash/Pro configs built by CacheConfigCreator are eligible.
     auto flash_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     auto flash_connector = std::make_shared<KVCacheMemoryConnector>(
         flash_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);

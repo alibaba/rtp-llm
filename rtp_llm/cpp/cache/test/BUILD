@@ -111,12 +111,19 @@ cc_test(
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     env = {},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -246,9 +253,9 @@ cc_test(
 )
 
 cc_test(
-    name = "single_type_kv_cache_allocator_test",
+    name = "hybrid_pool_kv_cache_allocator_single_path_test",
     srcs = [
-        "SingleTypeKVCacheAllocatorTest.cc",
+        "HybridPoolKVCacheAllocatorSinglePathTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -308,9 +315,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_test",
+    name = "hybrid_pool_kv_cache_allocator_hybrid_path_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "HybridPoolKVCacheAllocatorHybridPathTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -322,9 +329,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_cp_shard_test",
+    name = "hybrid_pool_kv_cache_allocator_cp_shard_test",
     srcs = [
-        "HybridKVCacheAllocatorCPShardTest.cc",
+        "HybridPoolKVCacheAllocatorCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
