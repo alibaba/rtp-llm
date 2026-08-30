@@ -39,7 +39,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public PreparedDelivery prepare(
+    public Transaction prepare(
             List<DeliveryItem> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
@@ -50,34 +50,37 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         return admit(candidates, evaluator, plannedPredictionMs);
     }
 
-    private Admission admit(
+    private BatchTransaction admit(
             List<DeliveryItem> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
         DeliveryItem head = candidates.get(0);
 
-        CapacityBoundary.Attempt<Prepared> groupAttempt =
+        CapacityBoundary.Attempt<BatchTransaction> groupAttempt =
                 slotPort.prepareIfOwned(head, () -> prepareAdmission(head))
                         .orElseGet(() -> BatchDeliveryStrategy
-                                .<Prepared>ownershipLost());
+                                .<BatchTransaction>ownershipLost());
         if (groupAttempt
-                instanceof CapacityBoundary.Attempt.Rejected<Prepared> blocked) {
-            return Admission.empty(
+                instanceof CapacityBoundary.Attempt.Rejected<BatchTransaction>
+                        blocked) {
+            return BatchTransaction.blocked(
                     this,
-                    new SelectionBoundary(
-                            head, blocked.boundary()));
+                    head,
+                    blocked.boundary());
         }
 
-        Prepared prepared = ((CapacityBoundary.Attempt.Accepted<Prepared>)
-                groupAttempt).value();
+        BatchTransaction transaction =
+                ((CapacityBoundary.Attempt.Accepted<BatchTransaction>)
+                        groupAttempt).value();
         List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
-        SelectionBoundary boundary = null;
+        DeliveryItem blockedItem = null;
+        CapacityBoundary blockedResult = null;
         try {
             for (int index = 0; index < candidates.size(); index++) {
                 DeliveryItem item = candidates.get(index);
                 CapacityBoundary.Attempt<DeliveryItem> attempt =
                         slotPort.prepareIfOwned(
-                                item, () -> prepared.append(item))
+                                item, () -> transaction.append(item))
                                 .orElseGet(() -> BatchDeliveryStrategy
                                         .<DeliveryItem>ownershipLost());
                 if (attempt
@@ -85,21 +88,17 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                 DeliveryItem>) {
                     admitted.add(item);
                 } else {
-                    boundary = new SelectionBoundary(
-                            item,
+                    blockedItem = item;
+                    blockedResult =
                             ((CapacityBoundary.Attempt.Rejected<DeliveryItem>)
-                                    attempt).boundary());
+                                    attempt).boundary();
                     break;
                 }
             }
             if (admitted.isEmpty()) {
-                return new Admission(
-                        this,
-                        List.of(),
-                        prepared,
-                        0L,
-                        null,
-                        boundary);
+                transaction.select(
+                        List.of(), 0L, null, blockedItem, blockedResult);
+                return transaction;
             }
             long predictedMs = plannedPredictionMs.isPresent()
                     && sameIdentitySequence(admitted, candidates)
@@ -110,15 +109,15 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                     admitted,
                                     DeliveryItem::seqLen,
                                     DeliveryItem::hitCache));
-            return new Admission(
-                    this,
+            transaction.select(
                     admitted,
-                    prepared,
                     predictedMs,
                     evaluator,
-                    boundary);
+                    blockedItem,
+                    blockedResult);
+            return transaction;
         } catch (Throwable failure) {
-            Throwable cleanup = close(prepared);
+            Throwable cleanup = close(transaction);
             if (cleanup != null && cleanup != failure) {
                 failure.addSuppressed(cleanup);
             }
@@ -126,7 +125,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private CapacityBoundary.Attempt<Prepared> prepareAdmission(
+    private CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(
             DeliveryItem head) {
         try {
             CapacityBoundary.Attempt<
@@ -174,7 +173,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                             "batch admission returned a non-positive "
                                     + "correlation id");
                 }
-                return accepted(new Prepared(
+                return accepted(new BatchTransaction(
+                        this,
                         batchId,
                         submission,
                         admission));
@@ -210,7 +210,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     private void deliverCommitted(
-            Committed batch,
+            BatchTransaction batch,
             DeliveryMetadata metadata) {
         List<DeliveryItem> original = batch.items();
         List<ClaimedMember> claimed = new ArrayList<>(original.size());
@@ -312,7 +312,9 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
     }
 
-    private Throwable failCommitted(Committed batch, Throwable cause) {
+    private Throwable failCommitted(
+            BatchTransaction batch,
+            Throwable cause) {
         Throwable cleanup = null;
         try {
             batch.closeSubmission();
@@ -397,177 +399,69 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         return new IllegalStateException("batch delivery failed", failure);
     }
 
-    /** Temporary owner of every resource for one admitted batch prefix. */
-    static final class Admission implements PreparedDelivery {
-        private final BatchDeliveryStrategy owner;
-        private final List<DeliveryItem> items;
-        private final long predictedMs;
-        private final PrefillTimePredictor.Evaluator evaluator;
-        private final SelectionBoundary boundary;
-        private Prepared prepared;
-
-        private Admission(
-                BatchDeliveryStrategy owner,
-                List<DeliveryItem> items,
-                Prepared prepared,
-                long predictedMs,
-                PrefillTimePredictor.Evaluator evaluator,
-                SelectionBoundary boundary) {
-            this.owner = owner;
-            this.items = items;
-            this.prepared = prepared;
-            this.predictedMs = predictedMs;
-            this.evaluator = evaluator;
-            this.boundary = boundary;
-        }
-
-        private static Admission empty(
-                BatchDeliveryStrategy owner,
-                SelectionBoundary boundary) {
-            return new Admission(
-                    owner, List.of(), null,
-                    0L, null, boundary);
-        }
-
-        @Override
-        public List<DeliveryItem> items() {
-            return items;
-        }
-
-        @Override
-        public SelectionBoundary boundary() {
-            return boundary;
-        }
-
-        @Override
-        public synchronized Committed commitOwnershipUnderLock() {
-            Prepared exactPrepared = prepared;
-            assert !items.isEmpty() && exactPrepared != null
-                    : "empty or resolved batch admission cannot commit";
-            Committed committed = exactPrepared.commitPreparedUnderLock(
-                    owner,
-                    items,
-                    predictedMs,
-                    evaluator);
-            prepared = null;
-            return committed;
-        }
-
-        @Override
-        public synchronized void close() {
-            Prepared exactPrepared = prepared;
-            if (exactPrepared == null) {
-                return;
-            }
-            prepared = null;
-            exactPrepared.close();
-        }
-    }
-
-    /** Private admission transaction whose non-null capabilities are its state. */
-    private static final class Prepared implements AutoCloseable {
-        private final long batchId;
-        private BatchSubmissionPort.PreparedSubmission submission;
-        private PrefillAdmissionPort.PreparedAdmission admission;
-
-        private Prepared(
-                long batchId,
-                BatchSubmissionPort.PreparedSubmission submission,
-                PrefillAdmissionPort.PreparedAdmission admission) {
-            this.batchId = batchId;
-            this.submission = submission;
-            this.admission = admission;
-        }
-
-        private synchronized CapacityBoundary.Attempt<DeliveryItem> append(
-                DeliveryItem exactItem) {
-            requirePrepared("append");
-            return admission.tryAppend(exactItem, 0L);
-        }
-
-        private synchronized Committed commitPreparedUnderLock(
-                BatchDeliveryStrategy owner,
-                List<DeliveryItem> exactItems,
-                long predictedMs,
-                PrefillTimePredictor.Evaluator evaluator) {
-            requirePrepared("commit");
-            Committed committed = new Committed(
-                    owner,
-                    exactItems,
-                    submission,
-                    batchId,
-                    predictedMs,
-                    evaluator);
-            PrefillAdmissionPort.CommittedAdmission committedAdmission =
-                    admission.commitPreparedUnderLock(exactItems, predictedMs);
-            committed.bind(committedAdmission);
-            admission = null;
-            submission = null;
-            return committed;
-        }
-
-        @Override
-        public synchronized void close() {
-            PrefillAdmissionPort.PreparedAdmission exactAdmission = admission;
-            BatchSubmissionPort.PreparedSubmission exactSubmission = submission;
-            if (exactAdmission == null && exactSubmission == null) {
-                return;
-            }
-            admission = null;
-            submission = null;
-            Throwable failure = BatchDeliveryStrategy.close(exactAdmission);
-            failure = BatchDeliveryStrategy.append(
-                    failure, BatchDeliveryStrategy.close(exactSubmission));
-            if (failure != null) {
-                throw propagate(failure);
-            }
-        }
-
-        private void requirePrepared(String operation) {
-            if (admission == null || submission == null) {
-                throw new IllegalStateException(
-                        "cannot " + operation
-                                + " after batch admission ownership was resolved");
-            }
-        }
-    }
-
-    /** Sole post-Registry batch owner. */
-    private static final class Committed implements Handoff {
-        private enum DeliveryPhase {
+    /** One owner and one explicit state machine for the complete batch flow. */
+    private static final class BatchTransaction implements Transaction {
+        private enum Phase {
+            PREPARED,
             COMMITTED,
             INFLIGHT,
             TERMINAL
         }
 
         private final BatchDeliveryStrategy owner;
-        private final List<DeliveryItem> items;
         private final long batchId;
-        private final long predictedMs;
-        private final PrefillTimePredictor.Evaluator evaluator;
-        private PrefillAdmissionPort.CommittedAdmission admission;
         private BatchSubmissionPort.PreparedSubmission submission;
-        private DeliveryPhase phase = DeliveryPhase.COMMITTED;
+        private PrefillAdmissionPort.PreparedAdmission preparedAdmission;
+        private PrefillAdmissionPort.CommittedAdmission committedAdmission;
+        private List<DeliveryItem> items = List.of();
+        private long predictedMs;
+        private PrefillTimePredictor.Evaluator evaluator;
+        private DeliveryItem blockedItem;
+        private CapacityBoundary blockedResult;
+        private Phase phase;
 
-        private Committed(
+        private BatchTransaction(
                 BatchDeliveryStrategy owner,
-                List<DeliveryItem> items,
-                BatchSubmissionPort.PreparedSubmission submission,
                 long batchId,
-                long predictedMs,
-                PrefillTimePredictor.Evaluator evaluator) {
+                BatchSubmissionPort.PreparedSubmission submission,
+                PrefillAdmissionPort.PreparedAdmission admission) {
             this.owner = owner;
-            this.items = List.copyOf(items);
-            this.submission = submission;
             this.batchId = batchId;
-            this.predictedMs = predictedMs;
-            this.evaluator = evaluator;
+            this.submission = submission;
+            this.preparedAdmission = admission;
+            this.phase = Phase.PREPARED;
         }
 
-        /** Bind the capability returned by the canonical commit without work. */
-        private void bind(
-                PrefillAdmissionPort.CommittedAdmission exactAdmission) {
-            admission = exactAdmission;
+        private static BatchTransaction blocked(
+                BatchDeliveryStrategy owner,
+                DeliveryItem blockedItem,
+                CapacityBoundary blockedResult) {
+            BatchTransaction transaction = new BatchTransaction(
+                    owner, 0L, null, null);
+            transaction.blockedItem = blockedItem;
+            transaction.blockedResult = blockedResult;
+            transaction.phase = Phase.TERMINAL;
+            return transaction;
+        }
+
+        private synchronized CapacityBoundary.Attempt<DeliveryItem> append(
+                DeliveryItem exactItem) {
+            requirePrepared("append");
+            return preparedAdmission.tryAppend(exactItem, 0L);
+        }
+
+        private synchronized void select(
+                List<DeliveryItem> exactItems,
+                long exactPredictionMs,
+                PrefillTimePredictor.Evaluator exactEvaluator,
+                DeliveryItem exactBlockedItem,
+                CapacityBoundary exactBlockedResult) {
+            requirePrepared("select");
+            items = List.copyOf(exactItems);
+            predictedMs = exactPredictionMs;
+            evaluator = exactEvaluator;
+            blockedItem = exactBlockedItem;
+            blockedResult = exactBlockedResult;
         }
 
         @Override
@@ -575,11 +469,83 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return items;
         }
 
-        public long batchId() {
+        @Override
+        public DeliveryItem blockedItem() {
+            return blockedItem;
+        }
+
+        @Override
+        public CapacityBoundary blockedResult() {
+            return blockedResult;
+        }
+
+        @Override
+        public synchronized void commitUnderLock() {
+            requirePrepared("commit");
+            if (items.isEmpty()) {
+                throw new IllegalStateException(
+                        "empty batch transaction cannot commit");
+            }
+            committedAdmission = preparedAdmission.commitPreparedUnderLock(
+                    items, predictedMs);
+            preparedAdmission = null;
+            phase = Phase.COMMITTED;
+        }
+
+        @Override
+        public synchronized void handoff(DeliveryMetadata metadata) {
+            requirePhase(Phase.COMMITTED, "deliver");
+            try {
+                owner.deliverCommitted(this, metadata);
+            } catch (Throwable failure) {
+                if (phase != Phase.COMMITTED) {
+                    throw propagate(failure);
+                }
+                Throwable cleanup = owner.failCommitted(this, failure);
+                if (cleanup != null && cleanup != failure) {
+                    failure.addSuppressed(cleanup);
+                }
+                phase = Phase.TERMINAL;
+                throw propagate(failure);
+            }
+            if (phase == Phase.COMMITTED) {
+                phase = Phase.TERMINAL;
+            }
+        }
+
+        @Override
+        public synchronized void abort(Throwable cause) {
+            if (phase != Phase.COMMITTED) {
+                return;
+            }
+            Throwable cleanup = owner.failCommitted(this, cause);
+            phase = Phase.TERMINAL;
+            if (cleanup != null) {
+                throw propagate(cleanup);
+            }
+        }
+
+        @Override
+        public synchronized void close() {
+            if (phase != Phase.PREPARED) {
+                return;
+            }
+            phase = Phase.TERMINAL;
+            Throwable failure = BatchDeliveryStrategy.close(preparedAdmission);
+            preparedAdmission = null;
+            failure = BatchDeliveryStrategy.append(
+                    failure, BatchDeliveryStrategy.close(submission));
+            submission = null;
+            if (failure != null) {
+                throw propagate(failure);
+            }
+        }
+
+        private long batchId() {
             return batchId;
         }
 
-        public long predictedMs() {
+        private long predictedMs() {
             return predictedMs;
         }
 
@@ -587,79 +553,30 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return evaluator;
         }
 
-        @Override
-        public synchronized void deliver(
-                DeliveryMetadata metadata) {
-            if (phase != DeliveryPhase.COMMITTED) {
-                throw new IllegalStateException(
-                        "batch cannot deliver in " + phase);
-            }
-            try {
-                owner.deliverCommitted(this, metadata);
-            } catch (Throwable failure) {
-                if (phase != DeliveryPhase.COMMITTED) {
-                    throw propagate(failure);
-                }
-                Throwable cleanup = owner.failCommitted(this, failure);
-                if (cleanup != null && cleanup != failure) {
-                    failure.addSuppressed(cleanup);
-                }
-                phase = DeliveryPhase.TERMINAL;
-                throw propagate(failure);
-            }
-            if (phase == DeliveryPhase.COMMITTED) {
-                phase = DeliveryPhase.TERMINAL;
-            }
-        }
-
-        @Override
-        public synchronized void failBeforeDelivery(Throwable cause) {
-            if (phase != DeliveryPhase.COMMITTED) {
-                return;
-            }
-            Throwable cleanup = owner.failCommitted(this, cause);
-            phase = DeliveryPhase.TERMINAL;
-            if (cleanup != null) {
-                throw propagate(cleanup);
-            }
-        }
-
         private boolean transferToEndpoint(DeliveryItem exactItem) {
-            if (phase != DeliveryPhase.COMMITTED) {
-                throw new IllegalStateException(
-                        "batch admission cannot transfer in " + phase);
-            }
-            return admission.transferToEndpoint(exactItem);
+            requirePhase(Phase.COMMITTED, "transfer admission");
+            return committedAdmission.transferToEndpoint(exactItem);
         }
 
         private void submit(
                 BatchSubmissionPort.Command command,
                 BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer) {
-            if (phase != DeliveryPhase.COMMITTED) {
-                throw new IllegalStateException(
-                        "batch cannot submit in " + phase);
-            }
+            requirePhase(Phase.COMMITTED, "submit");
             submission.submitBatch(command, observer);
         }
 
         private void transportAccepted() {
-            if (phase != DeliveryPhase.COMMITTED) {
-                throw new IllegalStateException(
-                        "batch transport cannot accept in " + phase);
-            }
-            phase = DeliveryPhase.INFLIGHT;
+            requirePhase(Phase.COMMITTED, "accept transport");
+            phase = Phase.INFLIGHT;
         }
 
         private void transportFailed() {
-            if (phase != DeliveryPhase.COMMITTED) {
-                throw new IllegalStateException(
-                        "batch transport cannot fail in " + phase);
-            }
-            phase = DeliveryPhase.TERMINAL;
+            requirePhase(Phase.COMMITTED, "fail transport");
+            phase = Phase.TERMINAL;
         }
 
         private boolean transportOwned() {
-            return phase == DeliveryPhase.INFLIGHT;
+            return phase == Phase.INFLIGHT;
         }
 
         private void closeCapabilities() {
@@ -672,7 +589,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             try {
                 closeSubmission();
             } catch (Throwable submissionFailure) {
-                failure = append(failure, submissionFailure);
+                failure = BatchDeliveryStrategy.append(
+                        failure, submissionFailure);
             }
             if (failure != null) {
                 throw propagate(failure);
@@ -680,9 +598,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         private void closeAdmission() {
-            PrefillAdmissionPort.CommittedAdmission exactAdmission = admission;
+            PrefillAdmissionPort.CommittedAdmission exactAdmission =
+                    committedAdmission;
             if (exactAdmission != null) {
-                admission = null;
+                committedAdmission = null;
                 exactAdmission.close();
             }
         }
@@ -692,6 +611,22 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             if (exactSubmission != null) {
                 submission = null;
                 exactSubmission.close();
+            }
+        }
+
+        private void requirePrepared(String operation) {
+            if (phase != Phase.PREPARED
+                    || preparedAdmission == null
+                    || submission == null) {
+                throw new IllegalStateException(
+                        "cannot " + operation + " batch transaction in " + phase);
+            }
+        }
+
+        private void requirePhase(Phase expected, String operation) {
+            if (phase != expected) {
+                throw new IllegalStateException(
+                        "cannot " + operation + " batch transaction in " + phase);
             }
         }
     }

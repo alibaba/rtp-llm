@@ -408,7 +408,7 @@ final class GroupPolicyTestSupport {
         }
 
         @Override
-        public PreparedDelivery prepare(
+        public Transaction prepare(
                 List<DeliveryItem> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
@@ -433,13 +433,11 @@ final class GroupPolicyTestSupport {
             }
             List<DeliveryItem> preparedCandidates = List.copyOf(
                     exactCandidates.subList(0, preparedCount));
-            SelectionBoundary suffixBoundary =
-                    preparedCount < exactCandidates.size()
-                            ? new SelectionBoundary(
-                                    exactCandidates.get(preparedCount),
-                                    new CapacityBoundary.Unavailable(
-                                            availability, blockSemantics))
-                            : null;
+            DeliveryItem blockedItem = preparedCount < exactCandidates.size()
+                    ? exactCandidates.get(preparedCount) : null;
+            CapacityBoundary blockedResult = blockedItem == null
+                    ? null : new CapacityBoundary.Unavailable(
+                            availability, blockSemantics);
 
             List<PrefillWorkLedger.RouteReservation> reservations =
                     new ArrayList<>(preparedCandidates.size());
@@ -456,39 +454,14 @@ final class GroupPolicyTestSupport {
                 }
                 reservations.add(result.reservation());
             }
-            TestCommittedDelivery owner = new TestCommittedDelivery(
+            return new RecordingTransaction(
                     preparedCandidates,
                     reservations,
                     registry,
                     committedGroups,
-                    committedMetadata);
-            return new PreparedDelivery() {
-                private boolean committed;
-
-                @Override
-                public List<DeliveryItem> items() {
-                    return preparedCandidates;
-                }
-
-                @Override
-                public SelectionBoundary boundary() {
-                    return suffixBoundary;
-                }
-
-                @Override
-                public Handoff commitOwnershipUnderLock() {
-                    owner.commitUnderLock();
-                    committed = true;
-                    return owner;
-                }
-
-                @Override
-                public void close() {
-                    if (!committed) {
-                        closeReservations(reservations);
-                    }
-                }
-            };
+                    committedMetadata,
+                    blockedItem,
+                    blockedResult);
         }
 
         @Override
@@ -557,33 +530,35 @@ final class GroupPolicyTestSupport {
 
     }
 
-    private static final class TestCommittedDelivery
-            implements DeliveryStrategy.Handoff {
+    private static final class RecordingTransaction
+            implements DeliveryStrategy.Transaction {
 
         private final List<DeliveryItem> items;
         private final List<PrefillWorkLedger.RouteReservation> reservations;
         private final PrefillWorkRegistry registry;
         private final List<List<Long>> committedGroups;
         private final List<DeliveryMetadata> committedMetadata;
+        private final DeliveryItem blockedItem;
+        private final CapacityBoundary blockedResult;
         private final AtomicBoolean resolved = new AtomicBoolean();
         private List<PrefillWorkLedger.CommittedHandoff> handoffs = List.of();
+        private boolean committed;
 
-        private TestCommittedDelivery(
+        private RecordingTransaction(
                 List<DeliveryItem> items,
                 List<PrefillWorkLedger.RouteReservation> reservations,
                 PrefillWorkRegistry registry,
                 List<List<Long>> committedGroups,
-                List<DeliveryMetadata> committedMetadata) {
+                List<DeliveryMetadata> committedMetadata,
+                DeliveryItem blockedItem,
+                CapacityBoundary blockedResult) {
             this.items = List.copyOf(items);
             this.reservations = List.copyOf(reservations);
             this.registry = registry;
             this.committedGroups = committedGroups;
             this.committedMetadata = committedMetadata;
-        }
-
-        private void commitUnderLock() {
-            handoffs = reservations.getFirst().commitGroupUnderLock(
-                    items, reservations);
+            this.blockedItem = blockedItem;
+            this.blockedResult = blockedResult;
         }
 
         @Override
@@ -592,7 +567,24 @@ final class GroupPolicyTestSupport {
         }
 
         @Override
-        public void deliver(DeliveryMetadata metadata) {
+        public DeliveryItem blockedItem() {
+            return blockedItem;
+        }
+
+        @Override
+        public CapacityBoundary blockedResult() {
+            return blockedResult;
+        }
+
+        @Override
+        public void commitUnderLock() {
+            handoffs = reservations.getFirst().commitGroupUnderLock(
+                    items, reservations);
+            committed = true;
+        }
+
+        @Override
+        public void handoff(DeliveryMetadata metadata) {
             committedGroups.add(items.stream()
                     .map(DeliveryItem::requestId)
                     .toList());
@@ -601,8 +593,15 @@ final class GroupPolicyTestSupport {
         }
 
         @Override
-        public void failBeforeDelivery(Throwable cause) {
+        public void abort(Throwable cause) {
             settle();
+        }
+
+        @Override
+        public void close() {
+            if (!committed) {
+                RecordingDeliveryStrategy.closeReservations(reservations);
+            }
         }
 
         private void settle() {
@@ -622,26 +621,39 @@ final class GroupPolicyTestSupport {
         }
     }
 
-    static DeliveryStrategy.PreparedDelivery boundaryOnly(
+    static DeliveryStrategy.Transaction boundaryOnly(
             DeliveryItem item,
             CapacityBoundary boundary) {
-        DeliveryStrategy.SelectionBoundary exactBoundary =
-                new DeliveryStrategy.SelectionBoundary(item, boundary);
-        return new DeliveryStrategy.PreparedDelivery() {
+        return new DeliveryStrategy.Transaction() {
             @Override
             public List<DeliveryItem> items() {
                 return List.of();
             }
 
             @Override
-            public DeliveryStrategy.SelectionBoundary boundary() {
-                return exactBoundary;
+            public DeliveryItem blockedItem() {
+                return item;
             }
 
             @Override
-            public DeliveryStrategy.Handoff commitOwnershipUnderLock() {
+            public CapacityBoundary blockedResult() {
+                return boundary;
+            }
+
+            @Override
+            public void commitUnderLock() {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot commit");
+            }
+
+            @Override
+            public void handoff(DeliveryMetadata metadata) {
+                throw new IllegalStateException(
+                        "boundary-only preparation cannot hand off");
+            }
+
+            @Override
+            public void abort(Throwable cause) {
             }
 
             @Override

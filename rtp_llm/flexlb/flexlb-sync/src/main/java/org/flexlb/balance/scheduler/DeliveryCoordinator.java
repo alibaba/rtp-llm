@@ -17,16 +17,6 @@ import java.util.OptionalLong;
  */
 final class DeliveryCoordinator {
 
-    record CommittedSelection(
-            DeliveryStrategy.Handoff handoff,
-            BatcherCycleResult.Admitted result) {
-
-        CommittedSelection {
-            Objects.requireNonNull(handoff, "handoff");
-            Objects.requireNonNull(result, "result");
-        }
-    }
-
     private final String workerKey;
     private final DeliveryStrategy mode;
 
@@ -45,22 +35,26 @@ final class DeliveryCoordinator {
             return BatcherCycleResult.Outcome.NO_ACTION;
         }
 
-        try (DeliveryStrategy.PreparedDelivery prepared = mode.prepare(
+        try (DeliveryStrategy.Transaction transaction = mode.prepare(
                 deliveryItems(candidates), evaluator, plannedPredictionMs)) {
-            if (prepared.items().isEmpty()) {
-                return queue.commitBoundary(prepared.boundary());
+            if (transaction.items().isEmpty()) {
+                return queue.commitBoundary(
+                        transaction.blockedItem(),
+                        transaction.blockedResult());
             }
 
-            CommittedSelection committed = queue.commitPreparedSelection(
-                    prepared, proposedMetadata.decisionReason());
-            if (committed == null) {
+            BatcherCycleResult.Admitted admitted =
+                    queue.commitPreparedSelection(
+                            transaction,
+                            proposedMetadata.decisionReason());
+            if (admitted == null) {
                 return BatcherCycleResult.Outcome.NO_ACTION;
             }
 
             // Only the lock-linearized result owns handoff metadata. In
             // particular, a capacity prefix changes both reason and depth.
-            handoff(committed.handoff(), committed.result().metadata());
-            return committed.result();
+            handoff(transaction, admitted.metadata());
+            return admitted;
         }
     }
 
@@ -75,11 +69,11 @@ final class DeliveryCoordinator {
     }
 
     private void handoff(
-            DeliveryStrategy.Handoff handoff,
+            DeliveryStrategy.Transaction transaction,
             DeliveryMetadata metadata) {
         Throwable deliveryFailure = null;
         try {
-            handoff.deliver(metadata);
+            transaction.handoff(metadata);
         } catch (Throwable failure) {
             deliveryFailure = failure;
         }
@@ -88,7 +82,7 @@ final class DeliveryCoordinator {
                 : new IllegalStateException(
                         "delivery returned without resolving owner");
         try {
-            handoff.failBeforeDelivery(unresolved);
+            transaction.abort(unresolved);
         } catch (Throwable cleanupFailure) {
             if (deliveryFailure == null) {
                 deliveryFailure = cleanupFailure;

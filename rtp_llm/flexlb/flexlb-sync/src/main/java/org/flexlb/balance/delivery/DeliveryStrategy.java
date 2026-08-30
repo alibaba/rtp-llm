@@ -14,7 +14,7 @@ import java.util.OptionalLong;
 public interface DeliveryStrategy {
 
     /** Reserve the largest feasible prefix without mutating queue ownership. */
-    PreparedDelivery prepare(
+    Transaction prepare(
             List<DeliveryItem> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs);
@@ -30,37 +30,26 @@ public interface DeliveryStrategy {
     /** Pure projection behavior paired with this live delivery strategy. */
     RouteProjection.DeliveryProjection projectionPolicy();
 
-    /**
-     * One invocation's pre-commit transaction. Closing releases every resource
-     * that has not crossed the queue commit boundary.
-     */
-    interface PreparedDelivery extends AutoCloseable {
+    /** One delivery transaction across prepare, queue commit, and handoff. */
+    interface Transaction extends AutoCloseable {
 
         List<DeliveryItem> items();
 
-        /** First candidate not covered by the prepared prefix, if any. */
-        SelectionBoundary boundary();
+        /** First candidate not covered by this transaction, if any. */
+        DeliveryItem blockedItem();
 
-        /** Move all prepared resources to one post-commit owner. */
-        Handoff commitOwnershipUnderLock();
+        CapacityBoundary blockedResult();
+
+        /** Cross the canonical queue commit while its lock is held. */
+        void commitUnderLock();
+
+        /** Transfer committed ownership to the configured delivery mode. */
+        void handoff(DeliveryMetadata metadata);
+
+        /** Resolve any committed ownership that handoff did not transfer. */
+        void abort(Throwable cause);
 
         @Override
         void close();
-    }
-
-    /** Sole owner after the canonical queue commit. */
-    interface Handoff {
-
-        List<DeliveryItem> items();
-
-        void deliver(DeliveryMetadata metadata);
-
-        void failBeforeDelivery(Throwable cause);
-    }
-
-    /** First candidate not covered by the prepared prefix. */
-    record SelectionBoundary(
-            DeliveryItem item,
-            CapacityBoundary result) {
     }
 }

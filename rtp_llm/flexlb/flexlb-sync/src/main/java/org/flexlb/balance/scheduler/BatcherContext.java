@@ -484,8 +484,7 @@ class BatcherContext {
             return operation.get();
         } catch (InvalidPrefillPredictionException failure) {
             return commitBoundary(
-                    new DeliveryStrategy.SelectionBoundary(
-                            exactHead, new CapacityBoundary.Failed(failure)));
+                    exactHead, new CapacityBoundary.Failed(failure));
         }
     }
 
@@ -493,13 +492,12 @@ class BatcherContext {
         return candidateSelectionStillOwned(candidates);
     }
 
-    DeliveryCoordinator.CommittedSelection commitPreparedSelection(
-            DeliveryStrategy.PreparedDelivery selection,
+    BatcherCycleResult.Admitted commitPreparedSelection(
+            DeliveryStrategy.Transaction transaction,
             String decisionReason) {
-        List<BatchItem> items = batchItems(selection.items());
+        List<BatchItem> items = batchItems(transaction.items());
         assert !items.isEmpty()
                 : "prepared selection commit requires a non-empty selection";
-        DeliveryStrategy.Handoff committedOwner = null;
         BatcherCycleResult.Admitted admittedResult = null;
         RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         Throwable postCommitFailure = null;
@@ -515,16 +513,14 @@ class BatcherContext {
                     return null;
                 }
             }
-            committedOwner = Objects.requireNonNull(
-                    selection.commitOwnershipUnderLock(), "committed owner");
+            transaction.commitUnderLock();
             try {
-                DeliveryStrategy.SelectionBoundary boundary =
-                        selection.boundary();
                 removedBoundary = removeSelectionBoundaryUnderLock(
-                        boundary, nowMs);
+                        transaction.blockedItem(),
+                        transaction.blockedResult(),
+                        nowMs);
                 queueVersion.incrementAndGet();
-                String committedReason = boundary != null
-                        && boundary.result()
+                String committedReason = transaction.blockedResult()
                         instanceof CapacityBoundary.Unavailable
                         ? "delivery_capacity_prefix" : decisionReason;
                 admittedResult = new BatcherCycleResult.Admitted(
@@ -546,15 +542,14 @@ class BatcherContext {
                 failure = appendFailure(failure, notificationFailure);
             }
             try {
-                committedOwner.failBeforeDelivery(failure);
+                transaction.abort(failure);
             } catch (Throwable ownerFailure) {
                 failure = appendFailure(failure, ownerFailure);
             }
             throw propagateCommitFailure(failure);
         }
         notifyTerminalAdmissionFailure(removedBoundary);
-        return new DeliveryCoordinator.CommittedSelection(
-                committedOwner, Objects.requireNonNull(admittedResult));
+        return Objects.requireNonNull(admittedResult);
     }
 
     private static Throwable appendFailure(
@@ -581,7 +576,8 @@ class BatcherContext {
     }
 
     BatcherCycleResult commitBoundary(
-            DeliveryStrategy.SelectionBoundary boundary) {
+            DeliveryItem blockedItem,
+            CapacityBoundary blockedResult) {
         BatcherCycleResult result = BatcherCycleResult.Outcome.NO_ACTION;
         RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         queueLock.lock();
@@ -590,13 +586,13 @@ class BatcherContext {
                 return result;
             }
             long nowMs = now();
-            if (boundary.result()
+            if (blockedResult
                     instanceof CapacityBoundary.Unavailable unavailable) {
                 result = resolveEmptyCapacityUnderLock(
-                        (BatchItem) boundary.item(), unavailable, nowMs);
+                        (BatchItem) blockedItem, unavailable, nowMs);
             } else {
                 removedBoundary = removeSelectionBoundaryUnderLock(
-                        boundary, nowMs);
+                        blockedItem, blockedResult, nowMs);
                 if (removedBoundary.wasRemoved()) {
                     queueVersion.incrementAndGet();
                     result = BatcherCycleResult.Outcome.QUEUE_CHANGED;
@@ -624,24 +620,25 @@ class BatcherContext {
 
     /** Caller holds queueLock. */
     private RemovedTerminalBoundary removeSelectionBoundaryUnderLock(
-            DeliveryStrategy.SelectionBoundary boundary,
+            DeliveryItem blockedItem,
+            CapacityBoundary blockedResult,
             long nowMs) {
         // OwnershipLost is not a terminal fact. In particular, the request's
         // admission mutation may still be closing after publishing the exact
         // queue item. Removing it here would leave RequestLifecycle QUEUED
         // without either a queue owner or a terminal callback.
-        if (boundary == null
-                || boundary.result() instanceof CapacityBoundary.Unavailable
-                || boundary.result() == CapacityBoundary.OwnershipLost.INSTANCE) {
+        if (blockedItem == null
+                || blockedResult instanceof CapacityBoundary.Unavailable
+                || blockedResult == CapacityBoundary.OwnershipLost.INSTANCE) {
             return RemovedTerminalBoundary.NONE;
         }
-        BatchItem item = (BatchItem) boundary.item();
+        BatchItem item = (BatchItem) blockedItem;
         if (!containsIdentity(item)
                 || item.requestExpired(nowMs)
                 || !removeTerminalActiveUnderLock(item)) {
             return RemovedTerminalBoundary.NONE;
         }
-        Throwable failure = boundary.result()
+        Throwable failure = blockedResult
                 instanceof CapacityBoundary.Failed failed
                 ? failed.cause() : null;
         return new RemovedTerminalBoundary(item, failure);

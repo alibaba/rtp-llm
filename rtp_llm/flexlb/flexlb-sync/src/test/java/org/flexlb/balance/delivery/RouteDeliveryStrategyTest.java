@@ -177,7 +177,7 @@ class RouteDeliveryStrategyTest {
         assertEquals(1, fixture.admission.preparedCloseCount());
         assertTrue(fixture.admission.committedItems().isEmpty());
         assertTrue(fixture.telemetry.routes().isEmpty());
-        assertSame(null, fixture.context.published());
+        assertSame(null, fixture.context.publishedMetadata());
     }
 
     private static final class Fixture {

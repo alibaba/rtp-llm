@@ -46,15 +46,16 @@ final class DeliveryStrategyTestSupport {
             long hitCache) implements DeliveryItem {
     }
 
+    record TestBoundary(DeliveryItem item, CapacityBoundary result) {
+    }
+
     static final class TestContext {
 
         private boolean owned = true;
         private boolean commit = true;
-        private boolean autoDeliver = true;
-        private DeliveryStrategy.PreparedDelivery preparedSelection;
-        private DeliveryStrategy.SelectionBoundary committedBoundary;
-        private DeliveryStrategy.SelectionBoundary emptyBoundary;
-        private DeliveryStrategy.Handoff published;
+        private DeliveryStrategy.Transaction preparedSelection;
+        private TestBoundary committedBoundary;
+        private TestBoundary emptyBoundary;
         private DeliveryMetadata publishedMetadata;
 
         String deliver(
@@ -65,22 +66,26 @@ final class DeliveryStrategyTestSupport {
             if (candidates.isEmpty() || !owned) {
                 return "NO_ACTION";
             }
-            try (DeliveryStrategy.PreparedDelivery prepared = strategy.prepare(
+            try (DeliveryStrategy.Transaction transaction = strategy.prepare(
                     candidates, EVALUATOR, plannedPredictionMs)) {
-                if (prepared.items().isEmpty()) {
-                    emptyBoundary = prepared.boundary();
+                if (transaction.items().isEmpty()) {
+                    emptyBoundary = new TestBoundary(
+                            transaction.blockedItem(),
+                            transaction.blockedResult());
                     return "BOUNDARY";
                 }
-                preparedSelection = prepared;
-                committedBoundary = prepared.boundary();
+                preparedSelection = transaction;
+                if (transaction.blockedItem() != null) {
+                    committedBoundary = new TestBoundary(
+                            transaction.blockedItem(),
+                            transaction.blockedResult());
+                }
                 if (!commit) {
                     return "NOT_COMMITTED";
                 }
-                published = prepared.commitOwnershipUnderLock();
+                transaction.commitUnderLock();
                 publishedMetadata = metadata;
-                if (autoDeliver) {
-                    published.deliver(metadata);
-                }
+                transaction.handoff(metadata);
                 return "COMMITTED";
             }
         }
@@ -93,24 +98,16 @@ final class DeliveryStrategyTestSupport {
             commit = value;
         }
 
-        void autoDeliver(boolean value) {
-            autoDeliver = value;
-        }
-
-        DeliveryStrategy.PreparedDelivery preparedSelection() {
+        DeliveryStrategy.Transaction preparedSelection() {
             return preparedSelection;
         }
 
-        DeliveryStrategy.SelectionBoundary committedBoundary() {
+        TestBoundary committedBoundary() {
             return committedBoundary;
         }
 
-        DeliveryStrategy.SelectionBoundary emptyBoundary() {
+        TestBoundary emptyBoundary() {
             return emptyBoundary;
-        }
-
-        DeliveryStrategy.Handoff published() {
-            return published;
         }
 
         DeliveryMetadata publishedMetadata() {

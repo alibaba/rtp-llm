@@ -222,7 +222,7 @@ class PrefillGenerationQueueTest {
                 };
 
         @Override
-        public PreparedDelivery prepare(
+        public Transaction prepare(
                 List<DeliveryItem> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
