@@ -7,7 +7,6 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
-import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -97,15 +96,9 @@ public class EngineAddressResolver {
         if (hostList == null || hostList.isEmpty()) {
             domainHostsMap.remove(endpoint);
         } else {
-            // VipServer reports the gRPC port for GRPC endpoints. Engine clients consume
-            // HTTP-port-shaped addresses and apply CommonUtils.toGrpcPort, so normalize
-            // discovery results here before publishing them.
-            boolean isGrpcProtocol = BackendServiceProtocolEnum.GRPC.getName()
-                    .equalsIgnoreCase(endpoint.getProtocol());
             List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
-                int port = isGrpcProtocol ? host.getPort() - 1 : host.getPort();
-                ipPortList.add(host.getIp() + ":" + port);
+                ipPortList.add(host.getIpPort());
             }
             domainHostsMap.put(endpoint, ipPortList);
         }

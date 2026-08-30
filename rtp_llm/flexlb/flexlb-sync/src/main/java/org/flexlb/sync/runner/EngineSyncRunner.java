@@ -11,7 +11,6 @@ import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.util.CommonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -146,7 +145,8 @@ public class EngineSyncRunner implements Runnable {
                     try {
                         logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                                = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                                = new GrpcWorkerStatusRunner(modelName, workerIpPort, host.getWorkerStatusPort(),
+                                site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
                                 syncRequestTimeoutMs, priorityScheduler, endpointRegistry,
                                 statusCheckExecutor, localKvCacheAwareManager);
@@ -231,7 +231,7 @@ public class EngineSyncRunner implements Runnable {
             workerStatus = new WorkerStatus();
             workerStatus.setIp(host.getIp());
             workerStatus.setPort(host.getPort());
-            workerStatus.setGrpcPort(host.getWorkerStatusPort());
+            workerStatus.setGrpcPort(host.getGrpcPort());
             workerStatus.setRole(roleType);
             workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             workerStatuses.put(workerIpPort, workerStatus);
@@ -255,10 +255,6 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private void ensureEndpoint(String ipPort, WorkerStatus workerStatus) {
-        int httpPort = workerStatus.getPort();
-        int grpcPort = CommonUtils.toGrpcPort(httpPort);
-        workerStatus.setGrpcPort(grpcPort);
-
         if (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION) {
             long dpSize = workerStatus.getDpSize();
             if (dpSize > 1) {

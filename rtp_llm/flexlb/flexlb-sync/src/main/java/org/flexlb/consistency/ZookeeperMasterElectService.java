@@ -15,6 +15,7 @@ import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.utils.CloseableUtils;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
@@ -51,6 +52,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private final GeneralHttpNettyService generalHttpNettyService;
     private final EngineHealthReporter engineHealthReporter;
     private final Environment environment;
+    private final DeploymentIdentity deploymentIdentity;
     @Setter
     private String roleId;
     @Setter
@@ -72,13 +74,15 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
                                        EngineHealthReporter engineHealthReporter,
                                        Environment environment,
-                                       ConfigService configService) {
+                                       ConfigService configService,
+                                       DeploymentIdentity deploymentIdentity) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
         this.generalHttpNettyService = generalHttpNettyService;
         this.engineHealthReporter = engineHealthReporter;
         this.environment = environment;
+        this.deploymentIdentity = deploymentIdentity;
         this.consistencyConfig = configService.loadBalanceConfig().getConsistency()
                 instanceof ZookeeperConsistencyConfig zookeeper
                 ? zookeeper
@@ -100,10 +104,7 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     private void initializeRoleId() {
-        roleId = System.getenv("HIPPO_ROLE");
-        if (StringUtils.isBlank(roleId)) {
-            throw new RuntimeException("Environment variable HIPPO_ROLE is not set or is blank");
-        }
+        roleId = deploymentIdentity.getDeploymentId();
     }
 
     private void initializeIpAndPort() {
