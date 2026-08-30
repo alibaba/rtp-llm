@@ -24,8 +24,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
@@ -289,7 +288,7 @@ protected:
         createDevice();
 
         cache_config_ = createMockCacheConfig();
-        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
 
         const int server_num = 4;
@@ -3089,7 +3088,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
         + 256;
     kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 512);
 
-    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     connector_ = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
     ASSERT_TRUE(connector_->init());
@@ -3486,7 +3485,7 @@ private:
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_CreatesDualPools) {
     auto cfg   = createHybridCacheConfig();
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
 
@@ -3512,7 +3511,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
                                            /*local_head_num_kv=*/8,
                                            /*size_per_head=*/128);
 
-    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(config);
 
@@ -3525,7 +3524,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
@@ -3588,7 +3587,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit)
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
@@ -3628,7 +3627,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_StopsOnDoubleMiss) {
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
@@ -3645,7 +3644,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, PoolSizing_JointCalculation) {
 TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRatioOnSameMount) {
     DiskTempDir disk0;
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
@@ -3669,7 +3668,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, InitDiskDualPools_MirrorsMemoryPoolRa
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoolWhenMemoryKindIsFull) {
     DiskTempDir disk0;
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
 
     auto kv_cfg = makeDiskKvConfig({disk0.path()}, /*disk_size_mb=*/1);
@@ -3708,7 +3707,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, AllocateOneBackingUsesMatchingDiskPoo
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncompleteWhenIncompletePoolDisabled) {
     auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/1);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
@@ -3735,7 +3734,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, BuildCopyPlanForWrite_SkipsIncomplete
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, CacheKeys_MergesBothCaches) {
     auto cfg   = createHybridCacheConfig(/*layer_num=*/2);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());
@@ -3778,7 +3777,7 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_IncompletePoolTracksCompletePool
     const int spb         = 8;
 
     auto cfg   = createHybridCacheConfig(layer_num, block_num, spb, linear_step);
-    allocator_ = std::make_shared<HybridTypeKVCacheAllocator>(cfg, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cfg, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     auto conn = createConnector(cfg);
     ASSERT_TRUE(conn->isDualPool());

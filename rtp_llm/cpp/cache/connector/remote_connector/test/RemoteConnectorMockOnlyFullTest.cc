@@ -1,5 +1,5 @@
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -119,7 +119,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
@@ -192,6 +192,44 @@ TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAnd
     coordinator->update_thread_->stop();
     coordinator->update_thread_.reset();
     coordinator.reset();
+}
+
+TEST_F(RemoteConnectorMockOnlyFullTest, ManagerRegistersOrdinarySingleFullHybridPoolWithRemoteConnector) {
+    ASSERT_FALSE(cache_config_.use_independent_block_pools);
+    ASSERT_EQ(cache_config_.groupNums(), 1);
+
+    auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
+    meta_clients_.push_back(meta_client.get());
+    EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
+        .WillOnce(
+            Invoke([&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
+
+    KVCacheConfig manager_kv_config       = kv_cache_config_;
+    manager_kv_config.reuse_cache         = true;
+    manager_kv_config.enable_remote_cache = true;
+    auto manager                          = std::make_shared<KVCacheManager>(cache_config_,
+                                                    /*warmup=*/false,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    manager_kv_config,
+                                                    parallelism_config_,
+                                                    runtime_config_,
+                                                    sp_config_);
+
+    ASSERT_TRUE(manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 1u);
+    const auto sole_pool = allocator->soleGroupBlockPool();
+    ASSERT_NE(sole_pool, nullptr);
+
+    auto coordinator = manager->connectorCoordinator();
+    ASSERT_NE(coordinator, nullptr);
+    ASSERT_NE(coordinator->remote_connector_, nullptr);
+    EXPECT_EQ(coordinator->remote_connector_->init_params_->register_buffer_addr, sole_pool->getBaseAddress());
+    EXPECT_EQ(coordinator->remote_connector_->init_params_->register_buffer_size, sole_pool->getTotalSizeBytes());
+    EXPECT_NE(
+        dynamic_cast<remote_connector::FullLayerGroupPolicy*>(coordinator->remote_connector_->group_policy_.get()),
+        nullptr);
 }
 #endif
 

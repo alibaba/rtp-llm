@@ -13,12 +13,13 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -134,6 +135,26 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
     return mc;
+}
+
+static ModelConfig makeOrdinaryMtpModelConfig(uint32_t        num_layers,
+                                              uint32_t        kv_head_num,
+                                              uint32_t        size_per_head,
+                                              KvCacheDataType kv_cache_dtype) {
+    ModelConfig config;
+    config.num_layers                   = static_cast<int64_t>(num_layers);
+    config.max_seq_len                  = 128;
+    config.hidden_size                  = 64;
+    config.vocab_size                   = 1024;
+    config.data_type                    = DataType::TYPE_FP16;
+    config.attn_config.head_num         = 4;
+    config.attn_config.kv_head_num      = static_cast<int>(kv_head_num);
+    config.attn_config.size_per_head    = static_cast<int>(size_per_head);
+    config.attn_config.tokens_per_block = 4;
+    config.attn_config.use_mla          = false;
+    config.attn_config.kv_cache_dtype   = kv_cache_dtype;
+    setDefaultKvCacheSpec(config);
+    return config;
 }
 
 static ModelConfig makeProModelConfig() {
@@ -416,6 +437,116 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     // Per-pool totalBlocksNum = group_block_nums[gid] - 1 (block 0 reserved).
     EXPECT_EQ(allocator->groupBlockPools()[0]->totalBlocksNum(), 6u - 1u);
     EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, OrdinarySingleMtpUsesExactMainAndProposeMemoryLayouts) {
+    auto score_config = makeOrdinaryMtpModelConfig(
+        /*num_layers=*/2, /*kv_head_num=*/1, /*size_per_head=*/8, KvCacheDataType::BASE);
+    auto propose_config = makeOrdinaryMtpModelConfig(
+        /*num_layers=*/1, /*kv_head_num=*/2, /*size_per_head=*/16, KvCacheDataType::FP8);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 6;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+    auto config                 = CacheConfigCreator::createSpConfig(score_config,
+                                                     propose_config,
+                                                     ParallelismConfig{},
+                                                     RuntimeConfig{},
+                                                     kv_cache_config,
+                                                     sp_config,
+                                                     /*warm_up_result=*/std::nullopt,
+                                                     /*is_mtp=*/true,
+                                                     /*is_eagle=*/false);
+
+    ASSERT_FALSE(config.use_independent_block_pools);
+    ASSERT_EQ(config.groupNums(), 1);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.layer_num, 2u);
+    ASSERT_EQ(config.layer_all_num, 4u);
+
+    const auto legacy_contract = BlockPoolConfigHelper::createConfig(config);
+    ASSERT_EQ(legacy_contract.memory_layouts.size(), 3u);
+    EXPECT_EQ(legacy_contract.memory_layouts[0].layer_num, 2u);
+    EXPECT_EQ(legacy_contract.memory_layouts[1].layer_num, 1u);
+    EXPECT_EQ(legacy_contract.memory_layouts[2].layer_num, 1u);
+    EXPECT_EQ(legacy_contract.memory_layouts[0].kv_scale_stride_bytes, 0u);
+    EXPECT_GT(legacy_contract.memory_layouts[1].kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(legacy_contract.memory_layouts[1].kv_block_stride_bytes,
+              config.mtp_sub_configs[0]->specForGroup(0)->block_size_bytes());
+    EXPECT_NE(legacy_contract.memory_layouts[0].kv_block_stride_bytes,
+              legacy_contract.memory_layouts[1].kv_block_stride_bytes);
+
+    size_t expected_offset = 0;
+    for (const auto& memory_layout : legacy_contract.memory_layouts) {
+        EXPECT_EQ(memory_layout.kv_cache_offset_bytes, expected_offset);
+        expected_offset += memory_layout.kv_block_pool_size_bytes;
+        EXPECT_EQ(memory_layout.kv_scale_offset_bytes, expected_offset);
+        expected_offset += memory_layout.kv_scale_pool_size_bytes;
+    }
+    EXPECT_EQ(legacy_contract.total_size_bytes, expected_offset);
+
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    const auto pool = allocator->soleGroupBlockPool();
+    ASSERT_NE(pool, nullptr);
+
+    const auto& actual_contract = pool->config_;
+    ASSERT_EQ(actual_contract.memory_layouts.size(), legacy_contract.memory_layouts.size());
+    EXPECT_EQ(actual_contract.total_size_bytes, legacy_contract.total_size_bytes);
+    EXPECT_EQ(pool->getTotalSizeBytes(), legacy_contract.total_size_bytes);
+
+    const auto  all_layout = manager->allLayerCacheBase();
+    const auto& group      = all_layout.group("default");
+    ASSERT_EQ(group.activeLayerCount(), 4u);
+    const auto* pool_base = static_cast<const char*>(pool->getBaseAddress());
+
+    for (size_t global_layer = 0; global_layer < 4; ++global_layer) {
+        const size_t layout_id   = global_layer < 2 ? 0 : global_layer - 1;
+        const size_t local_layer = global_layer < 2 ? global_layer : 0;
+        const auto&  expected    = legacy_contract.memory_layouts[layout_id];
+        const auto&  actual      = actual_contract.memory_layouts[layout_id];
+        EXPECT_EQ(actual.layer_num, expected.layer_num);
+        EXPECT_EQ(actual.block_num, expected.block_num);
+        EXPECT_EQ(actual.kv_block_stride_bytes, expected.kv_block_stride_bytes);
+        EXPECT_EQ(actual.kv_scale_stride_bytes, expected.kv_scale_stride_bytes);
+        EXPECT_EQ(actual.kv_cache_offset_bytes, expected.kv_cache_offset_bytes);
+        EXPECT_EQ(actual.kv_scale_offset_bytes, expected.kv_scale_offset_bytes);
+
+        ASSERT_TRUE(group.hasLayer(global_layer));
+        const auto& layer = group.at(global_layer);
+        ASSERT_TRUE(layer.kv_addr.defined());
+        EXPECT_EQ(layer.kv_addr.sizes().vec(),
+                  (std::vector<int64_t>{
+                      static_cast<int64_t>(expected.block_num),
+                      static_cast<int64_t>(expected.kv_block_stride_bytes / rtp_llm::getTypeSize(expected.dtype))}));
+        EXPECT_EQ(layer.kv_addr.nbytes(), static_cast<size_t>(expected.block_num) * expected.kv_block_stride_bytes);
+
+        const auto block_addr       = allocator->convertIndexToAddr(static_cast<int>(global_layer), /*block_id=*/1);
+        const auto expected_kv_addr = pool_base + expected.kv_cache_offset_bytes
+                                      + local_layer * expected.block_num * expected.kv_block_stride_bytes
+                                      + expected.kv_block_stride_bytes;
+        EXPECT_EQ(block_addr.kv_addr, expected_kv_addr);
+
+        if (expected.hasScale()) {
+            ASSERT_TRUE(layer.kv_scale_addr.defined());
+            EXPECT_EQ(layer.kv_scale_addr.sizes().vec(),
+                      (std::vector<int64_t>{static_cast<int64_t>(expected.block_num),
+                                            static_cast<int64_t>(expected.kv_scale_stride_bytes / sizeof(float))}));
+            EXPECT_EQ(layer.kv_scale_addr.nbytes(),
+                      static_cast<size_t>(expected.block_num) * expected.kv_scale_stride_bytes);
+            const auto expected_scale_addr = pool_base + expected.kv_scale_offset_bytes
+                                             + local_layer * expected.block_num * expected.kv_scale_stride_bytes
+                                             + expected.kv_scale_stride_bytes;
+            EXPECT_EQ(block_addr.kv_scale_addr, expected_scale_addr);
+        } else {
+            EXPECT_FALSE(layer.kv_scale_addr.defined());
+            EXPECT_EQ(block_addr.kv_scale_addr, nullptr);
+        }
+    }
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, SingleFullCoordinatorSupportsInitAndIncrementalAllocation) {

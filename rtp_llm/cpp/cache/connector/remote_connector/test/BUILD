@@ -96,6 +96,7 @@ cc_test(
     target_compatible_with = cuda13_target_compatibility,
     deps = test_deps + [
         ":remote_connector_mock_base",
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/connector:connector",
     ],
 )

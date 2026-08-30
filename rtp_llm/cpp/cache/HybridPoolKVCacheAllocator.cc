@@ -53,7 +53,7 @@ HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&       
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio,
                                                        RoleType                           role_type):
-    HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
+    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
 
 BlockPoolPtr HybridPoolKVCacheAllocator::soleGroupBlockPool() const {
     RTP_LLM_CHECK_WITH_INFO(group_block_pools_.size() == 1,

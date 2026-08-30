@@ -13,7 +13,6 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -162,6 +161,48 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::vector<uint
     config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
 }
 
+static CacheConfig makeTwoLinearGroupManagerConfig(bool use_independent_block_pools) {
+    CacheConfig config;
+    config.dtype                       = DataType::TYPE_FP16;
+    config.layer_num                   = 2;
+    config.layer_all_num               = 2;
+    config.block_num                   = 4;
+    config.seq_size_per_block          = 2;
+    config.kernel_seq_size_per_block   = 2;
+    config.group_layer_num             = 1;
+    config.linear_step                 = 2;
+    config.use_independent_block_pools = use_independent_block_pools;
+
+    auto linear0 = makeResolvedLinearSpec(config.dtype,
+                                          /*local_num_k_heads=*/1,
+                                          /*local_num_v_heads=*/1,
+                                          /*head_k_dim=*/2,
+                                          /*head_v_dim=*/2,
+                                          /*conv_kernel_dim=*/2,
+                                          /*seq_size_per_block=*/2,
+                                          config.dtype,
+                                          config.dtype,
+                                          "linear0");
+    auto linear1 = makeResolvedLinearSpec(config.dtype,
+                                          /*local_num_k_heads=*/1,
+                                          /*local_num_v_heads=*/1,
+                                          /*head_k_dim=*/2,
+                                          /*head_v_dim=*/2,
+                                          /*conv_kernel_dim=*/2,
+                                          /*seq_size_per_block=*/2,
+                                          config.dtype,
+                                          config.dtype,
+                                          "linear1");
+    config.fromGroupedSpecs(
+        {linear0, linear1}, {{0}, {1}}, {CacheGroupType::LINEAR, CacheGroupType::LINEAR}, {"linear0", "linear1"});
+    config.kv_block_stride_bytes = linear0->block_size_bytes();
+    config.kv_block_size_bytes   = linear0->block_size_bytes() + linear1->block_size_bytes();
+    config.block_size_bytes      = config.kv_block_size_bytes;
+    config.layer_to_block_stride_bytes.assign(2, static_cast<int>(config.kv_block_stride_bytes));
+    setGroupBlockNumsForTest(config, {4, 4});
+    return config;
+}
+
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     auto              mc = makeDSV4ManagerFlashModelConfig();
@@ -279,6 +320,187 @@ static CompleteTokenIdsPtr makeDSV4CompleteTokenIds(int initial_seq_len, int max
     return complete_token_ids;
 }
 
+static CompleteTokenIdsPtr makeSingleManagerCompleteTokenIds(int batch_size, int seq_len, int seq_size_per_block) {
+    auto input_ids                  = torch::arange(seq_len, torch::kInt32);
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = input_ids;
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+
+    auto complete_token_ids =
+        std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_len + 16, seq_size_per_block);
+    complete_token_ids->init(generate_input);
+    return complete_token_ids;
+}
+
+static BatchKVCacheResourcePtr makeSingleManagerBatchResource(int batch_size, const CacheConfig& config) {
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(batch_size);
+    resource->initGroups(config.topologyPtr());
+    return resource;
+}
+
+struct SingleManagerPoolCounters {
+    size_t free_blocks;
+    size_t available_blocks;
+    size_t request_refs;
+    size_t block_cache_refs;
+    size_t connector_refs;
+};
+
+static SingleManagerPoolCounters snapshotSingleManagerPoolCounters(const BlockPoolPtr& pool) {
+    return {pool->freeBlocksNum(),
+            pool->availableBlocksNum(),
+            pool->requestRefBlocksNum(),
+            pool->blockCacheRefBlocksNum(),
+            pool->connectorRefBlocksNum()};
+}
+
+static void expectSingleManagerPoolCountersEq(const BlockPoolPtr& pool, const SingleManagerPoolCounters& expected) {
+    EXPECT_EQ(pool->freeBlocksNum(), expected.free_blocks);
+    EXPECT_EQ(pool->availableBlocksNum(), expected.available_blocks);
+    EXPECT_EQ(pool->requestRefBlocksNum(), expected.request_refs);
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), expected.block_cache_refs);
+    EXPECT_EQ(pool->connectorRefBlocksNum(), expected.connector_refs);
+}
+
+static void expectInvalidSharedTopologyRejectedAfterAllocatorSetup(const CacheConfig& config,
+                                                                   const std::string& expected_message,
+                                                                   bool clear_sole_spec_before_init = false) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank                            = 0;
+    parallelism_config.tp_size                            = 2;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+
+    auto manager = std::make_shared<KVCacheManager>(config,
+                                                    /*warmup=*/true,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    KVCacheConfig{},
+                                                    parallelism_config,
+                                                    RuntimeConfig{},
+                                                    SpeculativeExecutionConfig{},
+                                                    PDSepConfig{},
+                                                    CacheStoreConfig{},
+                                                    /*use_cuda_malloc_block_pool=*/true);
+    if (clear_sole_spec_before_init) {
+        const_cast<GroupBase&>(manager->config_.topology().groupById(0)).spec.reset();
+    }
+    try {
+        manager->init();
+        FAIL() << "expected invalid shared topology to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find(expected_message), std::string::npos) << e.what();
+    }
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    EXPECT_TRUE(allocator->use_cuda_malloc_block_pool_);
+    ASSERT_NE(manager->cpSlotMapper(), nullptr);
+    EXPECT_EQ(allocator->cpSlotMapper(), manager->cpSlotMapper());
+    EXPECT_NE(allocator->sharedBlockCache(), nullptr);
+    EXPECT_TRUE(allocator->groupBlockPools().empty());
+    EXPECT_EQ(allocator->getBlockPool(), nullptr);
+}
+
+static void expectOrdinarySingleManagerUsesHybridPoolWithReuseAndRollback(const CacheConfig& roomy_config,
+                                                                          const CacheConfig& tight_config,
+                                                                          KVCacheSpecType    expected_spec_type) {
+    ASSERT_EQ(roomy_config.groupNums(), 1);
+    ASSERT_EQ(roomy_config.specForGroup(0)->type, expected_spec_type);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.reserve_block_ratio = 20;
+    auto manager                        = std::make_shared<KVCacheManager>(roomy_config,
+                                                    /*warmup=*/false,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    kv_cache_config);
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 1u);
+    const auto pool = allocator->groupBlockPools()[0];
+    ASSERT_NE(pool, nullptr);
+    EXPECT_EQ(pool->where(), MemoryType::MEMORY_GPU);
+    EXPECT_EQ(allocator->sharedBlockCache(), manager->allocator_->sharedBlockCache());
+    ASSERT_NE(allocator->sharedBlockCache(), nullptr);
+    EXPECT_EQ(manager->reserveBlocksNum(),
+              static_cast<size_t>(kv_cache_config.reserve_block_ratio) * allocator->availableBlocksNum()
+                  / static_cast<size_t>(100));
+
+    const int  seq_size_per_block = static_cast<int>(roomy_config.seq_size_per_block);
+    const int  seq_len            = 3 * seq_size_per_block + 1;
+    auto       seed_resource      = makeSingleManagerBatchResource(/*batch_size=*/1, roomy_config);
+    auto       seed_tokens        = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_len, seq_size_per_block);
+    MallocInfo seed_malloc{seed_resource, seed_tokens};
+    seed_malloc.enable_device_cache = false;
+    seed_malloc.reuse_cache         = true;
+    ASSERT_TRUE(manager->malloc(seed_malloc).success);
+    ASSERT_GE(seed_resource->blocksNum(0, /*group_id=*/0), 2u);
+    const auto cached_prefix_block = seed_resource->blocks(0, /*group_id=*/0)[0];
+
+    manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
+    manager->free(FreeInfo{seed_resource, seed_tokens});
+    ASSERT_EQ(allocator->requestRefBlocksNum(), 0u);
+    ASSERT_GT(allocator->blockCacheRefBlocksNum(), 0u);
+
+    auto       reuse_resource = makeSingleManagerBatchResource(/*batch_size=*/1, roomy_config);
+    auto       reuse_tokens   = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_len, seq_size_per_block);
+    MallocInfo reuse_malloc{reuse_resource, reuse_tokens};
+    reuse_malloc.enable_device_cache = true;
+    reuse_malloc.reuse_cache         = true;
+    const auto reuse_result          = manager->malloc(reuse_malloc);
+    ASSERT_TRUE(reuse_result.success);
+    EXPECT_GE(reuse_result.reuse_len, seq_size_per_block);
+    ASSERT_FALSE(reuse_resource->blocks(0, /*group_id=*/0).empty());
+    EXPECT_EQ(reuse_resource->blocks(0, /*group_id=*/0)[0], cached_prefix_block);
+    manager->free(FreeInfo{reuse_resource, reuse_tokens});
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+
+    ASSERT_EQ(tight_config.groupNums(), 1);
+    ASSERT_EQ(tight_config.specForGroup(0)->type, expected_spec_type);
+    auto rollback_manager = std::make_shared<KVCacheManager>(tight_config, /*warmup=*/false);
+    ASSERT_TRUE(rollback_manager->init());
+    auto rollback_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(rollback_manager->allocator_);
+    ASSERT_NE(rollback_allocator, nullptr);
+    ASSERT_EQ(rollback_allocator->groupBlockPools().size(), 1u);
+    const auto rollback_pool = rollback_allocator->groupBlockPools()[0];
+
+    auto target_resource = makeSingleManagerBatchResource(/*batch_size=*/2, tight_config);
+    auto target_tokens   = makeSingleManagerCompleteTokenIds(/*batch_size=*/2, seq_size_per_block, seq_size_per_block);
+    MallocInfo target_init{target_resource, target_tokens};
+    target_init.enable_device_cache = false;
+    target_init.reuse_cache         = false;
+    ASSERT_TRUE(rollback_manager->malloc(target_init).success);
+
+    auto holder_resource = makeSingleManagerBatchResource(/*batch_size=*/1, tight_config);
+    auto holder_tokens   = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_size_per_block, seq_size_per_block);
+    MallocInfo holder_init{holder_resource, holder_tokens};
+    holder_init.enable_device_cache = false;
+    holder_init.reuse_cache         = false;
+    ASSERT_TRUE(rollback_manager->malloc(holder_init).success);
+    ASSERT_EQ(rollback_pool->freeBlocksNum(), 1u);
+
+    const auto batch0_before   = target_resource->blocks(0, /*group_id=*/0);
+    const auto batch1_before   = target_resource->blocks(1, /*group_id=*/0);
+    const auto counters_before = snapshotSingleManagerPoolCounters(rollback_pool);
+
+    target_tokens->setSeqLength(2 * seq_size_per_block);
+    MallocInfo target_incr{target_resource, target_tokens};
+    target_incr.enable_device_cache = false;
+    target_incr.reuse_cache         = false;
+    target_incr.verbose             = false;
+    const auto failure_result       = rollback_manager->malloc(target_incr);
+    EXPECT_FALSE(failure_result.success);
+    EXPECT_EQ(failure_result.status, MallocStatus::INTERNAL_ERROR);
+    EXPECT_EQ(target_resource->blocks(0, /*group_id=*/0), batch0_before);
+    EXPECT_EQ(target_resource->blocks(1, /*group_id=*/0), batch1_before);
+    expectSingleManagerPoolCountersEq(rollback_pool, counters_before);
+
+    rollback_manager->free(FreeInfo{holder_resource, holder_tokens});
+    rollback_manager->free(FreeInfo{target_resource, target_tokens});
+}
+
 static void writeDsv4RegionPattern(const std::shared_ptr<KVCacheManager>& manager,
                                    int                                    block_id,
                                    int                                    layer_id,
@@ -331,10 +553,147 @@ TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
+    expectInvalidSharedTopologyRejectedAfterAllocatorSetup(
+        cache_config, "HybridPoolKVCacheAllocator requires one FULL MHA/MLA cache group");
+}
+
+TEST_F(KVCacheManagerTest, InitRejectsSharedPoolMultiGroupWithoutFullAttention) {
+    auto cache_config = makeTwoLinearGroupManagerConfig(/*use_independent_block_pools=*/false);
+
+    expectInvalidSharedTopologyRejectedAfterAllocatorSetup(
+        cache_config, "HybridPoolKVCacheAllocator requires at least one FULL MHA/MLA cache group");
+}
+
+TEST_F(KVCacheManagerTest, InitRejectsSingleNullSpecAfterAllocatorSetup) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    expectInvalidSharedTopologyRejectedAfterAllocatorSetup(
+        cache_config, "cache spec[0] is null", /*clear_sole_spec_before_init=*/true);
+}
+
+TEST_F(KVCacheManagerTest, InitRejectsSingleFullSpecWithLinearPolicyAfterAllocatorSetup) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    auto policy       = cache_config.policyForGroup(0);
+    policy.group_type = CacheGroupType::LINEAR;
+    cache_config.setGroupPolicies({policy});
+
+    expectInvalidSharedTopologyRejectedAfterAllocatorSetup(
+        cache_config, "HybridPoolKVCacheAllocator requires one FULL MHA/MLA cache group");
+}
+
+TEST_F(KVCacheManagerTest, InitAcceptsIndependentMultiGroupWithoutFullAttention) {
+    auto cache_config = makeTwoLinearGroupManagerConfig(/*use_independent_block_pools=*/true);
+
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
-    ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getBlockPool(), nullptr);
+    ASSERT_TRUE(cache_manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_NE(allocator->groupBlockPools()[0], allocator->groupBlockPools()[1]);
+}
+
+TEST_F(KVCacheManagerTest, IndependentLinearOnlyMultiGroupInsertFreeReusesDeviceCache) {
+    auto cache_config = makeTwoLinearGroupManagerConfig(/*use_independent_block_pools=*/true);
+    auto manager      = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    const auto& pools = allocator->groupBlockPools();
+    ASSERT_NE(pools[0], pools[1]);
+
+    const int  seq_size_per_block = static_cast<int>(cache_config.seq_size_per_block);
+    const int  seq_len            = 3 * seq_size_per_block + 1;
+    auto       seed_resource      = makeSingleManagerBatchResource(/*batch_size=*/1, cache_config);
+    auto       seed_tokens        = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_len, seq_size_per_block);
+    MallocInfo seed_malloc{seed_resource, seed_tokens};
+    seed_malloc.enable_device_cache = false;
+    seed_malloc.reuse_cache         = true;
+    ASSERT_TRUE(manager->malloc(seed_malloc).success);
+
+    ASSERT_EQ(seed_resource->groupNums(), 2);
+    ASSERT_EQ(seed_resource->cacheKeys(0).size(), 4u);
+    const auto cached_key        = seed_resource->cacheKeys(0)[1];
+    const auto parent_key        = seed_resource->cacheKeys(0)[0];
+    const auto cached_dependency = seed_resource->cacheResource(0).blockDependencies()[1];
+    ASSERT_TRUE(cached_dependency.has_parent);
+    EXPECT_EQ(cached_dependency.parent_key, parent_key);
+    EXPECT_EQ(cached_dependency.ordinal, 1u);
+
+    std::vector<BlockIdxType> cached_blocks;
+    for (int gid = 0; gid < seed_resource->groupNums(); ++gid) {
+        const auto& blocks = seed_resource->blocks(0, gid);
+        ASSERT_EQ(blocks.size(), 4u) << "group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "group " << gid;
+        ASSERT_FALSE(isNullBlockIdx(blocks[1])) << "group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "group " << gid;
+        ASSERT_FALSE(isNullBlockIdx(blocks[3])) << "group " << gid;
+        cached_blocks.push_back(blocks[1]);
+        EXPECT_EQ(pools[static_cast<size_t>(gid)]->requestRefBlocksNum(), 2u);
+        EXPECT_EQ(pools[static_cast<size_t>(gid)]->blockCacheRefBlocksNum(), 0u);
+    }
+
+    manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
+    ASSERT_EQ(allocator->sharedBlockCache()->allCacheKeys(), (CacheKeysType{cached_key}));
+    EXPECT_EQ(allocator->sharedBlockCache()->version(), 0);
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->requestRefBlocksNum(), 2u);
+        EXPECT_EQ(pool->blockCacheRefBlocksNum(), 1u);
+    }
+
+    manager->free(FreeInfo{seed_resource, seed_tokens});
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+        EXPECT_EQ(pool->blockCacheRefBlocksNum(), 1u);
+    }
+
+    auto       reuse_resource = makeSingleManagerBatchResource(/*batch_size=*/1, cache_config);
+    auto       reuse_tokens   = makeSingleManagerCompleteTokenIds(/*batch_size=*/1, seq_len, seq_size_per_block);
+    MallocInfo reuse_malloc{reuse_resource, reuse_tokens};
+    reuse_malloc.enable_device_cache = true;
+    reuse_malloc.reuse_cache         = true;
+    const auto reuse_result          = manager->malloc(reuse_malloc);
+    ASSERT_TRUE(reuse_result.success);
+    EXPECT_EQ(reuse_result.reuse_len, 2 * seq_size_per_block);
+    EXPECT_EQ(reuse_resource->cacheResource(0).deviceReuseBlockNum(), 2);
+    ASSERT_EQ(allocator->sharedBlockCache()->allCacheKeys(), (CacheKeysType{cached_key}));
+    for (int gid = 0; gid < reuse_resource->groupNums(); ++gid) {
+        const auto& blocks = reuse_resource->blocks(0, gid);
+        ASSERT_EQ(blocks.size(), 4u) << "group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "group " << gid;
+        EXPECT_EQ(blocks[1], cached_blocks[static_cast<size_t>(gid)]) << "group " << gid;
+        EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "group " << gid;
+        EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "group " << gid;
+        EXPECT_EQ(pools[static_cast<size_t>(gid)]->requestRefBlocksNum(), 2u);
+        EXPECT_EQ(pools[static_cast<size_t>(gid)]->blockCacheRefBlocksNum(), 1u);
+    }
+
+    manager->free(FreeInfo{reuse_resource, reuse_tokens});
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+        EXPECT_EQ(pool->blockCacheRefBlocksNum(), 1u);
+    }
+
+    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/1);
+    ASSERT_NE(evicted, nullptr);
+    ASSERT_EQ(evicted->cacheKeys(0), (CacheKeysType{cached_key}));
+    ASSERT_EQ(evicted->cacheResource(0).blockDependencies().size(), 1u);
+    const auto evicted_dependency = evicted->cacheResource(0).blockDependencies()[0];
+    EXPECT_EQ(evicted_dependency.has_parent, cached_dependency.has_parent);
+    EXPECT_EQ(evicted_dependency.parent_key, cached_dependency.parent_key);
+    EXPECT_EQ(evicted_dependency.ordinal, cached_dependency.ordinal);
+    for (int gid = 0; gid < evicted->groupNums(); ++gid) {
+        ASSERT_EQ(evicted->blocks(0, gid).size(), 1u) << "group " << gid;
+        EXPECT_EQ(evicted->blocks(0, gid)[0], cached_blocks[static_cast<size_t>(gid)]) << "group " << gid;
+    }
+    EXPECT_TRUE(allocator->sharedBlockCache()->allCacheKeys().empty());
+    manager->blockCacheFree(evicted);
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+        EXPECT_EQ(pool->blockCacheRefBlocksNum(), 0u);
+    }
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -377,6 +736,148 @@ TEST_F(KVCacheManagerTest, ProductionHybridConfigUsesHybridPoolWithDistinctPhysi
     ASSERT_NE(allocator, nullptr);
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     EXPECT_NE(allocator->groupBlockPools()[0], allocator->groupBlockPools()[1]);
+}
+
+TEST_F(KVCacheManagerTest, OrdinarySingleMhaUsesHybridPoolWithReuseAndRollback) {
+    expectOrdinarySingleManagerUsesHybridPoolWithReuseAndRollback(makeSimpleMhaCacheConfig(/*layer_num=*/2,
+                                                                                           /*block_num=*/10,
+                                                                                           /*tokens_per_block=*/4,
+                                                                                           DataType::TYPE_FP16,
+                                                                                           /*local_head_num_kv=*/2,
+                                                                                           /*size_per_head=*/8),
+                                                                  makeSimpleMhaCacheConfig(/*layer_num=*/2,
+                                                                                           /*block_num=*/4,
+                                                                                           /*tokens_per_block=*/4,
+                                                                                           DataType::TYPE_FP16,
+                                                                                           /*local_head_num_kv=*/2,
+                                                                                           /*size_per_head=*/8),
+                                                                  KVCacheSpecType::MultiHeadAttention);
+}
+
+TEST_F(KVCacheManagerTest, OrdinarySingleMlaUsesHybridPoolWithReuseAndRollback) {
+    auto make_config = [](int block_num) {
+        auto spec = makeResolvedMlaSpec(DataType::TYPE_FP16,
+                                        /*kv_lora_rank=*/8,
+                                        /*rope_head_dim=*/4,
+                                        /*seq_size_per_block=*/4,
+                                        /*tag=*/"default");
+        return makeSingleGroupCacheConfig(std::move(spec), CacheGroupType::FULL, /*layer_num=*/2, block_num);
+    };
+    expectOrdinarySingleManagerUsesHybridPoolWithReuseAndRollback(
+        make_config(/*block_num=*/10), make_config(/*block_num=*/4), KVCacheSpecType::MultiHeadLatentAttention);
+}
+
+TEST_F(KVCacheManagerTest, OrdinarySinglePreservesHybridPoolConstructorAndCudaBacking) {
+    auto cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/2,
+                                                 /*block_num=*/4,
+                                                 /*tokens_per_block=*/2,
+                                                 DataType::TYPE_FP16,
+                                                 /*local_head_num_kv=*/2,
+                                                 /*size_per_head=*/8);
+
+    auto metrics_tags = kmonitor::MetricsTags();
+    auto reporter     = std::make_shared<kmonitor::MetricsReporter>("", "", metrics_tags);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 20;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::DECODE;
+
+    auto manager = std::make_shared<KVCacheManager>(cache_config,
+                                                    /*warmup=*/false,
+                                                    reporter,
+                                                    kv_cache_config,
+                                                    ParallelismConfig{},
+                                                    RuntimeConfig{},
+                                                    SpeculativeExecutionConfig{},
+                                                    pd_sep_config,
+                                                    CacheStoreConfig{},
+                                                    /*use_cuda_malloc_block_pool=*/true);
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    EXPECT_EQ(allocator->allocation_type_, AllocationType::DEVICE);
+    EXPECT_EQ(allocator->metrics_reporter_, reporter);
+    EXPECT_EQ(allocator->role_type_, RoleType::DECODE);
+    EXPECT_TRUE(allocator->use_cuda_malloc_block_pool_);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 1u);
+    ASSERT_NE(allocator->groupBlockPools()[0], nullptr);
+    EXPECT_TRUE(allocator->groupBlockPools()[0]->use_cuda_malloc_backing_);
+}
+
+TEST_F(KVCacheManagerTest, OrdinarySinglePreservesLegacyBatchZeroForwardInsertionAndEvictionTrace) {
+    auto          cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/2,
+                                                 /*block_num=*/8,
+                                                 /*tokens_per_block=*/2,
+                                                 DataType::TYPE_FP16,
+                                                 /*local_head_num_kv=*/2,
+                                                 /*size_per_head=*/8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reuse_cache            = true;
+    kv_cache_config.reserve_block_ratio    = 0;
+    kv_cache_config.enable_gpu_prefix_tree = false;
+    auto manager                           = std::make_shared<KVCacheManager>(cache_config,
+                                                    /*warmup=*/false,
+                                                    /*metrics_reporter=*/nullptr,
+                                                    kv_cache_config);
+    ASSERT_TRUE(manager->init());
+
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    const auto pool         = allocator->soleGroupBlockPool();
+    const auto shared_cache = allocator->sharedBlockCache();
+    ASSERT_NE(pool, nullptr);
+    ASSERT_NE(shared_cache, nullptr);
+    ASSERT_FALSE(shared_cache->prefixTreeEnabled());
+
+    const auto blocks = pool->malloc(/*num_blocks=*/6);
+    ASSERT_EQ(blocks.size(), 6u);
+    auto resource = makeSingleManagerBatchResource(/*batch_size=*/2, cache_config);
+    resource->setBatchBlocks(/*batch_id=*/0, /*group_id=*/0, {blocks[0], blocks[1], blocks[2]});
+    resource->setBatchBlocks(/*batch_id=*/1, /*group_id=*/0, {blocks[3], blocks[4], blocks[5]});
+    resource->cacheResource(0).setCacheKeysAndBlockDependencies(
+        {100, 101, 102},
+        {BlockDependency{false, 0, 7}, BlockDependency{true, 100, 11}, BlockDependency{true, 101, 13}});
+    resource->cacheResource(1).setCacheKeysAndBlockDependencies(
+        {200, 201, 202},
+        {BlockDependency{false, 0, 17}, BlockDependency{true, 200, 23}, BlockDependency{true, 201, 29}});
+    auto tokens = makeSingleManagerCompleteTokenIds(/*batch_size=*/2, /*seq_len=*/6, /*seq_size_per_block=*/2);
+
+    ASSERT_EQ(pool->requestRefBlocksNum(), 6u);
+    ASSERT_EQ(pool->blockCacheRefBlocksNum(), 0u);
+    manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+
+    EXPECT_EQ(shared_cache->allCacheKeys(), (CacheKeysType{101, 100}));
+    EXPECT_EQ(shared_cache->version(), 1);
+    EXPECT_FALSE(shared_cache->contains(200));
+    EXPECT_FALSE(shared_cache->contains(201));
+    EXPECT_EQ(pool->requestRefBlocksNum(), 6u);
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), 2u);
+
+    manager->free(FreeInfo{resource, tokens});
+    EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), 2u);
+
+    auto evicted = manager->popBlocksFromCache(/*min_blocks_to_free=*/1);
+    ASSERT_NE(evicted, nullptr);
+    ASSERT_EQ(evicted->cacheKeys(0), (CacheKeysType{100}));
+    ASSERT_EQ(evicted->cacheResource(0).blockDependencies().size(), 1u);
+    const auto dependency = evicted->cacheResource(0).blockDependencies()[0];
+    EXPECT_FALSE(dependency.has_parent);
+    EXPECT_EQ(dependency.parent_key, 0);
+    EXPECT_EQ(dependency.ordinal, 0u);
+    EXPECT_EQ(shared_cache->allCacheKeys(), (CacheKeysType{101}));
+    EXPECT_EQ(shared_cache->version(), 1);
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), 2u);
+
+    manager->blockCacheFree(evicted);
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), 1u);
+    auto remaining = manager->popBlocksFromCache(/*min_blocks_to_free=*/8);
+    ASSERT_NE(remaining, nullptr);
+    manager->blockCacheFree(remaining);
+    EXPECT_EQ(pool->blockCacheRefBlocksNum(), 0u);
+    EXPECT_EQ(pool->requestRefBlocksNum(), 0u);
 }
 
 TEST_F(KVCacheManagerTest, MultiGroupRemoteFailsBeforeAllocatorInitialization) {
