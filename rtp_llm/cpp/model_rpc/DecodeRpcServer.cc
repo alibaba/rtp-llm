@@ -5,8 +5,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
-#include <unordered_map>
-#include <unordered_set>
+#include <map>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
 
@@ -77,6 +76,18 @@ torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
     } catch (const std::exception& e) {
         RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
         return tensor;
+    }
+}
+
+void appendTaggedGroupBlockIds(BroadcastLoadRequestPB&                request,
+                               const std::map<std::string, BlockIds>& block_ids_by_group) {
+    for (const auto& [tag, block_ids] : block_ids_by_group) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
+        auto* tagged_row = request.add_tagged_group_block_ids();
+        tagged_row->set_tag(tag);
+        for (const auto block_id : block_ids.blocks()) {
+            tagged_row->add_block_ids(block_id);
+        }
     }
 }
 
@@ -530,16 +541,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
-    if (!load_context.block_ids_by_group.empty()) {
-        for (const auto& [tag, block_ids] : load_context.block_ids_by_group) {
-            RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(tag);
-            for (const auto& block_id : block_ids.blocks()) {
-                tagged_row->add_block_ids(toLegacyBlockIdx(block_id));
-            }
-        }
-    }
+    appendTaggedGroupBlockIds(request, load_context.block_ids_by_group);
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -591,16 +593,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
         request.add_cache_keys(cache_key);
     }
     // Every cache group record carries its own semantic tag on the wire.
-    if (!load_context.block_ids_by_group.empty()) {
-        for (const auto& [tag, block_ids] : load_context.block_ids_by_group) {
-            RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cache group record requires a non-empty tag");
-            auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(tag);
-            for (const auto& block_id : block_ids.blocks()) {
-                tagged_row->add_block_ids(toLegacyBlockIdx(block_id));
-            }
-        }
-    }
+    appendTaggedGroupBlockIds(request, load_context.block_ids_by_group);
     request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
@@ -610,8 +603,8 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     RTP_LLM_PROFILE_FUNCTION();
     auto* generate_stream = decode_context.getStream().get();
     auto& cache_keys      = generate_stream->cacheKeys(0);
-    // kvCachePtr() validates the batch resource, so the tagged records below are
-    // already known to be non-null, non-empty and unique.
+    // The map keys make outgoing tag records unique. The receiving side verifies
+    // that the complete tag set matches its local CacheConfig.
     const auto& block_ids_by_group = generate_stream->kvCachePtr()->blocksByGroup(0);
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
@@ -895,7 +888,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
 
     if (!use_mla && !use_hybrid && !use_opaque_kv_store && !is_page_level_rr && peer_cnt > 1) {
-        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
+        RTP_LLM_CHECK_WITH_INFO(cache_config.hasSingleGlobalGroup(),
                                 "asymmetric TP cache load requires exactly one cache group, got %d",
                                 cache_config.groupNums());
         const auto& spec = cache_config.groups().front().spec;
@@ -934,8 +927,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     // not a positional choice.
     auto soleGroupTag = [](const CacheConfig& cfg) -> const std::string& {
         const auto& groups = cfg.groups();
-        RTP_LLM_CHECK_WITH_INFO(
-            groups.size() == 1, "single-group cache load requires exactly one cache group, got %zu", groups.size());
+        RTP_LLM_CHECK_WITH_INFO(cfg.hasSingleGlobalGroup(),
+                                "single-group cache load requires exactly one cache group, got %zu",
+                                groups.size());
         return groups.front().tag;
     };
     auto layerGroupTags = [&soleGroupTag](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {
@@ -1306,8 +1300,7 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     const auto&               cache_config       = engine_->resourceContext().cache_manager->cacheConfig();
     const auto                block_ids_by_group = decodeGroupBlockIds(*request, cache_config);
-
-    std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
+    std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
     // TODO(xinfei.sxf) add retry
     auto error_info = loadCache({request->request_id(),
@@ -1329,29 +1322,25 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
 }
 
 std::map<std::string, BlockIds> DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                                     const CacheConfig&            topology) {
+                                                                     const CacheConfig&            cache_config) {
     std::map<std::string, BlockIds> block_ids_by_group;
-    std::unordered_set<std::string> seen_tags;
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
-        const auto& tag = tagged_row.tag();
-        RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "RPC cache group record requires a non-empty tag");
-        // Rejects any tag the local cache plan does not own.
-        const auto& cache_group = topology.group(tag);
-        RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "duplicate RPC cache tag=%s", tag.c_str());
+        const auto&      tag         = tagged_row.tag();
+        const auto&      cache_group = cache_config.group(tag);
         BlockIds         block_ids(cache_group.storedKernelBlocksPerKvBlock());
         BlockIndicesType internal_ids;
         internal_ids.reserve(static_cast<size_t>(tagged_row.block_ids_size()));
         for (const auto block_id : tagged_row.block_ids()) {
-            RTP_LLM_CHECK_WITH_INFO(block_id >= 0, "RPC wire block id must be nonnegative, got %d", block_id);
-            internal_ids.push_back(block_id == 0 ? NULL_BLOCK_IDX : block_id);
+            internal_ids.push_back(block_id);
         }
         block_ids.assign(std::move(internal_ids));
-        block_ids_by_group.emplace(tag, std::move(block_ids));
+        const auto inserted = block_ids_by_group.emplace(tag, std::move(block_ids)).second;
+        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate RPC cache tag=%s", tag.c_str());
     }
-    RTP_LLM_CHECK_WITH_INFO(block_ids_by_group.size() == topology.groups().size(),
+    RTP_LLM_CHECK_WITH_INFO(block_ids_by_group.size() == cache_config.groups().size(),
                             "RPC cache tag set does not match local topology, rows=%zu groups=%zu",
                             block_ids_by_group.size(),
-                            topology.groups().size());
+                            cache_config.groups().size());
     return block_ids_by_group;
 }
 

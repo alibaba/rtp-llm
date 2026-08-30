@@ -1,7 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <map>
-#include <mutex>
+#include <utility>
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
@@ -31,7 +32,7 @@ public:
     class LoadKVCacheContext {
     public:
         LoadKVCacheContext(int64_t                                request_id,
-                           const std::string&                     request_key,
+                           std::string                            request_key,
                            const std::vector<std::string>&        peer_addrs,
                            const std::vector<CacheKeyType>&       cache_keys,
                            const std::map<std::string, BlockIds>& block_ids_by_group,
@@ -42,7 +43,7 @@ public:
                            grpc::ServerContext*                   server_context,
                            int32_t                                prefill_cp_size = 1):
             request_id(request_id),
-            request_key(request_key),
+            request_key(std::move(request_key)),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
             block_ids_by_group(block_ids_by_group),
@@ -53,7 +54,7 @@ public:
             server_context(server_context),
             prefill_cp_size(prefill_cp_size) {}
         int64_t                          request_id;
-        const std::string&               request_key;
+        std::string                      request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
         // Tag-bearing cache group records; the record order is not identity.
@@ -97,7 +98,7 @@ private:
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
     static std::map<std::string, BlockIds> decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                               const CacheConfig&            topology);
+                                                               const CacheConfig&            cache_config);
     static std::string makeRequestKeyForGroup(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
