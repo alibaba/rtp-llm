@@ -1,5 +1,6 @@
 import gc
 import logging
+import sys
 import threading
 import time
 from typing import Optional
@@ -21,6 +22,30 @@ from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
 USAGE_HEADER = "USAGE"
+
+
+def _reset_ep_wrappers() -> None:
+    """Release EP backends while their distributed process groups are alive."""
+    backends = (
+        (
+            "DeepEP",
+            "rtp_llm.models_py.distributed.deepep_wrapper",
+            "DeepEPWrapper",
+        ),
+        (
+            "MoriEP",
+            "rtp_llm.models_py.distributed.moriep_wrapper",
+            "MoriEPWrapper",
+        ),
+    )
+    for name, module_name, wrapper_name in backends:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        wrapper = getattr(module, wrapper_name)
+        if wrapper.is_initialized():
+            logging.info("Resetting %s wrapper before distributed teardown", name)
+            wrapper.reset()
 
 
 class BackendManager(object):
@@ -210,7 +235,9 @@ class BackendManager(object):
                             _nfs_manager.unmount_all()
                             logging.info("all nfs paths unmounted")
                         except Exception:
-                            logging.exception("nfs unmount failed during backend shutdown")
+                            logging.exception(
+                                "nfs unmount failed during backend shutdown"
+                            )
                             if engine_stop_error is None:
                                 raise
                     if engine_stop_error is not None:
@@ -219,8 +246,12 @@ class BackendManager(object):
                 try:
                     self.engine = None
                     if distributed_environment_initialized():
-                        # Release ProcessGroups and, crucially, the Python callbacks
-                        # held by librtp_compute_ops before CPython finalizes globals.
+                        # EP buffers own native background work tied to their process
+                        # groups. Destroy them before tearing those groups down; otherwise
+                        # their late finalizers can dereference already-released state.
+                        _reset_ep_wrappers()
+                        # Release ProcessGroups and the Python callbacks held by
+                        # librtp_compute_ops before CPython finalizes globals.
                         destroy_distributed_environment()
                 finally:
                     self._stopping = False

@@ -1,9 +1,11 @@
+import sys
 import threading
+import types
 import unittest
 from unittest.mock import Mock, patch
 
 from rtp_llm.async_decoder_engine.embedding.embedding_engine import EmbeddingCppEngine
-from rtp_llm.server.backend_manager import BackendManager
+from rtp_llm.server.backend_manager import BackendManager, _reset_ep_wrappers
 
 
 class FakeEngine:
@@ -69,9 +71,7 @@ class BackendManagerShutdownTest(unittest.TestCase):
         ready_event.set.side_effect = lambda: order.append("ready")
         manager = self.make_manager(engine, ready_event)
 
-        with patch(
-            "rtp_llm.server.backend_manager._nfs_manager.unmount_all"
-        ), patch(
+        with patch("rtp_llm.server.backend_manager._nfs_manager.unmount_all"), patch(
             "rtp_llm.server.backend_manager.distributed_environment_initialized",
             return_value=False,
         ):
@@ -112,6 +112,48 @@ class BackendManagerShutdownTest(unittest.TestCase):
                 manager.request_shutdown()
 
         self.assertTrue(manager._stopped)
+
+    def test_ep_wrappers_reset_before_distributed_teardown(self):
+        order = []
+        manager = self.make_manager(FakeEngine())
+
+        with patch("rtp_llm.server.backend_manager.BaseEngine", FakeEngine), patch(
+            "rtp_llm.server.backend_manager._nfs_manager.unmount_all"
+        ), patch(
+            "rtp_llm.server.backend_manager.distributed_environment_initialized",
+            return_value=True,
+        ), patch(
+            "rtp_llm.server.backend_manager._reset_ep_wrappers",
+            side_effect=lambda: order.append("ep"),
+        ), patch(
+            "rtp_llm.server.backend_manager.destroy_distributed_environment",
+            side_effect=lambda: order.append("distributed"),
+        ):
+            manager.stop()
+
+        self.assertEqual(order, ["ep", "distributed"])
+
+    def test_reset_ep_wrappers_releases_each_initialized_backend(self):
+        deepep = Mock()
+        deepep.is_initialized.return_value = True
+        moriep = Mock()
+        moriep.is_initialized.return_value = True
+        deepep_module = types.ModuleType("deepep_wrapper")
+        deepep_module.DeepEPWrapper = deepep
+        moriep_module = types.ModuleType("moriep_wrapper")
+        moriep_module.MoriEPWrapper = moriep
+
+        with patch.dict(
+            sys.modules,
+            {
+                "rtp_llm.models_py.distributed.deepep_wrapper": deepep_module,
+                "rtp_llm.models_py.distributed.moriep_wrapper": moriep_module,
+            },
+        ):
+            _reset_ep_wrappers()
+
+        deepep.reset.assert_called_once_with()
+        moriep.reset.assert_called_once_with()
 
 
 if __name__ == "__main__":
