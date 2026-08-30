@@ -537,21 +537,27 @@ def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
 
 
 def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
-    # Smoke/perf targets can explicitly disable the new real-request warmup.
-    # This is especially important for SM120 builds where the startup probe
-    # must not select an incompatible generic FP8 recipe before the dedicated
-    # blockwise backend has been initialized.
-    if not str_to_bool(os.environ.get("DSV4_STARTUP_REAL_WARMUP", "1")):
-        logging.info(
-            "skip DSV4 startup real warmup: DSV4_STARTUP_REAL_WARMUP is disabled"
-        )
-        return False
+    # Keep the opt-out scoped to the only path that consumes it.  In
+    # particular, a malformed/empty DSV4_* environment variable must not make
+    # a frontend-only or non-DSV4 server fail during startup configuration.
     runtime_config = py_env_configs.runtime_config
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
 
     role_is_prefill = _role_is_prefill(py_env_configs)
     if not role_is_prefill:
+        return False
+
+    if getattr(py_env_configs.model_args, "model_type", "") != "deepseek_v4":
+        return False
+
+    # Smoke/perf targets can explicitly disable the real-request warmup.  An
+    # empty value is treated as the default (enabled), matching the existing
+    # env parsing convention used by the speculative warmup helpers.
+    if not str_to_bool(os.environ.get("DSV4_STARTUP_REAL_WARMUP", "1") or "1"):
+        logging.info(
+            "skip DSV4 startup real warmup: DSV4_STARTUP_REAL_WARMUP is disabled"
+        )
         return False
 
     if not _is_startup_real_warmup_entry_rank(py_env_configs):
@@ -565,7 +571,7 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         )
         return False
 
-    return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+    return True
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -671,11 +677,15 @@ def start_server(py_env_configs: PyEnvConfigs):
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
-    # Initialize backend_process to None in case role_type is FRONTEND
+    # Initialize backend_process to None in case role_type is FRONTEND.  Keep
+    # the warmup gate setup inside the guarded startup transaction so a bad
+    # optional warmup setting follows the same cleanup path as other startup
+    # failures.
     backend_process = None
-    startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    startup_warmup_gate_file = None
 
     try:
+        startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
             vit_processes = start_vit_server_impl(py_env_configs, process_manager)

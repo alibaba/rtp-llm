@@ -1278,44 +1278,69 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
 }
 
 TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency) {
-    auto make_config = [](uint32_t blocks, std::optional<CacheMemoryPlacement> placement) {
+    auto make_config = [](uint32_t                            blocks,
+                          std::optional<CacheMemoryPlacement> placement,
+                          std::optional<uint32_t>             descriptor_blocks = std::nullopt) {
         auto              mc = makeProModelConfig();
         ParallelismConfig pc;
         RuntimeConfig     runtime_config;
         KVCacheConfig     kv_cache_config;
-        kv_cache_config.test_block_num = 100;
+        kv_cache_config.test_block_num             = 100;
         kv_cache_config.dsv4_hca_state_pool_blocks = blocks;
         for (auto& descs : mc.kv_cache_spec_descs) {
             for (auto& desc : descs) {
                 if (desc.tag != DSV4_HCA_STATE_TAG) {
                     continue;
                 }
-                desc.capacity.reset();
+                if (descriptor_blocks.has_value()) {
+                    // Keep an explicit descriptor capacity to verify that the
+                    // runtime KVCacheConfig value is the intentional override.
+                    desc.capacity                         = CacheCapacityPolicyDesc{};
+                    desc.capacity->explicit_block_num     = *descriptor_blocks;
+                    desc.capacity->charge_to_paged_budget = true;
+                } else {
+                    desc.capacity.reset();
+                }
                 if (placement.has_value()) {
                     desc.memory = CacheMemoryPolicyDesc{placement};
                 }
             }
         }
-        runtime_config.max_generate_batch_size = 2;
+        runtime_config.max_generate_batch_size                      = 2;
         runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
         return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
     };
 
-    auto device_config = make_config(256, CacheMemoryPlacement::DEVICE);
-    auto hca_gid = gidForTag(device_config, std::string(DSV4_HCA_STATE_TAG));
+    // Production descriptors leave memory placement unspecified for a GPU
+    // pool; this exercises the !desc.memory.has_value() branch in the creator.
+    auto device_config = make_config(256, std::nullopt);
+    auto hca_gid       = gidForTag(device_config, std::string(DSV4_HCA_STATE_TAG));
     EXPECT_EQ(device_config.blockNumForGroup(hca_gid), 256u);
     EXPECT_TRUE(device_config.policyForGroup(hca_gid).charge_to_paged_budget);
-    EXPECT_GT(device_config.explicitly_sized_pool_reserve_bytes, 0u);
+    EXPECT_EQ(device_config.explicitly_sized_pool_reserve_bytes, 256u * device_config.blockSizeBytesForGroup(hca_gid));
+
+    // Runtime injection intentionally wins over a stale descriptor-level
+    // capacity.  This is the precedence used by the production path.
+    auto descriptor_override_config = make_config(256, std::nullopt, 350u);
+    hca_gid                         = gidForTag(descriptor_override_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(descriptor_override_config.blockNumForGroup(hca_gid), 256u);
+    EXPECT_EQ(descriptor_override_config.policyForGroup(hca_gid).explicit_block_num, 256u);
+    EXPECT_EQ(descriptor_override_config.explicitly_sized_pool_reserve_bytes,
+              256u * descriptor_override_config.blockSizeBytesForGroup(hca_gid));
 
     auto host_config = make_config(256, CacheMemoryPlacement::HOST_PINNED);
-    hca_gid = gidForTag(host_config, std::string(DSV4_HCA_STATE_TAG));
+    hca_gid          = gidForTag(host_config, std::string(DSV4_HCA_STATE_TAG));
     EXPECT_EQ(host_config.blockNumForGroup(hca_gid), 256u);
     EXPECT_FALSE(host_config.policyForGroup(hca_gid).charge_to_paged_budget);
     EXPECT_EQ(host_config.explicitly_sized_pool_reserve_bytes, 0u);
 
-    auto fallback_config = make_config(0, std::nullopt);
-    hca_gid = gidForTag(fallback_config, std::string(DSV4_HCA_STATE_TAG));
+    // An explicit zero means no HCA override.  A host-resident descriptor
+    // must still remain outside the HBM budget on the framework fallback.
+    auto fallback_config = make_config(0, CacheMemoryPlacement::HOST_PINNED);
+    hca_gid              = gidForTag(fallback_config, std::string(DSV4_HCA_STATE_TAG));
     EXPECT_EQ(fallback_config.blockNumForGroup(hca_gid), 100u);
+    EXPECT_EQ(fallback_config.policyForGroup(hca_gid).memory_placement, CacheMemoryPlacement::HOST_PINNED);
+    EXPECT_FALSE(fallback_config.policyForGroup(hca_gid).charge_to_paged_budget);
     EXPECT_EQ(fallback_config.explicitly_sized_pool_reserve_bytes, 0u);
 }
 

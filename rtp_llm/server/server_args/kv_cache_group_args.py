@@ -455,7 +455,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
         type=int,
         default=0,
-        help="DSV4 固定池参数（已废弃，仅为兼容旧配置；实际 sizing 由 descriptor 决定）。",
+        help="[DEPRECATED] DSV4 固定池 block 数。仅为兼容旧配置保留，设置后将被忽略；"
+        "HCA_STATE 请改用 --dsv4_hca_state_pool_blocks，其余 pool 的 sizing 由 descriptor 决定。",
     )
     kv_cache_group.add_argument(
         "--dsv4_hca_state_pool_blocks",
@@ -472,5 +473,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
         type=str2bool,
         default=False,
-        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
+        help="DSV4 state/KV pool 的 residency 选择（不改变 pool sizing）：True 使用 pinned CPU memory，"
+        "False 使用 GPU memory；具体 pool 是否支持该 placement 仍由 descriptor 决定。",
     )

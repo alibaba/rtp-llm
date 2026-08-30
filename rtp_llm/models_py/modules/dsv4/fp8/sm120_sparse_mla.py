@@ -4,7 +4,6 @@ from typing import Optional, Sequence
 
 import torch
 
-
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
 _PACKED_CACHE: dict[tuple, torch.Tensor] = {}
 _GATHERED_CACHE: dict[tuple, torch.Tensor] = {}
@@ -73,10 +72,24 @@ def token_lens(
     device: torch.device,
     valid_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    """Normalize per-row sparse-index lengths for the FlashInfer ABI.
+
+    ``lengths`` is a *prefix* length: the kernel scans the first ``length``
+    entries of each row.  A few metadata producers can leave ``-1`` holes in
+    that prefix (for example an empty page during the first decode step), so
+    callers may provide ``valid_mask`` to derive the effective count instead.
+    Keeping this conversion on the input device also avoids a host sync in
+    CUDA-graph replay.
+    """
+    if rows < 0 or width < 0:
+        raise ValueError(f"invalid sparse-index shape rows={rows}, width={width}")
+
     if lengths is None:
         if valid_mask is None:
             return torch.full((rows,), width, dtype=torch.int32, device=device)
-        return valid_mask.reshape(rows, width).sum(-1, dtype=torch.int32).contiguous()
+        mask = valid_mask.to(device=device, dtype=torch.bool).reshape(rows, width)
+        return mask.sum(-1, dtype=torch.int32).contiguous()
+
     result = lengths.to(device=device, dtype=torch.int32).reshape(-1)
     if result.numel() == 0:
         raise ValueError(f"top-k lengths are empty; expected {rows} entries")
@@ -86,6 +99,15 @@ def token_lens(
         raise ValueError(
             f"top-k lengths have {result.numel()} entries; expected {rows}"
         )
+    # FlashInfer has no useful interpretation for a count outside the static
+    # index width.  Clamp rather than allowing an out-of-bounds scan; this is
+    # especially important for graph warmup buffers whose values are filled in
+    # place on a later replay.
+    result = result.clamp_(min=0, max=width)
+    if valid_mask is not None:
+        mask = valid_mask.to(device=device, dtype=torch.bool).reshape(rows, width)
+        prefix = torch.arange(width, device=device).unsqueeze(0) < result.unsqueeze(1)
+        result = (mask & prefix).sum(-1, dtype=torch.int32)
     return result.contiguous()
 
 
@@ -94,8 +116,24 @@ def canonical_topk(
     lengths: Optional[torch.Tensor],
     supported_widths: Sequence[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pad and canonicalize sparse indices for the fixed-width kernel.
+
+    FlashInfer consumes a prefix of each row, as described by its length
+    tensor.  Therefore invalid ``-1`` entries are stably moved to the right
+    before the length is calculated.  This preserves the order of selected
+    slots while preventing an interspersed padding entry from shortening the
+    effective prefix and silently dropping a later selected slot.
+    """
     indices = indices.to(torch.int32).contiguous()
+    if indices.dim() != 2:
+        raise ValueError(
+            f"sparse top-k indices must be 2D [rows, width], got {indices.shape}"
+        )
     rows, width = indices.shape
+    if not supported_widths or any(int(value) <= 0 for value in supported_widths):
+        raise ValueError(
+            f"supported top-k widths must be positive, got {supported_widths}"
+        )
     if width not in supported_widths:
         padded_width = next(
             (value for value in supported_widths if value >= width), None
@@ -110,13 +148,33 @@ def canonical_topk(
         )
         padded[:, :width] = indices
         indices = padded
-    return indices, token_lens(
-        lengths,
-        rows,
-        indices.shape[-1],
-        indices.device,
-        valid_mask=indices >= 0,
+
+    width = indices.shape[-1]
+    valid = indices >= 0
+    # An explicit length denotes a prefix in the original layout.  Ignore
+    # entries beyond it before compacting; otherwise stale values in the tail
+    # could become live merely because an earlier slot was -1.
+    normalized_lengths = (
+        token_lens(lengths, rows, width, indices.device)
+        if lengths is not None
+        else None
     )
+    if normalized_lengths is not None:
+        prefix = torch.arange(width, device=indices.device).unsqueeze(0) < (
+            normalized_lengths.unsqueeze(1)
+        )
+        valid &= prefix
+
+    # Stable sort by validity (valid first) keeps selected-slot order while
+    # producing a fixed-shape tensor suitable for CUDA graph replay.  Avoid
+    # ``masked_select`` here: its dynamically sized allocation is not graph
+    # safe when the number of valid slots changes between replays.
+    order = torch.argsort((~valid).to(torch.int8), dim=-1, stable=True)
+    canonical = indices.gather(1, order)
+    canonical_valid = valid.gather(1, order)
+    canonical.masked_fill_(~canonical_valid, -1)
+    effective_lengths = canonical_valid.sum(-1, dtype=torch.int32)
+    return canonical, effective_lengths.contiguous()
 
 
 def pack_logical_workspace(
@@ -132,6 +190,7 @@ def pack_logical_workspace(
     from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
         insert_packed_k_cache_flat,
     )
+
     flat_indices = indices.reshape(-1)
     # Padding slots use -1 by contract.  Gather a harmless row for them, then
     # keep -1 in the remapped indices so FlashInfer masks the slot instead of
@@ -220,6 +279,7 @@ def run(
     extra_lens: Optional[torch.Tensor] = None,
 ) -> None:
     from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+
     kernel_query = query.contiguous()
     kernel_sinks = sinks.float()
     kernel_out = out

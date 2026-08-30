@@ -430,7 +430,11 @@ def setup_default_args(py_env_configs):
 
     if py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks > 0:
         logging.warning(
-            "DSV4_FIXED_POOL_BLOCKS is deprecated and has no effect on descriptor-based pool sizing"
+            "DSV4_FIXED_POOL_BLOCKS=%d is deprecated and ignored for descriptor-based "
+            "pool sizing; use DSV4_HCA_STATE_POOL_BLOCKS=%d for HCA_STATE, while "
+            "the remaining pools use descriptor-derived sizing",
+            py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks,
+            py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks,
         )
 
     # Frontend doesn't need this setting

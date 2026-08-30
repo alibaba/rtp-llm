@@ -35,7 +35,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -190,9 +190,9 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-
-    // Legacy DSV4 fixed-allocation pool block count. Kept for compatibility
-    // with older callers; HCA_STATE has its own explicit sizing knob below.
+    // Deprecated legacy DSV4 fixed-allocation pool block count. Retained for
+    // config serialization/older callers, but ignored by descriptor-based
+    // sizing; use dsv4_hca_state_pool_blocks for HCA_STATE capacity.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
     // DSV4 HCA_STATE is a small active-tail ring, independent of linear_step
@@ -395,7 +395,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -405,9 +405,9 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
+    bool        terminate_without_stop_token = false;
+    int         num_workers                  = 8;
+    std::string tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;
