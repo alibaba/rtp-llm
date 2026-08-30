@@ -70,8 +70,6 @@ private:
     std::unordered_map<std::string, size_t>           tag_to_idx_;
     std::unordered_map<std::string, std::vector<int>> tag_to_layer_ids_;
 
-    void assignTopology(std::vector<CacheGroup> new_groups, std::vector<CacheLayer> new_layers);
-
     static void validateAndBuildIndex(std::vector<CacheGroup>&                           groups,
                                       const std::vector<CacheLayer>&                     layers,
                                       std::unordered_map<std::string, size_t>&           tag_to_idx,
@@ -82,9 +80,9 @@ public:
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
 
-    rtp_llm::DataType dtype = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num;      // the number of main model layers
-    const uint32_t    layer_all_num;  // the number of all layers including mtp modules
+    rtp_llm::DataType dtype                   = rtp_llm::DataType::TYPE_INVALID;
+    uint32_t          layer_num               = 0;  // the number of main model layers
+    uint32_t          layer_all_num           = 0;  // the number of all layers including mtp modules
     bool              use_mla                 = false;
     bool              enable_hybrid_attention = false;
     bool              is_sparse               = false;
@@ -106,10 +104,8 @@ public:
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
-    CacheConfig(): layer_num(0), layer_all_num(0) {}
+    CacheConfig() = default;
     CacheConfig(std::vector<CacheGroup> new_groups, std::vector<CacheLayer> new_layers, uint32_t main_layer_num);
-    CacheConfig(CacheConfig&&) noexcept = default;
-    CacheConfig& operator=(CacheConfig&& other) noexcept;
 
     static uint32_t
     mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {

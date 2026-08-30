@@ -42,21 +42,21 @@ void SharedBlockCache::init(const CacheConfig& config, const std::map<std::strin
 }
 
 void SharedBlockCache::put(CacheKeyType                               cache_key,
-                           const std::map<std::string, BlockIdxType>& group_block_ids,
+                           const std::map<std::string, BlockIdxType>& blocks_by_group,
                            bool                                       is_resident) {
     BlockDependency dependency;
-    put(cache_key, group_block_ids, {}, is_resident, kDefaultNamespace, dependency);
+    put(cache_key, blocks_by_group, {}, is_resident, kDefaultNamespace, dependency);
 }
 
 void SharedBlockCache::put(CacheKeyType                               cache_key,
-                           const std::map<std::string, BlockIdxType>& group_block_ids,
+                           const std::map<std::string, BlockIdxType>& blocks_by_group,
                            const std::map<std::string, bool>&         group_matchable,
                            bool                                       is_resident,
                            NamespaceId                                namespace_id,
                            const BlockDependency&                     dependency) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
-    for (const auto& [tag, block_id] : group_block_ids) {
+    for (const auto& [tag, block_id] : blocks_by_group) {
         validateTagLocked(tag);
     }
     for (const auto& [tag, matchable] : group_matchable) {
@@ -74,8 +74,8 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
             const bool dependency_updated = updateItemDependencyLocked(existing_item, namespace_id, dependency);
             bool       updated            = false;
             for (const auto& tag : group_tags_in_order_) {
-                const auto block_it = group_block_ids.find(tag);
-                if (block_it == group_block_ids.end()) {
+                const auto block_it = blocks_by_group.find(tag);
+                if (block_it == blocks_by_group.end()) {
                     continue;
                 }
                 const auto block_id = block_it->second;
@@ -91,7 +91,7 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
                                                || group_matchable.at(tag),
                                            now_us});
                     updated = true;
-                    blockCacheReferenceByTag(tag, block_id);
+                    blockCacheReferenceForGroup(tag, block_id);
                 } else if (const auto matchable_it = group_matchable.find(tag); matchable_it != group_matchable.end()
                                                                                 && matchable_it->second
                                                                                 && !binding_it->second.matchable) {
@@ -116,7 +116,7 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
     const auto       now_us = currentTimeUs();
     item.is_resident        = is_resident;
     item.created_time_us    = now_us;
-    for (const auto& [tag, block_id] : group_block_ids) {
+    for (const auto& [tag, block_id] : blocks_by_group) {
         if (!isNullBlockIdx(block_id)) {
             item.bindings_by_group.emplace(
                 tag,
@@ -132,13 +132,13 @@ void SharedBlockCache::put(CacheKeyType                               cache_key,
     refreshAllTreeAliasesLocked(cache_key);
 
     for (const auto& tag : group_tags_in_order_) {
-        const auto block_it = group_block_ids.find(tag);
-        if (block_it == group_block_ids.end()) {
+        const auto block_it = blocks_by_group.find(tag);
+        if (block_it == blocks_by_group.end()) {
             continue;
         }
         const auto block_id = block_it->second;
         if (!isNullBlockIdx(block_id)) {
-            blockCacheReferenceByTag(tag, block_id);
+            blockCacheReferenceForGroup(tag, block_id);
         }
     }
 }
@@ -348,7 +348,7 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
         for (const auto& tag : group_tags_in_order_) {
             const auto block_it = eviction.blocks_by_group.find(tag);
             if (block_it != eviction.blocks_by_group.end()) {
-                blockCacheFreeByTag(tag, block_it->second);
+                blockCacheFreeForGroup(tag, block_it->second);
                 freed++;
             }
         }
@@ -373,7 +373,7 @@ size_t SharedBlockCache::evictAndFreeForGroup(std::string_view tag, size_t min_b
         for (const auto& group_tag : group_tags_in_order_) {
             const auto block_it = eviction.blocks_by_group.find(group_tag);
             if (block_it != eviction.blocks_by_group.end()) {
-                blockCacheFreeByTag(group_tag, block_it->second);
+                blockCacheFreeForGroup(group_tag, block_it->second);
                 if (group_tag == tag) {
                     freed++;
                 }
@@ -686,11 +686,11 @@ void SharedBlockCache::validateTagLocked(std::string_view tag) const {
         it != group_pools_.end(), "unknown SharedBlockCache group tag=%s", std::string(tag).c_str());
 }
 
-void SharedBlockCache::blockCacheReferenceByTag(std::string_view tag, BlockIdxType block_id) {
+void SharedBlockCache::blockCacheReferenceForGroup(std::string_view tag, BlockIdxType block_id) {
     group_pools_.at(std::string(tag))->blockCacheReference(block_id);
 }
 
-void SharedBlockCache::blockCacheFreeByTag(std::string_view tag, BlockIdxType block_id) {
+void SharedBlockCache::blockCacheFreeForGroup(std::string_view tag, BlockIdxType block_id) {
     group_pools_.at(std::string(tag))->blockCacheFree(block_id);
 }
 

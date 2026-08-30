@@ -7,7 +7,7 @@
 #include <tuple>
 
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 
@@ -95,7 +95,7 @@ std::shared_ptr<const CacheConfig> makeFakeCacheConfig(const std::vector<std::st
 
 CacheConfig makeFakeConfig(const std::shared_ptr<const CacheConfig>& topology) {
     if (topology == nullptr) {
-        return CacheConfig();
+        return CacheConfig{};
     }
     CacheConfig config(topology->groups(), topology->layers(), static_cast<uint32_t>(topology->layers().size()));
     config.seq_size_per_block = topology->groups().front().seqSizePerBlock();
@@ -104,12 +104,12 @@ CacheConfig makeFakeConfig(const std::shared_ptr<const CacheConfig>& topology) {
 
 }  // namespace
 
-class FakeKVCacheAllocator: public KVCacheAllocator {
+class FakeCoordinatorCacheManager: public CoordinatorCacheManager {
 public:
-    FakeKVCacheAllocator(const CacheConfig& config, std::shared_ptr<const CacheConfig> topology):
-        KVCacheAllocator(config), topology_(std::move(topology)) {}
-    using KVCacheAllocator::convertIndexToAddr;
-    using KVCacheAllocator::convertIndexToBuffer;
+    FakeCoordinatorCacheManager(const CacheConfig& config, std::shared_ptr<const CacheConfig> topology):
+        CoordinatorCacheManager(config), topology_(std::move(topology)) {}
+    using CoordinatorCacheManager::convertIndexToAddr;
+    using CoordinatorCacheManager::convertIndexToBuffer;
     void free(const FreeInfo& free_info) override {
         return;
     }
@@ -126,7 +126,7 @@ public:
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
-    std::vector<BlockInfo> convertIndexToBufferByTag(int layer_id, std::string_view tag, int block_id) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, std::string_view tag, int block_id) const override {
         tagged_buffer_requests_.emplace_back(layer_id, tag, block_id);
         BlockInfo info;
         info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
@@ -134,7 +134,7 @@ public:
         return {info};
     }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake coordinator_cache_manager has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
         for (const auto& group : topology_->groups()) {
             groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology_->layers().size())));
@@ -283,23 +283,26 @@ public:
                          uint32_t                        linear_attention_write_interval = 0,
                          size_t                          sink_size                       = 0,
                          size_t                          sw_size                         = 0) {
-        topology_  = makeFakeCacheConfig(full_tags, other_tags, per_group_layer_num);
-        config_    = makeFakeConfig(topology_);
-        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
+        topology_ = makeFakeCacheConfig(full_tags, other_tags, per_group_layer_num);
+        config_   = makeFakeConfig(topology_);
+        ASSERT_NE(topology_, nullptr);
+        ASSERT_EQ(config_.layer_all_num, topology_->layers().size());
+        ASSERT_GT(config_.seq_size_per_block, 0u);
+        coordinator_cache_manager_ = std::make_shared<FakeCoordinatorCacheManager>(config_, topology_);
         switch (group_mode) {
             case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
-                group_policy_ =
-                    std::make_shared<remote_connector::DefaultLayerGroupPolicy>(allocator_, full_tags, other_tags);
+                group_policy_ = std::make_shared<remote_connector::DefaultLayerGroupPolicy>(
+                    coordinator_cache_manager_, full_tags, other_tags);
                 break;
             }
             case RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER: {
-                group_policy_ =
-                    std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_tags, other_tags);
+                group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(
+                    coordinator_cache_manager_, full_tags, other_tags);
                 break;
             }
             case RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER: {
                 group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
-                    allocator_, full_tags, other_tags, linear_attention_write_interval);
+                    coordinator_cache_manager_, full_tags, other_tags, linear_attention_write_interval);
                 break;
             }
         }
@@ -638,10 +641,10 @@ private:
     }
 
 private:
-    std::shared_ptr<const CacheConfig> topology_;
-    std::shared_ptr<KVCacheAllocator>  allocator_;
-    std::shared_ptr<GroupPolicy>       group_policy_;
-    CacheConfig                        config_;
+    std::shared_ptr<const CacheConfig>       topology_;
+    std::shared_ptr<CoordinatorCacheManager> coordinator_cache_manager_;
+    std::shared_ptr<GroupPolicy>             group_policy_;
+    CacheConfig                              config_;
 };
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) {
@@ -750,18 +753,20 @@ TEST_F(GroupPolicyTest, test_init_DefaultLayerGroupPolicy_fail_for_duplicate_gro
     std::vector<std::string> other_tags = {"0", "1"};
     topology_                           = makeFakeCacheConfig(full_tags, other_tags, 10);
     config_                             = makeFakeConfig(topology_);
-    allocator_                          = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
-    group_policy_ = std::make_shared<remote_connector::DefaultLayerGroupPolicy>(allocator_, full_tags, other_tags);
+    coordinator_cache_manager_          = std::make_shared<FakeCoordinatorCacheManager>(config_, topology_);
+    group_policy_ =
+        std::make_shared<remote_connector::DefaultLayerGroupPolicy>(coordinator_cache_manager_, full_tags, other_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_empty_full_group) {
     std::vector<std::string> full_tags;
     std::vector<std::string> other_tags;
-    topology_     = makeFakeCacheConfig({"placeholder"}, {}, 10);
-    config_       = makeFakeConfig(topology_);
-    allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
-    group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_tags, other_tags);
+    topology_                  = makeFakeCacheConfig(full_tags, other_tags, 10);
+    config_                    = makeFakeConfig(topology_);
+    coordinator_cache_manager_ = std::make_shared<FakeCoordinatorCacheManager>(config_, topology_);
+    group_policy_ =
+        std::make_shared<remote_connector::FullLayerGroupPolicy>(coordinator_cache_manager_, full_tags, other_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
@@ -787,8 +792,9 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_not_empty_other_
     std::vector<std::string> other_tags = {"1"};
     topology_                           = makeFakeCacheConfig(full_tags, other_tags, 10);
     config_                             = makeFakeConfig(topology_);
-    allocator_                          = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
-    group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_tags, other_tags);
+    coordinator_cache_manager_          = std::make_shared<FakeCoordinatorCacheManager>(config_, topology_);
+    group_policy_ =
+        std::make_shared<remote_connector::FullLayerGroupPolicy>(coordinator_cache_manager_, full_tags, other_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
@@ -798,19 +804,19 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_fail_for_not_empty_
         std::vector<std::string> other_tags = {"1"};
         topology_                           = makeFakeCacheConfig(full_tags, other_tags, 10);
         config_                             = makeFakeConfig(topology_);
-        allocator_                          = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
-        group_policy_ =
-            std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(allocator_, full_tags, other_tags, 0);
+        coordinator_cache_manager_          = std::make_shared<FakeCoordinatorCacheManager>(config_, topology_);
+        group_policy_                       = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
+            coordinator_cache_manager_, full_tags, other_tags, 0);
         ASSERT_FALSE(group_policy_->init());
     }
     {
         std::vector<std::string> full_tags = {"0"};
         std::vector<std::string> other_tags;
-        topology_  = makeFakeCacheConfig(full_tags, other_tags, 10);
-        config_    = makeFakeConfig(topology_);
-        allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, topology_);
-        group_policy_ =
-            std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(allocator_, full_tags, other_tags, 0);
+        topology_                  = makeFakeCacheConfig(full_tags, other_tags, 10);
+        config_                    = makeFakeConfig(topology_);
+        coordinator_cache_manager_ = std::make_shared<FakeCoordinatorCacheManager>(config_, topology_);
+        group_policy_              = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
+            coordinator_cache_manager_, full_tags, other_tags, 0);
         ASSERT_FALSE(group_policy_->init());
     }
 }
@@ -1189,7 +1195,9 @@ TEST_F(GroupPolicyTest, InvalidLaterTagIsRejectedBeforeAnyBufferLookupOrOutputMu
     kv_cache_manager::BlockBuffers buffers(1);
     EXPECT_ANY_THROW(group_policy_->genBlockBuffers({"full", "unknown"}, {7, 9}, buffers));
     EXPECT_EQ(buffers.size(), 1u);
-    EXPECT_TRUE(std::static_pointer_cast<FakeKVCacheAllocator>(allocator_)->taggedBufferRequests().empty());
+    EXPECT_TRUE(std::static_pointer_cast<FakeCoordinatorCacheManager>(coordinator_cache_manager_)
+                    ->taggedBufferRequests()
+                    .empty());
 }
 
 }  // namespace test

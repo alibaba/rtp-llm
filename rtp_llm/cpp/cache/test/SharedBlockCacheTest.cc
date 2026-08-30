@@ -30,14 +30,13 @@ BlockDependency childDep(CacheKeyType parent, uint32_t ordinal) {
 CacheConfig makeTaggedCacheConfig() {
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
     config.block_num          = 16;
     config.seq_size_per_block = 4;
 
     auto linear = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "linear");
     auto full   = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
     rtp_llm::test::assignCacheConfigFromGroupedSpecs(config,
-                                                     config.layer_num,
+                                                     /*main_layer_num=*/2,
                                                      {linear, full},
                                                      {{0}, {1}},
                                                      {CacheGroupType::FULL, CacheGroupType::FULL},
@@ -49,7 +48,6 @@ CacheConfig makeTaggedCacheConfig() {
 CacheConfig makeSlotCacheConfig(size_t group_count) {
     CacheConfig config;
     config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = static_cast<uint32_t>(group_count);
     config.block_num          = 2048;
     config.seq_size_per_block = 1;
 
@@ -71,7 +69,8 @@ CacheConfig makeSlotCacheConfig(size_t group_count) {
         block_nums.push_back(2048);
         scale_strides.push_back(0);
     }
-    rtp_llm::test::assignCacheConfigFromGroupedSpecs(config, config.layer_num, specs, layer_ids, group_types, tags);
+    rtp_llm::test::assignCacheConfigFromGroupedSpecs(
+        config, static_cast<uint32_t>(group_count), specs, layer_ids, group_types, tags);
     setGroupBlockLayout(config, block_nums, kv_strides, scale_strides);
     return config;
 }
@@ -186,14 +185,14 @@ public:
     std::vector<std::string> operations;
 
 protected:
-    void blockCacheReferenceByTag(std::string_view tag, BlockIdxType block_id) override {
+    void blockCacheReferenceForGroup(std::string_view tag, BlockIdxType block_id) override {
         operations.push_back("reference:" + std::string(tag));
-        SharedBlockCache::blockCacheReferenceByTag(tag, block_id);
+        SharedBlockCache::blockCacheReferenceForGroup(tag, block_id);
     }
 
-    void blockCacheFreeByTag(std::string_view tag, BlockIdxType block_id) override {
+    void blockCacheFreeForGroup(std::string_view tag, BlockIdxType block_id) override {
         operations.push_back("free:" + std::string(tag));
-        SharedBlockCache::blockCacheFreeByTag(tag, block_id);
+        SharedBlockCache::blockCacheFreeForGroup(tag, block_id);
     }
 };
 

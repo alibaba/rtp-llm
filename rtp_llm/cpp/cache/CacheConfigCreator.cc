@@ -530,15 +530,15 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                                     sp_config,
                                                     config.linear_step);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
-                            "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
+                            "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.totalGroupBlockSizeBytes() / 1024 / 1024));
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.finalizeBlockNums(block_num, runtime_config);
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %zu tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
-        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
+        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %zu tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
                             block_num,
                             kv_cache_seq_len,
@@ -631,7 +631,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                     warm_up_result,
                                                     sp_config,
                                                     joint_step);
-    RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
+    RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %u", block_num);
 
     auto makeConfig = [](BuiltConfigData&&  data,
                          const ModelConfig& model_config,
@@ -701,7 +701,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.finalizeBlockNums(block_num, runtime_config);
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
+    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%u, "
                      "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
                      is_mtp,
                      total_layer_num,

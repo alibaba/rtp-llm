@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -13,6 +14,11 @@
 
 namespace rtp_llm {
 namespace {
+
+static_assert(std::is_copy_constructible_v<CacheConfig>);
+static_assert(std::is_copy_assignable_v<CacheConfig>);
+static_assert(std::is_move_constructible_v<CacheConfig>);
+static_assert(std::is_move_assignable_v<CacheConfig>);
 
 CacheGroup makeGroup(std::string tag, CacheGroupType type = CacheGroupType::FULL) {
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
@@ -141,6 +147,26 @@ TEST(CacheConfigOwnershipTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
     EXPECT_EQ(first.group("linear").policy.group_type, reversed.group("linear").policy.group_type);
     EXPECT_EQ(first.groupForLayer(0, "full").tag, reversed.groupForLayer(0, "full").tag);
     EXPECT_EQ(first.groupForLayer(0, "linear").tag, reversed.groupForLayer(0, "linear").tag);
+}
+
+TEST(CacheConfigOwnershipTest, MoveAssignmentTransfersTopologyAndLayerMetadata) {
+    auto source                    = makeConfig({makeGroup("full"), makeGroup("linear", CacheGroupType::LINEAR)},
+                                                {{"full"}, {"linear"}, {"full", "linear"}});
+    source.block_num               = 23;
+    source.seq_size_per_block      = 8;
+    source.enable_hybrid_attention = true;
+
+    auto target = makeConfig({makeGroup("old")}, {{"old"}});
+    target      = std::move(source);
+
+    EXPECT_EQ(target.layer_num, 3u);
+    EXPECT_EQ(target.layer_all_num, 3u);
+    EXPECT_EQ(target.block_num, 23u);
+    EXPECT_EQ(target.seq_size_per_block, 8u);
+    EXPECT_TRUE(target.enable_hybrid_attention);
+    EXPECT_EQ(target.group("full").tag, "full");
+    EXPECT_EQ(target.groupForLayer(1, "linear").policy.group_type, CacheGroupType::LINEAR);
+    EXPECT_EQ(target.groupsForLayer(2), (std::vector<std::string>{"full", "linear"}));
 }
 
 TEST(CacheConfigOwnershipTest, RejectsUnknownLayerTag) {

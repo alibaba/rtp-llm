@@ -15,6 +15,31 @@ from rtp_llm.utils.backend_registry import (
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 
+    def test_removed_dsv4_fixed_pool_memory_inputs_are_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        cases = [
+            ("cli", {}, ["--dsv4_fixed_pool_use_memory", "1"]),
+            ("env", {"DSV4_FIXED_POOL_USE_MEMORY": "1"}, []),
+        ]
+        for source, env, args in cases:
+            with (
+                self.subTest(source=source),
+                patch.dict(os.environ, env, clear=True),
+                self.assertLogs(level="WARNING") as logs,
+            ):
+                configs = server_args.setup_args(args)
+
+            self.assertFalse(
+                hasattr(configs.kv_cache_config, "dsv4_fixed_pool_use_memory")
+            )
+            matching_logs = [
+                message
+                for message in logs.output
+                if "DSV4_FIXED_POOL_USE_MEMORY" in message
+            ]
+            self.assertEqual(len(matching_logs), 1)
+
     def test_internal_backend_registers_moe_choice_before_parser_initialization(self):
         from rtp_llm.server.server_args import server_args
 

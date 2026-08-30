@@ -29,26 +29,26 @@ bool deviceInputEnabled() {
 }
 
 struct GatherModelInputContext {
-    int                      input_vocab_size;
-    bool                     need_cal_position_id;
-    size_t                   max_blocks_num;
-    int*                     merged_tokens;
-    int*                     input_lengths;
-    int*                     lm_output_indexes;
-    int*                     combo_position_ids;
-    GroupOrdinalBlockIdPair* kv_cache_update_mapping;
-    int                      batch_idx;
-    int*                     sequence_lengths;
-    bool                     has_multimodal_input;
-    bool                     has_mm_extra_input;
-    size_t                   total_decode_batch_size;
-    int*                     prefix_lengths;
-    int*                     prefix_lengths_host;
-    int*                     merged_text_mask;
-    int*                     mm_features_locs;
-    int                      token_idx;
-    int                      cum_output_seq_len;
-    int                      mm_feature_index;
+    int               input_vocab_size;
+    bool              need_cal_position_id;
+    size_t            max_blocks_num;
+    int*              merged_tokens;
+    int*              input_lengths;
+    int*              lm_output_indexes;
+    int*              combo_position_ids;
+    GroupBlockIdPair* kv_cache_update_mapping;
+    int               batch_idx;
+    int*              sequence_lengths;
+    bool              has_multimodal_input;
+    bool              has_mm_extra_input;
+    size_t            total_decode_batch_size;
+    int*              prefix_lengths;
+    int*              prefix_lengths_host;
+    int*              merged_text_mask;
+    int*              mm_features_locs;
+    int               token_idx;
+    int               cum_output_seq_len;
+    int               mm_feature_index;
 };
 
 enum class GatherContextMode {
@@ -89,7 +89,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     }
     ctx.kv_cache_update_mapping =
         model_input.kv_cache_update_mapping.defined() ?
-            reinterpret_cast<GroupOrdinalBlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr())
+            reinterpret_cast<GroupBlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr())
                 + kv_cache_mapping_offset :
             nullptr;
 
@@ -228,9 +228,8 @@ void addCacheUpdateCopy(GatherModelInputContext&              ctx,
         return;
     }
     for (const auto& mapping : update_mapping) {
-        const auto group_ordinal = groupOrdinalForTag(cache_group_tags, mapping.tag, "cache update mapping");
-        *ctx.kv_cache_update_mapping++ =
-            GroupOrdinalBlockIdPair{static_cast<int32_t>(group_ordinal), mapping.src, mapping.dst};
+        const auto group_index         = groupIndexForTag(cache_group_tags, mapping.tag, "cache update mapping");
+        *ctx.kv_cache_update_mapping++ = GroupBlockIdPair{static_cast<int32_t>(group_index), mapping.src, mapping.dst};
     }
 }
 

@@ -11,14 +11,14 @@
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 class KVCacheMemoryConnector;
 class RemoteConnector;
 class P2PConnector;
@@ -26,15 +26,15 @@ class KVCacheConnectorReadWriteContext;
 
 class KVCacheConnectorCoordinator: public IKVCacheConnectorCoordinator {
 public:
-    KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
-                                const KVCacheConfig&                     kv_cache_config,
-                                const RuntimeConfig&                     runtime_config,
-                                const ParallelismConfig&                 parallelism_config,
-                                const SpeculativeExecutionConfig&        sp_config,
-                                const std::shared_ptr<KVCacheAllocator>& allocator,
-                                const kmonitor::MetricsReporterPtr&      metrics_reporter   = nullptr,
-                                const PDSepConfig&                       pd_sep_config      = PDSepConfig{},
-                                const CacheStoreConfig&                  cache_store_config = CacheStoreConfig{});
+    KVCacheConnectorCoordinator(const CacheConfig&                              cache_config,
+                                const KVCacheConfig&                            kv_cache_config,
+                                const RuntimeConfig&                            runtime_config,
+                                const ParallelismConfig&                        parallelism_config,
+                                const SpeculativeExecutionConfig&               sp_config,
+                                const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                                const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr,
+                                const PDSepConfig&                              pd_sep_config    = PDSepConfig{},
+                                const CacheStoreConfig& cache_store_config                       = CacheStoreConfig{});
     virtual ~KVCacheConnectorCoordinator();
 
 public:
@@ -56,7 +56,7 @@ public:
     std::vector<CacheKeyType> memoryCacheKeysForStatus() const;
 
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
-        return allocator_->convertToGlobalLayerId(model_id, layer_id);
+        return coordinator_cache_manager_->convertToGlobalLayerId(model_id, layer_id);
     }
 
     /// Prefill-side StartLoad path; P2P connector wiring fills this in when enabled.
@@ -79,15 +79,15 @@ private:
     bool isPdInvertMode() const;
 
 private:
-    const CacheConfig&                cache_config_;
-    const KVCacheConfig               kv_cache_config_;
-    const RuntimeConfig               runtime_config_;
-    const ParallelismConfig           parallelism_config_;
-    const SpeculativeExecutionConfig  sp_config_;
-    std::shared_ptr<KVCacheAllocator> allocator_;
-    kmonitor::MetricsReporterPtr      metrics_reporter_;
-    PDSepConfig                       pd_sep_config_;
-    CacheStoreConfig                  cache_store_config_;
+    const CacheConfig                        cache_config_;
+    const KVCacheConfig                      kv_cache_config_;
+    const RuntimeConfig                      runtime_config_;
+    const ParallelismConfig                  parallelism_config_;
+    const SpeculativeExecutionConfig         sp_config_;
+    std::shared_ptr<CoordinatorCacheManager> coordinator_cache_manager_;
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    PDSepConfig                              pd_sep_config_;
+    CacheStoreConfig                         cache_store_config_;
 
     std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
     std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;

@@ -151,7 +151,6 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 8;
@@ -183,7 +182,6 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistinct) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 24;
@@ -219,7 +217,6 @@ TEST_F(CPSlotMapperTest, TaggedGroupsKeepGlobalKeySpanAndGroupPhysicalSpanDistin
 TEST_F(CPSlotMapperTest, TaggedGroupMethodsRejectMissingIdentity) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block        = 8;
@@ -250,7 +247,6 @@ TEST_F(CPSlotMapperTest, TransferPlannerReturnsDirectTailPositions) {
 TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDummyTail) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 8;
@@ -293,7 +289,6 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionPreservesSelectedTimelineIncludingDu
 TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
     CacheConfig config;
     config.seq_size_per_block = 8;
-    config.layer_num          = 1;
 
     auto full_spec                       = std::make_shared<MHAKVCacheSpec>();
     full_spec->seq_size_per_block        = 8;

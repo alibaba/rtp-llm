@@ -83,8 +83,6 @@ private:
     const size_t     kernel_blocks_per_block_;
 };
 
-using PoolBlockIds = BlockIds;
-
 class KVCacheResource {
 public:
     void initGroups(const CacheConfig& config);

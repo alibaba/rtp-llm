@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -168,7 +168,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const SpeculativeExecutionConfig&         sp_config,
                                  void*                                     register_buffer_addr,
                                  size_t                                    register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>         allocator,
+                                 std::shared_ptr<CoordinatorCacheManager>  coordinator_cache_manager,
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
@@ -182,7 +182,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_size};
     init_params_  = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     group_policy_ = std::make_unique<remote_connector::FullLayerGroupPolicy>(
-        allocator, remote_connector::fullCacheTags(cache_config), std::vector<std::string>{});
+        coordinator_cache_manager, remote_connector::fullCacheTags(cache_config), std::vector<std::string>{});
 }
 
 void RemoteConnector::validateConfig(const CacheConfig& cache_config) {

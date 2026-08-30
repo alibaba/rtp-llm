@@ -15,11 +15,10 @@
 
 #include <algorithm>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -97,8 +96,8 @@ public:
 
 private:
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        const size_t all_group_num = full_group_tags_.size() + other_group_tags_.size();
-        cache_config_.layer_num    = all_group_num * layer_num;
+        const size_t all_group_num  = full_group_tags_.size() + other_group_tags_.size();
+        const auto   main_layer_num = static_cast<uint32_t>(all_group_num * layer_num);
 
         auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
         auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
@@ -133,7 +132,7 @@ private:
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
 
         rtp_llm::test::assignCacheConfigFromGroupedSpecs(
-            cache_config_, cache_config_.layer_num, specs, layers_by_group, group_types, tags);
+            cache_config_, main_layer_num, specs, layers_by_group, group_types, tags);
         cache_config_.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config_);
 
         ASSERT_GE(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
@@ -154,8 +153,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_construct_rejects_full_plus_linea
 
     // The topology is a legal, allocatable hybrid pool: the rejection below belongs to the
     // remote connector's narrowed accepted set, not to a malformed cache config.
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
-    ASSERT_TRUE(allocator->init());
+    auto coordinator_cache_manager = std::make_shared<CoordinatorCacheManager>(cache_config_);
+    ASSERT_TRUE(coordinator_cache_manager->init());
 
     // Report the rejection through the exception path instead of aborting the process.
     const bool saved_core_dump_on_exception               = rtp_llm::StaticConfig::user_ft_core_dump_on_exception;
@@ -164,10 +163,15 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_construct_rejects_full_plus_linea
     // Failure stage: construction, ahead of any remote client creation.
     EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _)).Times(0);
     // Failure category: invalid-configuration check failure (rtp_llm::RTPException).
-    EXPECT_THROW(
-        std::make_shared<RemoteConnector>(
-            cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator),
-        rtp_llm::RTPException);
+    EXPECT_THROW(std::make_shared<RemoteConnector>(cache_config_,
+                                                   kv_cache_config_,
+                                                   runtime_config_,
+                                                   parallelism_config_,
+                                                   sp_config_,
+                                                   nullptr,
+                                                   0,
+                                                   coordinator_cache_manager),
+                 rtp_llm::RTPException);
 
     rtp_llm::StaticConfig::user_ft_core_dump_on_exception = saved_core_dump_on_exception;
 }

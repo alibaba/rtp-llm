@@ -8,20 +8,25 @@ namespace rtp_llm {
 
 class MockKVCacheMemoryConnector: public KVCacheMemoryConnector {
 public:
-    MockKVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                               const KVCacheConfig&                     kv_cache_config,
-                               const ParallelismConfig&                 parallelism_config,
-                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                               const std::vector<std::string>&          worker_addrs,
-                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
+    MockKVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                               const KVCacheConfig&                            kv_cache_config,
+                               const ParallelismConfig&                        parallelism_config,
+                               const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                               const std::vector<std::string>&                 worker_addrs,
+                               const kmonitor::MetricsReporterPtr&             metrics_reporter):
+        KVCacheMemoryConnector(cache_config,
+                               kv_cache_config,
+                               parallelism_config,
+                               coordinator_cache_manager,
+                               worker_addrs,
+                               metrics_reporter) {}
+    MockKVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                               const KVCacheConfig&                            kv_cache_config,
+                               const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                               const std::vector<std::string>&                 worker_addrs,
+                               const kmonitor::MetricsReporterPtr&             metrics_reporter):
         KVCacheMemoryConnector(
-            cache_config, kv_cache_config, parallelism_config, allocator, worker_addrs, metrics_reporter) {}
-    MockKVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                               const KVCacheConfig&                     kv_cache_config,
-                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                               const std::vector<std::string>&          worker_addrs,
-                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
-        KVCacheMemoryConnector(cache_config, kv_cache_config, allocator, worker_addrs, metrics_reporter) {}
+            cache_config, kv_cache_config, coordinator_cache_manager, worker_addrs, metrics_reporter) {}
     ~MockKVCacheMemoryConnector() override = default;
 
 public:

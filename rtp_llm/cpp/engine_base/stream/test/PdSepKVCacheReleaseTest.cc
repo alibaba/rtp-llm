@@ -158,7 +158,7 @@ public:
 
 void fillDsv4RegionBytes(
     const std::shared_ptr<KVCacheManager>& manager, int block_id, int layer_id, const std::string& tag, uint8_t value) {
-    auto parts = manager->convertIndexToBufferByTag(block_id, layer_id, tag);
+    auto parts = manager->convertIndexToBuffer(block_id, layer_id, tag);
     ASSERT_EQ(parts.size(), 1u);
     auto device = torch::from_blob(
         parts[0].addr, {(int64_t)parts[0].size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
@@ -169,7 +169,7 @@ void fillDsv4RegionBytes(
 
 void expectDsv4RegionBytes(
     const std::shared_ptr<KVCacheManager>& manager, int block_id, int layer_id, const std::string& tag, uint8_t value) {
-    auto parts = manager->convertIndexToBufferByTag(block_id, layer_id, tag);
+    auto parts = manager->convertIndexToBuffer(block_id, layer_id, tag);
     ASSERT_EQ(parts.size(), 1u);
     auto device = torch::from_blob(
         parts[0].addr, {(int64_t)parts[0].size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));

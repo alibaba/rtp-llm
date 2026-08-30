@@ -21,7 +21,7 @@
 
 namespace rtp_llm {
 
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 class RemoteAsyncMatchContext;
 class RemoteConnectorAsyncContext;
 
@@ -34,7 +34,7 @@ public:
                     const SpeculativeExecutionConfig&         sp_config,
                     void*                                     register_buffer_addr,
                     size_t                                    register_buffer_size,
-                    std::shared_ptr<KVCacheAllocator>         allocator,
+                    std::shared_ptr<CoordinatorCacheManager>  coordinator_cache_manager,
                     const kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
                     const std::map<std::string, std::string>& lora_info_map    = {});
     ~RemoteConnector() override;
@@ -109,7 +109,7 @@ private:
 
 private:
     struct InitParams {
-        const CacheConfig&                cache_config;
+        const CacheConfig                 cache_config;
         const KVCacheConfig&              kv_cache_config;
         const RuntimeConfig&              runtime_config;
         const ParallelismConfig&          parallelism_config;

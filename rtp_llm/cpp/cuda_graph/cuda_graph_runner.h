@@ -54,20 +54,6 @@ public:
         for (const auto& group : cache_config_->groups()) {
             tags.push_back(group.tag);
         }
-        for (size_t module_idx = 0; module_idx < cache_config_->mtp_sub_configs.size(); ++module_idx) {
-            const auto& sub_config = cache_config_->mtp_sub_configs[module_idx];
-            RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "CUDA graph cache has null MTP sub-config %zu", module_idx);
-            for (const auto& group : cache_config_->groups()) {
-                const auto& sub_group = sub_config->group(group.tag);
-                RTP_LLM_CHECK_WITH_INFO(
-                    sub_group.block_num == group.block_num,
-                    "CUDA graph shared MTP pool block count mismatch: module=%zu tag=%s main=%u sub=%u",
-                    module_idx,
-                    group.tag.c_str(),
-                    group.block_num,
-                    sub_group.block_num);
-            }
-        }
         kv_cache_group_tags_  = sortedCacheGroupTags(tags, "CUDA graph KV cache");
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
@@ -162,7 +148,7 @@ private:
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
-    BlockIdxType            safeKernelBlockIdForTag(std::string_view tag) const;
+    BlockIdxType            safeKernelBlockIdForGroup(std::string_view tag) const;
     BlockIdxType            safeKernelBlockIdForFlatTable() const;
     BlockIdxType            safeKernelBlockIdForPrimaryTable() const;
     py::object              py_forward_method_;

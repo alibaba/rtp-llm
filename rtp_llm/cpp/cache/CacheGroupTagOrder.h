@@ -22,7 +22,7 @@ namespace rtp_llm {
 // function. Because both sides sort independently, no ordering has to be
 // transmitted and reordering the declaration records cannot change the binding.
 //
-// The resulting entry index is an adapter-local `group_ordinal`: it is never
+// The resulting entry index is an adapter-local `group_index`: it is never
 // stored, returned, bound to Python, or serialized as identity.
 inline std::vector<std::string> sortedCacheGroupTags(const std::vector<std::string>& tags,
                                                      const char*                     what = "cache group") {
@@ -40,9 +40,8 @@ inline std::vector<std::string> sortedCacheGroupTags(const std::vector<std::stri
 
 // Adapter-local entry index of `tag` inside a sorted boundary order. Callers use
 // the result only to address the entry they pack or unpack in the same function.
-inline size_t groupOrdinalForTag(const std::vector<std::string>& sorted_tags,
-                                 std::string_view                tag,
-                                 const char*                     what = "cache group") {
+inline size_t
+groupIndexForTag(const std::vector<std::string>& sorted_tags, std::string_view tag, const char* what = "cache group") {
     const auto it = std::lower_bound(sorted_tags.begin(), sorted_tags.end(), tag);
     if (it == sorted_tags.end() || *it != tag) {
         RTP_LLM_FAIL("unknown %s tag=%s at a positional boundary", what, std::string(tag).c_str());

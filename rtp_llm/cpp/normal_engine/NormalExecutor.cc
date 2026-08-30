@@ -22,9 +22,8 @@ namespace rtp_llm {
 
 namespace {
 
-// Boundary adapter: decode the packed kv_cache_update_mapping tensor back into
-// tagged records. The first column is the adapter-local group_ordinal the
-// gatherer produced from the canonical sorted tag order (see
+// Decode the packed kv_cache_update_mapping tensor back into tagged records.
+// The first column is a group_index in canonical sorted-tag order (see
 // rtp_llm/cpp/cache/CacheGroupTagOrder.h); it is resolved to a tag here and
 // never reaches the cache layer.
 std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& mapping, const CacheConfig& cache_config) {
@@ -38,17 +37,17 @@ std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& map
     }
     const auto sorted_tags = sortedCacheGroupTags(tags, "cache update mapping");
 
-    const auto*                    rows = reinterpret_cast<const GroupOrdinalBlockIdPair*>(mapping.data_ptr());
+    const auto*                    rows = reinterpret_cast<const GroupBlockIdPair*>(mapping.data_ptr());
     std::vector<TaggedBlockIdPair> tagged;
     tagged.reserve(static_cast<size_t>(mapping.size(0)));
     for (int64_t i = 0; i < mapping.size(0); ++i) {
-        const auto group_ordinal = rows[i].group_ordinal;
-        RTP_LLM_CHECK_WITH_INFO(group_ordinal >= 0 && static_cast<size_t>(group_ordinal) < sorted_tags.size(),
-                                "kv_cache_update_mapping row %ld has out-of-range group_ordinal=%d for %zu cache tags",
+        const auto group_index = rows[i].group_index;
+        RTP_LLM_CHECK_WITH_INFO(group_index >= 0 && static_cast<size_t>(group_index) < sorted_tags.size(),
+                                "kv_cache_update_mapping row %ld has out-of-range group_index=%d for %zu cache tags",
                                 static_cast<long>(i),
-                                group_ordinal,
+                                group_index,
                                 sorted_tags.size());
-        tagged.push_back({sorted_tags[static_cast<size_t>(group_ordinal)], rows[i].src, rows[i].dst});
+        tagged.push_back({sorted_tags[static_cast<size_t>(group_index)], rows[i].src, rows[i].dst});
     }
     return tagged;
 }
@@ -281,7 +280,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // update kv cache
         if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.size(0) > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            cache_manager_->blockBatchCopyByTag(
+            cache_manager_->blockBatchCopy(
                 decodeCacheUpdateMapping(model_input.kv_cache_update_mapping, cache_manager_->cacheConfig()));
         }
     }

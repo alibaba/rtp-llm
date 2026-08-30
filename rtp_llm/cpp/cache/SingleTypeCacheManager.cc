@@ -1,11 +1,11 @@
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-bool KVCacheGroup::init() {
+bool SingleTypeCacheManager::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
@@ -32,7 +32,7 @@ bool KVCacheGroup::init() {
     return true;
 }
 
-bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
+bool SingleTypeCacheManager::ensureFreeBlocks(int required_blocks) {
     if (required_blocks <= 0) {
         return true;
     }
@@ -76,23 +76,23 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     return true;
 }
 
-MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult SingleTypeCacheManager::match(const CacheKeysType& cache_keys) {
     return matchPrefix(cache_keys);
 }
 
-MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
-    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support prefix matching", tag().c_str());
+MatchResult SingleTypeCacheManager::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
+    RTP_LLM_FAIL("SingleTypeCacheManager tag=%s does not support prefix matching", tag().c_str());
     return {};
 }
 
-MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support single-key matching", tag().c_str());
+MatchResult SingleTypeCacheManager::matchSingleKey(CacheKeyType /*cache_key*/) const {
+    RTP_LLM_FAIL("SingleTypeCacheManager tag=%s does not support single-key matching", tag().c_str());
     return {};
 }
 
-void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
-                                   const BlockIndicesType& block_indices,
-                                   bool                    is_resident) {
+void SingleTypeCacheManager::insertIntoCache(const CacheKeysType&    cache_keys,
+                                             const BlockIndicesType& block_indices,
+                                             bool                    is_resident) {
     if (!shared_cache_) {
         return;
     }
@@ -106,58 +106,58 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     }
 }
 
-size_t KVCacheGroup::freeBlocksNum() const {
+size_t SingleTypeCacheManager::freeBlocksNum() const {
     return block_pool_->freeBlocksNum();
 }
 
-int KVCacheGroup::seqSizePerBlock() const {
+int SingleTypeCacheManager::seqSizePerBlock() const {
     return static_cast<int>(cache_group_.seqSizePerBlock());
 }
 
-const std::string& KVCacheGroup::tag() const {
+const std::string& SingleTypeCacheManager::tag() const {
     return cache_group_.tag;
 }
 
-const CacheGroup& KVCacheGroup::config() const {
+const CacheGroup& SingleTypeCacheManager::config() const {
     return cache_group_;
 }
 
-const CacheGroupPolicy& KVCacheGroup::policy() const {
+const CacheGroupPolicy& SingleTypeCacheManager::policy() const {
     return cache_group_.policy;
 }
 
-bool KVCacheGroup::prefixReuseEnabled() const {
+bool SingleTypeCacheManager::prefixReuseEnabled() const {
     return policy().enable_prefix_reuse;
 }
 
-CacheEvictPolicy KVCacheGroup::evictPolicy() const {
+CacheEvictPolicy SingleTypeCacheManager::evictPolicy() const {
     return policy().evict_policy;
 }
 
-uint32_t KVCacheGroup::explicitBlockNum() const {
+uint32_t SingleTypeCacheManager::explicitBlockNum() const {
     return policy().explicit_block_num;
 }
 
-size_t KVCacheGroup::activeTailBlocks() const {
+size_t SingleTypeCacheManager::activeTailBlocks() const {
     return policy().active_tail_blocks > 0 ? static_cast<size_t>(policy().active_tail_blocks) : 0;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
+std::unordered_map<int, torch::Tensor> SingleTypeCacheManager::allLayerCacheBase() const {
     return global_layer_to_kv_tensors;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerScaleCacheBase() const {
+std::unordered_map<int, torch::Tensor> SingleTypeCacheManager::allLayerScaleCacheBase() const {
     return global_layer_to_kv_scale_tensors;
 }
 
-BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
+BlockAddrInfo SingleTypeCacheManager::convertIndexToAddr(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
-std::vector<BlockInfo> KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> SingleTypeCacheManager::convertIndexToBuffer(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
@@ -165,34 +165,34 @@ std::vector<BlockInfo> KVCacheGroup::convertIndexToBuffer(int layer_id, int bloc
 }
 
 std::vector<BlockInfo>
-KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
+SingleTypeCacheManager::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
 }
 
-void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
+void SingleTypeCacheManager::reference(const BlockIndicesType& new_block_indices) {
     block_pool_->requestReference(new_block_indices);
 }
 
-bool KVCacheGroup::prefixReusable() const {
+bool SingleTypeCacheManager::prefixReusable() const {
     return policy().enable_prefix_reuse;
 }
 
-bool KVCacheGroup::hasSparseSlots() const {
+bool SingleTypeCacheManager::hasSparseSlots() const {
     return policy().group_type != CacheGroupType::FULL;
 }
 
-bool KVCacheGroup::hasKernelBlockSubdiv() const {
+bool SingleTypeCacheManager::hasKernelBlockSubdiv() const {
     return policy().group_type == CacheGroupType::FULL;
 }
 
-bool KVCacheGroup::transferTailBlocks() const {
+bool SingleTypeCacheManager::transferTailBlocks() const {
     return activeTailBlocks() > 0;
 }
 
-bool KVCacheGroup::isReservable() const {
+bool SingleTypeCacheManager::isReservable() const {
     return policy().reservable;
 }
 

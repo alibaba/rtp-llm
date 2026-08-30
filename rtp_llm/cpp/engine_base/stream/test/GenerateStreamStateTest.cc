@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -55,12 +55,13 @@ protected:
     }
 
     void installRetryableInitMalloc() {
-        auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-        ON_CALL(*allocator, totalBlocksNum()).WillByDefault(testing::Return(64));
-        ON_CALL(*allocator, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
-        ON_CALL(*allocator, initMallocForCommonLen(testing::_))
+        auto coordinator_manager =
+            std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+        ON_CALL(*coordinator_manager, totalBlocksNum()).WillByDefault(testing::Return(64));
+        ON_CALL(*coordinator_manager, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
+        ON_CALL(*coordinator_manager, initMallocForCommonLen(testing::_))
             .WillByDefault(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}));
-        cache_manager_->allocator_ = std::move(allocator);
+        cache_manager_->coordinator_cache_manager_ = std::move(coordinator_manager);
     }
 
 protected:

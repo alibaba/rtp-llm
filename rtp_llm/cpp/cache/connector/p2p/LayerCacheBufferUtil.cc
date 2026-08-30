@@ -293,7 +293,7 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     int                       layer_id = layer_cache_buffer->getLayerId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBufferByTag(
+        auto block_infos = converter->convertIndexToBuffer(
             layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
 
         transfer::KeyBlockInfo kbi;

@@ -135,6 +135,7 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
+        deprecated_ignored_warning: Optional[str] = None,
         bind_to: Optional[
             Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
         ] = None,
@@ -146,6 +147,7 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
+            deprecated_ignored_warning: CLI 或 env 显式设置该弃用参数时输出的告警
             bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
                 'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
@@ -166,6 +168,10 @@ class EnvArgumentGroup:
 
         # 保留 env 映射（用于兼容和日志）
         self._parser._register_env_mapping(action, args, env_name)
+        if deprecated_ignored_warning is not None:
+            self._parser._register_deprecated_ignored_warning(
+                action, deprecated_ignored_warning
+            )
         return action
 
     def __getattr__(self, name):
@@ -179,6 +185,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
         self.env_prefix = env_prefix.upper()
         self._groups: Dict[str, EnvArgumentGroup] = {}
         self._config_bindings: List[ConfigBinding] = []  # 配置绑定列表
+        self._deprecated_ignored_warnings: Dict[str, str] = {}
         self._root_config: Optional[Any] = None  # 根配置对象（PyEnvConfigs）
 
         super().__init__(*args, **kwargs)
@@ -199,6 +206,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
         binding = ConfigBinding(action, bind_to)
         self._config_bindings.append(binding)
 
+    def _register_deprecated_ignored_warning(
+        self, action: argparse.Action, warning: str
+    ) -> None:
+        self._deprecated_ignored_warnings[action.dest] = warning
+
     def add_argument_group(self, *args, **kwargs) -> EnvArgumentGroup:
         group = super().add_argument_group(*args, **kwargs)
         env_group = EnvArgumentGroup(group, self)
@@ -213,7 +225,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
         return EnvArgumentGroup(group, self)
 
     def add_argument(
-        self, *args, env_name: Optional[str] = None, **kwargs
+        self,
+        *args,
+        env_name: Optional[str] = None,
+        deprecated_ignored_warning: Optional[str] = None,
+        **kwargs,
     ) -> argparse.Action:
         if args and isinstance(args[0], str) and not args[0].startswith("-"):
             action = self._positionals.add_argument(*args, **kwargs)
@@ -221,6 +237,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
             action = self._optionals.add_argument(*args, **kwargs)
 
         self._register_env_mapping(action, args, env_name)
+        if deprecated_ignored_warning is not None:
+            self._register_deprecated_ignored_warning(
+                action, deprecated_ignored_warning
+            )
         return action
 
     def _register_env_mapping(
@@ -369,6 +389,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
                             else:
                                 # No type converter, use as string
                                 setattr(parsed_args, dest, env_value)
+
+        cli_provided = getattr(self, "_cli_provided_args", set())
+        for dest, warning in self._deprecated_ignored_warnings.items():
+            env_name = self._env_mappings.get(dest)
+            if dest in cli_provided or (
+                env_name is not None and env_name in os.environ
+            ):
+                logging.warning(warning)
 
         # 应用所有配置绑定
         if self._root_config is not None:
@@ -553,6 +581,5 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
     )
-
 
     return py_env_configs
