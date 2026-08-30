@@ -26,6 +26,7 @@ breakdown:
 import functools
 import json
 import logging
+import os
 from typing import List
 
 import torch
@@ -43,8 +44,8 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3MtpWeight,
 )
 from rtp_llm.models.dsv4_kv_cache import (
+    DSV4_TOKENS_PER_BLOCK,
     build_dsv4_kv_cache_spec_descs,
-    resolve_dsv4_tokens_per_block,
 )
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType
 from rtp_llm.utils.model_weight import (
@@ -495,6 +496,10 @@ class DeepSeekV4(DeepSeekV2):
     """
 
     @classmethod
+    def default_kv_cache_tokens_per_block(cls) -> int:
+        return DSV4_TOKENS_PER_BLOCK
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
         config.attn_config.head_num = 0
@@ -514,31 +519,14 @@ class DeepSeekV4(DeepSeekV2):
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         """Declare the seven-pool DSv4 cache topology.
 
-        Runs after ``build_model_config``, so the CLI-derived
-        ``attn_config.tokens_per_block`` is already in place and can be
-        promoted here without being clobbered.
+        Block geometry is resolved before ``build_model_config`` so this hook
+        only declares the model's cache topology.
         """
         if model_config.kv_cache_spec_descs:
             return
 
         attn_config = model_config.attn_config
         layer_num = int(model_config.num_layers)
-
-        promoted = resolve_dsv4_tokens_per_block(int(attn_config.tokens_per_block))
-        if promoted is not None:
-            # kernel_tokens_per_block mirrors tokens_per_block unless the user
-            # asked for a distinct --kernel_seq_size_per_block; C++ derives the
-            # kernel block the same way.
-            if int(attn_config.kernel_tokens_per_block) == int(
-                attn_config.tokens_per_block
-            ):
-                attn_config.kernel_tokens_per_block = promoted
-            attn_config.tokens_per_block = promoted
-            logging.info(
-                "DeepSeek-V4 promoted tokens_per_block to %d (kernel %d)",
-                attn_config.tokens_per_block,
-                attn_config.kernel_tokens_per_block,
-            )
 
         hybrid_config = model_config.hybrid_attention_config
         hybrid_config.hybrid_attention_types = [HybridAttentionType.NONE] * layer_num

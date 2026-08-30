@@ -32,7 +32,7 @@ true of ``ModelConfig.kv_cache_spec_descs`` (a ``std::vector<std::vector<...>>``
 mutate the Python list first, then assign it once.
 """
 
-from typing import Optional, Sequence
+from typing import Sequence
 
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
@@ -143,7 +143,6 @@ def _make_dsv4_desc(
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
 
     desc.state_ring_include_gen_num_per_cycle = True
-    cp.scale_seq_size = True
     desc.block_stride_alignment_min_entries = DSV4_SWA_WINDOW_ENTRIES
     desc.reuse = reuse
     desc.cp = cp
@@ -262,22 +261,3 @@ def build_dsv4_kv_cache_spec_descs(
         else:
             layer_descs.append([swa_kv])
     return layer_descs
-
-
-def resolve_dsv4_tokens_per_block(
-    tokens_per_block: int,
-    framework_default: int = 64,
-) -> Optional[int]:
-    """Return the physical block size DSv4 should run with, or None to keep.
-
-    ``CacheConfigCreator::createHybridAttentionPoolConfig`` takes
-    ``kv_cache_config.seq_size_per_block`` only when it differs from the
-    framework default of 64, otherwise it falls back to
-    ``attn_config.tokens_per_block``; and ``createBasicConfig`` (the warm-up
-    path) zeroes ``seq_size_per_block`` entirely, so ``attn_config`` is the only
-    channel that reaches both paths.  Promote the default to 256, but leave an
-    explicit ``--seq_size_per_block`` alone so the two paths stay in agreement.
-    """
-    if tokens_per_block == framework_default:
-        return DSV4_TOKENS_PER_BLOCK
-    return None

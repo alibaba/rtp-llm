@@ -982,7 +982,6 @@ class CacheTailPolicyDesc:
 class CacheCpPolicyDesc:
     mapping: typing.Any
     slice: typing.Any
-    scale_seq_size: typing.Any
     align_payload: typing.Any
     prefill_slice_layout: typing.Any
     def __init__(self) -> None: ...

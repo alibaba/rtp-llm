@@ -1,12 +1,27 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace rtp_llm {
 
 using namespace torch_ext;
+
+inline BlockIdxType cudaGraphSafePhysicalBlockId(const CacheGroup& group) {
+    RTP_LLM_CHECK_WITH_INFO(
+        group.block_num > 0, "CUDA graph cache group tag=%s has no safe dummy block", group.tag.c_str());
+    return 0;
+}
+
+inline BlockIdxType cudaGraphSafeKernelBlockId(const CacheGroup& group) {
+    (void)cudaGraphSafePhysicalBlockId(group);
+    return 0;
+}
 
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
@@ -18,13 +33,12 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool             enable_cuda_graph            = false;
-    bool             enable_cuda_graph_debug_mode = false;
-    bool             is_prefill_cuda_graph_mode   = false;
-    bool             is_target_verify             = false;
-    int              max_seq_len                  = 0;
-    int              tokens_per_block             = 0;  // physical kv block size
-    int              kernel_tokens_per_block      = 0;  // must be explicitly configured
+    bool                               enable_cuda_graph            = false;
+    bool                               enable_cuda_graph_debug_mode = false;
+    bool                               is_prefill_cuda_graph_mode   = false;
+    bool                               is_target_verify             = false;
+    int                                max_seq_len                  = 0;
+    std::shared_ptr<const CacheConfig> cache_config;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int              sp_steps               = 0;
     size_t           max_context_batch_size = 128;
@@ -33,10 +47,6 @@ struct GraphParams {
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult = 1;
-    // Golden cache-group identity for CUDA graph capture/replay. A one-group
-    // topology keeps the direct AttentionInputs fast path; multiple groups
-    // require an exact tag -> AttentionInputs mapping at replay time.
-    std::vector<std::string> kv_cache_group_tags;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from

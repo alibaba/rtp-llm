@@ -28,9 +28,9 @@ struct MLAKVCacheSpec: public KVCacheSpec {
                                 "MLA KVCacheSpecDesc tag=%s requires positive attn_config.rope_head_dim",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<MLAKVCacheSpec>();
-        spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        auto spec = std::make_shared<MLAKVCacheSpec>();
+        spec->setSequenceGeometry(ctx.seq_size_per_block, ctx.kernel_seq_size_per_block, desc.tag);
+        spec->dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
                                 desc.tag.c_str(),

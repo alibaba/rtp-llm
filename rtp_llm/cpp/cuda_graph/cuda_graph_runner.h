@@ -11,6 +11,7 @@
 #include "c10/core/TensorOptions.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 
@@ -31,8 +32,7 @@ public:
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         max_seq_len_(graph_params.max_seq_len),
-        seq_size_per_block_(graph_params.tokens_per_block),
-        kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
+        cache_config_(graph_params.cache_config),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
@@ -40,15 +40,35 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
+        if (!cache_config_ || cache_config_->seq_size_per_block == 0) {
+            throw std::runtime_error(
+                "CudaGraphRunner constructor: CacheConfig with positive logical block size required.");
         }
+        std::vector<std::string> tags;
+        tags.reserve(cache_config_->groups().size());
+        for (const auto& group : cache_config_->groups()) {
+            tags.push_back(group.tag);
+        }
+        for (size_t module_idx = 0; module_idx < cache_config_->mtp_sub_configs.size(); ++module_idx) {
+            const auto& sub_config = cache_config_->mtp_sub_configs[module_idx];
+            RTP_LLM_CHECK_WITH_INFO(sub_config != nullptr, "CUDA graph cache has null MTP sub-config %zu", module_idx);
+            for (const auto& group : cache_config_->groups()) {
+                const auto& sub_group = sub_config->group(group.tag);
+                RTP_LLM_CHECK_WITH_INFO(
+                    sub_group.block_num == group.block_num,
+                    "CUDA graph shared MTP pool block count mismatch: module=%zu tag=%s main=%u sub=%u",
+                    module_idx,
+                    group.tag.c_str(),
+                    group.block_num,
+                    sub_group.block_num);
+            }
+        }
+        kv_cache_group_tags_  = sortedCacheGroupTags(tags, "CUDA graph KV cache");
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
@@ -56,13 +76,12 @@ public:
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
+            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, \
             hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
-                         kernel_seq_size_per_block_,
                          hidden_size_,
                          input_hidden_size_,
                          num_tokens_per_bs_,
@@ -143,6 +162,9 @@ private:
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
+    BlockIdxType            safeKernelBlockIdForTag(std::string_view tag) const;
+    BlockIdxType            safeKernelBlockIdForFlatTable() const;
+    BlockIdxType            safeKernelBlockIdForPrimaryTable() const;
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
@@ -154,15 +176,14 @@ private:
     int                     num_tokens_per_bs_{1};
     int                     max_num_token_{1};
     int                     max_seq_len_{0};
-    int                     seq_size_per_block_{0};
-    int                     kernel_seq_size_per_block_{0};
-    int                     hidden_size_{0};
-    size_t                  input_hidden_size_{0};
-    int                     hc_mult_{1};
-    int                     sp_steps_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    std::shared_ptr<const CacheConfig> cache_config_;
+    int                                hidden_size_{0};
+    size_t                             input_hidden_size_{0};
+    int                                hc_mult_{1};
+    int                                sp_steps_{0};
+    std::vector<int>                   capture_range_;
+    std::vector<int>                   prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int>                   decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;

@@ -205,10 +205,10 @@ RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
     RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
     for (const auto& entry : group_policy_->groups()) {
-        const auto& cache_tag    = entry.first;
-        const auto& config_group = init_params_->cache_config.group(cache_tag);
-        const auto  group_block_size =
-            config_group.layer_ids.size() * (config_group.kv_block_stride_bytes + config_group.kv_scale_stride_bytes);
+        const auto& cache_tag        = entry.first;
+        const auto& config_group     = init_params_->cache_config.group(cache_tag);
+        const auto  group_block_size = init_params_->cache_config.groupLayerIds(cache_tag).size()
+                                      * (config_group.kv_block_stride_bytes + config_group.kv_scale_stride_bytes);
         const auto& group    = entry.second;
         auto [iter, success] = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
@@ -845,7 +845,7 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
                 return false;
             }
             auto block_id = block_indices.at(block_idx);
-            remote_request->add_block_ids(block_id);
+            remote_request->add_block_ids(toLegacyBlockIdx(block_id));
             remote_request->add_uris(location_spec.uri.data());
         }
         block_idx++;
@@ -913,7 +913,7 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
                 return false;
             }
             auto block_id = block_indices.at(cache_key_idx);
-            remote_request->add_block_ids(block_id);
+            remote_request->add_block_ids(toLegacyBlockIdx(block_id));
             remote_request->add_uris(location_spec.uri);
             actual_uri_gather[spec_info.tp_rank].push_back(
                 const_cast<kv_cache_manager::LocationSpecUnit*>(&location_spec));

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
@@ -127,22 +128,18 @@ private:
 
     void initCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
         cache_config_.layer_num          = layer_num;
-        cache_config_.layer_all_num      = layer_num;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
 
-        auto mha_spec                       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
-        cache_config_.dtype                 = rtp_llm::DataType::TYPE_FP16;
-        cache_config_.kv_block_stride_bytes = mha_spec->block_size_bytes();  // one-layer KV bytes for one logical block
-        cache_config_.kv_scale_stride_bytes = 0;
-        cache_config_.kv_block_size_bytes   = static_cast<size_t>(layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_size_bytes   = 0;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes;  // (kv + scale)
+        auto mha_spec       = makeTestMhaSpec("default", static_cast<uint32_t>(seq_size_per_block));
+        cache_config_.dtype = rtp_llm::DataType::TYPE_FP16;
         std::vector<int> layer_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_ids[i] = i;
         }
-        cache_config_.fromGroupedSpecs({mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        rtp_llm::test::assignCacheConfigFromGroupedSpecs(
+            cache_config_, cache_config_.layer_num, {mha_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        cache_config_.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config_);
     }
 };
 
@@ -194,11 +191,11 @@ TEST_F(RemoteConnectorMockOnlyFullTest, AllZeroWireWriteSucceedsWithEmptyPositio
 
 #ifdef USE_REMOTE_KV_CACHE
 TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAndBuildsFullPolicy) {
-    CacheConfig hybrid_config                 = cache_config_;
-    hybrid_config.use_independent_block_pools = true;
-    hybrid_config.setGroupBlockLayout({hybrid_config.block_num},
-                                      {hybrid_config.group("default").spec->block_size_bytes()},
-                                      {hybrid_config.group("default").spec->scale_block_size_bytes()});
+    CacheConfig hybrid_config = std::move(cache_config_);
+    setGroupBlockLayout(hybrid_config,
+                        {hybrid_config.block_num},
+                        {hybrid_config.group("default").spec->block_size_bytes()},
+                        {hybrid_config.group("default").spec->scale_block_size_bytes()});
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(hybrid_config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -231,7 +228,6 @@ TEST_F(RemoteConnectorMockOnlyFullTest, CoordinatorRegistersTheSoleHybridPoolAnd
 }
 
 TEST_F(RemoteConnectorMockOnlyFullTest, ManagerRegistersOrdinarySingleFullHybridPoolWithRemoteConnector) {
-    ASSERT_FALSE(cache_config_.use_independent_block_pools);
     ASSERT_EQ(cache_config_.groupNums(), 1);
 
     auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();

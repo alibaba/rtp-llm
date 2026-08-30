@@ -50,7 +50,7 @@ public:
 
         const auto& resource       = batch_resource[0];
         int         max_blocks_num = 0;
-        for (const auto& [tag, block_ids] : resource.blocksByTag()) {
+        for (const auto& [tag, block_ids] : resource.blocksByGroup()) {
             (void)block_ids;
             max_blocks_num = std::max(max_blocks_num, resource.blocksNum(tag));
         }
@@ -65,24 +65,16 @@ public:
         return cacheResource(batch_id).blocksForLayer(layer_id, tag);
     }
 
-    const BlockIndicesType& kernelBlocks(int batch_id, std::string_view tag) const {
-        return cacheResource(batch_id).kernelBlocks(tag);
-    }
-
-    const BlockIndicesType& kernelBlocksForLayer(int batch_id, int layer_id, std::string_view tag) const {
-        return cacheResource(batch_id).kernelBlocksForLayer(layer_id, tag);
-    }
-
     bool layerOwnsTag(int batch_id, int layer_id, std::string_view tag) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].layerOwnsTag(layer_id, tag);
     }
 
-    BlockIds& mutableBlockIds(int batch_id, std::string_view tag) {
+    PoolBlockIds& mutableBlockIds(int batch_id, std::string_view tag) {
         return cacheResource(batch_id).mutableBlockIds(tag);
     }
 
-    BlockIds& mutableBlockIdsForLayer(int batch_id, int layer_id, std::string_view tag) {
+    PoolBlockIds& mutableBlockIdsForLayer(int batch_id, int layer_id, std::string_view tag) {
         return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag);
     }
 
@@ -91,9 +83,9 @@ public:
         return batch_resource[0].layerOwnsTag(layer_id, tag);
     }
 
-    const std::map<std::string, BlockIds>& blocksByTag(int batch_id = 0) const {
+    const std::map<std::string, PoolBlockIds>& blocksByGroup(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].blocksByTag();
+        return batch_resource[batch_id].blocksByGroup();
     }
 
     const KVCacheResource& cacheResource(int batch_id = 0) const {
@@ -148,14 +140,14 @@ public:
 
     void check() const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        const auto& expected_blocks_by_tag = batch_resource[0].blocksByTag();
-        RTP_LLM_CHECK(!expected_blocks_by_tag.empty());
+        const auto& expected_blocks_by_group = batch_resource[0].blocksByGroup();
+        RTP_LLM_CHECK(!expected_blocks_by_group.empty());
         for (const auto& resource : batch_resource) {
-            const auto& blocks_by_tag = resource.blocksByTag();
-            RTP_LLM_CHECK(blocks_by_tag.size() == expected_blocks_by_tag.size());
-            for (const auto& [tag, expected_blocks] : expected_blocks_by_tag) {
-                const auto it = blocks_by_tag.find(tag);
-                RTP_LLM_CHECK(it != blocks_by_tag.end());
+            const auto& blocks_by_group = resource.blocksByGroup();
+            RTP_LLM_CHECK(blocks_by_group.size() == expected_blocks_by_group.size());
+            for (const auto& [tag, expected_blocks] : expected_blocks_by_group) {
+                const auto it = blocks_by_group.find(tag);
+                RTP_LLM_CHECK(it != blocks_by_group.end());
                 RTP_LLM_CHECK(it->second.blocksNum() == expected_blocks.blocksNum());
             }
         }

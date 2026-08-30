@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import torch
 from torch import nn
@@ -108,10 +108,10 @@ class MlaAttention(nn.Module):
         hidden_states: torch.Tensor,
         q_c: Optional[torch.Tensor],
         q_view: torch.Tensor,
-        kv_cache: LayerKVCache,
+        kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
     ) -> Optional[torch.Tensor]:
-        if self.indexer is None:
+        if self.indexer is None or kv_cache is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
         topk_indices = self.indexer(
@@ -138,37 +138,30 @@ class MlaAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
-        kv_cache: Optional[LayerKVCache] | Mapping[str, LayerKVCache] = None,
+        kv_cache: Optional[LayerKVCache]
+        | Mapping[str, Optional[LayerKVCache]] = None,
     ) -> torch.Tensor:
         if self.indexer is not None:
-            required_tags = {"default", "indexer_kv"}
-            if (
-                not isinstance(fmha_impl, Mapping)
-                or not isinstance(kv_cache, Mapping)
-                or set(fmha_impl) != required_tags
-                or set(kv_cache) != required_tags
-            ):
+            fmha_routes = cast(Mapping[str, MlaImplBase], fmha_impl)
+            if kv_cache is None:
+                cache_routes: Mapping[str, Optional[LayerKVCache]] = {
+                    "default": None,
+                    "indexer_kv": None,
+                }
+            elif isinstance(kv_cache, Mapping):
+                cache_routes = kv_cache
+            else:
                 raise RuntimeError(
-                    "sparse MLA requires exactly the default and indexer_kv "
-                    "FMHA and KV-cache routes"
+                    "sparse MLA requires grouped KV cache routes "
+                    "when cache is initialized"
                 )
-            default_fmha_impl = fmha_impl["default"]
-            indexer_fmha_impl = fmha_impl["indexer_kv"]
-            default_kv_cache = kv_cache["default"]
-            indexer_kv_cache = kv_cache["indexer_kv"]
-            if not isinstance(default_fmha_impl, MlaImplBase) or not isinstance(
-                indexer_fmha_impl, MlaImplBase
-            ):
-                raise RuntimeError("sparse MLA FMHA routes must contain MlaImplBase")
-            if not isinstance(default_kv_cache, LayerKVCache) or not isinstance(
-                indexer_kv_cache, LayerKVCache
-            ):
-                raise RuntimeError("sparse MLA cache routes must contain LayerKVCache")
+            default_fmha_impl = fmha_routes["default"]
+            indexer_fmha_impl = fmha_routes["indexer_kv"]
+            default_kv_cache = cache_routes["default"]
+            indexer_kv_cache = cache_routes["indexer_kv"]
         else:
-            if isinstance(fmha_impl, Mapping) or isinstance(kv_cache, Mapping):
-                raise RuntimeError("dense MLA does not accept tagged cache routes")
-            default_fmha_impl = fmha_impl
-            default_kv_cache = kv_cache
+            default_fmha_impl = cast(MlaImplBase, fmha_impl)
+            default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
 
         input_shape = hidden_states.shape[:-1]
         q_c = None

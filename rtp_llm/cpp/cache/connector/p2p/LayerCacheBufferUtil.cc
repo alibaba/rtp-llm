@@ -26,31 +26,24 @@ void validateGroupPacking(const CacheConfig&     config,
                           std::string_view       tag) {
     RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "P2P transfer requires a non-empty cache group tag");
     const auto& group = config.groupForLayer(layer_id, tag);
-    RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block > 0 && group.seq_size_per_block > 0
-                                && group.seq_size_per_block % config.seq_size_per_block == 0,
+    RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block > 0 && group.seqSizePerBlock() > 0
+                                && group.seqSizePerBlock() % config.seq_size_per_block == 0,
                             "P2P transfer tag=%.*s has invalid global/physical spans=%zu/%zu",
                             static_cast<int>(tag.size()),
                             tag.data(),
                             config.seq_size_per_block,
-                            group.seq_size_per_block);
-    RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+                            group.seqSizePerBlock());
+    RTP_LLM_CHECK_WITH_INFO(group.kernelSeqSizePerBlock() > 0
+                                && group.seqSizePerBlock() % group.kernelSeqSizePerBlock() == 0,
                             "P2P transfer tag=%.*s has invalid physical/kernel spans=%zu/%zu",
                             static_cast<int>(tag.size()),
                             tag.data(),
-                            group.seq_size_per_block,
-                            group.kernel_seq_size_per_block);
+                            group.seqSizePerBlock(),
+                            group.kernelSeqSizePerBlock());
 
-    const auto&  block_ids              = resource.blockIdsForLayer(layer_id, tag);
-    const size_t physical_kernel_blocks = group.seq_size_per_block / group.kernel_seq_size_per_block;
-    const size_t stored_kernel_blocks   = group.policy.group_type == CacheGroupType::FULL ? physical_kernel_blocks : 1;
-    RTP_LLM_CHECK_WITH_INFO(block_ids.kernelBlocksPerKvBlock() == stored_kernel_blocks,
-                            "P2P transfer tag=%.*s block table K=%zu does not match stored/group K=%zu/%zu",
-                            static_cast<int>(tag.size()),
-                            tag.data(),
-                            block_ids.kernelBlocksPerKvBlock(),
-                            stored_kernel_blocks,
-                            physical_kernel_blocks);
+    // Validate layer/tag ownership without duplicating group geometry in the
+    // request-owned physical binding sequence.
+    resource.blockIdsForLayer(layer_id, tag);
 }
 
 template<typename Visitor>
@@ -83,7 +76,7 @@ bool visitSelectedBlocks(const CacheConfig&     config,
         physical_capacity = local_block_count * world_size;
     }
 
-    const size_t keys_per_physical_block = group.seq_size_per_block / config.seq_size_per_block;
+    const size_t keys_per_physical_block = group.seqSizePerBlock() / config.seq_size_per_block;
     const size_t available_key_count     = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
     const size_t key_begin               = static_cast<size_t>(start_key_ordinal);
     if (key_begin >= available_key_count) {
@@ -180,7 +173,7 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(con
                                                                              int                 cp_rank,
                                                                              int                 cp_size,
                                                                              ConversionObserver* observer) {
-    for (const auto& [tag, block_ids] : resource.blocksByTag()) {
+    for (const auto& [tag, block_ids] : resource.blocksByGroup()) {
         (void)block_ids;
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "P2P transfer requires a non-empty cache group tag");
         config.group(tag);

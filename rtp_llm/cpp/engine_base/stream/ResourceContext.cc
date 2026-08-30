@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -22,7 +23,10 @@ void ResourceContext::initCacheConfig(const KVCacheConfig&       kv_cache_config
         if (max_batch_tokens > 0) {
             max_prefill_tokens = std::min(max_prefill_tokens, max_batch_tokens);
         }
-        const int64_t block_size     = kv_cache_config.seq_size_per_block;
+        const int64_t block_size = kv_cache_config.seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(block_size > 0,
+                                "seq_size_per_block must be resolved before ResourceContext initialization, got %ld",
+                                block_size);
         device_cache_min_free_blocks = (max_prefill_tokens + block_size - 1) / block_size;
         RTP_LLM_LOG_INFO("device_cache_min_free_blocks auto-set to %ld"
                          " (max_context_batch_size=%ld, max_seq_len=%ld,"

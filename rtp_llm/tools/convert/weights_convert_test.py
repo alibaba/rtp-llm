@@ -72,7 +72,7 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
     def test_kimi_real_post_build_replaces_stale_layer_metadata(self):
         self._assert_real_post_build(KimiLinear)
 
-    def test_qwen3_next_linear_only_override_is_rejected_by_cpp_creator(self):
+    def test_qwen3_next_linear_only_override_is_accepted_by_cpp_creator(self):
         model_config = self._model_config()
         model_config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.LINEAR,
@@ -84,10 +84,7 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
             model_config, Qwen3Next, {"HACK_LAYER_NUM": "2"}
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError, "exactly one FULL MHA/MLA cache group"
-        ):
-            validate_basic_config(result)
+        validate_basic_config(result)
 
     def test_invalid_layer_override_preserves_metadata_and_can_retry(self):
         model_config = self._model_config()

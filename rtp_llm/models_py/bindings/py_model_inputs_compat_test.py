@@ -6,7 +6,7 @@ import torch
 
 from rtp_llm.models_py.model_desc.block_map import (
     get_layer_cache_for_tag,
-    get_layer_caches_for_tags,
+    get_layer_caches_for_groups,
     select_attention_inputs_for_layer,
     select_fmha_impl_for_tag,
 )
@@ -71,8 +71,12 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertIs(get_layer_cache_for_tag(cache, 0, "default"), default_cache)
         self.assertIs(get_layer_cache_for_tag(cache, 0, "indexer_kv"), indexer_cache)
         self.assertEqual(
-            get_layer_caches_for_tags(cache, 0, ("default", "indexer_kv")),
+            get_layer_caches_for_groups(cache, 0, ("default", "indexer_kv")),
             {"default": default_cache, "indexer_kv": indexer_cache},
+        )
+        self.assertEqual(
+            get_layer_caches_for_groups(None, 0, ("default", "indexer_kv")),
+            {"default": None, "indexer_kv": None},
         )
         routes = {"indexer_kv": object(), "default": object()}
         self.assertIs(select_fmha_impl_for_tag(routes, "default"), routes["default"])

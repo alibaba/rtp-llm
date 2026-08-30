@@ -71,28 +71,23 @@ public:
 
 private:
     struct LayerTagSlot {
-        int              layer_id{-1};
-        std::string      tag;
-        size_t           kv_block_stride_bytes{0};
-        size_t           kv_scale_stride_bytes{0};
-        size_t           stride_bytes{0};
-        CacheGroupPolicy policy;
-        CacheBlockKind   block_kind{CacheBlockKind::COMPLETE};
-        KVCacheSpecType  spec_type{KVCacheSpecType::MultiHeadAttention};
-        // Immutable per-(layer, tag) spec resolved once at the connector
-        // boundary (Task 6 deferred Minor). Request/copy paths read layout from
-        // the slot and never re-resolve topology from CacheConfig.
-        std::shared_ptr<const KVCacheSpec> spec;
+        int            layer_id{-1};
+        std::string    tag;
+        size_t         kv_block_stride_bytes{0};
+        size_t         kv_scale_stride_bytes{0};
+        size_t         stride_bytes{0};
+        CacheBlockKind block_kind{CacheBlockKind::COMPLETE};
         // Derived connector capability resolved once at the boundary: a FULL
         // group is copied as a whole block regardless of completeness.
         bool is_full_only{false};
     };
     struct LayerTagBlock {
-        LayerTagSlot slot;
-        BlockIdxType block_id{NULL_BLOCK_IDX};
+        int          layer_id{-1};
+        std::string  tag;
+        BlockIdxType pool_block_id{NULL_BLOCK_IDX};
     };
-    using LayerTagBlocks   = std::vector<LayerTagBlock>;
-    using LayerTagBlockIds = std::vector<std::unordered_map<std::string, const BlockIds*>>;
+    using LayerTagBlocks          = std::vector<LayerTagBlock>;
+    using LayerTagPoolBlockTables = std::vector<std::unordered_map<std::string, const PoolBlockIds*>>;
     struct CopyInfoPerKey {
         CacheKeyType         cache_key{0};
         CacheBlockKind       kind{CacheBlockKind::COMPLETE};
@@ -136,12 +131,12 @@ private:
     };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&             cache_keys,
-                                                   const LayerTagBlockIds&          layer_tag_block_ids,
+                                                   const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                    const std::vector<LayerTagSlot>& slots,
                                                    int                              start_index,
                                                    int                              read_num);
     std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&             cache_keys,
-                                                    const LayerTagBlockIds&          layer_tag_block_ids,
+                                                    const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,
                                                     int                              start_index,
                                                     int                              write_num,
@@ -189,42 +184,42 @@ private:
     StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
 
     void                             checkLayerBlockStrideBytes() const;
-    static std::vector<LayerTagSlot> buildLayerTagSlots(const CacheConfig& cache_config);
-    const std::vector<LayerTagSlot>& layerTagSlots() const;
+    static std::vector<LayerTagSlot> buildPoolBlockMemoryLayout(const CacheConfig& cache_config);
+    const std::vector<LayerTagSlot>& poolBlockMemoryLayout() const;
     static LayerTagBlocks            normalizeCopyItemGpuBlocks(const MemoryOperationRequestPB::CopyItem& item,
                                                                 const std::vector<LayerTagSlot>&          slots);
     static NormalizedCopyItem        normalizeCopyItem(const MemoryOperationRequestPB::CopyItem& item,
                                                        const std::vector<LayerTagSlot>&          slots);
-    bool                             hasTypedLayerTagSlots(const std::vector<LayerTagSlot>& slots) const;
+    bool                             hasTypedPoolBlockMemoryLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             usesTypedMemoryPoolLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             supportsTypedPrefixCacheLayout(const std::vector<LayerTagSlot>& slots) const;
-    LayerTagBlockIds                 resourceLayerTagBlocks(const KVCacheResource&           resource,
-                                                            const std::vector<LayerTagSlot>& slots) const;
-    bool                             checkLayerTagBlocks(const LayerTagBlockIds&          layer_tag_block_ids,
-                                                         const std::vector<LayerTagSlot>& slots,
-                                                         size_t                           required_len) const;
-    bool                             gpuBlocksAllValid(const LayerTagBlockIds&          layer_tag_block_ids,
+    LayerTagPoolBlockTables          resourceLayerTagPoolBlockTables(const KVCacheResource&           resource,
+                                                                     const std::vector<LayerTagSlot>& slots) const;
+    bool                             checkLayerTagPoolBlockTables(const LayerTagPoolBlockTables&   layer_tag_block_ids,
+                                                                  const std::vector<LayerTagSlot>& slots,
+                                                                  size_t                           required_len) const;
+    bool                             gpuBlocksAllValid(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                        const std::vector<LayerTagSlot>& slots,
                                                        size_t                           key_index) const;
     bool                             usePrefixTreeMemoryCache() const;
-    bool                             kindRequiredAt(const LayerTagBlockIds&          layer_tag_block_ids,
+    bool                             kindRequiredAt(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,
                                                     size_t                           key_index,
                                                     CacheBlockKind                   kind) const;
-    std::vector<uint8_t>             prefixSlotValidMask(const LayerTagBlockIds&          layer_tag_block_ids,
+    std::vector<uint8_t>             prefixSlotValidMask(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                          const std::vector<LayerTagSlot>& slots,
                                                          size_t                           key_index,
                                                          CacheBlockKind                   kind) const;
     size_t                    prefixKindBlockSize(CacheBlockKind kind, const std::vector<LayerTagSlot>& slots) const;
     std::shared_ptr<CopyPlan> buildPrefixCopyPlanForRead(const CacheKeysType&             cache_keys,
                                                          const BlockDependenciesType&     dependencies,
-                                                         const LayerTagBlockIds&          layer_tag_block_ids,
+                                                         const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                          const std::vector<LayerTagSlot>& slots,
                                                          int                              start_index,
                                                          int                              read_num);
     std::shared_ptr<CopyPlan> buildPrefixCopyPlanForWrite(const CacheKeysType&             cache_keys,
                                                           const BlockDependenciesType&     dependencies,
-                                                          const LayerTagBlockIds&          layer_tag_block_ids,
+                                                          const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                           const std::vector<LayerTagSlot>& slots,
                                                           int                              start_index,
                                                           int                              write_num,
@@ -263,7 +258,7 @@ private:
     size_t                     maxDiskSlotStrideBytes() const;
 
     bool isDualPool() const;
-    bool isFullOnlySlot(const LayerTagSlot& slot) const;
+    bool isFullOnlyLayoutEntry(const LayerTagSlot& slot) const;
     bool mallocBlocksFromPool(const std::shared_ptr<BlockPool>&        pool,
                               const std::shared_ptr<MemoryBlockCache>& cache,
                               size_t                                   need_blocks,
@@ -315,7 +310,7 @@ private:
 
 private:
     const CacheConfig&                cache_config_;
-    const std::vector<LayerTagSlot>   layer_tag_slots_;
+    const std::vector<LayerTagSlot>   pool_block_memory_layout_;
     const KVCacheConfig&              kv_cache_config_;
     const ParallelismConfig           parallelism_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;

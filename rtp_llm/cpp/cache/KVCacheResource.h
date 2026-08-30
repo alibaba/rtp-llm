@@ -23,6 +23,13 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
     return block_idx == NULL_BLOCK_IDX;
 }
 
+// Legacy block tables and wire records use block 0 as their missing/default
+// value. Keep NULL_BLOCK_IDX internal to request-owned sparse metadata.
+inline BlockIdxType toLegacyBlockIdx(BlockIdxType block_idx) {
+    RTP_LLM_CHECK_WITH_INFO(block_idx >= NULL_BLOCK_IDX, "invalid internal block id=%d", block_idx);
+    return isNullBlockIdx(block_idx) ? 0 : block_idx;
+}
+
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
 
@@ -37,48 +44,48 @@ struct BlockDependency {
 
 using BlockDependenciesType = std::vector<BlockDependency>;
 
-class BlockIds {
+// Request-owned physical block bindings. The vector index is the GroupBlockPosition
+// for the owning cache group. Consumer projections are derived outside this type.
+class PoolBlockIds {
 public:
-    explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
-        kernel_blocks_per_kv_block_(kernel_blocks_per_kv_block > 0 ? kernel_blocks_per_kv_block : 1) {}
+    PoolBlockIds() = default;
 
     size_t blocksNum() const;
 
-    const BlockIndicesType& blocks() const;
-
-    const BlockIndicesType& kernelBlocks() const;
-
-    size_t kernelBlocksPerKvBlock() const;
+    const std::vector<BlockIdxType>& blocks() const;
 
     // Remove and return the last physical block ID.
     BlockIdxType popBack();
 
     // Append new physical block IDs to the tail.
-    void add(const BlockIndicesType& ids);
+    void add(const std::vector<BlockIdxType>& ids);
     void remove(const std::vector<size_t>& indices);
 
     // Swap the physical block IDs at positions pos_a and pos_b.
-    // Corresponding kernel slots for both positions are updated incrementally.
     void swap(size_t pos_a, size_t pos_b);
 
-    void assign(const BlockIndicesType& new_block_indices);
-    void assign(BlockIndicesType&& new_block_indices);
+    void assign(const std::vector<BlockIdxType>& new_block_indices);
+    void assign(std::vector<BlockIdxType>&& new_block_indices);
     void setAt(size_t pos, BlockIdxType val);
 
     void resize(size_t new_size, BlockIdxType value = NULL_BLOCK_IDX);
 
 private:
-    // Update the kernel slots that correspond to physical block position `pos`.
-    void updateKernelSlotAt(size_t pos, BlockIdxType val);
-    // Update all kernel slots
-    void syncKernelBlocks();
+    std::vector<BlockIdxType> block_ids_;
+};
 
-    BlockIndicesType block_indices;
-    // Kernel-granularity block IDs, always maintained.
-    // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
-    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
-    BlockIndicesType kernel_block_indices_;
-    size_t           kernel_blocks_per_kv_block_ = 1;
+// Derived view from physical pool IDs to a consumer's kernel block table. This
+// object owns geometry only; project() writes caller-owned transient storage.
+class PoolBlockToKernelBlockProjection {
+public:
+    explicit PoolBlockToKernelBlockProjection(size_t kernel_blocks_per_pool_block);
+
+    size_t projectedSize(size_t pool_block_count) const;
+    void   append(BlockIdxType source, std::vector<BlockIdxType>& destination) const;
+    void   project(const std::vector<BlockIdxType>& source, std::vector<BlockIdxType>& destination) const;
+
+private:
+    size_t kernel_blocks_per_pool_block_;
 };
 
 class KVCacheResource {
@@ -89,13 +96,11 @@ public:
     int                     blocksNum(std::string_view tag) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
     const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
-    BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
+    PoolBlockIds&           mutableBlockIds(std::string_view tag) const;
+    PoolBlockIds&           mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
 
-    const BlockIds& blockIds(std::string_view tag) const;
-    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    const PoolBlockIds& blockIds(std::string_view tag) const;
+    const PoolBlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
@@ -103,7 +108,9 @@ public:
     int layerNum() const;
     int groupNums() const;
 
-    const std::map<std::string, BlockIds>& blocksByTag() const;
+    // Group-owned physical bindings. The string key is the stable group tag and
+    // scopes each numeric block ID.
+    const std::map<std::string, PoolBlockIds>& blocksByGroup() const;
 
     bool layerOwnsTag(int layer_id, std::string_view tag) const;
 
@@ -157,11 +164,11 @@ public:
 private:
     bool layerContainsTag(int layer_id, std::string_view tag) const;
 
-    std::vector<std::vector<std::string>>   layer_group_tags_;
-    mutable std::map<std::string, BlockIds> blocks_by_tag_;
-    CacheKeysType                           cache_keys;
-    BlockDependenciesType                   block_dependencies;
-    bool                                    cache_keys_are_cp_canonical_{false};
+    std::vector<std::vector<std::string>>       layer_group_tags_;
+    mutable std::map<std::string, PoolBlockIds> blocks_by_group_;
+    CacheKeysType                               cache_keys;
+    BlockDependenciesType                       block_dependencies;
+    bool                                        cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

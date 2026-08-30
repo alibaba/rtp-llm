@@ -256,9 +256,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    /*block_num=*/static_cast<int>(kBlockNum),
                                                    tag);
     config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    config.kv_block_stride_bytes     = kv_stride;
-    config.kv_scale_stride_bytes     = kv_scale_stride;
-    config.setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride});
+    test::setGroupBlockLayout(config, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
 
@@ -659,7 +657,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     ASSERT_EQ(resource.kvCache().groupNums(), kDsv4PoolNum);
     ASSERT_GT(resource.curBlocksNum(), 0);
     ASSERT_EQ(config.groupNums(), kDsv4PoolNum);
-    for (const auto& group : config.topology().groups()) {
+    for (const auto& group : config.groups()) {
         const auto& tag = group.tag;
         ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
         const auto&  blocks = resource.kvCache().blocks(0, tag);
@@ -758,7 +756,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
     EXPECT_EQ(decode_stream->reuseLength(), 0)
         << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
     EXPECT_EQ(decode_resource.kvCache().groupNums(), kDsv4PoolNum);
-    for (const auto& [tag, block_ids] : decode_resource.kvCache().blocksByTag()) {
+    for (const auto& [tag, block_ids] : decode_resource.kvCache().blocksByGroup()) {
         (void)block_ids;
         EXPECT_EQ(decode_resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
     }
@@ -853,7 +851,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seqSizePerBlock());
             layer_cache.layer_id           = layer_id;
             layer_cache.tag                = tag;
 
@@ -887,7 +885,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                                                      "dsv4-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->blocksByTag(),
+                                                     decode_resource->blocksByGroup(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1027,7 +1025,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                                                      "dsv4-decoupled-cache-store-pd",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->blocksByTag(),
+                                                     decode_resource->blocksByGroup(),
                                                      /*reuse_block_size=*/0,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1137,7 +1135,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.at(tag, static_cast<size_t>(layer_id)).kv_addr;
-            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seq_size_per_block);
+            layer_cache.seq_size_per_block = static_cast<int>(cache_config.group(tag).seqSizePerBlock());
             layer_cache.layer_id           = layer_id;
             layer_cache.tag                = tag;
 
@@ -1171,7 +1169,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                                                      "dsv4-cache-store-pd-prefix-reuse",
                                                      peer_addrs,
                                                      cache_keys,
-                                                     decode_resource->blocksByTag(),
+                                                     decode_resource->blocksByGroup(),
                                                      reuse_num,
                                                      /*timeout_ms=*/5000,
                                                      /*partition_count=*/1,
@@ -1237,7 +1235,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
             auto bid       = resource->blocks(0, default_tag)[b];
-            auto kv_stride = config.kv_block_stride_bytes;
+            auto kv_stride = config.group(default_tag).kv_block_stride_bytes;
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},

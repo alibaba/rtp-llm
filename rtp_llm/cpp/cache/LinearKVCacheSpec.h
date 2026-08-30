@@ -43,8 +43,8 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 linear.linear_key_head_dim,
                                 linear.linear_value_head_dim);
 
-        auto spec                  = std::make_shared<LinearKVCacheSpec>();
-        spec->seq_size_per_block   = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        auto spec = std::make_shared<LinearKVCacheSpec>();
+        spec->setSequenceGeometry(ctx.seq_size_per_block, ctx.kernel_seq_size_per_block, desc.tag);
         spec->memory_layout_dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->memory_layout_dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",

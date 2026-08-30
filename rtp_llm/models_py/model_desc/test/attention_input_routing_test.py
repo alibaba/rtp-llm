@@ -61,6 +61,32 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(model._get_fmha_group_tags(), ["default", "indexer_kv"])
 
+    def test_generic_sparse_mla_cacheless_forward_passes_none(self):
+        model = object.__new__(GenericMoeModel)
+        hidden_states = torch.zeros((2, 4), dtype=torch.float32)
+        residual = torch.zeros_like(hidden_states)
+        decoder_layer = Mock(
+            return_value=SimpleNamespace(
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        )
+        model.__dict__.update(
+            config=SimpleNamespace(
+                attn_config=SimpleNamespace(is_sparse=True, use_mla=True)
+            ),
+            layer_num=1,
+            layers=[decoder_layer],
+            kv_cache=None,
+            embed_tokens=Mock(return_value=hidden_states),
+            norm=Mock(return_value=(hidden_states, None)),
+        )
+        fmha_impl = {"default": object(), "indexer_kv": object()}
+
+        model.forward(SimpleNamespace(input_ids=torch.tensor([1, 2])), fmha_impl)
+
+        self.assertIsNone(decoder_layer.call_args.kwargs["kv_cache"])
+
     def test_generic_dense_mla_keeps_scalar_group_selection(self):
         model = object.__new__(GenericMoeModel)
         model.__dict__["config"] = SimpleNamespace(

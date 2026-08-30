@@ -3,7 +3,9 @@
 #include <c10/core/ScalarType.h>
 #include <c10/util/Half.h>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <utility>
 #include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
@@ -26,9 +28,15 @@ namespace rtp_llm {
 // Mock model that returns random logits for testing NormalEngine without Python
 class MockModel: public ModelBase {
 public:
-    MockModel(size_t vocab_size): vocab_size_(vocab_size) {}
+    using ForwardObserver = std::function<void(const GptModelInputs&)>;
+
+    MockModel(size_t vocab_size, ForwardObserver forward_observer = {}):
+        vocab_size_(vocab_size), forward_observer_(std::move(forward_observer)) {}
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
+        if (forward_observer_) {
+            forward_observer_(inputs);
+        }
         GptModelOutputs outputs;
         // lm_output_indexes tells us how many logits rows to produce
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
@@ -38,7 +46,8 @@ public:
     }
 
 private:
-    size_t vocab_size_;
+    size_t          vocab_size_;
+    ForwardObserver forward_observer_;
 };
 
 struct CustomConfig {
@@ -49,6 +58,9 @@ struct CustomConfig {
     bool                                    prefill_cp_enabled  = false;
     bool                                    speculative_enabled = false;
     bool                                    warm_up_with_loss   = false;
+    bool                                    warm_up             = false;
+    bool                                    decode_role         = false;
+    bool                                    hybrid_attention    = false;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -78,6 +90,27 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
         config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos
     setDefaultMhaKVCacheSpecDescs(model_config);
+    if (config.hybrid_attention) {
+        model_config.hybrid_attention_config.enable_hybrid_attention           = true;
+        model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+        model_config.hybrid_attention_config.hybrid_attention_types            = {HybridAttentionType::LINEAR,
+                                                                                  HybridAttentionType::NONE};
+        model_config.linear_attention_config.linear_conv_kernel_dim            = 4;
+        model_config.linear_attention_config.linear_key_head_dim               = 16;
+        model_config.linear_attention_config.linear_value_head_dim             = 16;
+        model_config.linear_attention_config.linear_num_key_heads              = 2;
+        model_config.linear_attention_config.linear_num_value_heads            = 2;
+        KVCacheSpecDesc linear_desc{"linear", KVCacheSpecType::LinearAttention};
+        linear_desc.group_type = CacheGroupType::LINEAR;
+
+        KVCacheSpecDesc full_desc{"full", KVCacheSpecType::OpaqueState};
+        full_desc.group_type             = CacheGroupType::FULL;
+        full_desc.entry_elems            = 1;
+        full_desc.entry_dtype            = DataType::TYPE_FP16;
+        full_desc.explicit_entry_count   = 2;
+        full_desc.cp                     = CacheCpPolicyDesc{};
+        model_config.kv_cache_spec_descs = {{linear_desc}, {full_desc}};
+    }
 
     const size_t inter_size = 512;
     // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
@@ -138,7 +171,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     if (config.prefill_cp_enabled) {
         parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
     }
-    rtp_llm::PDSepConfig                 pd_sep_config;
+    if (config.hybrid_attention) {
+        parallelism_config.role_type                          = RoleType::DECODE;
+        parallelism_config.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+        parallelism_config.prefill_cp_config.kv_cache_sharded = true;
+        parallelism_config.prefill_cp_config.prefill_cp_size  = 2;
+    }
+    rtp_llm::PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = config.decode_role ? RoleType::DECODE : RoleType::PDFUSION;
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FMHAConfig                  fmha_config;
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
@@ -148,6 +188,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
     sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
+    runtime_config.warm_up           = config.warm_up;
     runtime_config.warm_up_with_loss = config.warm_up_with_loss;
     rtp_llm::CacheStoreConfig      cache_store_config;
     rtp_llm::MiscellaneousConfig   misc_config;

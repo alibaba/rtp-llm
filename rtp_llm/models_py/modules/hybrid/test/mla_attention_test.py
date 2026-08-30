@@ -196,42 +196,35 @@ class SparseMlaRoutingTest(TestCase):
             indexer_inputs.cache_store_inputs, self.indexer_cache
         )
 
-    def test_sparse_forward_rejects_missing_extra_and_wrong_routes(self):
+    def test_sparse_forward_skips_indexer_for_cacheless_warmup(self):
+        attention, _ = make_sparse_routing_attention()
+        default_inputs = SimpleNamespace(
+            is_prefill=True, cache_store_inputs=None, cache_store_writer=None
+        )
+        indexer_cache_store_writer = Mock()
+        indexer_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=object(),
+            cache_store_writer=indexer_cache_store_writer,
+        )
         default_impl = RecordingSparseMlaImpl(
-            self._attention_inputs("default"), torch.zeros((2, 1, 2))
+            default_inputs, torch.tensor([[[9.0, 10.0]], [[11.0, 12.0]]])
         )
-        indexer_impl = RecordingSparseMlaImpl(
-            self._attention_inputs("indexer_kv"), torch.empty(0)
-        )
-        valid_fmha = {"default": default_impl, "indexer_kv": indexer_impl}
-        valid_cache = {
-            "default": self.default_cache,
-            "indexer_kv": self.indexer_cache,
-        }
-        invalid_routes = (
-            ({"default": default_impl}, valid_cache),
-            ({**valid_fmha, "extra": indexer_impl}, valid_cache),
-            ({"default": default_impl, "wrong": indexer_impl}, valid_cache),
-            (valid_fmha, {"default": self.default_cache}),
-            (valid_fmha, {**valid_cache, "extra": self.indexer_cache}),
-            (
-                valid_fmha,
-                {"default": self.default_cache, "wrong": self.indexer_cache},
-            ),
+        indexer_impl = RecordingSparseMlaImpl(indexer_inputs, torch.empty(0))
+
+        output = attention(
+            torch.zeros((2, 4), dtype=torch.float32),
+            {"default": default_impl, "indexer_kv": indexer_impl},
+            None,
         )
 
-        for fmha_routes, cache_routes in invalid_routes:
-            attention, _ = make_sparse_routing_attention()
-            with self.subTest(
-                fmha_tags=list(fmha_routes), cache_tags=list(cache_routes)
-            ):
-                with self.assertRaisesRegex(RuntimeError, "requires exactly"):
-                    attention(
-                        torch.zeros((2, 4), dtype=torch.float32),
-                        fmha_routes,
-                        cache_routes,
-                    )
-                attention.fused_qkv_proj.assert_not_called()
+        self.assertTrue(
+            torch.equal(output, torch.tensor([[9.0, 10.0], [11.0, 12.0]]))
+        )
+        self.assertIs(default_impl.calls[0][3], None)
+        self.assertIs(default_impl.calls[0][5], None)
+        attention.indexer.assert_not_called()
+        indexer_cache_store_writer.write.assert_not_called()
 
 
 class MLATest(TestCase):

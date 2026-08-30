@@ -158,10 +158,6 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     addTensorList(payload, "mm_extra_input", inputs.mm_extra_input, devices, float8_dtypes);
     addTensorList(payload, "input_embeddings", inputs.input_embeddings, devices, float8_dtypes);
     payload.insert("float8_dtypes", std::move(float8_dtypes));
-    payload.insert("kv_block_stride_bytes", static_cast<int64_t>(inputs.kv_block_stride_bytes));
-    payload.insert("kv_scale_stride_bytes", static_cast<int64_t>(inputs.kv_scale_stride_bytes));
-    payload.insert("seq_size_per_block", static_cast<int64_t>(inputs.seq_size_per_block));
-    payload.insert("kernel_seq_size_per_block", static_cast<int64_t>(inputs.kernel_seq_size_per_block));
     payload.insert("pd_separation", inputs.pd_separation);
     payload.insert("decode_entrance", inputs.decode_entrance);
     payload.insert("use_opaque_kv_cache_store", inputs.use_opaque_kv_cache_store);
