@@ -1,10 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryContext;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryLifecyclePort;
-import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
@@ -224,23 +222,20 @@ class PrefillGenerationQueueTest {
                 };
 
         @Override
-        public <R> R admitAndDeliver(
+        public PreparedDelivery prepare(
                 List<DeliveryItem> candidates,
-                DeliveryMetadata metadata,
                 PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction,
-                DeliveryContext<R> context) {
+                OptionalLong plannedPrediction) {
             attempts.incrementAndGet();
-            return context.commitBoundary(
-                    new DeliveryContext.SelectionBoundary(
-                            candidates.getFirst(),
-                            new CapacityBoundary.Unavailable(
-                                    availability,
-                                    new RouteProjection.AdmissionBlockSemantics(
-                                            "TEST_QUEUE_BLOCK",
-                                            RouteProjection.AfterProbeAdmission.BLOCKED,
-                                            "TEST_QUEUE_BLOCK",
-                                            RoleType.PREFILL))));
+            return GroupPolicyTestSupport.boundaryOnly(
+                    candidates.getFirst(),
+                    new CapacityBoundary.Unavailable(
+                            availability,
+                            new RouteProjection.AdmissionBlockSemantics(
+                                    "TEST_QUEUE_BLOCK",
+                                    RouteProjection.AfterProbeAdmission.BLOCKED,
+                                    "TEST_QUEUE_BLOCK",
+                                    RoleType.PREFILL)));
         }
 
         @Override

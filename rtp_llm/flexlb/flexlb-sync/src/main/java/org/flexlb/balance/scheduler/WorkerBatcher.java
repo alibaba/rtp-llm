@@ -80,7 +80,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
-    private final DeliveryStrategy deliveryStrategy;
     private final DeliveryLifecyclePort deliveryLifecycle;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final long maximumPendingRequests;
@@ -135,7 +134,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         this.prefillEndpoint = prefillEp;
         boolean queueScheduling = config.isQueue();
         boolean priorityOrdering = config.isPriorityOrdering();
-        this.deliveryStrategy = deliveryStrategy;
         this.deliveryLifecycle = deliveryLifecycle;
         this.maximumPendingRequests = config.getRouter().getRoles()
                 .getPrefill().getAvailability().getMaxPendingRequests();
@@ -293,7 +291,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     /** Immutable delivery semantics used by a pure route projection. */
     @Override
     public RouteProjection.DeliveryProjection deliveryProjection() {
-        return deliveryStrategy.projectionPolicy();
+        return ctx.deliveryProjection();
     }
 
     /**

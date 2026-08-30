@@ -39,37 +39,15 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public <R> R admitAndDeliver(
+    public PreparedDelivery prepare(
             List<DeliveryItem> candidates,
-            DeliveryMetadata metadata,
             PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPredictionMs,
-            DeliveryContext<R> context) {
-        if (candidates.isEmpty()
-                || !context.selectionStillOwned(candidates)) {
-            return context.noAction();
+            OptionalLong plannedPredictionMs) {
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "batch delivery requires at least one candidate");
         }
-
-        Admission admission = admit(
-                candidates, evaluator, plannedPredictionMs);
-        try (admission) {
-            if (admission.items().isEmpty()) {
-                return context.commitBoundary(admission.boundary());
-            }
-            DeliveryContext.CommitResult<R> commitResult =
-                    context.commitPreparedSelection(
-                            admission,
-                            metadata.decisionReason());
-            if (commitResult
-                    instanceof DeliveryContext.CommitResult.NotCommitted<?>) {
-                return commitResult.loopResult();
-            }
-            DeliveryContext.CommitResult.Committed<R> committed =
-                    (DeliveryContext.CommitResult.Committed<R>) commitResult;
-            context.handoffCommittedDelivery(
-                    committed.owner(), metadata);
-            return committed.loopResult();
-        }
+        return admit(candidates, evaluator, plannedPredictionMs);
     }
 
     private Admission admit(
@@ -86,14 +64,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 instanceof CapacityBoundary.Attempt.Rejected<Prepared> blocked) {
             return Admission.empty(
                     this,
-                    new DeliveryContext.SelectionBoundary(
+                    new SelectionBoundary(
                             head, blocked.boundary()));
         }
 
         Prepared prepared = ((CapacityBoundary.Attempt.Accepted<Prepared>)
                 groupAttempt).value();
         List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
-        DeliveryContext.SelectionBoundary boundary = null;
+        SelectionBoundary boundary = null;
         try {
             for (int index = 0; index < candidates.size(); index++) {
                 DeliveryItem item = candidates.get(index);
@@ -107,7 +85,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                 DeliveryItem>) {
                     admitted.add(item);
                 } else {
-                    boundary = new DeliveryContext.SelectionBoundary(
+                    boundary = new SelectionBoundary(
                             item,
                             ((CapacityBoundary.Attempt.Rejected<DeliveryItem>)
                                     attempt).boundary());
@@ -420,13 +398,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Temporary owner of every resource for one admitted batch prefix. */
-    static final class Admission implements AutoCloseable,
-            DeliveryContext.PreparedSelection {
+    static final class Admission implements PreparedDelivery {
         private final BatchDeliveryStrategy owner;
         private final List<DeliveryItem> items;
         private final long predictedMs;
         private final PrefillTimePredictor.Evaluator evaluator;
-        private final DeliveryContext.SelectionBoundary boundary;
+        private final SelectionBoundary boundary;
         private Prepared prepared;
 
         private Admission(
@@ -435,7 +412,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                 Prepared prepared,
                 long predictedMs,
                 PrefillTimePredictor.Evaluator evaluator,
-                DeliveryContext.SelectionBoundary boundary) {
+                SelectionBoundary boundary) {
             this.owner = owner;
             this.items = items;
             this.prepared = prepared;
@@ -446,7 +423,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         private static Admission empty(
                 BatchDeliveryStrategy owner,
-                DeliveryContext.SelectionBoundary boundary) {
+                SelectionBoundary boundary) {
             return new Admission(
                     owner, List.of(), null,
                     0L, null, boundary);
@@ -458,7 +435,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public DeliveryContext.SelectionBoundary boundary() {
+        public SelectionBoundary boundary() {
             return boundary;
         }
 
@@ -556,7 +533,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Sole post-Registry batch owner. */
-    private static final class Committed implements CommittedDelivery {
+    private static final class Committed implements Handoff {
         private enum DeliveryPhase {
             COMMITTED,
             INFLIGHT,

@@ -1,10 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryContext;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryLifecyclePort;
-import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -238,22 +236,19 @@ class WorkerBatcherPerformanceTest {
                 };
 
         @Override
-        public <R> R admitAndDeliver(
+        public PreparedDelivery prepare(
                 List<DeliveryItem> candidates,
-                DeliveryMetadata metadata,
                 PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction,
-                DeliveryContext<R> context) {
-            return context.commitBoundary(
-                    new DeliveryContext.SelectionBoundary(
-                            candidates.getFirst(),
-                            new CapacityBoundary.Unavailable(
-                                    availability,
-                                    new RouteProjection.AdmissionBlockSemantics(
-                                            "PERF_BLOCK",
-                                            RouteProjection.AfterProbeAdmission.BLOCKED,
-                                            "PERF_BLOCK",
-                                            RoleType.PREFILL))));
+                OptionalLong plannedPrediction) {
+            return GroupPolicyTestSupport.boundaryOnly(
+                    candidates.getFirst(),
+                    new CapacityBoundary.Unavailable(
+                            availability,
+                            new RouteProjection.AdmissionBlockSemantics(
+                                    "PERF_BLOCK",
+                                    RouteProjection.AfterProbeAdmission.BLOCKED,
+                                    "PERF_BLOCK",
+                                    RoleType.PREFILL)));
         }
 
         @Override
@@ -267,5 +262,6 @@ class WorkerBatcherPerformanceTest {
         public RouteProjection.DeliveryProjection projectionPolicy() {
             return mock(RouteProjection.DeliveryProjection.class);
         }
+
     }
 }

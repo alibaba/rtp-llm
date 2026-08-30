@@ -11,7 +11,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.OptionalLong;
 
-import static org.flexlb.balance.delivery.DeliveryStrategyTestSupport.EVALUATOR;
 import static org.flexlb.balance.delivery.DeliveryStrategyTestSupport.item;
 import static org.flexlb.balance.delivery.DeliveryStrategyTestSupport.unavailable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,9 +29,9 @@ class BatchDeliveryStrategyTest {
         TestItem second = item(2L);
         DeliveryMetadata metadata = new DeliveryMetadata("fixed_window", 3);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(first, second), metadata, EVALUATOR,
-                OptionalLong.of(83L), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(first, second), metadata,
+                OptionalLong.of(83L));
 
         assertEquals("COMMITTED", result);
         BatchSubmissionPort.Command command = fixture.submission.command();
@@ -66,10 +65,9 @@ class BatchDeliveryStrategyTest {
         TestItem first = item(1L);
         TestItem second = item(2L);
 
-        fixture.strategy.admitAndDeliver(
-                List.of(first, second),
-                new DeliveryMetadata("predict", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        fixture.context.deliver(
+                fixture.strategy, List.of(first, second),
+                new DeliveryMetadata("predict", 0), OptionalLong.empty());
 
         assertEquals(200L, fixture.submission.command().predictedMs());
         assertEquals(200L, fixture.admission.committedPrediction());
@@ -85,10 +83,9 @@ class BatchDeliveryStrategyTest {
             Fixture fixture = new Fixture(invalid);
             TestItem item = item(1L);
 
-            String result = fixture.strategy.admitAndDeliver(
-                    List.of(item),
-                    new DeliveryMetadata("bad-id", 0),
-                    EVALUATOR, OptionalLong.empty(), fixture.context);
+            String result = fixture.context.deliver(
+                    fixture.strategy, List.of(item),
+                    new DeliveryMetadata("bad-id", 0), OptionalLong.empty());
 
             assertEquals("BOUNDARY", result);
             assertSame(item, fixture.context.emptyBoundary().item());
@@ -111,9 +108,10 @@ class BatchDeliveryStrategyTest {
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.submission.prepareBoundary(unavailable);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(head), new DeliveryMetadata("submission-full", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(head),
+                new DeliveryMetadata("submission-full", 0),
+                OptionalLong.empty());
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
@@ -129,9 +127,10 @@ class BatchDeliveryStrategyTest {
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.prepareBoundary(unavailable);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(head), new DeliveryMetadata("admission-full", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(head),
+                new DeliveryMetadata("admission-full", 0),
+                OptionalLong.empty());
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
@@ -148,10 +147,9 @@ class BatchDeliveryStrategyTest {
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.rejectAppendAt(1, unavailable);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(first, second),
-                new DeliveryMetadata("prefix", 1),
-                EVALUATOR, OptionalLong.of(999L), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(first, second),
+                new DeliveryMetadata("prefix", 1), OptionalLong.of(999L));
 
         assertEquals("COMMITTED", result);
         assertEquals(List.of(first),
@@ -179,9 +177,9 @@ class BatchDeliveryStrategyTest {
                     "transport preparation must close before callbacks open");
         });
 
-        fixture.strategy.admitAndDeliver(
-                List.of(first, second), new DeliveryMetadata("gate", 0),
-                EVALUATOR, OptionalLong.of(20L), fixture.context);
+        fixture.context.deliver(
+                fixture.strategy, List.of(first, second),
+                new DeliveryMetadata("gate", 0), OptionalLong.of(20L));
 
         assertEquals(List.of(
                         new DeliveryStrategyTestSupport.CompletionEvent(
@@ -201,10 +199,10 @@ class BatchDeliveryStrategyTest {
                 canonical.requestId(), canonical.priority(),
                 canonical.enqueuedAtMs(), canonical.seqLen(),
                 canonical.hitCache());
-        fixture.strategy.admitAndDeliver(
-                List.of(canonical),
+        fixture.context.deliver(
+                fixture.strategy, List.of(canonical),
                 new DeliveryMetadata("identity-fence", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+                OptionalLong.empty());
 
         IllegalStateException failure = assertThrows(
                 IllegalStateException.class,
@@ -221,10 +219,9 @@ class BatchDeliveryStrategyTest {
         Fixture fixture = new Fixture(701L);
         TestItem first = item(1L);
         TestItem second = item(2L);
-        fixture.strategy.admitAndDeliver(
-                List.of(first, second),
-                new DeliveryMetadata("outcomes", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        fixture.context.deliver(
+                fixture.strategy, List.of(first, second),
+                new DeliveryMetadata("outcomes", 0), OptionalLong.empty());
         RuntimeException timeout = new RuntimeException("timeout");
         RuntimeException uncertain = new RuntimeException("uncertain");
 
@@ -251,10 +248,10 @@ class BatchDeliveryStrategyTest {
         TestItem second = item(2L);
         fixture.slots.commitLostFor(first);
 
-        fixture.strategy.admitAndDeliver(
-                List.of(first, second),
+        fixture.context.deliver(
+                fixture.strategy, List.of(first, second),
                 new DeliveryMetadata("claim-race", 0),
-                EVALUATOR, OptionalLong.of(999L), fixture.context);
+                OptionalLong.of(999L));
 
         assertEquals(List.of(second),
                 fixture.submission.command().exactItems());

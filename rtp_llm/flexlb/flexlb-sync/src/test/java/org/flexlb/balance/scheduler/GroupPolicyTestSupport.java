@@ -1,8 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.CommittedDelivery;
-import org.flexlb.balance.delivery.DeliveryContext;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryLifecyclePort;
 import org.flexlb.balance.delivery.DeliveryMetadata;
@@ -372,7 +370,6 @@ final class GroupPolicyTestSupport {
 
         private final PrefillWorkRegistry registry;
         private final List<List<DeliveryItem>> attempts = new ArrayList<>();
-        private final List<DeliveryMetadata> metadata = new ArrayList<>();
         private final List<PrefillTimePredictor.Evaluator> evaluators =
                 new ArrayList<>();
         private final List<OptionalLong> plannedPredictions = new ArrayList<>();
@@ -381,6 +378,7 @@ final class GroupPolicyTestSupport {
         private final List<DeliveryMetadata> committedMetadata =
                 new ArrayList<>();
         private final AtomicBoolean blocked = new AtomicBoolean();
+        private int maximumPreparedItems = Integer.MAX_VALUE;
         private ToDoubleFunction<List<DeliveryItem>> groupProjection =
                 items -> items.stream().mapToLong(DeliveryItem::seqLen).sum();
         private final RouteProjection.AdmissionBlockSemantics blockSemantics =
@@ -410,83 +408,87 @@ final class GroupPolicyTestSupport {
         }
 
         @Override
-        public <R> R admitAndDeliver(
+        public PreparedDelivery prepare(
                 List<DeliveryItem> candidates,
-                DeliveryMetadata exactMetadata,
                 PrefillTimePredictor.Evaluator evaluator,
-                OptionalLong plannedPrediction,
-                DeliveryContext<R> context) {
+                OptionalLong plannedPrediction) {
             List<DeliveryItem> exactCandidates = List.copyOf(candidates);
             attempts.add(exactCandidates);
-            metadata.add(exactMetadata);
             evaluators.add(evaluator);
             plannedPredictions.add(plannedPrediction);
             if (blocked.get()) {
-                return context.commitBoundary(
-                        new DeliveryContext.SelectionBoundary(
-                                exactCandidates.getFirst(),
-                                new CapacityBoundary.Unavailable(
-                                        availability, blockSemantics)));
-            }
-            if (!context.selectionStillOwned(exactCandidates)) {
-                return context.noAction();
+                return boundaryOnly(
+                        exactCandidates.getFirst(),
+                        new CapacityBoundary.Unavailable(
+                                availability, blockSemantics));
             }
 
+            int preparedCount = Math.min(
+                    maximumPreparedItems, exactCandidates.size());
+            if (preparedCount == 0) {
+                return boundaryOnly(
+                        exactCandidates.getFirst(),
+                        new CapacityBoundary.Unavailable(
+                                availability, blockSemantics));
+            }
+            List<DeliveryItem> preparedCandidates = List.copyOf(
+                    exactCandidates.subList(0, preparedCount));
+            SelectionBoundary suffixBoundary =
+                    preparedCount < exactCandidates.size()
+                            ? new SelectionBoundary(
+                                    exactCandidates.get(preparedCount),
+                                    new CapacityBoundary.Unavailable(
+                                            availability, blockSemantics))
+                            : null;
+
             List<PrefillWorkLedger.RouteReservation> reservations =
-                    new ArrayList<>(exactCandidates.size());
-            for (DeliveryItem item : exactCandidates) {
+                    new ArrayList<>(preparedCandidates.size());
+            for (DeliveryItem item : preparedCandidates) {
                 PrefillWorkLedger.RouteReservationResult result =
                         registry.reserveRoute(
                                 item, 0L, Integer.MAX_VALUE, () -> { });
                 if (result.status()
                         != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
                     closeReservations(reservations);
-                    return context.noAction();
+                    return boundaryOnly(
+                            exactCandidates.getFirst(),
+                            CapacityBoundary.OwnershipLost.INSTANCE);
                 }
                 reservations.add(result.reservation());
             }
             TestCommittedDelivery owner = new TestCommittedDelivery(
-                    exactCandidates,
+                    preparedCandidates,
                     reservations,
                     registry,
                     committedGroups,
                     committedMetadata);
-            DeliveryContext.CommitResult<R> commitResult;
-            try {
-                commitResult = context.commitPreparedSelection(
-                        new DeliveryContext.PreparedSelection() {
-                            @Override
-                            public List<DeliveryItem> items() {
-                                return exactCandidates;
-                            }
+            return new PreparedDelivery() {
+                private boolean committed;
 
-                            @Override
-                            public DeliveryContext.SelectionBoundary
-                                    boundary() {
-                                return null;
-                            }
+                @Override
+                public List<DeliveryItem> items() {
+                    return preparedCandidates;
+                }
 
-                            @Override
-                            public CommittedDelivery
-                                    commitOwnershipUnderLock() {
-                                owner.commitUnderLock();
-                                return owner;
-                            }
-                        },
-                        exactMetadata.decisionReason());
-            } catch (Throwable failure) {
-                closeReservations(reservations);
-                throw failure;
-            }
-            if (commitResult
-                    instanceof DeliveryContext.CommitResult.Committed<R>
-                    committed) {
-                context.handoffCommittedDelivery(
-                        committed.owner(), exactMetadata);
-            } else {
-                closeReservations(reservations);
-            }
-            return commitResult.loopResult();
+                @Override
+                public SelectionBoundary boundary() {
+                    return suffixBoundary;
+                }
+
+                @Override
+                public Handoff commitOwnershipUnderLock() {
+                    owner.commitUnderLock();
+                    committed = true;
+                    return owner;
+                }
+
+                @Override
+                public void close() {
+                    if (!committed) {
+                        closeReservations(reservations);
+                    }
+                }
+            };
         }
 
         @Override
@@ -510,6 +512,10 @@ final class GroupPolicyTestSupport {
             blocked.set(true);
         }
 
+        void limitPreparedPrefix(int maximumItems) {
+            maximumPreparedItems = maximumItems;
+        }
+
         void projection(ToDoubleFunction<List<DeliveryItem>> replacement) {
             groupProjection = replacement;
         }
@@ -520,10 +526,6 @@ final class GroupPolicyTestSupport {
                             .map(DeliveryItem::requestId)
                             .toList())
                     .toList();
-        }
-
-        List<DeliveryMetadata> metadata() {
-            return List.copyOf(metadata);
         }
 
         List<PrefillTimePredictor.Evaluator> evaluators() {
@@ -552,10 +554,11 @@ final class GroupPolicyTestSupport {
                 reservations.get(index).close();
             }
         }
+
     }
 
     private static final class TestCommittedDelivery
-            implements CommittedDelivery {
+            implements DeliveryStrategy.Handoff {
 
         private final List<DeliveryItem> items;
         private final List<PrefillWorkLedger.RouteReservation> reservations;
@@ -617,5 +620,33 @@ final class GroupPolicyTestSupport {
                 handoff.close();
             }
         }
+    }
+
+    static DeliveryStrategy.PreparedDelivery boundaryOnly(
+            DeliveryItem item,
+            CapacityBoundary boundary) {
+        DeliveryStrategy.SelectionBoundary exactBoundary =
+                new DeliveryStrategy.SelectionBoundary(item, boundary);
+        return new DeliveryStrategy.PreparedDelivery() {
+            @Override
+            public List<DeliveryItem> items() {
+                return List.of();
+            }
+
+            @Override
+            public DeliveryStrategy.SelectionBoundary boundary() {
+                return exactBoundary;
+            }
+
+            @Override
+            public DeliveryStrategy.Handoff commitOwnershipUnderLock() {
+                throw new IllegalStateException(
+                        "boundary-only preparation cannot commit");
+            }
+
+            @Override
+            public void close() {
+            }
+        };
     }
 }

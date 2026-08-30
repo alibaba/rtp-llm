@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.OptionalLong;
 
-import static org.flexlb.balance.delivery.DeliveryStrategyTestSupport.EVALUATOR;
 import static org.flexlb.balance.delivery.DeliveryStrategyTestSupport.item;
 import static org.flexlb.balance.delivery.DeliveryStrategyTestSupport.unavailable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,9 +28,9 @@ class RouteDeliveryStrategyTest {
         TestItem second = item(2L);
         DeliveryMetadata metadata = new DeliveryMetadata("route", 7);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(first, second), metadata, EVALUATOR,
-                OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(first, second), metadata,
+                OptionalLong.empty());
 
         assertEquals("COMMITTED", result);
         assertEquals(List.of(first, second),
@@ -70,9 +69,9 @@ class RouteDeliveryStrategyTest {
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.prepareBoundary(unavailable);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(head), new DeliveryMetadata("blocked", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(head),
+                new DeliveryMetadata("blocked", 0), OptionalLong.empty());
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
@@ -88,9 +87,9 @@ class RouteDeliveryStrategyTest {
         TestItem head = item(1L);
         fixture.slots.preparationLostFor(head);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(head), new DeliveryMetadata("lost", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(head),
+                new DeliveryMetadata("lost", 0), OptionalLong.empty());
 
         assertEquals("BOUNDARY", result);
         assertSame(head, fixture.context.emptyBoundary().item());
@@ -107,10 +106,9 @@ class RouteDeliveryStrategyTest {
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.rejectAppendAt(1, unavailable);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(first, second),
-                new DeliveryMetadata("prefix", 1),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(first, second),
+                new DeliveryMetadata("prefix", 1), OptionalLong.empty());
 
         assertEquals("COMMITTED", result);
         assertEquals(
@@ -130,10 +128,10 @@ class RouteDeliveryStrategyTest {
         TestItem third = item(3L);
         fixture.slots.throwCommitFor(first);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(first, second, third),
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(first, second, third),
                 new DeliveryMetadata("isolate-commit", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+                OptionalLong.empty());
 
         assertEquals("COMMITTED", result);
         assertEquals(List.of(first, second, third), fixture.slots.committed());
@@ -153,10 +151,10 @@ class RouteDeliveryStrategyTest {
 
         IllegalStateException failure = assertThrows(
                 IllegalStateException.class,
-                () -> fixture.strategy.admitAndDeliver(
-                        List.of(first, second),
+                () -> fixture.context.deliver(
+                        fixture.strategy, List.of(first, second),
                         new DeliveryMetadata("isolate-completion", 0),
-                        EVALUATOR, OptionalLong.empty(), fixture.context));
+                        OptionalLong.empty()));
 
         assertTrue(failure.getMessage().contains("completion failure 1"));
         assertEquals(List.of(first, second), fixture.slots.committed());
@@ -171,9 +169,9 @@ class RouteDeliveryStrategyTest {
         fixture.context.commit(false);
         TestItem head = item(1L);
 
-        String result = fixture.strategy.admitAndDeliver(
-                List.of(head), new DeliveryMetadata("lost-commit", 0),
-                EVALUATOR, OptionalLong.empty(), fixture.context);
+        String result = fixture.context.deliver(
+                fixture.strategy, List.of(head),
+                new DeliveryMetadata("lost-commit", 0), OptionalLong.empty());
 
         assertEquals("NOT_COMMITTED", result);
         assertEquals(1, fixture.admission.preparedCloseCount());

@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.dao.master.WorkerStatus;
@@ -291,6 +292,27 @@ class FixedWindowGroupPolicyTest {
     }
 
     @Test
+    void deliveryPrefixPublishesOnlyLockLinearizedMetadata() {
+        GroupPolicyTestSupport.Fixture fixture = fixed(
+                false, 2, 0L, 500L);
+        fixture.delivery().limitPreparedPrefix(1);
+        fixture.add(1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
+        BatchItem suffix = fixture.add(
+                2L, 50, 10L, NOW_MS + 1L, Long.MAX_VALUE);
+
+        BatcherCycleResult.Admitted admitted = assertInstanceOf(
+                BatcherCycleResult.Admitted.class,
+                policy.processQueue(fixture.context()));
+
+        DeliveryMetadata canonical = new DeliveryMetadata(
+                "delivery_capacity_prefix", 1);
+        assertEquals(canonical, admitted.metadata());
+        assertEquals(List.of(canonical),
+                fixture.delivery().committedMetadata());
+        assertEquals(List.of(suffix), fixture.activeItems());
+    }
+
+    @Test
     void invalidPredictionTerminalizesOnlyItsExactHead() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 4, 0L, 500L);
@@ -449,8 +471,8 @@ class FixedWindowGroupPolicyTest {
         assertEquals(List.of(first), fixture.activeItems());
         assertTrue(fixture.delivery().committedGroups().isEmpty());
         assertTrue(fixture.lifecycle().deliveryFailureItems().isEmpty());
-        assertEquals(List.of(List.of(1L, 2L)),
-                fixture.delivery().attempts());
+        assertTrue(fixture.delivery().attempts().isEmpty(),
+                "revoked selection must not prepare delivery resources");
     }
 
     @Test

@@ -46,54 +46,42 @@ final class DeliveryStrategyTestSupport {
             long hitCache) implements DeliveryItem {
     }
 
-    static final class TestContext implements DeliveryContext<String> {
+    static final class TestContext {
 
         private boolean owned = true;
         private boolean commit = true;
         private boolean autoDeliver = true;
-        private PreparedSelection preparedSelection;
-        private SelectionBoundary committedBoundary;
-        private SelectionBoundary emptyBoundary;
-        private CommittedDelivery published;
+        private DeliveryStrategy.PreparedDelivery preparedSelection;
+        private DeliveryStrategy.SelectionBoundary committedBoundary;
+        private DeliveryStrategy.SelectionBoundary emptyBoundary;
+        private DeliveryStrategy.Handoff published;
         private DeliveryMetadata publishedMetadata;
 
-        @Override
-        public String noAction() {
-            return "NO_ACTION";
-        }
-
-        @Override
-        public boolean selectionStillOwned(List<DeliveryItem> candidates) {
-            return owned;
-        }
-
-        @Override
-        public CommitResult<String> commitPreparedSelection(
-                PreparedSelection selection,
-                String decisionReason) {
-            preparedSelection = selection;
-            committedBoundary = selection.boundary();
-            if (!commit) {
-                return new CommitResult.NotCommitted<>("NOT_COMMITTED");
+        String deliver(
+                DeliveryStrategy strategy,
+                List<DeliveryItem> candidates,
+                DeliveryMetadata metadata,
+                OptionalLong plannedPredictionMs) {
+            if (candidates.isEmpty() || !owned) {
+                return "NO_ACTION";
             }
-            return new CommitResult.Committed<>(
-                    selection.commitOwnershipUnderLock(), "COMMITTED");
-        }
-
-        @Override
-        public String commitBoundary(SelectionBoundary boundary) {
-            emptyBoundary = boundary;
-            return "BOUNDARY";
-        }
-
-        @Override
-        public void handoffCommittedDelivery(
-                CommittedDelivery delivery,
-                DeliveryMetadata metadata) {
-            published = delivery;
-            publishedMetadata = metadata;
-            if (autoDeliver) {
-                delivery.deliver(metadata);
+            try (DeliveryStrategy.PreparedDelivery prepared = strategy.prepare(
+                    candidates, EVALUATOR, plannedPredictionMs)) {
+                if (prepared.items().isEmpty()) {
+                    emptyBoundary = prepared.boundary();
+                    return "BOUNDARY";
+                }
+                preparedSelection = prepared;
+                committedBoundary = prepared.boundary();
+                if (!commit) {
+                    return "NOT_COMMITTED";
+                }
+                published = prepared.commitOwnershipUnderLock();
+                publishedMetadata = metadata;
+                if (autoDeliver) {
+                    published.deliver(metadata);
+                }
+                return "COMMITTED";
             }
         }
 
@@ -109,19 +97,19 @@ final class DeliveryStrategyTestSupport {
             autoDeliver = value;
         }
 
-        PreparedSelection preparedSelection() {
+        DeliveryStrategy.PreparedDelivery preparedSelection() {
             return preparedSelection;
         }
 
-        SelectionBoundary committedBoundary() {
+        DeliveryStrategy.SelectionBoundary committedBoundary() {
             return committedBoundary;
         }
 
-        SelectionBoundary emptyBoundary() {
+        DeliveryStrategy.SelectionBoundary emptyBoundary() {
             return emptyBoundary;
         }
 
-        CommittedDelivery published() {
+        DeliveryStrategy.Handoff published() {
             return published;
         }
 

@@ -31,25 +31,20 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     @Override
-    public <R> R admitAndDeliver(
+    public PreparedDelivery prepare(
             List<DeliveryItem> candidates,
-            DeliveryMetadata metadata,
             PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPredictionMs,
-            DeliveryContext<R> context) {
-        if (candidates.isEmpty()
-                || !context.selectionStillOwned(candidates)) {
-            return context.noAction();
+            OptionalLong plannedPredictionMs) {
+        if (candidates.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "route delivery requires at least one candidate");
         }
-
         Prefix prefix = prepareAdmissiblePrefix(candidates, evaluator);
         if (prefix.items().isEmpty()) {
-            return context.commitBoundary(prefix.boundary());
+            return new EmptyPreparation(prefix.boundary());
         }
-
-        final AdmittedGroup group;
         try {
-            group = new AdmittedGroup(
+            return new AdmittedGroup(
                     this, prefix.items(), prefix.prepared(), prefix.boundary());
         } catch (Throwable failure) {
             Throwable cleanup = close(prefix.prepared());
@@ -58,31 +53,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
             throw propagate(failure);
         }
-        DeliveryContext.CommitResult<R> commitResult;
-        try {
-            commitResult = context.commitPreparedSelection(
-                    group,
-                    metadata.decisionReason());
-        } catch (Throwable failure) {
-            Throwable cleanup = group.resolveCommitFailure(failure);
-            if (cleanup != null && cleanup != failure) {
-                failure.addSuppressed(cleanup);
-            }
-            throw propagate(failure);
-        }
-        if (commitResult
-                instanceof DeliveryContext.CommitResult.NotCommitted<?>) {
-            Throwable cleanup = group.releaseUncommitted();
-            if (cleanup != null) {
-                throw propagate(cleanup);
-            }
-            return commitResult.loopResult();
-        }
-        DeliveryContext.CommitResult.Committed<R> committed =
-                (DeliveryContext.CommitResult.Committed<R>) commitResult;
-        context.handoffCommittedDelivery(
-                committed.owner(), metadata);
-        return committed.loopResult();
     }
 
     private Prefix prepareAdmissiblePrefix(
@@ -98,14 +68,14 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             return new Prefix(
                     List.of(),
                     null,
-                    new DeliveryContext.SelectionBoundary(
+                    new SelectionBoundary(
                             head, rejected.boundary()));
         }
         PrefillAdmissionPort.PreparedAdmission prepared =
                 ((CapacityBoundary.Attempt.Accepted<
                         PrefillAdmissionPort.PreparedAdmission>) beginAttempt)
                         .value();
-        DeliveryContext.SelectionBoundary boundary = null;
+        SelectionBoundary boundary = null;
         try {
             for (DeliveryItem item : candidates) {
                 CapacityBoundary.Attempt<DeliveryItem> attempt =
@@ -120,7 +90,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (attempt
                         instanceof CapacityBoundary.Attempt.Rejected<DeliveryItem>
                                 rejected) {
-                    boundary = new DeliveryContext.SelectionBoundary(
+                    boundary = new SelectionBoundary(
                             item, rejected.boundary());
                     break;
                 }
@@ -254,11 +224,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Ordered route callback payload and sole owner of its exact members. */
-    private static final class AdmittedGroup implements CommittedDelivery,
-            DeliveryContext.PreparedSelection {
+    private static final class AdmittedGroup
+            implements PreparedDelivery, Handoff {
         private final RouteDeliveryStrategy owner;
         private final List<DeliveryItem> items;
-        private final DeliveryContext.SelectionBoundary boundary;
+        private final SelectionBoundary boundary;
         private PrefillAdmissionPort.PreparedAdmission prepared;
         private PrefillAdmissionPort.CommittedAdmission committed;
 
@@ -266,7 +236,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 RouteDeliveryStrategy owner,
                 List<DeliveryItem> items,
                 PrefillAdmissionPort.PreparedAdmission prepared,
-                DeliveryContext.SelectionBoundary boundary) {
+                SelectionBoundary boundary) {
             this.owner = owner;
             this.items = items;
             this.prepared = prepared;
@@ -281,7 +251,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public DeliveryContext.SelectionBoundary boundary() {
+        public SelectionBoundary boundary() {
             return boundary;
         }
 
@@ -318,36 +288,22 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 exactCommitted = committed;
                 committed = null;
             }
-            Throwable cleanup = close(exactCommitted);
+            Throwable cleanup = RouteDeliveryStrategy.close(exactCommitted);
             if (cleanup != null) {
                 throw propagate(cleanup);
             }
         }
 
-        private synchronized Throwable releaseUncommitted() {
+        @Override
+        public synchronized void close() {
             PrefillAdmissionPort.PreparedAdmission exactPrepared = prepared;
             if (exactPrepared == null) {
-                return new IllegalStateException(
-                        "route group no longer owns a prepared admission");
+                return;
             }
             prepared = null;
-            return close(exactPrepared);
-        }
-
-        private Throwable resolveCommitFailure(Throwable cause) {
-            synchronized (this) {
-                if (prepared == null && committed == null) {
-                    return null;
-                }
-                if (prepared != null) {
-                    return releaseUncommitted();
-                }
-            }
-            try {
-                failBeforeDelivery(cause);
-                return null;
-            } catch (Throwable cleanupFailure) {
-                return cleanupFailure;
+            Throwable cleanup = RouteDeliveryStrategy.close(exactPrepared);
+            if (cleanup != null) {
+                throw propagate(cleanup);
             }
         }
 
@@ -366,10 +322,30 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     private record Prefix(
             List<DeliveryItem> items,
             PrefillAdmissionPort.PreparedAdmission prepared,
-            DeliveryContext.SelectionBoundary boundary) {
+            SelectionBoundary boundary) {
         private Prefix {
             assert items.isEmpty() == (prepared == null)
                     : "route prefix must own preparation exactly when non-empty";
+        }
+    }
+
+    /** Boundary-only preparation with no acquired resource. */
+    private record EmptyPreparation(SelectionBoundary boundary)
+            implements PreparedDelivery {
+
+        @Override
+        public List<DeliveryItem> items() {
+            return List.of();
+        }
+
+        @Override
+        public Handoff commitOwnershipUnderLock() {
+            throw new IllegalStateException(
+                    "empty route preparation cannot commit");
+        }
+
+        @Override
+        public void close() {
         }
     }
 

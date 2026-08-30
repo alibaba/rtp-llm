@@ -1,8 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.CommittedDelivery;
-import org.flexlb.balance.delivery.DeliveryContext;
 import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.delivery.DeliveryLifecyclePort;
 import org.flexlb.balance.delivery.DeliveryMetadata;
@@ -41,7 +39,7 @@ import java.util.function.Supplier;
  * the queue version, keeping the priority scheduling invariant "version unchanged ⇒
  * queue content unchanged" (optimistic plan validation).
  */
-class BatcherContext implements DeliveryContext<BatcherCycleResult> {
+class BatcherContext {
 
     /** Compute and KV limits derived from one WorkerStatus publication. */
     record BatchCapacitySnapshot(
@@ -73,7 +71,7 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
     private final Comparator<BatchItem> queueOrder;
     private final Comparator<GroupPlanner.Item> projectionOrder;
     private final boolean queueScheduling;
-    private final DeliveryStrategy deliveryStrategy;
+    private final DeliveryCoordinator delivery;
     private final PrefillWorkRegistry workRegistry;
 
     private boolean stopped;
@@ -104,8 +102,7 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
         this.projectionOrder = Objects.requireNonNull(
                 projectionOrder, "projectionOrder");
         this.queueScheduling = queueScheduling;
-        this.deliveryStrategy = Objects.requireNonNull(
-                deliveryStrategy, "deliveryStrategy");
+        this.delivery = new DeliveryCoordinator(key, deliveryStrategy);
         this.workRegistry = Objects.requireNonNull(workRegistry, "workRegistry");
     }
 
@@ -459,19 +456,19 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
         if (candidates.isEmpty()) {
             return BatcherCycleResult.Outcome.NO_ACTION;
         }
-        return deliveryStrategy.admitAndDeliver(
-                deliveryItems(candidates),
-                metadata,
-                evaluator,
-                plannedCommittedPredictionMs,
-                this);
+        return delivery.deliver(
+                this, candidates, metadata, evaluator,
+                plannedCommittedPredictionMs);
     }
 
     double projectGroupDurationMs(
             List<BatchItem> items,
             PrefillTimePredictor.Evaluator evaluator) {
-        return deliveryStrategy.projectGroupDurationMs(
-                deliveryItems(items), evaluator);
+        return delivery.projectGroupDurationMs(items, evaluator);
+    }
+
+    RouteProjection.DeliveryProjection deliveryProjection() {
+        return delivery.projectionPolicy();
     }
 
     /**
@@ -487,50 +484,41 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
             return operation.get();
         } catch (InvalidPrefillPredictionException failure) {
             return commitBoundary(
-                    new DeliveryContext.SelectionBoundary(
+                    new DeliveryStrategy.SelectionBoundary(
                             exactHead, new CapacityBoundary.Failed(failure)));
         }
     }
 
-    @Override
-    public BatcherCycleResult noAction() {
-        return BatcherCycleResult.Outcome.NO_ACTION;
+    boolean selectionStillOwned(List<BatchItem> candidates) {
+        return candidateSelectionStillOwned(candidates);
     }
 
-    @Override
-    public boolean selectionStillOwned(List<DeliveryItem> candidates) {
-        return candidateSelectionStillOwned(batchItems(candidates));
-    }
-
-    @Override
-    public DeliveryContext.CommitResult<BatcherCycleResult>
-            commitPreparedSelection(
-            DeliveryContext.PreparedSelection selection,
+    DeliveryCoordinator.CommittedSelection commitPreparedSelection(
+            DeliveryStrategy.PreparedDelivery selection,
             String decisionReason) {
         List<BatchItem> items = batchItems(selection.items());
         assert !items.isEmpty()
                 : "prepared selection commit requires a non-empty selection";
-        CommittedDelivery committedOwner = null;
-        BatcherCycleResult result = BatcherCycleResult.Outcome.NO_ACTION;
+        DeliveryStrategy.Handoff committedOwner = null;
+        BatcherCycleResult.Admitted admittedResult = null;
         RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         Throwable postCommitFailure = null;
 
         queueLock.lock();
         try {
             if (stopped) {
-                return new DeliveryContext.CommitResult.NotCommitted<>(result);
+                return null;
             }
             long nowMs = now();
             for (BatchItem item : items) {
                 if (!containsIdentity(item) || item.requestExpired(nowMs)) {
-                    return new DeliveryContext.CommitResult.NotCommitted<>(
-                            BatcherCycleResult.Outcome.NO_ACTION);
+                    return null;
                 }
             }
             committedOwner = Objects.requireNonNull(
                     selection.commitOwnershipUnderLock(), "committed owner");
             try {
-                DeliveryContext.SelectionBoundary boundary =
+                DeliveryStrategy.SelectionBoundary boundary =
                         selection.boundary();
                 removedBoundary = removeSelectionBoundaryUnderLock(
                         boundary, nowMs);
@@ -539,7 +527,7 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
                         && boundary.result()
                         instanceof CapacityBoundary.Unavailable
                         ? "delivery_capacity_prefix" : decisionReason;
-                result = new BatcherCycleResult.Admitted(
+                admittedResult = new BatcherCycleResult.Admitted(
                         items,
                         new DeliveryMetadata(
                                 committedReason, queue.size()));
@@ -565,11 +553,8 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
             throw propagateCommitFailure(failure);
         }
         notifyTerminalAdmissionFailure(removedBoundary);
-        if (result instanceof BatcherCycleResult.Admitted admitted) {
-            return new DeliveryContext.CommitResult.Committed<>(
-                    committedOwner, admitted);
-        }
-        return new DeliveryContext.CommitResult.NotCommitted<>(result);
+        return new DeliveryCoordinator.CommittedSelection(
+                committedOwner, Objects.requireNonNull(admittedResult));
     }
 
     private static Throwable appendFailure(
@@ -595,9 +580,8 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
                 "delivery selection failed after ownership commit", failure);
     }
 
-    @Override
-    public BatcherCycleResult commitBoundary(
-            DeliveryContext.SelectionBoundary boundary) {
+    BatcherCycleResult commitBoundary(
+            DeliveryStrategy.SelectionBoundary boundary) {
         BatcherCycleResult result = BatcherCycleResult.Outcome.NO_ACTION;
         RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         queueLock.lock();
@@ -640,7 +624,7 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
 
     /** Caller holds queueLock. */
     private RemovedTerminalBoundary removeSelectionBoundaryUnderLock(
-            DeliveryContext.SelectionBoundary boundary,
+            DeliveryStrategy.SelectionBoundary boundary,
             long nowMs) {
         // OwnershipLost is not a terminal fact. In particular, the request's
         // admission mutation may still be closing after publishing the exact
@@ -687,11 +671,6 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
         return (List<BatchItem>) (List<?>) items;
     }
 
-    @SuppressWarnings("unchecked")
-    private static List<DeliveryItem> deliveryItems(List<BatchItem> items) {
-        return (List<DeliveryItem>) (List<?>) items;
-    }
-
     private boolean candidateSelectionStillOwned(List<BatchItem> candidates) {
         queueLock.lock();
         try {
@@ -727,37 +706,6 @@ class BatcherContext implements DeliveryContext<BatcherCycleResult> {
             Logger.error("WorkerBatcher[{}] delivery-failure callback failed "
                             + "request_id={}",
                     key, item.requestId(), callbackFailure);
-        }
-    }
-
-    /** Cross the strategy-specific delivery boundary outside the queue lock. */
-    @Override
-    public void handoffCommittedDelivery(
-            CommittedDelivery committedDelivery,
-            DeliveryMetadata metadata) {
-        Throwable deliveryFailure = null;
-        try {
-            committedDelivery.deliver(metadata);
-        } catch (Throwable failure) {
-            deliveryFailure = failure;
-        }
-        Throwable unresolved = deliveryFailure != null
-                ? deliveryFailure
-                : new IllegalStateException(
-                        "delivery returned without resolving owner");
-        try {
-            committedDelivery.failBeforeDelivery(unresolved);
-        } catch (Throwable cleanupFailure) {
-            if (deliveryFailure == null) {
-                deliveryFailure = cleanupFailure;
-            } else if (deliveryFailure != cleanupFailure) {
-                deliveryFailure.addSuppressed(cleanupFailure);
-            }
-        }
-        if (deliveryFailure != null) {
-            Logger.error(
-                    "WorkerBatcher[{}] committed delivery failed",
-                    key, deliveryFailure);
         }
     }
 
