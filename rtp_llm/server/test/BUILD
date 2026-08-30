@@ -67,6 +67,7 @@ py_test(
 
 py_test(
     name = "backend_manager_shutdown_test",
+    exec_properties = {"gpu": "A10"},
     srcs = ["backend_manager_shutdown_test.py"],
     deps = [
         "//rtp_llm:testlib",
