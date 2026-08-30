@@ -1,7 +1,10 @@
 import threading
+import time
 from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import ANY, MagicMock, patch
+
+import grpc
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaDescPB,
@@ -9,6 +12,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
     ReleaseEmbeddingPB,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.vit_proxy_server import (
     LoadBalancer,
     VitProxyRpcServer,
@@ -16,6 +20,109 @@ from rtp_llm.server.vit_proxy_server import (
     _resolve_rpc_timeout_seconds,
 )
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
+
+
+class VitErrorQpsTest(TestCase):
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_wait_greennet_worker_rpc_error_reports_error_qps(self, report):
+        class WorkerRpcError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "worker unavailable"
+
+            def trailing_metadata(self):
+                return ()
+
+        load_balancer = MagicMock()
+        load_balancer.get_worker.return_value = "worker-a"
+        load_balancer.decrement_connections.side_effect = RuntimeError("counter failed")
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        connection_pool.get_stub.return_value = stub
+        worker_call = MagicMock()
+        worker_call.result.side_effect = WorkerRpcError()
+        stub.WaitGreenNetVerdict.future.return_value = worker_call
+        context = MagicMock()
+        context.add_callback.return_value = True
+        context.abort.side_effect = RuntimeError("proxy aborted")
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        with self.assertRaises(RuntimeError):
+            servicer.WaitGreenNetVerdict(MultimodalInputsPB(), context)
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
+        worker_call.cancel.assert_not_called()
+
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
+    def test_worker_rpc_failed_verdict_is_reported(self, _trans_mm_input):
+        engine = MagicMock()
+        verdict = SimpleNamespace(passed=False, code=2, message="unsafe")
+        engine.wait_greennet_verdict.return_value = verdict
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        context = MagicMock()
+        context.add_callback.return_value = True
+
+        servicer.WaitGreenNetVerdict(MultimodalInputsPB(), context)
+
+        engine.report_vit_error.assert_called_once_with(verdict)
+        self.assertEqual(
+            context.set_code.call_args.args[0], grpc.StatusCode.PERMISSION_DENIED
+        )
+
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_rdma_release_worker_error_reports_error_qps(self, report):
+        load_balancer = MagicMock()
+        connection_pool = MagicMock()
+        connection_pool.get_stub.side_effect = RuntimeError("release failed")
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        servicer._rdma_handle_routes["h"] = ("worker-a", time.monotonic())
+
+        servicer.ReleaseMultimodalEmbedding(
+            ReleaseEmbeddingPB(handle=["h"]), MagicMock()
+        )
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
+
+    @patch("rtp_llm.server.vit_proxy_server.kmonitor.report")
+    def test_connection_cleanup_error_reports_error_qps(self, report):
+        load_balancer = MagicMock()
+        load_balancer.get_worker.return_value = "worker-a"
+        load_balancer.decrement_connections.side_effect = RuntimeError("counter failed")
+        connection_pool = MagicMock()
+        stub = MagicMock()
+        worker_call = MagicMock()
+        worker_call.result.return_value = MultimodalOutputPB()
+        stub.RemoteMultimodalEmbedding.future.return_value = worker_call
+        connection_pool.get_stub.return_value = stub
+        context = MagicMock()
+        context.add_callback.return_value = True
+
+        servicer = VitProxyRpcServer(load_balancer, connection_pool)
+        self.assertIsInstance(
+            servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context),
+            MultimodalOutputPB,
+        )
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
 
 
 class VitWorkerRequestIdTest(TestCase):

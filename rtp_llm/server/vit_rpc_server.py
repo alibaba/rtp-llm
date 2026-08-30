@@ -101,7 +101,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
         def cancel_queued_work() -> None:
             rpc_done.set()
-            self.engine.cancel_queued_request(request_id)
+            try:
+                self.engine.cancel_queued_request(request_id)
+            except Exception as error:
+                # Cancellation runs in gRPC's callback thread, after the
+                # handler may have returned; report failures here as well.
+                self.engine.report_vit_error(error)
+                logging.exception("Failed to cancel queued ViT work")
 
         if not context.add_callback(cancel_queued_work):
             cancel_queued_work()
@@ -163,10 +169,19 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             self.engine.async_submit(converted_inputs, multimodal_inputs.request_id)
             return EmptyPB()
         except FtRuntimeException as error:
+            self.engine.report_vit_error(error)
             _abort_ft_runtime(context, error)
+        except Exception as error:
+            self.engine.report_vit_error(error)
+            logging.exception("AsyncSubmitEmbedding failed")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
+            )
 
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
         """Start missing work and block until GreenNet decides for all inputs."""
+        verdict = None
         try:
             converted_inputs = trans_mm_input(multimodal_inputs)
             cancellation_event = self._register_queue_cancellation(
@@ -177,23 +192,48 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,
             )
+            if verdict is None:
+                raise RuntimeError("ViT GreenNet returned no verdict")
         except FtRuntimeException as error:
+            self.engine.report_vit_error(error)
             _abort_ft_runtime(context, error)
-        if not verdict.passed:
-            error_code = (
-                ExceptionType.UNSAFE_INPUT_CONTENT
-                if verdict.code == 2
-                else ExceptionType.MM_PROCESS_ERROR
+            return EmptyPB()
+        except Exception as error:
+            self.engine.report_vit_error(error)
+            logging.exception("WaitGreenNetVerdict failed")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
             )
-            details = ErrorDetailsPB(
-                error_code=int(error_code),
-                error_message=verdict.message or "data inspection failed",
+            return EmptyPB()
+
+        try:
+            if not verdict.passed:
+                self.engine.report_vit_error(verdict)
+                error_code = (
+                    ExceptionType.UNSAFE_INPUT_CONTENT
+                    if verdict.code == 2
+                    else ExceptionType.MM_PROCESS_ERROR
+                )
+                details = ErrorDetailsPB(
+                    error_code=int(error_code),
+                    error_message=verdict.message or "data inspection failed",
+                )
+                context.set_trailing_metadata(
+                    (("grpc-status-details-bin", details.SerializeToString()),)
+                )
+                context.set_code(grpc.StatusCode.PERMISSION_DENIED)
+                context.set_details(verdict.message or "data inspection failed")
+        except Exception as error:
+            # A malformed verdict or response-metadata failure is also an
+            # exceptional result and must be visible in the error QPS.
+            self.engine.report_vit_error(error)
+            logging.exception("Failed to serialize ViT GreenNet verdict")
+            context.abort(
+                grpc.StatusCode.INTERNAL,
+                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
             )
-            context.set_trailing_metadata(
-                (("grpc-status-details-bin", details.SerializeToString()),)
-            )
-            context.set_code(grpc.StatusCode.PERMISSION_DENIED)
-            context.set_details(verdict.message or "data inspection failed")
+            return EmptyPB()
         return EmptyPB()
 
     def RemoteMultimodalEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
@@ -223,17 +263,24 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     return rdma_out
             return trans_output(merged)
         except FtRuntimeException as error:
+            self.engine.report_vit_error(error)
             _abort_ft_runtime(context, error)
         except Exception as e:
+            self.engine.report_vit_error(e)
             logging.exception("RemoteMultimodalEmbedding failed")
             context.abort(
                 grpc.StatusCode.INTERNAL, f"[MM_PROCESS_ERROR] {type(e).__name__}: {e}"
             )
 
     def ReleaseMultimodalEmbedding(self, request: ReleaseEmbeddingPB, context):
-        if self._rdma is not None and len(request.handle) > 0:
-            self._rdma.release(list(request.handle))
-        return EmptyPB()
+        try:
+            if self._rdma is not None and len(request.handle) > 0:
+                self._rdma.release(list(request.handle))
+            return EmptyPB()
+        except Exception as error:
+            self.engine.report_vit_error(error)
+            logging.exception("ReleaseMultimodalEmbedding failed")
+            raise
 
     def GetWorkerStatus(self, request: StatusVersionPB, context):
         worker_status = WorkerStatusPB()

@@ -1209,3 +1209,185 @@ The first three behavior-changing stages address the largest confirmed gaps in
 the current M3VL path. Cache, routing, and CUDA Graph work should follow once
 the new cost model and packed execution path provide stable measurements and
 interfaces.
+
+## 15. RTP-LLM Versus vLLM EPD Recheck (2026-08-21)
+
+This section supersedes comparisons that reused one image or referenced an
+incomplete image set. Those runs could hit the RTP-LLM multimodal cache or fail
+for a missing input rather than for a framework performance reason.
+
+### 15.1 Measurement Contract
+
+- Model: MiniMax-M3-MXFP8.
+- Deployment: one Encoder/ViT worker on GPU 5, Prefill TP2 on GPUs 1-2, and
+  Decode TP2 on GPUs 3-4. P, D, and E used independent processes and did not
+  share GPUs.
+- RTP-LLM revision: `47e05783fc78390725dcb58ea8c6e34940212449`.
+- vLLM source revision: `bb233626caa31602728f7ee4625f3d2a4d1a3ad5`;
+  runtime version: `0.27.2rc1.dev154+g5fd7a8883`.
+- Input: one 1920x1080 JPEG per request from a pool of 13200 images. Every
+  decoded image contains a distinct 128x128 binary pixel patch and was checked
+  by SHA256. No hard links or identical-content copies were used.
+- Request: streaming with `max_tokens=1`; concurrency 64/96/128/160/192 and
+  192/288/384/320/384 requests per point in each repeat.
+- Every point ran three times with QPS, TTFT, RT, errors, NVML utilization, and
+  memory recorded. Runs with external work on the same GPUs were discarded.
+- RTP-LLM values below are three-repeat medians. vLLM values include only
+  completely error-free repeats at each concurrency.
+
+With one generated token, full request latency is effectively TTFT; the observed
+difference was normally only a few milliseconds. The table reports RT p50/p95,
+which can be used directly as first-token latency for this workload.
+
+### 15.2 Results
+
+| Concurrency | RTP QPS | RTP RT p50/p95 | vLLM QPS | vLLM RT p50/p95 | Clean vLLM repeats | vLLM errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 34.13 | 1.531 / 2.889 s | 32.49 | 1.525 / 3.080 s | 3 | 0/576 |
+| 96 | 42.34 | 1.985 / 3.458 s | 35.04 | 2.469 / 3.027 s | 3 | 0/864 |
+| 128 | 34.90 | 3.072 / 5.412 s | 36.68 | 3.119 / 5.134 s | 2 | 2/1152 |
+| 160 | 34.48 | 4.263 / 6.597 s | 39.49 | 3.729 / 4.031 s | 1 | 38/960 |
+| 192 | 38.02 | 4.266 / 6.882 s | 32.33 | 5.524 / 6.289 s | 1 | 15/1152 |
+
+Only one vLLM repeat was completely error-free at C160 and C192, so those points
+are not stable high-concurrency estimates. Failures included Encoder connection
+resets, server disconnects, and HTTP 200 responses with no first streaming body.
+Failed requests terminate early and can inflate success-count/elapsed-time QPS;
+repeats containing failures are therefore excluded from the vLLM medians above.
+
+Raw three-repeat QPS variability was:
+
+| Concurrency | RTP QPS range / CV | vLLM QPS range / CV |
+| ---: | ---: | ---: |
+| 64 | 29.10-40.50 / 13.50% | 22.33-39.53 / 22.45% |
+| 96 | 37.13-42.44 / 6.10% | 22.12-38.97 / 22.46% |
+| 128 | 34.81-39.23 / 5.67% | 26.43-40.00 / 16.66% |
+| 160 | 32.47-38.59 / 7.24% | 36.43-39.48 / 3.39% |
+| 192 | 37.52-38.43 / 0.97% | 32.33-39.28 / 8.50% |
+
+RTP-LLM median Prefill GPU utilization was about 60%-71% and ViT utilization
+was 15%-20%. vLLM Prefill utilization was about 63%-80% and Encoder utilization
+was 21%-28%. Peak memory per Prefill GPU was about 239.5 GiB for RTP-LLM and
+264.2 GiB for vLLM; per Decode GPU it was 243.0 GiB and 248.8 GiB. RTP-LLM ViT
+peak memory grew from 6.6 GiB early in repeat one to about 37.0 GiB in repeat
+three while processing unique images, whereas vLLM Encoder memory stabilized at
+about 20.6 GiB. Follow-up work should distinguish embedding-cache residency from
+CUDA allocator retention.
+
+### 15.3 Conclusions and Artifacts
+
+- The corrected data does not support the prior conclusion that vLLM is much
+  faster than RTP-LLM. C64-C128 are broadly comparable, with higher RTP-LLM
+  throughput at C96.
+- All 4704 RTP-LLM requests succeeded, and C192 had the most stable throughput.
+- vLLM remained volatile at low concurrency and had Proxy-to-Encoder connection
+  failures at high concurrency. Failed repeats must not be used as peak
+  throughput comparisons until that path is fixed.
+- RTP-LLM high-concurrency p95 still varies materially and should be correlated
+  with a batching and queue timeline.
+- RTP-LLM artifacts:
+  `/data2/xieshui.yyx/m3vl_profile_artifacts/rtpllm_rtp_rt_recheck/20260821_115924`.
+- vLLM artifacts:
+  `/data2/xieshui.yyx/m3vl_profile_artifacts/vllm_rtp_rt_recheck/20260821_112254`.
+
+## 16. RTP-LLM Versus vLLM EPD Steady-State Recheck (2026-08-24)
+
+This run repeats the Section 15 workload with stricter streaming validation. An
+HTTP 200 response counts as successful only after SSE contains at least one
+non-empty `choices` event; empty streams and connection resets count as errors.
+The input remains one pixel-distinct 1920x1080 JPEG per request, one output
+token, with the same model revisions and separate E/P/D topology.
+
+RTP-LLM ran five repeats. Because `warm_up=0`, repeat one contained clear model
+and kernel cold start, so steady-state values are medians of repeats 2-5. All
+6272 formal requests in those repeats succeeded. The 4096-entry multimodal and
+URL caches were enabled, but every formal request used different image content,
+so there were no cross-request cache hits. ViT batching used 64 request/image
+limits and a 10 ms wait.
+
+vLLM ran three repeats. The stale keep-alive reuse between Proxy and Encoder was
+fixed, and all C64-C160 repeats succeeded. The benchmark client still hit seven
+stale client-to-Proxy connections in the third C192 repeat, so C192 uses its two
+error-free repeats. No repeat containing an error contributes to QPS or latency
+medians.
+
+### 16.1 Complete-Path Results
+
+| Concurrency | RTP QPS | vLLM QPS | RTP throughput delta | RTP RT p50/p95 | vLLM RT p50/p95 | Valid repeats RTP/vLLM |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 43.652 | 38.147 | +14.4% | 1.259 / 1.822 s | 1.515 / 1.908 s | 4 / 3 |
+| 96 | 40.427 | 39.689 | +1.9% | 1.833 / 3.952 s | 2.209 / 2.526 s | 4 / 3 |
+| 128 | 42.728 | 40.437 | +5.7% | 2.662 / 3.806 s | 2.949 / 3.342 s | 4 / 3 |
+| 160 | 44.206 | 39.609 | +11.6% | 3.117 / 4.729 s | 3.613 / 4.165 s | 4 / 3 |
+| 192 | 40.685 | 39.871 | +2.0% | 3.965 / 5.796 s | 4.334 / 4.974 s | 4 / 2 |
+
+RTP-LLM has higher steady-state throughput at every point. Its median peak is
+44.206 QPS at C160, versus vLLM's 40.437 QPS at C128. RTP-LLM RT p50 is
+8.5%-17.0% lower, but its C96-C192 p95 is 13.5%-56.5% higher. The remaining gap
+is therefore high-concurrency queue and batching tail latency rather than mean
+throughput. RTP-LLM C128 produced 42.953/42.503/42.223/48.839 QPS in its four
+steady repeats, disproving a deterministic C128 throughput cliff.
+
+### 16.2 Stage and Resource Evidence
+
+RTP-LLM ViT request p50/p95 grows from 0.466/0.918 seconds at C64 to
+2.017/3.595 seconds at C192. Prefill access-log `wait_time` p95 concurrently
+grows from 1.367 to 4.868 seconds, while non-wait p95 remains 0.475-0.994
+seconds. The high-concurrency tail is therefore formed primarily in waiting and
+batch scheduling. vLLM Proxy Encoder p50 grows from 1.138 to 3.945 seconds,
+while Prefill+Decode TTFB p50 stays at 0.337-0.378 seconds, so vLLM complete RT
+is governed mainly by Encoder queueing.
+
+RTP-LLM average ViT batch sizes at C64/96/128/160/192 are
+13.7/17.5/30.7/33.7/43.9, with 0%/3.0%/8.0%/21.1%/48.6% of batches reaching
+64. This does not support directly increasing the batch limit: most points do
+not reach it, and p95 is the metric that currently needs improvement. The next
+A/B keeps the 10 ms wait and changes only the two batch limits from 64 to 32.
+
+Coarse NVML samples put RTP-LLM median Prefill utilization at about 69%-71% and
+ViT at 20%-26%, versus vLLM Prefill at 74%-84% and Encoder at 27%-29%. Peak
+memory per Prefill GPU is about 239.7 GiB for RTP-LLM and 258.0 GiB for vLLM.
+RTP-LLM ViT memory grows to about 37.7 GiB as unique images populate its
+4096-entry cache, while vLLM Encoder stabilizes near 16.4 GiB. This reflects the
+selected cache configurations and is not an intrinsic model-memory comparison.
+
+### 16.3 Artifacts
+
+- RTP-LLM:
+  `/data2/xieshui.yyx/m3vl_profile_artifacts/rtpllm_rtp_rt_cache_on_recheck/20260824_103313`.
+- vLLM:
+  `/data2/xieshui.yyx/m3vl_profile_artifacts/vllm_rtp_rt_recheck/20260824_110631`.
+
+### 16.4 ViT Batch Limit 64-to-32 A/B
+
+This A/B keeps every RTP-LLM baseline condition from Section 16 unchanged and
+only changes `gpu_max_batch_size` and `gpu_max_batch_images` from 64 to 32;
+`gpu_batch_wait_ms` remains 10. Both configurations ran five repeats, discard
+repeat one as cold start, and report medians of repeats 2-5. All 7840 formal
+requests in each configuration succeeded.
+
+| Concurrency | QPS 64 -> 32 | QPS delta | RT p50 64 -> 32 | p50 delta | RT p95 64 -> 32 | p95 delta |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 43.652 -> 41.880 | -4.1% | 1.259 -> 1.383 s | +9.9% | 1.822 -> 1.918 s | +5.3% |
+| 96 | 40.427 -> 39.642 | -1.9% | 1.833 -> 2.150 s | +17.3% | 3.952 -> 3.110 s | -21.3% |
+| 128 | 42.728 -> 39.890 | -6.6% | 2.662 -> 2.823 s | +6.1% | 3.806 -> 4.388 s | +15.3% |
+| 160 | 44.206 -> 42.927 | -2.9% | 3.117 -> 3.007 s | -3.5% | 4.729 -> 4.582 s | -3.1% |
+| 192 | 40.685 -> 43.259 | +6.3% | 3.965 -> 3.711 s | -6.4% | 5.796 -> 5.419 s | -6.5% |
+
+With a limit of 32, average actual batch size is 25.6-27.9 at C96-C192 and
+78%-80% of C128-C192 batches reach the limit, confirming that the new limit is
+active. Relative to batch 64, per-image ViT forward time increases by
+8.3%/11.4%/21.8%/5.0%/8.3% across the five points; ViT request p50 increases
+34%-79% at C96-C192. Smaller batches reduce work per launch but require more
+batches and lose kernel efficiency.
+
+Steady-state QPS CV for batch 32 at C64/96/128/160/192 is
+12.1%/8.4%/21.4%/10.4%/13.1%, versus 8.2%/5.7%/7.1%/10.3%/1.5% for batch 64.
+The C192 end-to-end median improvement occurs alongside worse isolated ViT
+latency and much larger run-to-run variation, indicating a batching-to-Prefill
+timing effect rather than a robust global win. Keep the default limit at 64. A
+tail-latency follow-up should hold the limit at 64 and A/B a 5 ms wait, or test
+adaptive waiting under production queue depth.
+
+Batch-32 artifacts:
+`/data2/xieshui.yyx/m3vl_profile_artifacts/rtpllm_rtp_rt_batch32_wait10/20260824_112024`.

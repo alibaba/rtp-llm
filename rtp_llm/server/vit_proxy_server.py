@@ -38,6 +38,14 @@ DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0
 RDMA_HANDLE_ROUTE_TTL_SECONDS = 120.0
 
 
+def _report_vit_error_qps() -> None:
+    try:
+        kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+    except Exception:
+        # Telemetry failures must not hide the original RPC failure.
+        logging.exception("Failed to report ViT error QPS")
+
+
 def _resolve_rpc_timeout_seconds(
     request: "MultimodalInputsPB",
     default_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
@@ -198,14 +206,32 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             for handle in handles:
                 self._rdma_handle_routes[handle] = (worker_address, now)
 
+    def _decrement_connections(
+        self, worker_address: Optional[str], report_error: bool = True
+    ) -> None:
+        """Release a proxy worker slot without hiding the request outcome."""
+        if not worker_address:
+            return
+        try:
+            self.load_balancer.decrement_connections(worker_address)
+        except Exception:
+            # A bookkeeping failure must still be observable, but it should
+            # not replace an RPC error that is already being propagated.
+            if report_error:
+                _report_vit_error_qps()
+            logging.exception(
+                "Failed to decrement proxy connection count for worker %s",
+                worker_address,
+            )
+
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
     ) -> MultimodalOutputPB:
         """将请求转发到工作进程"""
-        kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "vit_proxy"})
-
         worker_address = None
+        request_failed = False
         try:
+            kmonitor.report(AccMetrics.VIT_QPS_METRIC, 1, {"source": "vit_proxy"})
             worker_address = self.load_balancer.get_worker()
             self.load_balancer.increment_connections(worker_address)
 
@@ -234,37 +260,88 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
 
             return response
         except grpc.RpcError as e:
+            request_failed = True
             logging.error(
                 f"RPC error when forwarding to worker {worker_address}: {e.code()} - {e.details()}"
             )
-            kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            _report_vit_error_qps()
             trailing_metadata = e.trailing_metadata()
             if trailing_metadata:
                 context.set_trailing_metadata(trailing_metadata)
             context.abort(e.code(), e.details())
         except Exception as e:
+            request_failed = True
             logging.error(f"Error forwarding request to worker {worker_address}: {e}")
-            kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            _report_vit_error_qps()
             raise
         finally:
-            if worker_address:
-                self.load_balancer.decrement_connections(worker_address)
+            self._decrement_connections(worker_address, report_error=not request_failed)
+
+    def WaitGreenNetVerdict(self, request: MultimodalInputsPB, context) -> EmptyPB:
+        """Forward the prefill-side GreenNet gate to one VIT worker.
+
+        This RPC is part of the multimodal service contract. Leaving the
+        generated UNIMPLEMENTED fallback in the proxy turns a valid GreenNet
+        rejection or worker failure into an unobserved proxy error.
+        """
+        worker_address = None
+        request_failed = False
+        try:
+            worker_address = self.load_balancer.get_worker()
+            self.load_balancer.increment_connections(worker_address)
+            stub = self.connection_pool.get_stub(worker_address)
+            timeout_s = _resolve_rpc_timeout_seconds(
+                request, self.default_rpc_timeout_seconds
+            )
+            worker_call = stub.WaitGreenNetVerdict.future(request, timeout=timeout_s)
+            if not context.add_callback(worker_call.cancel):
+                worker_call.cancel()
+            return worker_call.result()
+        except grpc.RpcError as error:
+            request_failed = True
+            logging.error(
+                "RPC error when forwarding GreenNet verdict to worker %s: " "%s - %s",
+                worker_address,
+                error.code(),
+                error.details(),
+            )
+            _report_vit_error_qps()
+            trailing_metadata = error.trailing_metadata()
+            if trailing_metadata:
+                context.set_trailing_metadata(trailing_metadata)
+            context.abort(error.code(), error.details())
+        except Exception as error:
+            request_failed = True
+            logging.error(
+                "Error forwarding GreenNet verdict to worker %s: %s",
+                worker_address,
+                error,
+            )
+            _report_vit_error_qps()
+            raise
+        finally:
+            self._decrement_connections(worker_address, report_error=not request_failed)
 
     def ReleaseMultimodalEmbedding(
         self, request: ReleaseEmbeddingPB, context
     ) -> EmptyPB:
-        handles_by_worker: dict[str, list[str]] = defaultdict(list)
-        now = time.monotonic()
-        with self._rdma_handle_routes_lock:
-            for handle in request.handle:
-                route = self._rdma_handle_routes.pop(handle, None)
-                if route is None or now - route[1] > RDMA_HANDLE_ROUTE_TTL_SECONDS:
-                    logging.warning(
-                        "No live VIT worker route for RDMA handle %s; worker GC will reclaim it",
-                        handle,
-                    )
-                    continue
-                handles_by_worker[route[0]].append(handle)
+        try:
+            handles_by_worker: dict[str, list[str]] = defaultdict(list)
+            now = time.monotonic()
+            with self._rdma_handle_routes_lock:
+                for handle in request.handle:
+                    route = self._rdma_handle_routes.pop(handle, None)
+                    if route is None or now - route[1] > RDMA_HANDLE_ROUTE_TTL_SECONDS:
+                        logging.warning(
+                            "No live VIT worker route for RDMA handle %s; worker GC will reclaim it",
+                            handle,
+                        )
+                        continue
+                    handles_by_worker[route[0]].append(handle)
+        except Exception as error:
+            _report_vit_error_qps()
+            logging.exception("Failed to route RDMA release request")
+            raise
 
         for worker_address, handles in handles_by_worker.items():
             try:
@@ -273,6 +350,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                     ReleaseEmbeddingPB(handle=handles), timeout=1.0
                 )
             except Exception:
+                _report_vit_error_qps()
                 logging.exception(
                     "Failed to release RDMA handles on VIT worker %s; worker GC will reclaim them",
                     worker_address,
@@ -281,27 +359,31 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
 
     def AsyncSubmitEmbedding(self, request: MultimodalInputsPB, context) -> EmptyPB:
         worker_address = None
+        request_failed = False
         try:
             worker_address = self.load_balancer.get_worker()
             self.load_balancer.increment_connections(worker_address)
             stub = self.connection_pool.get_stub(worker_address)
             return stub.AsyncSubmitEmbedding(request, timeout=5.0)
         except grpc.RpcError as e:
+            request_failed = True
             logging.error(
                 f"RPC error when forwarding AsyncSubmit to worker {worker_address}: {e.code()} - {e.details()}"
             )
+            _report_vit_error_qps()
             trailing_metadata = e.trailing_metadata()
             if trailing_metadata:
                 context.set_trailing_metadata(trailing_metadata)
             context.abort(e.code(), e.details())
         except Exception as e:
+            request_failed = True
             logging.error(
                 f"Error forwarding AsyncSubmit to worker {worker_address}: {e}"
             )
+            _report_vit_error_qps()
             raise
         finally:
-            if worker_address:
-                self.load_balancer.decrement_connections(worker_address)
+            self._decrement_connections(worker_address, report_error=not request_failed)
 
     def GetWorkerStatus(self, request: StatusVersionPB, context) -> WorkerStatusPB:
         # Aggregation pending flexlb refactor; explicitly UNIMPLEMENTED so the caller

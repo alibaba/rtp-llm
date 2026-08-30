@@ -30,6 +30,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
 )
+from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import (
     GreenNetHandle,
     GreenNetProvider,
@@ -143,6 +144,22 @@ class FakeMultiModalEmbeddingInterfaceBadCount(FakeMultiModalEmbeddingInterface)
         return [(torch.tensor(0), None) for _ in range(len(data_list) - 1)]
 
 
+class FakeEmbeddingLengthInterface(FakeMultiModalEmbeddingInterface):
+    """Return distinct token counts so request-level aggregation is testable."""
+
+    @staticmethod
+    def preprocess_input(
+        mm_inputs: List[MultimodalInput], vit_config: VitConfig, **kwargs
+    ):
+        return torch.tensor([len(mm_inputs[0].url)])
+
+    @torch.inference_mode()
+    def batched_embedding(self, data_list, mm_types, **kwargs):
+        return [
+            (torch.zeros((int(data.reshape(-1)[0]), 4)), None) for data in data_list
+        ]
+
+
 class FakeModel:
     def __init__(self, mm_part: MultiModalEmbeddingInterface = None):
         self.model_config = ModelConfig()
@@ -180,6 +197,41 @@ class MMProcessEngineTest(TestCase):
         res = self.mm_process_engine.mm_embedding_rpc(mm_inputs)
         self.assertEqual(res.embeddings, [torch.tensor(0)])
         self.assertEqual(res.position_ids, [])
+
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_embedding_length_metric_sums_a_request(self, report):
+        """A multi-image request emits one gauge containing all visual tokens."""
+        model = FakeModel(FakeEmbeddingLengthInterface())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True
+        vit_config.use_gpu_batch = True
+        vit_config.gpu_batch_wait_ms = 100
+        vit_config.mm_cache_item_num = 0
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        inputs = [
+            MultimodalInput("a", MMUrlType.IMAGE, torch.empty(0), config),
+            MultimodalInput("bb", MMUrlType.IMAGE, torch.empty(0), config),
+        ]
+        try:
+            result = engine.mm_embedding_impl(inputs)
+        finally:
+            engine.stop()
+
+        self.assertEqual(
+            [embedding.shape[0] for embedding in result.embeddings], [1, 2]
+        )
+        lengths = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args and call.args[0] == GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC
+        ]
+        self.assertEqual(lengths, [3])
 
     def test_timeout(self):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceSlow())
@@ -223,6 +275,36 @@ class MMProcessEngineTest(TestCase):
             )
         except PreprcoesException as e:
             self.assertEqual(str(e), "{'test': 'hello'}")
+
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_error_qps_is_reported_for_preprocess_failure(self, report):
+        model = FakeModel(FakeMultiModalEmbeddingInterfacePreprocessException())
+        vit_config = VitConfig()
+        vit_config.use_local_preprocess = True
+        vit_config.mm_cache_item_num = 0
+        engine = MMProcessEngine(
+            model.mm_part,
+            model.model_config,
+            vit_config,
+            ProfilingDebugLoggingConfig(),
+        )
+        try:
+            with self.assertRaises(PreprcoesException):
+                engine.mm_embedding_cpp(
+                    ["fake://error-qps-preprocess"],
+                    [MMUrlType.IMAGE],
+                    [torch.empty(0)],
+                    [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+                )
+        finally:
+            engine.stop()
+
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
 
     def test_local_preprocess_mode(self):
         """LocalPreprocessExecutor path: use_local_preprocess=True bypasses the worker pool."""
@@ -648,7 +730,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             release.set()
             engine.stop()
 
-    def test_async_compute_queue_rejects_over_capacity(self):
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_async_compute_queue_rejects_over_capacity(self, report):
         engine = self._make_engine(vit_concurrency=1, vit_max_queue_size=1)
         release = threading.Event()
         started = threading.Event()
@@ -682,6 +765,12 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
                 ExceptionType.CONCURRENCY_LIMIT_ERROR,
             )
             self.assertIsNone(engine._embedding_cache.peek(rejected.cache_key()))
+            error_reports = [
+                call
+                for call in report.call_args_list
+                if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+            ]
+            self.assertEqual(len(error_reports), 1)
 
             release.set()
             self.assertTrue(completed.wait(timeout=5))
@@ -901,7 +990,8 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         self.assertGreaterEqual(engine._embedding_cache.stats()["inflight_dedup"], 1)
         engine.stop()
 
-    def test_error_clears_cache(self):
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_error_clears_cache(self, report):
         engine = self._make_engine(
             FakeMultiModalEmbeddingInterfacePreprocessException()
         )
@@ -917,6 +1007,12 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
         # After error, cache entry should be removed — next call should re-attempt
         state, _ = engine._async_cache.try_acquire(inp.cache_key())
         self.assertEqual(state, "miss")
+        error_reports = [
+            call
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+        ]
+        self.assertEqual(len(error_reports), 1)
         engine.stop()
 
     def test_empty_url_raises(self):
@@ -1156,7 +1252,8 @@ class MMProcessEngineGreenNetTest(TestCase):
         self.assertTrue(verdict.passed)
         engine.stop()
 
-    def test_wait_verdict_fail_after_async_submit(self):
+    @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
+    def test_wait_verdict_fail_after_async_submit(self, report):
         engine = self._make_engine()
         engine._greennet_provider = _StubGreenNetProvider(
             GreenNetVerdict(passed=False, code=2, message="nsfw")
@@ -1173,6 +1270,12 @@ class MMProcessEngineGreenNetTest(TestCase):
             engine.get_embedding_result([inp])
         self.assertEqual(
             ctx.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        self.assertTrue(
+            any(
+                call.args and call.args[0] == AccMetrics.VIT_ERROR_QPS_METRIC
+                for call in report.call_args_list
+            )
         )
         engine.stop()
 

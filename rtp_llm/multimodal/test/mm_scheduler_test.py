@@ -1,10 +1,11 @@
 import threading
 import time
 from typing import Any, List, Optional
-from unittest import TestCase, main
+from unittest import TestCase, main, mock
 
 import torch
 
+from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_scheduler import MMScheduler, OutputCountMismatchError
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_util import (
@@ -136,6 +137,53 @@ def _submit_concurrently(
 
 
 class MMSchedulerTest(TestCase):
+    def test_queue_metrics_report_depth_and_wait(self):
+        """Queue gauges expose backlog depth and time before a forward starts."""
+        fake = _FakeMMPart(delay=0.2)
+        sched = MMScheduler(fake, batch_wait_ms=0, max_batch_size=1)
+        errors: List[Optional[Exception]] = [None, None]
+
+        def submit(index: int):
+            try:
+                sched.submit_and_wait([_FakeWorkItem(timeout_ms=5000)])
+            except Exception as error:  # noqa: BLE001 - asserted below
+                errors[index] = error
+
+        with mock.patch("rtp_llm.multimodal.mm_scheduler.kmonitor.report") as report:
+            first = threading.Thread(target=submit, args=(0,))
+            second = threading.Thread(target=submit, args=(1,))
+            try:
+                first.start()
+                self.assertTrue(fake.call_started.wait(timeout=1.0))
+                second.start()
+                # Keep the second request behind the first forward so its queue
+                # wait is observable rather than a scheduler race.
+                time.sleep(0.03)
+                second.join(timeout=2.0)
+                first.join(timeout=2.0)
+            finally:
+                sched.close()
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(errors, [None, None])
+
+            depth_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_SIZE_METRIC
+            ]
+            wait_values = [
+                call.args[1]
+                for call in report.call_args_list
+                if call.args
+                and call.args[0] == GaugeMetrics.VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC
+            ]
+            self.assertIn(1, depth_values)
+            self.assertEqual(depth_values[-1], 0)
+            self.assertGreater(max(wait_values), 50.0)
+
     def test_multi_request_batching(self):
         """Several concurrent submissions are merged into one forward."""
         fake = _FakeMMPart()

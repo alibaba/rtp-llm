@@ -34,6 +34,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import (
+    collect_download_timing,
     maybe_tensor_to_list,
     trans_mm_input,
     url_data_cache_,
@@ -46,6 +47,38 @@ from rtp_llm.utils.time_util import Timer, timer_wrapper
 _worker_vit_config: Optional[VitConfig] = None
 _worker_preprocess_params: Optional[dict] = None
 _worker_preprocess_func: Optional[Callable] = None
+
+
+def _run_preprocess_task(
+    preprocess_func: Callable,
+    mm_inputs: List[MultimodalInput],
+    vit_config: VitConfig,
+    preprocess_params: dict,
+) -> Tuple[Any, float, float]:
+    """Run preprocessing and return total and media-load durations in ms."""
+    with collect_download_timing() as download_timing:
+        with Timer() as route_timer:
+            result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+    return result, route_timer.cost_ms(), download_timing.elapsed_ms
+
+
+def _embedding_token_length(embeddings: List[Any]) -> int:
+    """Return the total visual-token length represented by embedding tensors."""
+    total = 0
+    for embedding in embeddings:
+        if isinstance(embedding, torch.Tensor):
+            # Embeddings are normally [tokens, hidden]. A 1-D tensor is a
+            # single token vector, so its hidden dimension must not be counted
+            # as the token length.
+            total += int(embedding.shape[0]) if embedding.ndim >= 2 else 1
+            continue
+        try:
+            total += len(embedding)
+        except TypeError:
+            logging.warning(
+                "Cannot derive embedding length from %s", type(embedding).__name__
+            )
+    return total
 
 
 def _worker_initializer(
@@ -68,18 +101,40 @@ def _worker_initializer(
 
 def _worker_process_task(
     mm_inputs: List[MultimodalInput],
-) -> Tuple[Any, float]:
+) -> Tuple[Any, float, float]:
     """
     只接收变化的 `mm_inputs` 参数。
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
 
-    with Timer() as route_timer:
-        result = _worker_preprocess_func(
-            mm_inputs, _worker_vit_config, **_worker_preprocess_params
+    return _run_preprocess_task(
+        _worker_preprocess_func,
+        mm_inputs,
+        _worker_vit_config,
+        _worker_preprocess_params,
+    )
+
+
+def _unpack_preprocess_result(payload: Any) -> Tuple[Any, float, float]:
+    """Normalize preprocess results from current and legacy executors."""
+    if not isinstance(payload, tuple) or len(payload) < 2:
+        raise ValueError(
+            "preprocess executor must return (result, total_ms[, download_ms])"
         )
-    return result, route_timer.cost_ms()
+    result, total_ms = payload[0], float(payload[1])
+    download_ms = float(payload[2]) if len(payload) > 2 else 0.0
+    # Clock/context overhead must never make the derived remainder negative.
+    download_ms = max(0.0, min(download_ms, total_ms))
+    return result, total_ms, download_ms
+
+
+def _report_preprocess_timing(total_ms: float, download_ms: float) -> None:
+    """Report the two non-overlapping preprocessing components in milliseconds."""
+    kmonitor.report(GaugeMetrics.VIT_DOWNLOAD_RT_METRIC, download_ms)
+    kmonitor.report(
+        GaugeMetrics.VIT_PREPROCESS_OTHER_RT_METRIC, max(0.0, total_ms - download_ms)
+    )
 
 
 class PreprocessExecutor:
@@ -113,14 +168,15 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            with Timer() as route_timer:
-                result = self.preprocess_func(
-                    work_item.mm_inputs, self.vit_config, **self.preprocess_params
-                )
-            preprocess_time = route_timer.cost_ms()
+            result, preprocess_time, download_time = _run_preprocess_task(
+                self.preprocess_func,
+                work_item.mm_inputs,
+                self.vit_config,
+                self.preprocess_params,
+            )
             work_item.preprocess_result = result
             # 使用简单的对象模拟 future 行为
-            work_item.future = _LocalResult(result, preprocess_time)
+            work_item.future = _LocalResult(result, preprocess_time, download_time)
         except Exception as e:
             logging.error(f"Error in local preprocessing: {e}", exc_info=True)
             raise
@@ -132,8 +188,10 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            _, preprocess_time = work_item.future.get()
-            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+            _, preprocess_time, download_time = _unpack_preprocess_result(
+                work_item.future.get()
+            )
+            _report_preprocess_timing(preprocess_time, download_time)
         except Exception as e:
             logging.error(f"Error getting local preprocess result: {e}", exc_info=True)
             raise
@@ -231,12 +289,15 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            work_item.preprocess_result, preprocess_time = work_item.future.get(
-                timeout=work_item.mm_timeout_ms / 1000.0
-            )
+            payload = work_item.future.get(timeout=work_item.mm_timeout_ms / 1000.0)
+            (
+                work_item.preprocess_result,
+                preprocess_time,
+                download_time,
+            ) = _unpack_preprocess_result(payload)
             with self._pool_lock:
                 self._consecutive_timeouts = 0
-            kmonitor.report(GaugeMetrics.VIT_PREPROCESS_RT_METRIC, preprocess_time)
+            _report_preprocess_timing(preprocess_time, download_time)
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
                 self._consecutive_timeouts += 1
@@ -291,12 +352,13 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
 class _LocalResult:
     """本地预处理结果的简单包装类"""
 
-    def __init__(self, result: Any, time: float):
+    def __init__(self, result: Any, preprocess_time: float, download_time: float):
         self.result = result
-        self.time = time
+        self.preprocess_time = preprocess_time
+        self.download_time = download_time
 
-    def get(self, timeout: Optional[float] = None) -> Tuple[Any, float]:
-        return (self.result, self.time)
+    def get(self, timeout: Optional[float] = None) -> Tuple[Any, float, float]:
+        return (self.result, self.preprocess_time, self.download_time)
 
 
 class MMEmbeddingRes:
@@ -601,6 +663,49 @@ class MMProcessEngine:
         with self.query_num_lock:
             return self.query_num
 
+    def report_vit_error(
+        self,
+        error: Optional[Any] = None,
+        entry: Optional[MMEmbeddingCacheEntry] = None,
+    ) -> None:
+        """Report one ViT error, suppressing duplicate reports for one result.
+
+        A failed async task can be observed by the task callback and by the
+        caller waiting on its cache entry. The cache-entry claim handles
+        different exception objects representing the same result; the
+        exception marker covers RPC/wrapper layers that re-raise the same
+        object. Proxy workers still leave accounting to the proxy layer.
+        """
+        if entry is not None:
+            try:
+                if not entry.claim_error_report():
+                    # Preserve the cross-layer marker even when the entry was
+                    # already claimed, so a later wrapper cannot count it
+                    # again without the entry.
+                    if error is not None:
+                        setattr(error, "_vit_error_qps_reported", True)
+                    return
+            except Exception:
+                # Telemetry must never turn a request failure into a different
+                # failure if a compatibility cache entry lacks this helper.
+                pass
+        if error is not None:
+            try:
+                if getattr(error, "_vit_error_qps_reported", False):
+                    return
+                setattr(error, "_vit_error_qps_reported", True)
+            except Exception:
+                # A few third-party exception types may not have a writable
+                # __dict__. Reporting is still more useful than failing the
+                # request because deduplication was unavailable.
+                pass
+        if not self.is_proxy_mode:
+            try:
+                kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
+            except Exception:
+                # Metrics must never mask the original ViT request failure.
+                logging.exception("Failed to report ViT error QPS")
+
     # ------------------------------------------------------------------
     # GreenNet (content safety) plumbing
     # ------------------------------------------------------------------
@@ -671,11 +776,20 @@ class MMProcessEngine:
             def _stamp(fut: "concurrent.futures.Future") -> None:
                 try:
                     verdict = fut.result()
-                except Exception as e:  # noqa: BLE001 - convert to process error
+                except Exception as error:  # noqa: BLE001 - convert to process error
+                    inspect_error = RuntimeError(f"greennet inspect failed: {error}")
+                    self.report_vit_error(inspect_error, entry)
                     verdict = GreenNetVerdict(
-                        passed=False, code=11, message=f"greennet inspect failed: {e}"
+                        passed=False, code=11, message=str(inspect_error)
                     )
-                entry.set_greennet_verdict(verdict)
+                    try:
+                        setattr(verdict, "_vit_error_qps_reported", True)
+                    except Exception:
+                        pass
+                try:
+                    entry.set_greennet_verdict(verdict)
+                except Exception as error:
+                    self.report_vit_error(error, entry)
 
             verdict_future.add_done_callback(_stamp)
         return rewritten, verdict_future, handle
@@ -704,6 +818,16 @@ class MMProcessEngine:
     def _embed_with_greennet_sync(
         self, mm_inputs: List[MultimodalInput], request_id: int = 0
     ) -> MMEmbeddingRes:
+        """Run one synchronous request and account for every failure boundary."""
+        try:
+            return self._embed_with_greennet_sync_impl(mm_inputs, request_id=request_id)
+        except Exception as error:
+            self.report_vit_error(error)
+            raise
+
+    def _embed_with_greennet_sync_impl(
+        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+    ) -> MMEmbeddingRes:
         """Synchronous embedding path with greennet (used by the in-process /
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
         with inspect, then the verdict gates the result. Raises
@@ -718,10 +842,13 @@ class MMProcessEngine:
                     rewritten,
                     defer_cache_complete=True,
                     request_id=request_id,
+                    report_vit_error=False,
                 )
                 verdict = GreenNetVerdict(passed=True)
                 if verdict_future is not None:
                     verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                    if verdict is None:
+                        raise RuntimeError("sync GreenNet returned no verdict")
                     if not verdict.passed:
                         raise FtRuntimeException(
                             ExceptionType.UNSAFE_INPUT_CONTENT,
@@ -734,6 +861,7 @@ class MMProcessEngine:
                         work_item.complete_cache(work_item.embedding_result, force=True)
                 return result
             except Exception as error:
+                self.report_vit_error(error)
                 for work_item in work_items:
                     work_item.fail_cache(error)
                 raise
@@ -758,6 +886,7 @@ class MMProcessEngine:
                 cache_claim=(cache_key, entry, state),
                 defer_cache_complete=state == "miss",
                 request_id=request_id,
+                report_vit_error=False,
             )
 
             if state == "miss":
@@ -766,6 +895,8 @@ class MMProcessEngine:
                     if verdict_future is not None
                     else GreenNetVerdict(passed=True)
                 )
+                if verdict is None:
+                    raise RuntimeError("sync GreenNet returned no verdict")
                 if not verdict.passed:
                     raise FtRuntimeException(
                         ExceptionType.UNSAFE_INPUT_CONTENT,
@@ -777,13 +908,16 @@ class MMProcessEngine:
                 self._embedding_cache.complete(cache_key, entry, raw_result)
             elif self._greennet_enabled():
                 verdict = entry.wait_greennet(timeout=self._greennet_timeout_s)
-                if verdict is not None and not verdict.passed:
+                if verdict is None:
+                    raise RuntimeError("cached GreenNet returned no verdict")
+                if not verdict.passed:
                     raise FtRuntimeException(
                         ExceptionType.UNSAFE_INPUT_CONTENT,
                         verdict.message or "data inspection failed",
                     )
             return result
         except Exception as error:
+            self.report_vit_error(error, entry if state == "miss" else None)
             if state == "miss":
                 self._embedding_cache.fail(cache_key, entry, error)
             raise
@@ -803,27 +937,42 @@ class MMProcessEngine:
         Called by the VIT RPC's ``WaitGreenNetVerdict`` handler before prefill.
         If an input was never async-submitted (cache miss), kick its compute
         now so the verdict gets produced."""
-        if not self._greennet_enabled():
-            return GreenNetVerdict(passed=True)
+        current_entry: Optional[MMEmbeddingCacheEntry] = None
+        try:
+            if not self._greennet_enabled():
+                return GreenNetVerdict(passed=True)
 
-        valid_inputs = [mm_input for mm_input in mm_inputs if mm_input.url != ""]
-        claims = self._claim_and_submit_async(
-            valid_inputs,
-            request_id=request_id,
-            queue_timeout_ms=timeout_ms,
-            cancellation_event=cancellation_event,
-        )
-        deadline = time.monotonic() + timeout_ms / 1000.0
-        for _, entry in claims:
-            remaining = max(0.0, deadline - time.monotonic())
-            verdict = entry.wait_greennet(timeout=remaining)
-            if verdict is not None and not verdict.passed:
-                return verdict
-        return GreenNetVerdict(passed=True)
+            valid_inputs = [mm_input for mm_input in mm_inputs if mm_input.url != ""]
+            claims = self._claim_and_submit_async(
+                valid_inputs,
+                request_id=request_id,
+                queue_timeout_ms=timeout_ms,
+                cancellation_event=cancellation_event,
+            )
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            for _, entry in claims:
+                current_entry = entry
+                remaining = max(0.0, deadline - time.monotonic())
+                verdict = entry.wait_greennet(timeout=remaining)
+                if verdict is None:
+                    raise RuntimeError("GreenNet returned no verdict")
+                if not verdict.passed:
+                    # A rejected verdict is an exceptional RPC result even
+                    # though this API returns it instead of raising.
+                    self.report_vit_error(verdict, current_entry)
+                    return verdict
+            return GreenNetVerdict(passed=True)
+        except Exception as error:
+            self.report_vit_error(error, current_entry)
+            raise
 
     def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
-        converted_inputs = trans_mm_input(mm_inputs)
+        try:
+            converted_inputs = trans_mm_input(mm_inputs)
+        except Exception as error:
+            self.report_vit_error(error)
+            raise
         return self._embed_with_greennet_sync(
             converted_inputs, request_id=mm_inputs.request_id
         )
@@ -837,16 +986,24 @@ class MMProcessEngine:
         request_id: int = 0,
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
-        mm_inputs = [
-            MultimodalInput(
-                url, MMUrlType(url_type), tensor, MMPreprocessConfig(*config)
-            )
-            for url, url_type, tensor, config in zip(
-                urls, types, tensors, mm_preprocess_configs
-            )
-        ]
+        try:
+            mm_inputs = [
+                MultimodalInput(
+                    url, MMUrlType(url_type), tensor, MMPreprocessConfig(*config)
+                )
+                for url, url_type, tensor, config in zip(
+                    urls, types, tensors, mm_preprocess_configs
+                )
+            ]
+        except Exception as error:
+            self.report_vit_error(error)
+            raise
         res = self._embed_with_greennet_sync(mm_inputs, request_id=request_id)
-        res.position_ids = [pos.cpu() for pos in res.position_ids]
+        try:
+            res.position_ids = [pos.cpu() for pos in res.position_ids]
+        except Exception as error:
+            self.report_vit_error(error)
+            raise
         return res
 
     def mm_embedding_impl(
@@ -862,6 +1019,8 @@ class MMProcessEngine:
         cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
         defer_cache_complete: bool = False,
         request_id: int = 0,
+        report_embedding_length: bool = True,
+        report_vit_error: bool = True,
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -872,6 +1031,7 @@ class MMProcessEngine:
         """
         logging.debug(f"{self.server_id} request [{request_id}] received")
         work_items: List[MMWorkItem] = []
+        query_started = False
         try:
             self.mm_part.validate_inputs(mm_inputs)
             with self.profiler.profile_request():
@@ -882,6 +1042,7 @@ class MMProcessEngine:
                         )
 
                     self.inc_query_num()
+                    query_started = True
                     if not self.vit_config.disable_access_log:
                         self._access_logger.log_query_access(mm_inputs, request_id)
 
@@ -897,6 +1058,11 @@ class MMProcessEngine:
                         emb_res, pos_res, extra_input_res = self._compute_embeddings(
                             work_items
                         )
+                        if report_embedding_length:
+                            kmonitor.report(
+                                GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                                _embedding_token_length(emb_res),
+                            )
 
                     with torch.profiler.record_function("postprocess"):
                         result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
@@ -911,16 +1077,19 @@ class MMProcessEngine:
 
             return result, work_items
         except Exception as e:
+            if report_vit_error:
+                # Report before cleanup: cache cleanup/access logging must not
+                # hide the fact that this request returned an error.
+                self.report_vit_error(e)
             for work_item in work_items:
                 work_item.fail_cache(e)
             torch.cuda.empty_cache()
             gc.collect()
-            if not self.is_proxy_mode:
-                kmonitor.report(AccMetrics.VIT_ERROR_QPS_METRIC, 1)
             self._access_logger.log_exception_access(mm_inputs, e, request_id)
             raise
         finally:
-            self.dec_query_num()
+            if query_started:
+                self.dec_query_num()
 
     def _create_work_items(
         self,
@@ -1020,9 +1189,13 @@ class MMProcessEngine:
         Returns the list of cache keys. Inputs already in-progress or complete
         are not recomputed.
         """
-        self.mm_part.validate_inputs(mm_inputs)
-        claims = self._claim_and_submit_async(mm_inputs, request_id=request_id)
-        return [cache_key for cache_key, _ in claims]
+        try:
+            self.mm_part.validate_inputs(mm_inputs)
+            claims = self._claim_and_submit_async(mm_inputs, request_id=request_id)
+            return [cache_key for cache_key, _ in claims]
+        except Exception as error:
+            self.report_vit_error(error)
+            raise
 
     def get_embedding_result(
         self,
@@ -1038,21 +1211,31 @@ class MMProcessEngine:
         If in-progress, blocks until the computing thread finishes.
         If complete, returns immediately.
         """
-        self.mm_part.validate_inputs(mm_inputs)
-        claims = self._claim_and_submit_async(
-            mm_inputs,
-            request_id=request_id,
-            queue_timeout_ms=timeout_ms,
-            cancellation_event=cancellation_event,
-        )
-        deadline = time.monotonic() + timeout_ms / 1000.0
-        results = []
-        for _, entry in claims:
-            remaining = max(0.0, deadline - time.monotonic())
-            raw_result = entry.wait(timeout=remaining)
-            results.append(self._work_item_result_to_response(raw_result))
+        current_entry: Optional[MMEmbeddingCacheEntry] = None
+        try:
+            self.mm_part.validate_inputs(mm_inputs)
+            claims = self._claim_and_submit_async(
+                mm_inputs,
+                request_id=request_id,
+                queue_timeout_ms=timeout_ms,
+                cancellation_event=cancellation_event,
+            )
+            deadline = time.monotonic() + timeout_ms / 1000.0
+            results = []
+            for _, entry in claims:
+                current_entry = entry
+                remaining = max(0.0, deadline - time.monotonic())
+                raw_result = entry.wait(timeout=remaining)
+                results.append(self._work_item_result_to_response(raw_result))
 
-        return results
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                sum(_embedding_token_length(result.embeddings) for result in results),
+            )
+            return results
+        except Exception as error:
+            self.report_vit_error(error, current_entry)
+            raise
 
     def _claim_and_submit_async(
         self,
@@ -1138,20 +1321,36 @@ class MMProcessEngine:
                     continue
 
                 if task.future is None:
-                    self._forget_async_task_locked(entry)
-                    self._fail_async_compute(
-                        task.cache_key,
-                        entry,
-                        FtRuntimeException(
-                            ExceptionType.CANCELLED_ERROR,
-                            f"ViT request {request_id} was cancelled before submission",
-                        ),
+                    error = FtRuntimeException(
+                        ExceptionType.CANCELLED_ERROR,
+                        f"ViT request {request_id} was cancelled before submission",
                     )
+                    self._forget_async_task_locked(entry)
+                    self._fail_async_compute(task.cache_key, entry, error)
                     cancelled += 1
-                elif task.future.cancel():
-                    # The done callback removes the task, fails the cache entry,
-                    # and releases its admission slot.
-                    cancelled += 1
+                else:
+                    try:
+                        future_cancelled = task.future.cancel()
+                    except Exception as error:
+                        # A custom Future can fail while cancelling. It is an
+                        # exceptional result even though no worker started.
+                        self._fail_async_compute(task.cache_key, entry, error)
+                        logging.exception("Failed to cancel queued ViT work")
+                        continue
+                    if future_cancelled:
+                        # Future.cancel() normally invokes the done callback
+                        # synchronously, but fail explicitly as well so a
+                        # custom Future cannot leave an unreported terminal
+                        # result.
+                        self._fail_async_compute(
+                            task.cache_key,
+                            entry,
+                            FtRuntimeException(
+                                ExceptionType.CANCELLED_ERROR,
+                                "ViT async compute cancelled before execution",
+                            ),
+                        )
+                        cancelled += 1
 
         if cancelled:
             logging.info(
@@ -1202,11 +1401,27 @@ class MMProcessEngine:
         entry: MMEmbeddingCacheEntry,
         error: Exception,
     ) -> None:
-        if not entry.is_greennet_decided:
-            entry.set_greennet_verdict(
-                GreenNetVerdict(passed=False, code=11, message=str(error))
-            )
-        self._embedding_cache.fail(cache_key, entry, error)
+        self.report_vit_error(error, entry)
+        try:
+            if not entry.is_greennet_decided:
+                verdict = GreenNetVerdict(passed=False, code=11, message=str(error))
+                try:
+                    if getattr(error, "_vit_error_qps_reported", False):
+                        setattr(verdict, "_vit_error_qps_reported", True)
+                except Exception:
+                    pass
+                entry.set_greennet_verdict(verdict)
+        except Exception as verdict_error:
+            # Keep the cache terminal transition even if the optional safety
+            # verdict bookkeeping fails. The request error was already counted.
+            self.report_vit_error(verdict_error, entry)
+            logging.exception("Failed to publish ViT failure verdict")
+        try:
+            self._embedding_cache.fail(cache_key, entry, error)
+        except Exception as cache_error:
+            self.report_vit_error(cache_error, entry)
+            logging.exception("Failed to publish ViT failure to embedding cache")
+            raise
 
     def _on_async_compute_done(
         self,
@@ -1217,22 +1432,31 @@ class MMProcessEngine:
         with self._async_task_lock:
             try:
                 if future.cancelled():
-                    self._fail_async_compute(
-                        cache_key,
-                        entry,
-                        FtRuntimeException(
-                            ExceptionType.CANCELLED_ERROR,
-                            "ViT async compute cancelled before execution",
-                        ),
+                    error = FtRuntimeException(
+                        ExceptionType.CANCELLED_ERROR,
+                        "ViT async compute cancelled before execution",
                     )
+                    self._fail_async_compute(cache_key, entry, error)
                     return
 
                 error = future.exception()
                 if error is not None:
                     self._fail_async_compute(cache_key, entry, error)
+            except Exception as callback_error:
+                # Future inspection itself can fail for unusual Future
+                # implementations; it is still an exceptional ViT result.
+                self._fail_async_compute(cache_key, entry, callback_error)
             finally:
-                self._forget_async_task_locked(entry)
-                self._release_async_slots()
+                try:
+                    self._forget_async_task_locked(entry)
+                except Exception as cleanup_error:
+                    self.report_vit_error(cleanup_error, entry)
+                    logging.exception("Failed to remove completed ViT async task")
+                try:
+                    self._release_async_slots()
+                except Exception as cleanup_error:
+                    self.report_vit_error(cleanup_error, entry)
+                    logging.exception("Failed to release ViT async admission slot")
 
     def _run_async_compute(
         self,
@@ -1243,14 +1467,11 @@ class MMProcessEngine:
         deadline: float,
     ) -> None:
         if time.monotonic() >= deadline:
-            self._fail_async_compute(
-                cache_key,
-                entry,
-                FtRuntimeException(
-                    ExceptionType.GENERATE_TIMEOUT,
-                    "ViT queue wait timed out before execution",
-                ),
+            error = FtRuntimeException(
+                ExceptionType.GENERATE_TIMEOUT,
+                "ViT queue wait timed out before execution",
             )
+            self._fail_async_compute(cache_key, entry, error)
             return
         self._async_compute(mm_inputs, cache_key, entry, request_id)
 
@@ -1311,7 +1532,8 @@ class MMProcessEngine:
                         )
                     )
                     submitted += 1
-            except RuntimeError as error:
+            except Exception as error:
+                self.report_vit_error(error)
                 unsubmitted = active_pending[submitted:]
                 self._release_async_slots(len(unsubmitted))
                 for _, cache_key, entry in unsubmitted:
@@ -1340,19 +1562,18 @@ class MMProcessEngine:
                 cache_claim=(cache_key, entry, "miss"),
                 defer_cache_complete=True,
                 request_id=request_id,
+                report_embedding_length=False,
+                report_vit_error=False,
             )
             if verdict_future is not None:
                 verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                if verdict is None:
+                    raise RuntimeError("async GreenNet returned no verdict")
                 if not verdict.passed:
-                    self._embedding_cache.fail(
-                        cache_key,
-                        entry,
-                        FtRuntimeException(
-                            ExceptionType.UNSAFE_INPUT_CONTENT,
-                            verdict.message or "data inspection failed",
-                        ),
+                    raise FtRuntimeException(
+                        ExceptionType.UNSAFE_INPUT_CONTENT,
+                        verdict.message or "data inspection failed",
                     )
-                    return
             raw_result = work_items[0].embedding_result
             if raw_result is None:
                 raise RuntimeError("async embedding did not produce a cache value")

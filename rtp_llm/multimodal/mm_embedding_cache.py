@@ -63,10 +63,22 @@ class MMEmbeddingCacheEntry:
         self._on_fail = on_fail
         self.result: Optional[Any] = None
         self.error: Optional[Exception] = None
+        # Error telemetry may be observed from several places (the producer
+        # callback, a cache waiter, and an RPC handler). Keep one atomic claim
+        # on the entry so a failed result contributes one error-QPS sample.
+        self._error_reported = False
         self.charge_tokens = 0
         self.charge_bytes = 0
         self._greennet_event = threading.Event()
         self._greennet_verdict: Optional[GreenNetVerdict] = None
+
+    def claim_error_report(self) -> bool:
+        """Claim the single error-telemetry sample for this cache entry."""
+        with self._state_lock:
+            if self._error_reported:
+                return False
+            self._error_reported = True
+            return True
 
     def wait(self, timeout: Optional[float] = None) -> Any:
         if not self._event.wait(timeout=timeout):
