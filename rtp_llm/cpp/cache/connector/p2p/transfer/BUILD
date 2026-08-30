@@ -4,7 +4,6 @@ load("@//bazel:arch_select.bzl", "transfer_backend_deps")
 
 transfer_backend_deps()
 
-
 cc_library(
     name = "arpc_dep",
     srcs = [
@@ -94,3 +93,4 @@ cc_library(
     ],
     visibility = ['//visibility:public'],
 )
+

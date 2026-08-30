@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -91,27 +93,27 @@ bool visitSelectedBlocks(const CacheConfig&     config,
     const size_t key_end        = key_begin + count;
     const size_t physical_begin = key_begin / keys_per_physical_block;
     const size_t physical_end   = (key_end + keys_per_physical_block - 1) / keys_per_physical_block;
-    const size_t last_key       = key_end - 1;
     bool         found          = false;
 
-    const auto visit_physical = [&](size_t physical_position) {
-        if (mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
-            RTP_LLM_CHECK_WITH_INFO(physical_position % world_size == rank,
-                                    "P2P transfer physical block=%zu is not owned by rank=%zu tag=%.*s",
-                                    physical_position,
-                                    rank,
-                                    static_cast<int>(tag.size()),
-                                    tag.data());
+    const CPSlotMapper mapper(cp_rank, cp_size, static_cast<int>(config.seq_size_per_block));
+    const bool         use_hybrid = group.policy.group_type != CacheGroupType::FULL;
+    const auto         plan       = mapper.buildStorePlan(group.policy, physical_end, physical_begin, use_hybrid);
+    for (const auto& pair : plan) {
+        const size_t physical_position = static_cast<size_t>(pair.key_index);
+        if (physical_position < physical_begin) {
+            continue;
         }
-        const size_t local_position =
-            mapping == CpBlockMappingMode::NONE ? physical_position : physical_position / world_size;
+        const size_t local_position = static_cast<size_t>(pair.offset_index);
         RTP_LLM_CHECK_WITH_INFO(local_position < block_ids.blocks().size(),
                                 "P2P transfer physical block=%zu maps past tag=%.*s local blocks=%zu",
                                 physical_position,
                                 static_cast<int>(tag.size()),
                                 tag.data(),
                                 block_ids.blocks().size());
-        const size_t global_key = std::min((physical_position + 1) * keys_per_physical_block - 1, last_key);
+        // A physical block has one stable wire identity. The selection window
+        // chooses blocks, but must not change the key assigned to a selected block.
+        const size_t global_key =
+            std::min((physical_position + 1) * keys_per_physical_block - 1, available_key_count - 1);
         RTP_LLM_CHECK_WITH_INFO(global_key < cache_keys.size(),
                                 "P2P transfer key ordinal=%zu is past request cache keys=%zu",
                                 global_key,
@@ -121,34 +123,6 @@ bool visitSelectedBlocks(const CacheConfig&     config,
             visitor(cache_keys[global_key], block_id);
             found = true;
         }
-    };
-
-    if (mapping == CpBlockMappingMode::COMPACT_LAST_RANK) {
-        const size_t compact_begin  = physical_begin / world_size;
-        const size_t compact_end    = (physical_end + world_size - 1) / world_size;
-        size_t       selected_begin = compact_begin;
-        if (group.policy.group_type != CacheGroupType::FULL) {
-            const size_t tail =
-                group.policy.active_tail_blocks > 0 ? static_cast<size_t>(group.policy.active_tail_blocks) : 1;
-            selected_begin = compact_end > tail ? std::max(compact_begin, compact_end - tail) : compact_begin;
-        }
-        for (size_t compact_position = selected_begin; compact_position < compact_end; ++compact_position) {
-            visit_physical(std::min((compact_position + 1) * world_size - 1, physical_end - 1));
-        }
-        return found;
-    }
-
-    size_t selected_begin = physical_begin;
-    if (group.policy.group_type != CacheGroupType::FULL) {
-        const size_t tail =
-            group.policy.active_tail_blocks > 0 ? static_cast<size_t>(group.policy.active_tail_blocks) : 1;
-        selected_begin = physical_end > tail ? std::max(physical_begin, physical_end - tail) : physical_begin;
-    }
-    for (size_t physical_position = selected_begin; physical_position < physical_end; ++physical_position) {
-        if (mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN && physical_position % world_size != rank) {
-            continue;
-        }
-        visit_physical(physical_position);
     }
     return found;
 }
@@ -162,17 +136,6 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(con
                                                                              int                key_count,
                                                                              int                cp_rank,
                                                                              int                cp_size) {
-    return convert(config, resource, batch_id, start_key_ordinal, key_count, cp_rank, cp_size, nullptr);
-}
-
-std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(const CacheConfig&  config,
-                                                                             KVCacheResource&    resource,
-                                                                             int                 batch_id,
-                                                                             int                 start_key_ordinal,
-                                                                             int                 key_count,
-                                                                             int                 cp_rank,
-                                                                             int                 cp_size,
-                                                                             ConversionObserver* observer) {
     for (const auto& [tag, block_ids] : resource.blocksByGroup()) {
         (void)block_ids;
         RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "P2P transfer requires a non-empty cache group tag");
@@ -181,12 +144,8 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(con
     std::vector<std::vector<std::string>> sorted_tags_by_layer;
     sorted_tags_by_layer.reserve(static_cast<size_t>(resource.layerNum()));
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
-        auto sorted_tags = resource.groupTagsForLayer(layer_id);
-        std::sort(sorted_tags.begin(), sorted_tags.end());
-        RTP_LLM_CHECK_WITH_INFO(std::adjacent_find(sorted_tags.begin(), sorted_tags.end()) == sorted_tags.end(),
-                                "P2P transfer layer=%d contains duplicate cache group tags",
-                                layer_id);
-        sorted_tags_by_layer.push_back(std::move(sorted_tags));
+        sorted_tags_by_layer.push_back(
+            sortedCacheGroupTags(resource.groupTagsForLayer(layer_id), "P2P transfer cache group"));
     }
     // Whole-set validation: no output object exists while every selected
     // tag/layer/range/CP mapping is checked through the final packing path.
@@ -207,13 +166,10 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(con
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
         for (const auto& tag : sorted_tags_by_layer[static_cast<size_t>(layer_id)]) {
-            auto buffer = convertLayer(
-                config, resource, batch_id, layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size, observer);
+            auto buffer =
+                convertLayer(config, resource, batch_id, layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size);
             if (buffer) {
                 layer_cache_buffers.push_back(std::move(buffer));
-                if (observer != nullptr) {
-                    observer->onLayerCacheBufferPublished();
-                }
             }
         }
     }
@@ -229,29 +185,12 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const Cache
                                                                      int                key_count,
                                                                      int                cp_rank,
                                                                      int                cp_size) {
-    return convertLayer(
-        config, resource, batch_id, layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size, nullptr);
-}
-
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(const CacheConfig&  config,
-                                                                     KVCacheResource&    resource,
-                                                                     int                 batch_id,
-                                                                     int                 layer_id,
-                                                                     std::string_view    tag,
-                                                                     int                 start_key_ordinal,
-                                                                     int                 key_count,
-                                                                     int                 cp_rank,
-                                                                     int                 cp_size,
-                                                                     ConversionObserver* observer) {
     (void)batch_id;
     if (!validRangeArguments(layer_id, tag, start_key_ordinal, key_count, cp_rank, cp_size)) {
         return nullptr;
     }
     validateGroupPacking(config, resource, layer_id, tag);
     auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, std::string(tag));
-    if (observer != nullptr) {
-        observer->onLayerCacheBufferConstructed();
-    }
     visitSelectedBlocks(
         config,
         resource,

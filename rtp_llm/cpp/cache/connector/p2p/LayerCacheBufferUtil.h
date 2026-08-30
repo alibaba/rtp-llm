@@ -13,6 +13,10 @@ namespace rtp_llm {
 /// 提供 KVCacheResource 到 LayerCacheBuffer 的转换功能
 class LayerCacheBufferUtil {
 public:
+    /// Convert every tagged layer binding in canonical tag order.
+    /// start_key_ordinal/key_count select canonical cache-key ordinals; key_count=-1 selects the remaining keys.
+    /// cp_rank must be in [0, cp_size), and invalid ranges return no buffers. Empty, duplicate, or unknown tags and
+    /// invalid cache geometry violate the cache topology contract and raise through RTP_LLM_CHECK.
     static std::vector<std::shared_ptr<LayerCacheBuffer>> convert(const CacheConfig& config,
                                                                   KVCacheResource&   resource,
                                                                   int                batch_id,
@@ -21,7 +25,7 @@ public:
                                                                   int                cp_rank           = 0,
                                                                   int                cp_size           = 1);
 
-    /// @brief 将 KVCacheResource 的指定层转换为单个 LayerCacheBuffer
+    /// Convert one tagged layer binding using the same key ordinal, CP, and error contract as convert().
     static std::shared_ptr<LayerCacheBuffer> convertLayer(const CacheConfig& config,
                                                           KVCacheResource&   resource,
                                                           int                batch_id,
@@ -47,36 +51,6 @@ public:
                                                         const std::shared_ptr<LayerCacheBuffer>&    layer_cache_buffer,
                                                         int                                         partition_count = 1,
                                                         int                                         partition_id = 0);
-
-protected:
-    // Test-only observer for proving invalid selection sets are rejected before
-    // a LayerCacheBuffer is constructed or published. Normal callers use the
-    // public overloads above and always pass no observer.
-    class ConversionObserver {
-    public:
-        virtual ~ConversionObserver()                = default;
-        virtual void onLayerCacheBufferConstructed() = 0;
-        virtual void onLayerCacheBufferPublished()   = 0;
-    };
-
-    static std::vector<std::shared_ptr<LayerCacheBuffer>> convert(const CacheConfig&  config,
-                                                                  KVCacheResource&    resource,
-                                                                  int                 batch_id,
-                                                                  int                 start_key_ordinal,
-                                                                  int                 key_count,
-                                                                  int                 cp_rank,
-                                                                  int                 cp_size,
-                                                                  ConversionObserver* observer);
-    static std::shared_ptr<LayerCacheBuffer>              convertLayer(const CacheConfig&  config,
-                                                                       KVCacheResource&    resource,
-                                                                       int                 batch_id,
-                                                                       int                 layer_id,
-                                                                       std::string_view    tag,
-                                                                       int                 start_key_ordinal,
-                                                                       int                 key_count,
-                                                                       int                 cp_rank,
-                                                                       int                 cp_size,
-                                                                       ConversionObserver* observer);
 };
 
 }  // namespace rtp_llm

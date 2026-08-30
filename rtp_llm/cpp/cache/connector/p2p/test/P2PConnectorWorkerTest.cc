@@ -25,6 +25,7 @@
 #include <set>
 
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+
 namespace rtp_llm {
 
 namespace test {
@@ -33,35 +34,6 @@ namespace {
 
 constexpr int kDsv4CpSize = 4;
 constexpr int kDsv4CpRank = kDsv4CpSize - 1;
-
-class ObservedLayerCacheBufferUtil final: public LayerCacheBufferUtil {
-public:
-    class Observer final: public ConversionObserver {
-    public:
-        void onLayerCacheBufferConstructed() override {
-            ++constructed;
-        }
-
-        void onLayerCacheBufferPublished() override {
-            ++published;
-        }
-
-        size_t constructed = 0;
-        size_t published   = 0;
-    };
-
-    static std::vector<std::shared_ptr<LayerCacheBuffer>> convert(const CacheConfig& config,
-                                                                  KVCacheResource&   resource,
-                                                                  int                batch_id,
-                                                                  int                start_key_ordinal,
-                                                                  int                key_count,
-                                                                  int                cp_rank,
-                                                                  int                cp_size,
-                                                                  Observer&          observer) {
-        return LayerCacheBufferUtil::convert(
-            config, resource, batch_id, start_key_ordinal, key_count, cp_rank, cp_size, &observer);
-    }
-};
 
 CacheConfig makeRealDsv4P2PCacheConfig() {
     ModelConfig model_config;
@@ -402,6 +374,8 @@ protected:
         worker_config_.layer_all_num                                        = 2;
         cache_config_                                                       = makeTestCacheConfigByTag(
             /*group_num=*/2, /*layer_num=*/2, {{"group0", "group1"}, {"group1"}});
+        ASSERT_EQ(cache_config_.groupsForLayer(0), (CacheLayer{"group0", "group1"}));
+        ASSERT_EQ(cache_config_.groupsForLayer(1), (CacheLayer{"group1"}));
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -421,32 +395,6 @@ protected:
     void TearDown() override {
         prefill_.reset();
         decode_.reset();
-    }
-
-    KVCacheResourcePtr createKVCacheResource(int layer_id, int num_blocks = 2) {
-        auto                                  resource  = std::make_shared<KVCacheResource>();
-        int                                   layer_num = static_cast<int>(worker_config_.layer_all_num);
-        std::vector<std::vector<std::string>> layer_to_group_tags(layer_num);
-        for (int i = 0; i < layer_num; ++i) {
-            layer_to_group_tags[i] = {"group" + std::to_string(i)};
-        }
-        resource->initGroups(makeTestCacheConfigByTag(layer_num, layer_num, layer_to_group_tags));
-
-        for (int i = 0; i < layer_num; ++i) {
-            if (i == layer_id) {
-                // Each layer owns exactly one group; layer_to_group_tags records its tag.
-                const auto& tag = layer_to_group_tags[i].front();
-                for (int j = 0; j < num_blocks; ++j) {
-                    resource->mutableBlockIds(tag).add({j});
-                }
-            }
-        }
-
-        for (int i = 0; i < num_blocks; ++i) {
-            resource->appendCacheKey(layer_id * 1000 + i);
-        }
-
-        return resource;
     }
 
     // Create a c10::Event that is immediately queryable (already recorded on current stream).
@@ -518,8 +466,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
     int     layer_id   = 0;
     int64_t request_id = 1002;
     auto    resource   = std::make_shared<KVCacheResource>();
-    resource->initGroups(
-        makeTestCacheConfigByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0", "group1"}, {"group1"}}));
+    resource->initGroups(cache_config_);
     for (const auto& tag : {"group0", "group1"}) {
         resource->mutableBlockIds(tag).add({1, 2});
     }
@@ -542,8 +489,7 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {
 TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
     constexpr int64_t request_id = 1003;
     auto              resource   = std::make_shared<KVCacheResource>();
-    resource->initGroups(
-        makeTestCacheConfigByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0", "group1"}, {"group1"}}));
+    resource->initGroups(cache_config_);
     resource->mutableBlockIds("group0").add({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     resource->mutableBlockIds("group1").add({3, 4});
     resource->setCacheKeys({10, 11});
@@ -1521,6 +1467,22 @@ TEST_F(LayerCacheBufferUtilTest, FullRoundRobinUsesGlobalKeyOrdinalsWithDifferen
     EXPECT_EQ(buffer->blockIdMap().at(1005), 41);
     EXPECT_EQ(buffer->blockIdMap().at(1011), 43);
 
+    // A local window ending inside physical block 1 must use the same terminal
+    // key as the full-window registration above.
+    buffer = LayerCacheBufferUtil::convertLayer(
+        config, resource, 0, 0, "full", /*start_key_ordinal=*/3, /*key_count=*/2, /*cp_rank=*/1, /*cp_size=*/2);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->blockIdMap(), (std::map<CacheKeyType, BlockIdxType>{{1005, 41}}));
+
+    // The final incomplete physical block is likewise identified by the last
+    // key in the resource timeline, not by a shorter selection window.
+    resource.setCacheKeys({1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010});
+    buffer = LayerCacheBufferUtil::convertLayer(
+        config, resource, 0, 0, "full", /*start_key_ordinal=*/9, /*key_count=*/1, /*cp_rank=*/1, /*cp_size=*/2);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->blockIdMap(), (std::map<CacheKeyType, BlockIdxType>{{1010, 43}}));
+    resource.setCacheKeys({1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011});
+
     resource.mutableBlockIds("full").setAt(0, NULL_BLOCK_IDX);
     buffer = LayerCacheBufferUtil::convertLayer(config, resource, 0, 0, "full", 0, -1, 1, 2);
     ASSERT_NE(buffer, nullptr);
@@ -1561,6 +1523,34 @@ TEST_F(LayerCacheBufferUtilTest, CompactSwaUsesConfigurableTailAndTransientPhysi
     ASSERT_NE(buffer, nullptr);
     ASSERT_EQ(buffer->blockIdMap().size(), 1u);
     EXPECT_EQ(buffer->blockIdMap().at(2031), 71);
+}
+
+TEST_F(LayerCacheBufferUtilTest, ZeroActiveTailBlocksPreservesFullHybridWindow) {
+    CacheConfig config;
+    auto        swa_spec                = std::make_shared<MHAKVCacheSpec>();
+    swa_spec->seq_size_per_block        = 8;
+    swa_spec->kernel_seq_size_per_block = 8;
+    CacheGroup swa;
+    swa.tag                       = "swa";
+    swa.spec                      = std::move(swa_spec);
+    swa.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa.policy.active_tail_blocks = 0;
+    config                        = CacheConfig({std::move(swa)}, {{"swa"}}, /*main_layer_num=*/1);
+    config.seq_size_per_block     = 8;
+
+    KVCacheResource resource;
+    resource.initGroups(config);
+    resource.mutableBlockIds("swa").assign({70, 71, 72});
+    resource.setCacheKeys({2000, 2001, 2002});
+
+    auto buffer = LayerCacheBufferUtil::convertLayer(
+        config, resource, 0, 0, "swa", /*start_key_ordinal=*/0, /*key_count=*/-1, /*cp_rank=*/0, /*cp_size=*/1);
+
+    ASSERT_NE(buffer, nullptr);
+    ASSERT_EQ(buffer->blockIdMap().size(), 3u);
+    EXPECT_EQ(buffer->blockIdMap().at(2000), 70);
+    EXPECT_EQ(buffer->blockIdMap().at(2001), 71);
+    EXPECT_EQ(buffer->blockIdMap().at(2002), 72);
 }
 
 TEST_F(LayerCacheBufferUtilTest, RealDsv4SevenTagsIgnoreReversedRecordsAndFilterNullWireBlocks) {
@@ -1616,52 +1606,37 @@ TEST_F(LayerCacheBufferUtilTest, RealDsv4SevenTagsIgnoreReversedRecordsAndFilter
 }
 
 TEST_F(LayerCacheBufferUtilTest, InvalidDirectRangeProducesNoOutput) {
-    auto                                   resource = createResource(1, 2);
-    ObservedLayerCacheBufferUtil::Observer observer;
-    const auto buffers = ObservedLayerCacheBufferUtil::convert(config_, *resource, 0, -1, -1, 0, 1, observer);
+    auto       resource = createResource(1, 2);
+    const auto buffers  = LayerCacheBufferUtil::convert(config_, *resource, 0, -1, -1, 0, 1);
     EXPECT_TRUE(buffers.empty());
-    EXPECT_EQ(observer.constructed, 0u);
-    EXPECT_EQ(observer.published, 0u);
 }
 
-TEST_F(LayerCacheBufferUtilTest, MissingLaterGroupPublishesNoPartialBuffers) {
-    const auto make_config = []() {
-        CacheConfig config;
-        auto        first_spec                = std::make_shared<MHAKVCacheSpec>();
-        first_spec->seq_size_per_block        = 8;
-        first_spec->kernel_seq_size_per_block = 8;
-        CacheGroup first;
-        first.tag                              = "first";
-        first.spec                             = std::move(first_spec);
-        first.policy                           = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        CacheGroup second                      = first;
-        second.tag                             = "second";
-        auto second_spec                       = std::make_shared<MHAKVCacheSpec>();
-        second_spec->seq_size_per_block        = 8;
-        second_spec->kernel_seq_size_per_block = 8;
-        second.spec                            = std::move(second_spec);
-        config = CacheConfig({std::move(first), std::move(second)}, {{"first", "second"}}, /*main_layer_num=*/1);
-        config.seq_size_per_block = 8;
-        return config;
-    };
+TEST_F(LayerCacheBufferUtilTest, InvalidLaterGroupFailsBeforeReturningBuffers) {
+    auto first_spec                       = std::make_shared<MHAKVCacheSpec>();
+    first_spec->seq_size_per_block        = 8;
+    first_spec->kernel_seq_size_per_block = 8;
+    CacheGroup first;
+    first.tag    = "first";
+    first.spec   = std::move(first_spec);
+    first.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
 
-    const auto      config = make_config();
+    auto second_spec                       = std::make_shared<MHAKVCacheSpec>();
+    second_spec->seq_size_per_block        = 7;
+    second_spec->kernel_seq_size_per_block = 7;
+    CacheGroup second;
+    second.tag    = "second";
+    second.spec   = std::move(second_spec);
+    second.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+
+    CacheConfig config({std::move(first), std::move(second)}, {{"first", "second"}}, 1);
+    config.seq_size_per_block = 8;
     KVCacheResource resource;
     resource.initGroups(config);
     resource.mutableBlockIds("first").assign({1});
-    CacheKeysType keys = {1234};
-    resource.setCacheKeys(std::move(keys));
+    resource.mutableBlockIds("second").assign({2});
+    resource.setCacheKeys({1234});
 
-    // Preserve the declared two-tag layer while simulating an incomplete
-    // request binding set. Whole-set validation must reach the missing later
-    // tag before constructing or publishing the valid first tag.
-    auto& incomplete_groups = const_cast<std::map<std::string, BlockIds>&>(resource.blocksByGroup());
-    ASSERT_EQ(incomplete_groups.erase("second"), 1u);
-
-    ObservedLayerCacheBufferUtil::Observer observer;
-    EXPECT_ANY_THROW(ObservedLayerCacheBufferUtil::convert(config, resource, 0, 0, -1, 0, 1, observer));
-    EXPECT_EQ(observer.constructed, 0u);
-    EXPECT_EQ(observer.published, 0u);
+    EXPECT_ANY_THROW(LayerCacheBufferUtil::convert(config, resource, 0, 0, -1, 0, 1));
 }
 
 }  // namespace test

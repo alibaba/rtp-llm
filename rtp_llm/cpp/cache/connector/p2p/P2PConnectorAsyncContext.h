@@ -16,7 +16,7 @@
 
 namespace rtp_llm {
 
-/// @brief PD 分离场景下的匹配上下文，始终全量匹配
+/// @brief PD 分离场景下的匹配上下文，始终匹配完整 cache-key 时间线。
 class P2PConnectorAsyncMatchContext: public AsyncMatchContext {
 public:
     P2PConnectorAsyncMatchContext(const KVCacheResourcePtr& resource): resource_(resource) {}

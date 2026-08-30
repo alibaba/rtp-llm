@@ -121,7 +121,11 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&
 std::shared_ptr<AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
+    if (!worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent())) {
+        RTP_LLM_LOG_WARNING(
+            "asyncWriteByLayer failed, layer_id=%d request_id=%ld", layer_id, layer_context->requestId());
+        return nullptr;
+    }
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 

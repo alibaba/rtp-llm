@@ -8,6 +8,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
@@ -23,15 +24,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-CacheConfig
-makeP2PTestCacheConfig(int group_num, int layer_num, const std::vector<std::vector<std::string>>& layer_group_tags) {
-    return test::makeTestCacheConfigByTag(group_num, layer_num, layer_group_tags);
-}
-
-}  // namespace
-
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
@@ -42,6 +34,28 @@ public:
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }
+};
+
+class TestLayerContext: public KVCacheConnectorLayerContext {
+public:
+    TestLayerContext(KVCacheResource resource, int64_t request_id):
+        resource_(std::move(resource)), request_id_(request_id) {}
+
+    const KVCacheResource& kvCacheResource() const override {
+        return resource_;
+    }
+
+    int64_t requestId() const override {
+        return request_id_;
+    }
+
+    std::optional<c10::Event> attentionEvent() const override {
+        return std::nullopt;
+    }
+
+private:
+    KVCacheResource resource_;
+    int64_t         request_id_;
 };
 
 class P2PConnectorTest: public ::testing::Test {
@@ -93,13 +107,13 @@ protected:
         for (int i = 0; i < num_layers; ++i) {
             layer_to_group_tags[i] = {"group" + std::to_string(i)};
         }
-        resource->initGroups(makeP2PTestCacheConfig(num_layers, num_layers, layer_to_group_tags));
+        resource->initGroups(test::makeTestCacheConfigByTag(num_layers, num_layers, layer_to_group_tags));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             // Each layer owns exactly one group; layer_to_group_tags records its tag.
             const auto& tag = layer_to_group_tags[layer_id].front();
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(tag).add({i});
+                resource->mutableBlockIds(tag).add({i + 1});
             }
         }
 
@@ -219,7 +233,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
 TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
     auto resource = std::make_shared<KVCacheResource>();
     resource->setCacheKeys({1000, 1001, 1002});
-    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/4, /*layer_num=*/2, {{"group1"}, {"group3"}}));
+    resource->initGroups(test::makeTestCacheConfigByTag(/*group_num=*/4, /*layer_num=*/2, {{"group1"}, {"group3"}}));
     resource->mutableBlockIds("group1").assign({10, 11, 12});
     resource->mutableBlockIds("group3").assign({30, 31, 32});
     ASSERT_GT(resource->groupNums(), 1);
@@ -228,9 +242,17 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
 }
 
+TEST_F(P2PConnectorTest, AsyncWriteByLayerPreservesInvariantFailure) {
+    KVCacheResource invalid_resource;
+    invalid_resource.initGroups(test::makeTestCacheConfigByTag(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
+    auto context = std::make_shared<TestLayerContext>(std::move(invalid_resource), /*request_id=*/73);
+
+    EXPECT_THROW((void)connector_->asyncWriteByLayer(/*layer_id=*/0, context), std::runtime_error);
+}
+
 TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesCacheKeyTimelineInsteadOfAnyGroupBlockCount) {
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
+    resource->initGroups(test::makeTestCacheConfigByTag(/*group_num=*/2, /*layer_num=*/2, {{"group0"}, {"group1"}}));
     resource->mutableBlockIds("group0").assign({10, 11});
     resource->mutableBlockIds("group1").assign({20, 21, 22, 23});
     resource->setCacheKeys({100, 101, 102});
@@ -244,7 +266,7 @@ TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountIsZeroForNullOrEmptyTim
     EXPECT_EQ(null_ctx.matchedBlockCount(), 0u);
 
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(makeP2PTestCacheConfig(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
+    resource->initGroups(test::makeTestCacheConfigByTag(/*group_num=*/1, /*layer_num=*/1, {{"group0"}}));
     resource->mutableBlockIds("group0").assign({10, 11});
     P2PConnectorAsyncMatchContext empty_ctx(resource);
     EXPECT_EQ(empty_ctx.matchedBlockCount(), 0u);
