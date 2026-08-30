@@ -42,7 +42,10 @@ def _cached_buffer(
             )
         result = torch.empty(shape, dtype=dtype, device=device)
         cache[key] = result
-    return result.view(shape)
+    # Reuse the prefix of a larger grow-only allocation.  ``view(shape)`` on
+    # the full tensor would fail as soon as a later request has fewer slots
+    # than the largest request seen so far.
+    return result.reshape(-1)[:needed].view(shape)
 
 
 def workspace(device: torch.device) -> torch.Tensor:
@@ -117,7 +120,11 @@ def canonical_topk(
 
 
 def pack_logical_workspace(
-    pool: torch.Tensor, indices: torch.Tensor, page_size: int
+    pool: torch.Tensor,
+    indices: torch.Tensor,
+    page_size: int,
+    *,
+    namespace: str = "default",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
         gather_k_cache_slots_packed,
@@ -130,8 +137,18 @@ def pack_logical_workspace(
     # keep -1 in the remapped indices so FlashInfer masks the slot instead of
     # accidentally attending to physical slot zero.
     slot_count = int(flat_indices.numel())
-    cache_key = (pool.device, int(page_size), int(pool.shape[-1]), pool.dtype)
-    slot_key = (pool.device,)
+    # The SWA and extra-sparse pools can have identical layouts (notably both
+    # use 64-token pages).  Keep their packed pages and remap workspaces
+    # independent: the two calls happen back-to-back, but both tensors are
+    # consumed by FlashInfer after the second call returns.
+    cache_key = (
+        namespace,
+        pool.device,
+        int(page_size),
+        int(pool.shape[-1]),
+        pool.dtype,
+    )
+    slot_key = cache_key
     lookup_indices = _cached_buffer(
         _LOOKUP_CACHE,
         slot_key,
