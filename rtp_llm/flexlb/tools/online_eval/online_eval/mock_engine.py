@@ -27,6 +27,37 @@ SENTINEL = object()
 logger = logging.getLogger("mock_engine")
 
 
+def build_static_model_service_config(
+    prefill_domain: str,
+    decode_domain: str,
+    prefill_hosts: Iterable[str],
+    decode_hosts: Iterable[str],
+) -> dict:
+    role_endpoint = {"group": "mock"}
+    prefill_host_list = list(prefill_hosts)
+    decode_host_list = list(decode_hosts)
+    if prefill_host_list:
+        role_endpoint["prefill_endpoint"] = {
+            "address": prefill_domain,
+            "protocol": "http",
+            "path": "/",
+            "discovery": {"type": "static-env", "hosts": prefill_host_list},
+        }
+    if decode_host_list:
+        role_endpoint["decode_endpoint"] = {
+            "address": decode_domain,
+            "protocol": "http",
+            "path": "/",
+            "discovery": {"type": "static-env", "hosts": decode_host_list},
+        }
+    if len(role_endpoint) == 1:
+        raise ValueError("at least one mock engine host must be configured")
+    return {
+        "service_id": "aigc.text-generation.generation.engine_service",
+        "role_endpoints": [role_endpoint],
+    }
+
+
 def role_addr_type(pb2, role_addr) -> int:
     """Decode the dsv4 enum plus the new string representation."""
     string_value = getattr(role_addr, "role_str", "")
@@ -1932,32 +1963,15 @@ class MockEngineCluster:
         }
 
     def service_discovery_env(self, prefill_domain: str, decode_domain: str) -> dict:
-        prefill = ",".join(s.ip_port for s in self.states if s.role == "prefill")
-        decode = ",".join(s.ip_port for s in self.states if s.role == "decode")
-        model_service_config = {
-            "service_id": "aigc.text-generation.generation.engine_service",
-            "role_endpoints": [
-                {
-                    "group": "mock",
-                    "prefill_endpoint": {
-                        "address": prefill_domain,
-                        "protocol": "http",
-                        "path": "/",
-                    },
-                    "decode_endpoint": {
-                        "address": decode_domain,
-                        "protocol": "http",
-                        "path": "/",
-                    },
-                }
-            ],
-        }
+        prefill = [s.ip_port for s in self.states if s.role == "prefill"]
+        decode = [s.ip_port for s in self.states if s.role == "decode"]
+        model_service_config = build_static_model_service_config(
+            prefill_domain, decode_domain, prefill, decode
+        )
         return {
             "MODEL_SERVICE_CONFIG": json.dumps(
                 model_service_config, separators=(",", ":")
             ),
-            f"DOMAIN_ADDRESS:{prefill_domain}": prefill,
-            f"DOMAIN_ADDRESS:{decode_domain}": decode,
         }
 
 

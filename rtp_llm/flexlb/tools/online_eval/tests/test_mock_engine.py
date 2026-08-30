@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from online_eval.mock_engine import (
     LruBlockCache,
     MockEngineCluster,
     TaskRuntime,
+    build_static_model_service_config,
     encode_unique_key,
     generate_aggregated_prometheus_metrics,
 )
@@ -33,6 +35,30 @@ class LruBlockCacheTest(unittest.TestCase):
         self.assertEqual([2, 3], cache.keys)
         self.assertEqual(1, cache.evictions)
         self.assertEqual(0, cache.prefix_hit_blocks([1, 2, 3]))
+
+
+class StaticServiceDiscoveryConfigTest(unittest.TestCase):
+    def test_embeds_static_hosts_and_omits_empty_role(self) -> None:
+        config = build_static_model_service_config(
+            "mock.prefill",
+            "mock.decode",
+            ["127.0.0.1:50050", "127.0.0.1:50051"],
+            [],
+        )
+
+        role_endpoint = config["role_endpoints"][0]
+        self.assertNotIn("decode_endpoint", role_endpoint)
+        self.assertEqual(
+            {
+                "type": "static-env",
+                "hosts": ["127.0.0.1:50050", "127.0.0.1:50051"],
+            },
+            role_endpoint["prefill_endpoint"]["discovery"],
+        )
+
+    def test_rejects_config_without_engines(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one mock engine host"):
+            build_static_model_service_config("mock.prefill", "mock.decode", [], [])
 
 
 class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
@@ -107,6 +133,21 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(11, cache.cache_keys)
         self.assertIn(12, cache.cache_keys)
+
+    async def test_service_discovery_env_uses_inline_static_hosts(self) -> None:
+        env = self.cluster.service_discovery_env("mock.prefill", "mock.decode")
+
+        self.assertEqual({"MODEL_SERVICE_CONFIG"}, set(env))
+        config = json.loads(env["MODEL_SERVICE_CONFIG"])
+        role_endpoint = config["role_endpoints"][0]
+        self.assertEqual(
+            [self.prefill.ip_port],
+            role_endpoint["prefill_endpoint"]["discovery"]["hosts"],
+        )
+        self.assertEqual(
+            [self.decode.ip_port],
+            role_endpoint["decode_endpoint"]["discovery"]["hosts"],
+        )
 
     async def test_cancel_response_maps_accepted_and_not_found(self) -> None:
         prefill_stub = self.pb2_grpc.RpcServiceStub(self.channel)
