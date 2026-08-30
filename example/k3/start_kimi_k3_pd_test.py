@@ -50,6 +50,7 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
         server_binary: Optional[str] = None,
         dry_run: bool = True,
         check: bool = True,
+        env_overrides: Optional[dict[str, str]] = None,
     ) -> subprocess.CompletedProcess[str]:
         script = pathlib.Path(__file__).with_name("start_kimi_k3_pd.sh")
         with tempfile.TemporaryDirectory() as checkpoint:
@@ -59,6 +60,8 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
                 '{"weight_map": {}}\n', encoding="utf-8"
             )
             env = os.environ.copy()
+            env.pop("THINK_START_TAG", None)
+            env.pop("THINK_END_TAG", None)
             env.update(
                 {
                     "CHECKPOINT_PATH": checkpoint,
@@ -81,6 +84,8 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
                 env.pop("GANG_CONFIG_STRING", None)
             else:
                 env["GANG_CONFIG_STRING"] = gang_config
+            if env_overrides:
+                env.update(env_overrides)
             return subprocess.run(
                 ["bash", str(script), role],
                 check=check,
@@ -99,6 +104,23 @@ class StartKimiK3PdDryRunTest(unittest.TestCase):
         self.assertIn("--ktp_size 1", output)
         self.assertIn("--ep_size 8", output)
         self.assertIn("--world_size 8", output)
+        self.assertIn("think start:     <|open|>think<|sep|>", output)
+        self.assertIn(
+            "think end:       <|close|>think<|sep|><|open|>response<|sep|>",
+            output,
+        )
+
+    def test_preserves_explicit_think_boundary_override(self):
+        output = self._dry_run(
+            "prefill",
+            "tp8_ep8",
+            env_overrides={
+                "THINK_START_TAG": "custom-start",
+                "THINK_END_TAG": "custom-end",
+            },
+        )
+        self.assertIn("think start:     custom-start", output)
+        self.assertIn("think end:       custom-end", output)
 
     def test_decode_projection_ktp8(self):
         output = self._dry_run("decode", "dp8_ktp8_ep8")

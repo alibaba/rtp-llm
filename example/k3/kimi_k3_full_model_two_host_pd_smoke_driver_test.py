@@ -8,6 +8,26 @@ from unittest import mock
 
 from example.k3 import kimi_k3_full_model_two_host_pd_smoke_driver as driver
 
+class ForwardedOptionalEnvironmentTest(unittest.TestCase):
+    def test_forwards_explicit_rdma_hca_allowlist_to_both_roles(self) -> None:
+        value = "mlx5_bond_0,mlx5_bond_1"
+        with mock.patch.dict(os.environ, {"SMOKE_ACCL_USE_NICS": value}, clear=True):
+            for role in ("prefill", "decode"):
+                with self.subTest(role=role):
+                    self.assertEqual(
+                        driver.forwarded_optional_environment(role)[
+                            "SMOKE_ACCL_USE_NICS"
+                        ],
+                        value,
+                    )
+
+    def test_does_not_invent_driver_override_when_unset(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertNotIn(
+                "SMOKE_ACCL_USE_NICS",
+                driver.forwarded_optional_environment("prefill"),
+            )
+
 
 class KimiK3FullModelTwoHostPdSmokeDriverTest(unittest.TestCase):
     def test_parse_args_accepts_ordinary_decode_without_sp_checkpoint(self):

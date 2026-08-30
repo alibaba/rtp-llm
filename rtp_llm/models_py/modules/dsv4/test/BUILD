@@ -201,6 +201,15 @@ py_test(
 )
 
 py_test(
+    name = "test_quant_layouts_tmpdir",
+    srcs = ["test_quant_layouts_tmpdir.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
