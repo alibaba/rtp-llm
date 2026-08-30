@@ -14,6 +14,8 @@
 
 namespace rtp_llm {
 
+using CacheTopologyPair = std::pair<std::vector<CacheGroup>, std::vector<CacheLayer>>;
+
 struct KVCacheBlockBudget {
     size_t explicit_pool_reserve_bytes = 0;
     size_t paged_block_bytes           = 0;
@@ -27,27 +29,29 @@ uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlo
 
 class CacheConfigCreator {
 public:
-    // Owns all production descriptor lowering. The legacy creator classes are
-    // retained only as test oracles until their Task 9 deletion.
-    static CacheConfig createBasicConfig(const ModelConfig&       model_config,
-                                         const ParallelismConfig& parallelism_config,
-                                         bool                     is_mtp,
-                                         int                      gen_num_per_cycle);
-    static CacheConfig createConfig(const ModelConfig&                               model_config,
-                                    const ParallelismConfig&                         parallelism_config,
-                                    const RuntimeConfig&                             runtime_config,
-                                    const KVCacheConfig&                             kv_cache_config,
-                                    const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                    const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
-    static CacheConfig createSpConfig(const ModelConfig&                 score_model_config,
-                                      const ModelConfig&                 propose_model_config,
-                                      const ParallelismConfig&           parallelism_config,
-                                      const RuntimeConfig&               runtime_config,
-                                      const KVCacheConfig&               kv_cache_config,
-                                      const SpeculativeExecutionConfig&  sp_config,
-                                      const std::optional<WarmUpResult>& warm_up_result,
-                                      bool                               is_mtp,
-                                      bool                               is_eagle);
+    static CacheTopologyPair mergeMTPModule(CacheTopologyPair&       target,
+                                            const CacheTopologyPair& propose,
+                                            int                      module_index,
+                                            uint32_t                 main_layer_num);
+    static CacheConfig       createBasicConfig(const ModelConfig&       model_config,
+                                               const ParallelismConfig& parallelism_config,
+                                               const KVCacheConfig&     kv_cache_config,
+                                               int                      gen_num_per_cycle);
+    static CacheConfig       createConfig(const ModelConfig&                               model_config,
+                                          const ParallelismConfig&                         parallelism_config,
+                                          const RuntimeConfig&                             runtime_config,
+                                          const KVCacheConfig&                             kv_cache_config,
+                                          const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
+                                          const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
+    static CacheConfig       createSpConfig(const ModelConfig&                 score_model_config,
+                                            const ModelConfig&                 propose_model_config,
+                                            const ParallelismConfig&           parallelism_config,
+                                            const RuntimeConfig&               runtime_config,
+                                            const KVCacheConfig&               kv_cache_config,
+                                            const SpeculativeExecutionConfig&  sp_config,
+                                            const std::optional<WarmUpResult>& warm_up_result,
+                                            bool                               is_mtp,
+                                            bool                               is_eagle);
 
     // Unified desc->spec conversion. Callers provide the runtime build context;
     // descs remain read-only.

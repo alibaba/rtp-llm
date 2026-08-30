@@ -19,16 +19,14 @@ protected:
     void TearDown() override {}
 };
 
-static const GroupBase& makeTestFullGroup(KVCacheSpecPtr spec) {
-    static std::deque<GroupBase> groups;
-    GroupBase                    group;
-    group.tag                       = "full";
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.seq_size_per_block        = group.spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = group.seq_size_per_block;
-    group.kv_block_stride_bytes     = group.spec->block_size_bytes();
-    group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+static const CacheGroup& makeTestFullGroup(KVCacheSpecPtr spec) {
+    static std::deque<CacheGroup> groups;
+    CacheGroup                    group;
+    group.tag                   = "full";
+    group.spec                  = std::move(spec);
+    group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.kv_block_stride_bytes = group.spec->block_size_bytes();
+    group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
     groups.push_back(std::move(group));
     return groups.back();
 }
@@ -55,7 +53,7 @@ TEST_F(FullKVCacheGroupTest, RetainsCanonicalGroupAndSemanticTag) {
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    GroupBase cache_group    = makeTestFullGroup(spec);
+    CacheGroup cache_group   = makeTestFullGroup(spec);
 
     FullKVCacheGroup group(cache_group, block_pool);
 
@@ -95,7 +93,7 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     FullKVCacheGroup group1(makeTestFullGroup(spec), block_pool);
 
     BlockIndicesType old_indices = {1, 2, 3, 4};
-    BlockIds         block_ids(/*kernel_blocks_per_kv_block=*/1);
+    PoolBlockIds     block_ids;
     block_ids.assign(old_indices);
     group1.removeSkippedBlocks(block_ids);
     ASSERT_EQ(old_indices, block_ids.blocks());
@@ -108,12 +106,10 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    GroupBase cache_group    = makeTestFullGroup(spec);
-    cache_group.layer_ids    = {0};
+    CacheGroup cache_group   = makeTestFullGroup(spec);
 
-    CacheConfig cache_config;
-    cache_config.setTopology({cache_group}, {{0, {"full"}}});
-    auto shared_cache = std::make_shared<SharedBlockCache>();
+    CacheConfig cache_config({cache_group}, {{"full"}}, /*main_layer_num=*/1);
+    auto        shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->init(cache_config, {{"full", block_pool}});
 
     FullKVCacheGroup group1(cache_group, block_pool, shared_cache.get());
@@ -163,7 +159,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     FullKVCacheGroup group1(makeTestFullGroup(spec), block_pool);
 
     CacheKeysType cache_keys = {101, 102, 103};
-    BlockIds      block_ids(/*kernel_blocks_per_kv_block=*/1);
+    PoolBlockIds  block_ids;
 
     ASSERT_TRUE(group1.malloc(block_ids, 7));
     ASSERT_EQ(block_pool->freeBlocksNum(), 5);
@@ -177,7 +173,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    BlockIds block_ids2(/*kernel_blocks_per_kv_block=*/1);
+    PoolBlockIds block_ids2;
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 

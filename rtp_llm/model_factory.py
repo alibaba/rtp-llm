@@ -10,7 +10,7 @@ CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
 from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
-from rtp_llm.config.kv_cache_config import KVCacheConfig
+from rtp_llm.config.kv_cache_config import KVCacheConfig, resolve_seq_size_per_block
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import (
@@ -34,6 +34,16 @@ from rtp_llm.utils.warmup import configure_warmup
 
 
 class ModelFactory:
+    @staticmethod
+    def _materialize_kv_cache_block_size(
+        model_cls, kv_cache_config: KVCacheConfig
+    ) -> None:
+        if kv_cache_config.seq_size_per_block != 0:
+            return
+        kv_cache_config.seq_size_per_block = resolve_seq_size_per_block(
+            0, model_cls.default_kv_cache_tokens_per_block()
+        )
+
     @staticmethod
     def get_config_json(ckpt_path: str):
         check_with_info(os.path.isdir(ckpt_path), f"{ckpt_path} check os.isdir failed")
@@ -339,6 +349,7 @@ class ModelFactory:
             ModelConfig instance for the main model
         """
         model_cls = ModelFactory.get_model_cls(model_args.model_type)
+        ModelFactory._materialize_kv_cache_block_size(model_cls, kv_cache_config)
         model_config = model_cls._create_config(model_args.ckpt_path)
         build_model_config(
             model_config=model_config,
@@ -452,6 +463,9 @@ class ModelFactory:
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
+        ModelFactory._materialize_kv_cache_block_size(
+            propose_model_cls, engine_config.kv_cache_config
+        )
         propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )

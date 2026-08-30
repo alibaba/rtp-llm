@@ -21,6 +21,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
     ] + torch_deps(),

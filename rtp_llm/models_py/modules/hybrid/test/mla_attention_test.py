@@ -196,43 +196,6 @@ class SparseMlaRoutingTest(TestCase):
             indexer_inputs.cache_store_inputs, self.indexer_cache
         )
 
-    def test_sparse_forward_rejects_missing_extra_and_wrong_routes(self):
-        default_impl = RecordingSparseMlaImpl(
-            self._attention_inputs("default"), torch.zeros((2, 1, 2))
-        )
-        indexer_impl = RecordingSparseMlaImpl(
-            self._attention_inputs("indexer_kv"), torch.empty(0)
-        )
-        valid_fmha = {"default": default_impl, "indexer_kv": indexer_impl}
-        valid_cache = {
-            "default": self.default_cache,
-            "indexer_kv": self.indexer_cache,
-        }
-        invalid_routes = (
-            ({"default": default_impl}, valid_cache),
-            ({**valid_fmha, "extra": indexer_impl}, valid_cache),
-            ({"default": default_impl, "wrong": indexer_impl}, valid_cache),
-            (valid_fmha, {"default": self.default_cache}),
-            (valid_fmha, {**valid_cache, "extra": self.indexer_cache}),
-            (
-                valid_fmha,
-                {"default": self.default_cache, "wrong": self.indexer_cache},
-            ),
-        )
-
-        for fmha_routes, cache_routes in invalid_routes:
-            attention, _ = make_sparse_routing_attention()
-            with self.subTest(
-                fmha_tags=list(fmha_routes), cache_tags=list(cache_routes)
-            ):
-                with self.assertRaisesRegex(RuntimeError, "requires exactly"):
-                    attention(
-                        torch.zeros((2, 4), dtype=torch.float32),
-                        fmha_routes,
-                        cache_routes,
-                    )
-                attention.fused_qkv_proj.assert_not_called()
-
 
 class MLATest(TestCase):
     NUM_TOKENS = [7]

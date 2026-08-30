@@ -36,8 +36,9 @@ constexpr size_t kPhysicalBlocks = 8;
 struct TestCacheSpec: public KVCacheSpec {
     TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes):
         debug_tag_(std::move(cache_tag)), bytes_(bytes) {
-        seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-        type               = KVCacheSpecType::OpaqueState;
+        seq_size_per_block        = static_cast<uint32_t>(tokens_per_block);
+        kernel_seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+        type                      = KVCacheSpecType::OpaqueState;
     }
 
     size_t block_size() const override {
@@ -80,24 +81,12 @@ struct GroupSpec {
 };
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
-    CacheConfig config;
-    config.dtype                          = DataType::TYPE_INT8;
-    config.layer_num                      = 1;
-    config.layer_all_num                  = 1;
-    config.block_num                      = kPhysicalBlocks;
-    config.seq_size_per_block             = groups.front().tokens_per_block;
-    config.kernel_seq_size_per_block      = groups.front().tokens_per_block;
-    config.kv_block_stride_bytes          = groups.front().stride_bytes;
-    config.use_independent_block_pools    = true;
-    config.use_opaque_kv_cache_store      = true;
-    config.group_block_layout_initialized = true;
-
-    std::vector<GroupBase>   topology_groups;
-    std::vector<std::string> layer_tags;
+    std::vector<CacheGroup> topology_groups;
+    CacheLayer              layer_tags;
     topology_groups.reserve(groups.size());
     layer_tags.reserve(groups.size());
     for (const auto& spec : groups) {
-        GroupBase group;
+        CacheGroup group;
         group.tag    = spec.tag;
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
         group.policy = defaultCacheGroupPolicy(spec.tag == "linear" ? CacheGroupType::LINEAR : CacheGroupType::FULL);
@@ -106,19 +95,17 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         // group types so a type/tag permutation bug is observable.
         group.policy.active_tail_blocks = 0;
         group.policy.explicit_block_num = kPhysicalBlocks;
-        group.layer_ids                 = {kLayerId};
         group.block_num                 = kPhysicalBlocks;
-        group.seq_size_per_block        = spec.tokens_per_block;
-        group.kernel_seq_size_per_block = spec.tokens_per_block;
         group.kv_block_stride_bytes     = spec.stride_bytes;
         topology_groups.push_back(std::move(group));
         layer_tags.push_back(spec.tag);
     }
 
-    LayerBase layer;
-    layer.layer_id   = kLayerId;
-    layer.group_tags = std::move(layer_tags);
-    config.setTopology(std::move(topology_groups), {std::move(layer)});
+    CacheConfig config(std::move(topology_groups), {std::move(layer_tags)}, /*main_layer_num=*/1);
+    config.dtype                     = DataType::TYPE_INT8;
+    config.block_num                 = kPhysicalBlocks;
+    config.seq_size_per_block        = groups.front().tokens_per_block;
+    config.use_opaque_kv_cache_store = true;
     return config;
 }
 
@@ -130,7 +117,7 @@ struct LayoutAndBases {
 LayoutAndBases makeLayout(const CacheConfig& config) {
     GroupedCacheLayerLayout::GroupLayouts layouts;
     std::map<std::string, uintptr_t>      bases;
-    for (const auto& group : config.topology().groups()) {
+    for (const auto& group : config.groups()) {
         auto storage =
             torch::zeros({static_cast<int64_t>(kPhysicalBlocks), static_cast<int64_t>(group.kv_block_stride_bytes)},
                          torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
@@ -138,7 +125,8 @@ LayoutAndBases makeLayout(const CacheConfig& config) {
         layouts.emplace(group.tag,
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{{std::move(storage), torch::Tensor()}}));
     }
-    return {GroupedCacheLayerLayout(config.topologyPtr(), std::move(layouts)), std::move(bases)};
+    auto topology = std::make_shared<const CacheConfig>(config.groups(), config.layers(), config.layer_num);
+    return {GroupedCacheLayerLayout(std::move(topology), std::move(layouts)), std::move(bases)};
 }
 
 class RecordingCacheStore: public CacheStore {
@@ -262,9 +250,7 @@ GptModelInputs makeInputs(const std::vector<int32_t>& input_lengths,
                           size_t                      cache_keys_width,
                           const std::vector<int32_t>& block_ids,
                           size_t                      group_count,
-                          size_t                      block_table_width,
-                          size_t                      global_tokens_per_block,
-                          size_t                      global_stride_bytes) {
+                          size_t                      block_table_width) {
     const size_t batch_size = input_lengths.size();
     const size_t token_count =
         static_cast<size_t>(std::accumulate(input_lengths.begin(), input_lengths.end(), int32_t{0}));
@@ -295,10 +281,6 @@ GptModelInputs makeInputs(const std::vector<int32_t>& input_lengths,
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
     inputs.cache_keys =
         pinnedLongTensor(cache_keys, {static_cast<int64_t>(batch_size), static_cast<int64_t>(cache_keys_width)});
-    inputs.seq_size_per_block        = global_tokens_per_block;
-    inputs.kernel_seq_size_per_block = global_tokens_per_block;
-    inputs.kv_block_stride_bytes     = global_stride_bytes;
-    inputs.kv_scale_stride_bytes     = 0;
     inputs.pd_separation             = true;
     inputs.use_opaque_kv_cache_store = true;
     return inputs;
@@ -376,11 +358,9 @@ Scenario makeMultiTagScenario(bool declare_in_sorted_order) {
                              /*cache_keys=*/{1001, 1002, 1003, 1004},
                              /*cache_keys_width=*/4,
                              // sorted-tag row 0 = "full", sorted-tag row 1 = "linear"
-                             /*block_ids=*/{1, 2, -1, -1, 3, 4, 5, 6},
+                             /*block_ids=*/{1, 2, 0, 0, 3, 4, 5, 6},
                              /*group_count=*/2,
-                             /*block_table_width=*/4,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/24);
+                             /*block_table_width=*/4);
     inputs.kv_cache_group_tags = {"full", "linear"};
     inputs.kv_cache_group_types =
         pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL), static_cast<int32_t>(CacheGroupType::LINEAR)}, {2});
@@ -394,11 +374,9 @@ Scenario makeMicroBatchScenario() {
                              /*request_ids=*/{201, 202, 203},
                              /*cache_keys=*/{2101, 0, 2201, 2202, 2301, 0},
                              /*cache_keys_width=*/2,
-                             /*block_ids=*/{1, -1, 2, 3, 4, -1},
+                             /*block_ids=*/{1, 0, 2, 3, 4, 0},
                              /*group_count=*/1,
-                             /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*block_table_width=*/2);
     inputs.kv_cache_group_tags  = {"default"};
     inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
@@ -415,9 +393,7 @@ Scenario makeContextParallelScenario() {
                              /*cache_keys_width=*/6,
                              /*block_ids=*/{1, 2, 3},
                              /*group_count=*/1,
-                             /*block_table_width=*/3,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*block_table_width=*/3);
     inputs.kv_cache_group_tags  = {"default"};
     inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
@@ -438,9 +414,7 @@ Scenario makeTpNonRootSingleTagScenario() {
                              /*cache_keys_width=*/4,
                              /*block_ids=*/{1, 2},
                              /*group_count=*/1,
-                             /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/16);
+                             /*block_table_width=*/2);
     // This is the documented post-tpSyncModelInputs non-root state: tensor
     // payloads and types are present, while string tags are reconstructed from
     // the rank-local CacheConfig rather than broadcast.
@@ -464,7 +438,7 @@ Scenario makeTpNonRootMultiTagScenario() {
 }
 
 Scenario makeMtpScenario() {
-    auto main_config  = makeCacheConfig({{"main", 4, 16}});
+    auto main_config  = makeCacheConfig({{"draft", 2, 32}});
     auto draft_config = std::make_shared<CacheConfig>(makeCacheConfig({{"draft", 2, 32}}));
     auto layout       = makeLayout(*draft_config);
     main_config.mtp_sub_configs.push_back(draft_config);
@@ -474,9 +448,7 @@ Scenario makeMtpScenario() {
                              /*cache_keys_width=*/2,
                              /*block_ids=*/{1, 2},
                              /*group_count=*/1,
-                             /*block_table_width=*/2,
-                             /*global_tokens_per_block=*/2,
-                             /*global_stride_bytes=*/32);
+                             /*block_table_width=*/2);
     inputs.kv_cache_group_tags  = {"draft"};
     inputs.kv_cache_group_types = pinnedTensor({static_cast<int32_t>(CacheGroupType::FULL)}, {1});
     Scenario scenario{
@@ -602,7 +574,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     auto scenario    = makeScenario(scenario_name);
     auto cache_store = std::make_shared<RecordingCacheStore>();
-    auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
+    auto manager     = std::make_shared<KVCacheManager>(std::move(scenario).manager_config,
                                                     /*warmup=*/true,
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
@@ -618,9 +590,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = 1;
 
-    const auto&        active_config = scenario.mtp_cache_config_index.has_value() ?
-                                           manager->getMTPModuleCacheConfig(*scenario.mtp_cache_config_index) :
-                                           manager->cacheConfig();
     GptModelInitParams params{weights,
                               description,
                               scenario.layout,
@@ -635,8 +604,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/64,
                               /*hidden_size=*/1,
-                              active_config.seq_size_per_block,
-                              active_config.kernel_seq_size_per_block,
                               manager,
                               scenario.mtp_cache_config_index};
 
@@ -660,7 +627,7 @@ py::dict runInvalidBoundaryDiagnostics(py::object py_model, const std::string& s
     });
     auto scenario    = makeScenario(scenario_name);
     auto cache_store = std::make_shared<RecordingCacheStore>();
-    auto manager     = std::make_shared<KVCacheManager>(scenario.manager_config,
+    auto manager     = std::make_shared<KVCacheManager>(std::move(scenario).manager_config,
                                                     /*warmup=*/true,
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
@@ -674,7 +641,6 @@ py::dict runInvalidBoundaryDiagnostics(py::object py_model, const std::string& s
     description.attention_conf.head_num      = 1;
     description.attention_conf.kv_head_num   = 1;
     description.attention_conf.size_per_head = 1;
-    const auto&        active_config         = manager->cacheConfig();
     GptModelInitParams params{weights,
                               description,
                               scenario.layout,
@@ -689,8 +655,6 @@ py::dict runInvalidBoundaryDiagnostics(py::object py_model, const std::string& s
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/64,
                               /*hidden_size=*/1,
-                              active_config.seq_size_per_block,
-                              active_config.kernel_seq_size_per_block,
                               manager,
                               std::nullopt};
     PyWrappedModel     model(params, std::move(py_model));

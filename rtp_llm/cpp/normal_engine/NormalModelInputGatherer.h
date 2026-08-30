@@ -18,25 +18,21 @@ namespace rtp_llm {
 struct TensorHolder;
 
 struct NormalModelInputGathererConfig {
-    size_t                                     num_layers{};
-    size_t                                     vocab_size{};
-    size_t                                     input_vocab_size{};
-    bool                                       has_positional_encoding{};
-    bool                                       is_multimodal{};
-    PositionIdsStyle                           mm_position_ids_style{};
-    size_t                                     position_id_len_factor{};
-    RoleType                                   role_type{};
-    bool                                       decode_entrance{};
-    size_t                                     block_stride_bytes{};
-    size_t                                     scale_stride_bytes{};
-    size_t                                     seq_size_per_block{};
-    size_t                                     kernel_seq_size_per_block{};
-    size_t                                     kernel_blocks_per_kv_block = 1;
-    bool                                       use_opaque_kv_cache_store  = false;
-    std::unordered_map<std::string, GroupBase> kv_cache_groups;
-    bool                                       warm_up{};
-    bool                                       enable_detail_log{};
-    bool                                       enable_model_inputs_log{};
+    size_t                                      num_layers{};
+    size_t                                      vocab_size{};
+    size_t                                      input_vocab_size{};
+    bool                                        has_positional_encoding{};
+    bool                                        is_multimodal{};
+    PositionIdsStyle                            mm_position_ids_style{};
+    size_t                                      position_id_len_factor{};
+    RoleType                                    role_type{};
+    bool                                        decode_entrance{};
+    size_t                                      max_kernel_blocks_per_kv_block = 1;
+    bool                                        use_opaque_kv_cache_store      = false;
+    std::unordered_map<std::string, CacheGroup> kv_cache_groups;
+    bool                                        warm_up{};
+    bool                                        enable_detail_log{};
+    bool                                        enable_model_inputs_log{};
 };
 
 class NormalModelInputGatherer {

@@ -25,11 +25,13 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const GroupBase&                    cache_group,
+    KVCacheGroup(const CacheGroup&                   cache_group,
+                 std::vector<int>                    layer_ids,
                  BlockPoolPtr                        block_pool,
                  SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         cache_group_(cache_group),
+        layer_ids_(std::move(layer_ids)),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter) {}
@@ -37,7 +39,7 @@ public:
     virtual ~KVCacheGroup() = default;
 
     bool                init();
-    virtual bool        malloc(BlockIds&            block_ids,
+    virtual bool        malloc(PoolBlockIds&        block_ids,
                                int                  seq_len,
                                bool                 enable_reuse_cache   = false,
                                int                  reserve_step         = 0,
@@ -47,9 +49,10 @@ public:
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
-    virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
-    virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
-    virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
+    virtual void free(const BlockIndicesType& block_indices) = 0;
+    virtual void
+                removeSkippedBlocks(PoolBlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual int needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                          = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,
                                        const BlockIndicesType& current_block_indices,
@@ -66,7 +69,7 @@ public:
                                                               int  target_batch_size) const = 0;
     virtual NeedBlocksInfo getNeedBlocks(
         int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled = false) const = 0;
-    virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
+    virtual void reference(PoolBlockIds& block_ids, const BlockIndicesType& new_block_indices)                     = 0;
 
     void                                   reference(const BlockIndicesType& new_block_indices);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
@@ -80,7 +83,7 @@ public:
     bool                    ensureFreeBlocks(int need_blocks);
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
-    const GroupBase&        config() const;
+    const CacheGroup&       config() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
@@ -94,7 +97,8 @@ public:
     virtual bool isReservable() const;
 
 protected:
-    const GroupBase&             cache_group_;
+    const CacheGroup&            cache_group_;
+    const std::vector<int>       layer_ids_;
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;

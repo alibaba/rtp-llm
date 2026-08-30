@@ -414,11 +414,6 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
-    model_input.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
-}
-
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
                                                             size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
@@ -633,9 +628,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     // Warmup runs MtpExecutor before the CacheManager is wired up, so every
-    // cache_manager-> call here must be guarded. PyWrappedModel's own
-    // kernel_tokens_per_block check trips loudly downstream when the geometry
-    // is missing, so no soft fallback is needed here.
+    // cache_manager-> call here must be guarded.
     GroupedCacheLayerLayout target_cache_layer_layout;
     GroupedCacheLayerLayout draft_cache_layer_layout;
     if (cache_manager) {
@@ -658,8 +651,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         params.model_config_.attn_config.tokens_per_block,
-         params.model_config_.attn_config.kernel_tokens_per_block,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
@@ -675,9 +666,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config   = cache_manager ? cache_manager->cacheConfig() : CacheConfig();
-    const auto& cache_groups   = cache_config.topology().groups();
-    is_linear_attention_model_ = std::any_of(cache_groups.begin(), cache_groups.end(), [](const GroupBase& group) {
+    CacheConfig        empty_cache_config;
+    const CacheConfig& cache_config = cache_manager ? cache_manager->cacheConfig() : empty_cache_config;
+    const auto&        cache_groups = cache_config.groups();
+    is_linear_attention_model_ = std::any_of(cache_groups.begin(), cache_groups.end(), [](const CacheGroup& group) {
         return group.policy.group_type == CacheGroupType::LINEAR;
     });
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
@@ -709,8 +701,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mla_ops_type,
                                 mtp_params->model_config_.max_seq_len,
                                 mtp_params->model_config_.hidden_size,
-                                mtp_params->model_config_.attn_config.tokens_per_block,
-                                mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
@@ -944,9 +934,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
-        int64_t     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = model_output.all_hidden_states;
         }
@@ -1570,11 +1558,8 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& cache_cfg = cache_manager_->cacheConfig();
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
-    auto model_input_copy                  = model_input;
-    model_input_copy.kv_block_stride_bytes = cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes = cache_cfg.kv_scale_stride_bytes;
+    auto model_input_copy = model_input;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input)");
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
@@ -1657,13 +1642,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy    = model_input;
-    model_input_copy.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input_copy.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
@@ -1772,10 +1754,10 @@ int MtpExecutor::debugLinearSeqSizePerBlock(const CacheConfig& cache_config, std
     RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::LINEAR,
                             "debug linear block geometry requested for non-LINEAR tag=%s",
                             std::string(tag).c_str());
-    RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block > 0,
+    RTP_LLM_CHECK_WITH_INFO(group.seqSizePerBlock() > 0,
                             "debug linear block geometry has zero seq_size_per_block for tag=%s",
                             std::string(tag).c_str());
-    return static_cast<int>(group.seq_size_per_block);
+    return static_cast<int>(group.seqSizePerBlock());
 }
 
 void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
@@ -1888,7 +1870,6 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
 
 void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(tp_sync_post_rejection)");
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // DSpARK carries its proposal through the model-owned state buffers rather
     // than the post-rejection model input, so there is nothing to re-broadcast.
     if (parallelism_config_.tp_size > 1 && !is_dspark_) {
@@ -1911,8 +1892,6 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
             tpSyncModelInputs(model_input, parallelism_config_);
         }
     }
-    model_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
 }
 
 GptModelOutputs MtpExecutor::runDSparkProposeForward(GptModelInputs& model_input) {
@@ -1965,8 +1944,6 @@ void MtpExecutor::dsparkModelDecode(GptModelInputs&                             
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
                                   model_input.input_lengths.size(0));
 
-    const auto& draft_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheStrideToModelInput(model_input, draft_cache_cfg);
     int64_t start_time_us  = autil::TimeUtility::currentTimeInMicroSeconds();
     auto    propose_output = runDSparkProposeForward(model_input);
     model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1979,7 +1956,6 @@ void MtpExecutor::dsparkModelDecode(GptModelInputs&                             
             {static_cast<int64_t>(model_input.input_lengths.size(0)), static_cast<int64_t>(propose_step_ + 1)});
     }
 
-    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
     tpSyncModelInputs(model_input, parallelism_config_);
     ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify");
 }
@@ -2205,9 +2181,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
-    const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
-
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
     torch::Tensor              spec_prefix_lengths;
@@ -2392,8 +2365,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             }
             execBroadcast({broadcast_tensors, 0});
         }
-
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
     }
 }
 

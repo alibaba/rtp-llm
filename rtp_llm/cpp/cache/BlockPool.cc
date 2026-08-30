@@ -414,7 +414,7 @@ bool BlockPool::init() {
 }
 
 void BlockPool::initFreeBlocks() {
-    // block 0 is reserved
+    // Physical block 0 is reserved as the CUDA graph safe dummy.
     for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids_.insert(i);
     }
@@ -670,7 +670,7 @@ size_t BlockPool::freeBlocksNum() const {
 }
 
 size_t BlockPool::totalBlocksNum() const {
-    // reserve block 0 for internal use
+    // Physical block 0 is reserved as the CUDA graph safe dummy.
     return config_.block_num - 1;
 }
 

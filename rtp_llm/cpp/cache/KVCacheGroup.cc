@@ -9,7 +9,7 @@ bool KVCacheGroup::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    const auto& layer_ids = cache_group_.layer_ids;
+    const auto& layer_ids = layer_ids_;
     RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids.size(),
                             "layer_tensors size (%zu) is less than layer_ids size (%zu)",
                             layer_tensors.size(),
@@ -49,17 +49,16 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
             return false;
         }
 
-        const size_t                  need_evict = static_cast<size_t>(required_blocks) - free_blocks;
-        SharedBlockCache::EvictResult evict_result;
-        size_t                        freed = shared_cache_->evictAndFreeForGroup(tag(), need_evict, &evict_result);
+        const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
+        EvictResult  evict_result;
+        size_t       freed = shared_cache_->evictAndFreeForGroup(tag(), need_evict, &evict_result);
 
         if (metrics_reporter_) {
-            for (const auto& [cache_key, lifetime_ms] : evict_result.evicted_lifetime_ms) {
+            for (const auto& eviction : evict_result.evictions) {
                 RtpLLMCacheEvictionMetricsCollector collector;
-                collector.lifetime_ms = lifetime_ms;
+                collector.lifetime_ms = eviction.lifetime_ms;
                 kmonitor::MetricsTags tags("scope", "gpu");
-                tags.AddTag("evict_policy",
-                            evict_result.evicted_independent_group_tags.count(cache_key) ? "independent" : "chain");
+                tags.AddTag("evict_policy", eviction.kind == EvictionKind::IndependentGroup ? "independent" : "chain");
                 tags.AddTag("backing", "device");
                 metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(&tags,
                                                                                                            &collector);
@@ -112,14 +111,14 @@ size_t KVCacheGroup::freeBlocksNum() const {
 }
 
 int KVCacheGroup::seqSizePerBlock() const {
-    return static_cast<int>(cache_group_.seq_size_per_block);
+    return static_cast<int>(cache_group_.seqSizePerBlock());
 }
 
 const std::string& KVCacheGroup::tag() const {
     return cache_group_.tag;
 }
 
-const GroupBase& KVCacheGroup::config() const {
+const CacheGroup& KVCacheGroup::config() const {
     return cache_group_;
 }
 
