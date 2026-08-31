@@ -73,6 +73,7 @@ std::string GptModelInputs::debugString(bool force) const {
     debug_string << ", is_target_verify: " << is_target_verify;
     debug_string << ", is_mtp_draft_prefill: " << is_mtp_draft_prefill;
     debug_string << ", mtp_iteration_step: " << mtp_iteration_step;
+    debug_string << ", last_hidden_states_layout: " << mtpHiddenStatesLayoutName(last_hidden_states_layout);
     debug_string << "}";
     return debug_string.str();
 }

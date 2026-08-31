@@ -152,6 +152,10 @@ class TestContextParallelLoadBalanceSplit(unittest.TestCase):
 
 
 class TestHandleInputsWithHidden(unittest.TestCase):
+    _NONE = 0
+    _GLOBAL = 1
+    _CP_LOCAL = 2
+
     def test_hidden_states_split_with_input_tokens(self):
         total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
         input_lengths = torch.tensor([6], dtype=torch.int32)
@@ -207,6 +211,180 @@ class TestHandleInputsWithHidden(unittest.TestCase):
                 ),
             )
         )
+
+    def _handle_with_layout(
+        self,
+        tokens,
+        lengths,
+        hidden,
+        cp_rank,
+        cp_size,
+        layout,
+        sequence_lengths=None,
+    ):
+        return cp_test.handle_inputs_with_hidden_layout(
+            torch.tensor(tokens, dtype=torch.int32),
+            torch.tensor(lengths, dtype=torch.int32),
+            torch.tensor(sequence_lengths or [], dtype=torch.int32),
+            torch.tensor(hidden, dtype=torch.float32),
+            cp_rank,
+            cp_size,
+            layout,
+        )
+
+    def test_equal_row_count_uses_explicit_layout_cp2(self):
+        # len=2 -> padded=4 -> local=2, so global/local row counts are equal.
+        global_hidden = [[10.0, 10.5], [11.0, 11.5]]
+        expected_global_split = [
+            [[10.0, 10.5], [0.0, 0.0]],
+            [[11.0, 11.5], [0.0, 0.0]],
+        ]
+        already_local = [
+            [[100.0, 100.5], [900.0, 900.5]],
+            [[110.0, 110.5], [910.0, 910.5]],
+        ]
+        for rank in range(2):
+            _, _, split_hidden, _, output_layout = self._handle_with_layout(
+                [10, 11], [2], global_hidden, rank, 2, self._GLOBAL
+            )
+            self.assertTrue(
+                torch.equal(split_hidden, torch.tensor(expected_global_split[rank]))
+            )
+            self.assertEqual(output_layout, self._CP_LOCAL)
+
+            _, _, passthrough_hidden, _, output_layout = self._handle_with_layout(
+                [10, 11], [2], already_local[rank], rank, 2, self._CP_LOCAL
+            )
+            self.assertTrue(
+                torch.equal(passthrough_hidden, torch.tensor(already_local[rank]))
+            )
+            self.assertEqual(output_layout, self._CP_LOCAL)
+
+    def test_equal_row_count_uses_explicit_layout_cp4(self):
+        # len=2 -> padded=8 -> local=2. Rank 1 owns token 1; a second split
+        # would replace its valid hidden row with the padding row.
+        local_hidden = [[11.0, 11.5], [911.0, 911.5]]
+        _, _, actual_hidden, shuffle, output_layout = self._handle_with_layout(
+            [10, 11], [2], local_hidden, 1, 4, self._CP_LOCAL
+        )
+        self.assertTrue(torch.equal(actual_hidden, torch.tensor(local_hidden)))
+        self.assertTrue(torch.equal(shuffle, torch.tensor([1, 6], dtype=torch.int32)))
+        self.assertEqual(output_layout, self._CP_LOCAL)
+
+    def test_mixed_stream_row_count_cancellation_preserves_local_hidden(self):
+        # CP2: len=1 has local-global delta +1 and len=3 has delta -1.
+        # Totals are both 4, but the supplied rows are already rank-local.
+        global_hidden = [[10.0], [11.0], [12.0], [13.0]]
+        expected_global_split = [
+            [[10.0], [0.0], [11.0], [0.0]],
+            [[0.0], [0.0], [12.0], [13.0]],
+        ]
+        rank_local_hidden = [
+            [[100.0], [101.0], [102.0], [103.0]],
+            [[110.0], [111.0], [112.0], [113.0]],
+        ]
+        for rank in range(2):
+            _, _, split_hidden, _, output_layout = self._handle_with_layout(
+                [10, 11, 12, 13],
+                [1, 3],
+                global_hidden,
+                rank,
+                2,
+                self._GLOBAL,
+            )
+            self.assertTrue(
+                torch.equal(split_hidden, torch.tensor(expected_global_split[rank]))
+            )
+            self.assertEqual(output_layout, self._CP_LOCAL)
+
+            _, _, actual_hidden, _, output_layout = self._handle_with_layout(
+                [10, 11, 12, 13],
+                [1, 3],
+                rank_local_hidden[rank],
+                rank,
+                2,
+                self._CP_LOCAL,
+            )
+            self.assertTrue(
+                torch.equal(actual_hidden, torch.tensor(rank_local_hidden[rank]))
+            )
+            self.assertEqual(output_layout, self._CP_LOCAL)
+
+    def test_decode_rows_remain_aligned_for_global_and_local_hidden(self):
+        tokens = [90, 91, 10, 11, 12, 13, 14, 15]
+        lengths = [1, 1, 6]
+        sequence_lengths = [7, 9]
+        global_hidden = [
+            [float(value)] for value in [900, 910, 100, 110, 120, 130, 140, 150]
+        ]
+        expected_global_split = [
+            [[900.0], [910.0], [100.0], [0.0]],
+            [[900.0], [910.0], [110.0], [0.0]],
+            [[900.0], [910.0], [120.0], [150.0]],
+            [[900.0], [910.0], [130.0], [140.0]],
+        ]
+        for rank in range(4):
+            _, _, split_hidden, _, output_layout = self._handle_with_layout(
+                tokens,
+                lengths,
+                global_hidden,
+                rank,
+                4,
+                self._GLOBAL,
+                sequence_lengths,
+            )
+            self.assertTrue(
+                torch.equal(split_hidden, torch.tensor(expected_global_split[rank]))
+            )
+            self.assertEqual(output_layout, self._CP_LOCAL)
+
+            local_hidden = [[float(rank * 100 + row)] for row in range(4)]
+            _, _, passthrough_hidden, _, output_layout = self._handle_with_layout(
+                tokens,
+                lengths,
+                local_hidden,
+                rank,
+                4,
+                self._CP_LOCAL,
+                sequence_lengths,
+            )
+            self.assertTrue(torch.equal(passthrough_hidden, torch.tensor(local_hidden)))
+            self.assertEqual(output_layout, self._CP_LOCAL)
+
+    def test_empty_hidden_does_not_require_layout(self):
+        _, _, hidden, _, output_layout = self._handle_with_layout(
+            [10, 11], [2], [], 0, 2, self._NONE
+        )
+        self.assertEqual(hidden.numel(), 0)
+        self.assertEqual(output_layout, self._NONE)
+
+    def test_nonempty_hidden_rejects_none_and_unknown_layouts(self):
+        for layout in (self._NONE, 99):
+            with self.subTest(layout=layout), self.assertRaisesRegex(
+                RuntimeError, "explicit GLOBAL or CP_LOCAL layout"
+            ):
+                self._handle_with_layout([10, 11], [2], [[10.0], [11.0]], 0, 2, layout)
+
+    def test_global_hidden_rejects_wrong_row_count(self):
+        with self.assertRaisesRegex(
+            RuntimeError, "global CP MTP hidden states row count mismatch"
+        ):
+            self._handle_with_layout([10, 11], [2], [[10.0]], 0, 2, self._GLOBAL)
+
+    def test_cp_local_hidden_rejects_wrong_row_count(self):
+        with self.assertRaisesRegex(
+            RuntimeError, "local CP MTP hidden states row count mismatch"
+        ):
+            self._handle_with_layout([10, 11], [2], [[10.0]], 0, 2, self._CP_LOCAL)
+
+    def test_empty_hidden_normalizes_stale_layout_to_none(self):
+        for layout in (self._GLOBAL, self._CP_LOCAL):
+            with self.subTest(layout=layout):
+                _, _, hidden, _, output_layout = self._handle_with_layout(
+                    [10, 11], [2], [], 0, 2, layout
+                )
+                self.assertEqual(hidden.numel(), 0)
+                self.assertEqual(output_layout, self._NONE)
 
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):

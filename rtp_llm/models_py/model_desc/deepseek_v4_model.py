@@ -1122,6 +1122,10 @@ class DeepSeekV4Model(GptModelBase):
         )
         return buf[:requested]
 
+    def supports_mtp_target_hidden_states(self) -> bool:
+        """Whether this instance owns the compact target-hidden hand-off buffer."""
+        return self.v4 is not None and self.v4._mtp_hidden_buffer is not None
+
     def get_mtp_last_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")

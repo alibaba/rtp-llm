@@ -59,16 +59,26 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         RTP_LLM_CHECK_WITH_INFO(
             total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
         const int64_t local_token_num = cp_split_input_tokens.numel();
-        if (total_hidden_states.size(0) == global_token_num) {
-            split_hidden_states = true;
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == local_token_num,
-                                    "CP MTP hidden states row count mismatch: rows=%ld, global_tokens=%ld, "
-                                    "local_tokens=%ld",
+        if (model_input.last_hidden_states_layout == MtpHiddenStatesLayout::GLOBAL) {
+            RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == global_token_num,
+                                    "global CP MTP hidden states row count mismatch: rows=%ld, global_tokens=%ld",
                                     total_hidden_states.size(0),
-                                    global_token_num,
+                                    global_token_num);
+            split_hidden_states = true;
+        } else if (model_input.last_hidden_states_layout == MtpHiddenStatesLayout::CP_LOCAL) {
+            RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == local_token_num,
+                                    "local CP MTP hidden states row count mismatch: rows=%ld, local_tokens=%ld",
+                                    total_hidden_states.size(0),
                                     local_token_num);
+        } else {
+            RTP_LLM_FAIL("CP MTP hidden states require an explicit GLOBAL or CP_LOCAL layout, rows=%ld, "
+                         "global_tokens=%ld, local_tokens=%ld",
+                         total_hidden_states.size(0),
+                         global_token_num,
+                         local_token_num);
         }
+    } else {
+        model_input.last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
     }
     // Per-local-token remap: for each token this rank keeps after the CP split,
     // record its global source index + validity. Reused to CP-split every per-token
@@ -336,6 +346,10 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                 model_input.mm_features_locs = locs_cpu.to(torch::kCUDA, /*non_blocking=*/true);
             }
         }
+    }
+
+    if (has_hidden_states) {
+        model_input.last_hidden_states_layout = MtpHiddenStatesLayout::CP_LOCAL;
     }
 
     model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);

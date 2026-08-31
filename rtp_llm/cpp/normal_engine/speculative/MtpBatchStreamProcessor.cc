@@ -397,12 +397,12 @@ void setVerifyPairInputs(GptModelInputs& model_input,
                          size_t          batch_size,
                          size_t          score_len,
                          TensorHolder&   host_holder) {
-    model_input.combo_tokens       = std::move(combo_tokens);
-    model_input.sequence_lengths   = emptyInt32OnCuda({0});
-    model_input.last_hidden_states = torch::Tensor();
-    model_input.prefix_lengths     = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
-    model_input.input_lengths      = fullInt32OnCuda({static_cast<int64_t>(batch_size)}, score_len);
-    model_input.lm_output_indexes  = makeCudaInt32Range(static_cast<int64_t>(batch_size * score_len));
+    model_input.combo_tokens     = std::move(combo_tokens);
+    model_input.sequence_lengths = emptyInt32OnCuda({0});
+    model_input.clearLastHiddenStates();
+    model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
+    model_input.input_lengths     = fullInt32OnCuda({static_cast<int64_t>(batch_size)}, score_len);
+    model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size * score_len));
 }
 
 torch::Tensor interleaveTokenPairs(const torch::Tensor& first, const torch::Tensor& second) {
@@ -882,8 +882,8 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
                                                           const GptModelOutputs& model_output,
                                                           const torch::Tensor&   draft_token_ids,
                                                           TensorHolder&          host_holder) {
-    int batch_size                 = model_input.combo_tokens.size(0);
-    model_input.last_hidden_states = model_output.all_hidden_states;
+    int batch_size = model_input.combo_tokens.size(0);
+    model_input.setLastHiddenStates(model_output.all_hidden_states, MtpHiddenStatesLayout::GLOBAL);
 
     // here combo_tokens is a device buffer
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
@@ -905,8 +905,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
                                                                const GptModelOutputs& model_output,
                                                                const SamplerOutput&   sampler_output,
                                                                TensorHolder&          host_holder) {
-    model_input.last_hidden_states = model_output.all_hidden_states;
-    const auto& new_all_token_ids  = sampler_output.token_ids;
+    const auto& new_all_token_ids = sampler_output.token_ids;
 
     // set model_input.combo_tokens
     const int64_t batch_size   = new_all_token_ids.size(0);
@@ -959,7 +958,8 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
-    TensorHolder&                                host_holder) {
+    TensorHolder&                                host_holder,
+    bool                                         use_model_output_hidden_states) {
     // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
     // only the last accepted position. All outputs stay on CUDA so the next
     // stream-async step can prepare without waiting for worker D2H.
@@ -978,25 +978,34 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
                             total_tokens,
                             batch_size,
                             propose_step_);
-    RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined(),
-                            "target verify output must carry all_hidden_states for draft prefill");
-    RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.dim() == 2
-                                && model_output.all_hidden_states.size(0) >= total_tokens,
-                            "target verify hidden shape mismatch: dim=%ld, rows=%ld, required_rows=%d",
-                            model_output.all_hidden_states.dim(),
-                            model_output.all_hidden_states.defined() && model_output.all_hidden_states.dim() > 0 ?
-                                model_output.all_hidden_states.size(0) :
-                                0,
-                            total_tokens);
+    if (use_model_output_hidden_states) {
+        RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined(),
+                                "target verify output must carry all_hidden_states for draft prefill");
+        RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.dim() == 2
+                                    && model_output.all_hidden_states.size(0) >= total_tokens,
+                                "target verify hidden shape mismatch: dim=%ld, rows=%ld, required_rows=%d",
+                                model_output.all_hidden_states.dim(),
+                                model_output.all_hidden_states.defined() && model_output.all_hidden_states.dim() > 0 ?
+                                    model_output.all_hidden_states.size(0) :
+                                    0,
+                                total_tokens);
+    }
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
+    model_input.input_lengths =
+        fullInt32OnCuda({static_cast<int64_t>(batch_size)}, static_cast<int64_t>(propose_step_ + 1));
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
     model_input.lm_output_indexes =
         torch::arange(
             0, total_tokens, propose_step_ + 1, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
         + (accept_len_d - 1);
-    model_input.last_hidden_states = model_output.all_hidden_states;
-    hidden_states_d_t              = model_input.last_hidden_states;
+    if (use_model_output_hidden_states) {
+        model_input.setLastHiddenStates(model_output.all_hidden_states, MtpHiddenStatesLayout::GLOBAL);
+        hidden_states_d_t = model_input.last_hidden_states;
+    } else {
+        model_input.clearLastHiddenStates();
+        hidden_states_d_t = torch::Tensor();
+    }
 }
 
 void MtpBatchStreamProcessor::updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
@@ -1241,7 +1250,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     // copy hidden
     torch::Tensor all_hidden_states;
     if (all_streams.size() == 0) {
-        model_input.last_hidden_states = torch::Tensor();
+        model_input.clearLastHiddenStates();
         return;
     } else if (all_streams.size() == 1) {
         all_hidden_states = pick_hidden_states(all_streams.front());
@@ -1294,7 +1303,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
         }
     }
 
-    model_input.last_hidden_states = all_hidden_states;
+    model_input.setLastHiddenStates(all_hidden_states, MtpHiddenStatesLayout::GLOBAL);
 }
 
 }  // namespace rtp_llm

@@ -9,16 +9,39 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <memory>
 #include <torch/extension.h>
 #include <torch/python.h>
 #include <ATen/Generator.h>
 #include <type_traits>
+#include <utility>
 
 namespace rtp_llm {
 
 class CacheStoreAsyncWriter;
+
+// Semantic row layout of GptModelInputs::last_hidden_states. Row count alone
+// cannot distinguish GLOBAL from CP_LOCAL when short padded requests make both
+// layouts the same size.
+enum class MtpHiddenStatesLayout : uint8_t {
+    NONE     = 0,
+    GLOBAL   = 1,
+    CP_LOCAL = 2,
+};
+
+inline const char* mtpHiddenStatesLayoutName(MtpHiddenStatesLayout layout) {
+    switch (layout) {
+        case MtpHiddenStatesLayout::NONE:
+            return "NONE";
+        case MtpHiddenStatesLayout::GLOBAL:
+            return "GLOBAL";
+        case MtpHiddenStatesLayout::CP_LOCAL:
+            return "CP_LOCAL";
+    }
+    return "INVALID";
+}
 
 enum class ParallelMode {
     TP        = 0,
@@ -48,7 +71,8 @@ struct GptModelInputs {
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
 
     // for mtp model
-    torch::Tensor last_hidden_states;
+    torch::Tensor         last_hidden_states;
+    MtpHiddenStatesLayout last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
@@ -112,6 +136,24 @@ struct GptModelInputs {
     std::vector<std::string> trace_ids;
 
 public:
+    void setLastHiddenStates(torch::Tensor hidden_states, MtpHiddenStatesLayout layout) {
+        last_hidden_states = std::move(hidden_states);
+        if (last_hidden_states.defined() && last_hidden_states.numel() > 0) {
+            RTP_LLM_CHECK_WITH_INFO(layout == MtpHiddenStatesLayout::GLOBAL
+                                        || layout == MtpHiddenStatesLayout::CP_LOCAL,
+                                    "non-empty MTP hidden states require GLOBAL or CP_LOCAL layout, got %s",
+                                    mtpHiddenStatesLayoutName(layout));
+            last_hidden_states_layout = layout;
+        } else {
+            last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
+        }
+    }
+
+    void clearLastHiddenStates() {
+        last_hidden_states        = torch::Tensor();
+        last_hidden_states_layout = MtpHiddenStatesLayout::NONE;
+    }
+
     std::string debugString(bool force = false) const;
 };
 

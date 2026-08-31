@@ -549,6 +549,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     auto          last_hidden_states_h      = last_hidden_states.cpu().clone();
     vector<float> expect_last_hidden_states = {0.1, 0.2, 1.1, 1.2};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
+    EXPECT_EQ(model_input.value().last_hidden_states_layout, MtpHiddenStatesLayout::GLOBAL);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
@@ -1065,6 +1066,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto        combo_tokens        = model_input.combo_tokens.cpu();
     vector<int> expect_combo_tokens = {2, 0, 0, 2, 3, 0, 2, 3, 1};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
+    EXPECT_EQ((vector<int>{3, 3, 3}), toVec<int>(model_input.input_lengths.cpu()));
 
     EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
     auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
@@ -1075,6 +1077,15 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     vector<float> expect_last_hidden_states = {
         0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f, 2.1f, 2.2f, 2.3f, 2.4f, 2.5f, 2.6f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
+    EXPECT_EQ(model_input.last_hidden_states_layout, MtpHiddenStatesLayout::GLOBAL);
+
+    GptModelOutputs compact_output;
+    processor.updateDecodePostDraftModelInput(
+        model_input, compact_output, spec_decode_output, 3, hidden_states_d_t, holder, false);
+    EXPECT_FALSE(model_input.last_hidden_states.defined());
+    EXPECT_FALSE(hidden_states_d_t.defined());
+    EXPECT_EQ(model_input.last_hidden_states_layout, MtpHiddenStatesLayout::NONE);
+    EXPECT_EQ((vector<int>{3, 3, 3}), toVec<int>(model_input.input_lengths.cpu()));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutput) {

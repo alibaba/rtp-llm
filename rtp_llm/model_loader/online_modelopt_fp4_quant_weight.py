@@ -740,15 +740,17 @@ class OnlineModelOptFp4HybridFp8AttnWeight(LoadQuantPerBlockFp8Weight):
 
 
 def is_mega_moe_strategy() -> bool:
-    """Return True when a MegaMoE strategy is set in the env."""
+    """Return True for MegaMoE strategies that consume FP4 weights.
+
+    The ``mega_moe_fp8`` variants consume checkpoint FP8 weights directly and
+    must not enter the load-time BF16/FP8-to-FP4 wrapper path.
+    """
     import os
 
     return os.environ.get("MOE_STRATEGY") in {
         "mega_moe",
         "mega_moe_se",
         "mega_moe_fused",
-        "mega_moe_fp8",
-        "mega_moe_fp8_se",
     }
 
 

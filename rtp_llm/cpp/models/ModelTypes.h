@@ -84,6 +84,7 @@ enum GptModelInputIndex : size_t {
     needAllHiddenStates,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
+    mtpHiddenStatesLayout,
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
@@ -144,8 +145,9 @@ public:
     // the post-reduce ``[T, D]``. Default returns an empty Tensor (model has no
     // such buffer); ``PyWrappedModel`` overrides to call the Python accessor.
     //
-    // The producer writes the buffer in verify (req-major) layout
-    // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
+    // Without CP the producer writes the buffer in verify (req-major) layout
+    // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``. After CP input handling the
+    // same producer writes this rank's local zigzag rows instead.
     virtual torch::Tensor getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
     }

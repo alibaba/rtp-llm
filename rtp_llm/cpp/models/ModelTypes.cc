@@ -73,11 +73,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
+    const bool has_mtp_hidden_states = inputs.last_hidden_states.defined() && inputs.last_hidden_states.numel() > 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
-        inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
+        has_mtp_hidden_states ? inputs.last_hidden_states.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
         inputs.last_hidden_states.defined() ? (std::uint8_t)torchDTypeToDataType(inputs.last_hidden_states.dtype()) : 0;
-    shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
+    shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesLayout] = static_cast<int64_t>(inputs.last_hidden_states_layout);
+    shape_hints_ptr[GptModelInputIndex::skipRun]               = inputs.skip_run;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
@@ -117,8 +119,30 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int64_t*      mm_extra_input_shape_ptr = nullptr;
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
-    inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
-    inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    const auto hidden_layout_value         = shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesLayout];
+    RTP_LLM_CHECK_WITH_INFO(hidden_layout_value >= static_cast<int64_t>(MtpHiddenStatesLayout::NONE)
+                                && hidden_layout_value <= static_cast<int64_t>(MtpHiddenStatesLayout::CP_LOCAL),
+                            "invalid synchronized MTP hidden layout=%ld",
+                            hidden_layout_value);
+    inputs.last_hidden_states_layout        = static_cast<MtpHiddenStatesLayout>(hidden_layout_value);
+    const bool synced_has_mtp_hidden_states = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] > 0;
+    RTP_LLM_CHECK_WITH_INFO(synced_has_mtp_hidden_states
+                                || inputs.last_hidden_states_layout == MtpHiddenStatesLayout::NONE,
+                            "MTP hidden layout must be NONE when hidden states are empty, got layout=%s",
+                            mtpHiddenStatesLayoutName(inputs.last_hidden_states_layout));
+    RTP_LLM_CHECK_WITH_INFO(!synced_has_mtp_hidden_states
+                                || inputs.last_hidden_states_layout != MtpHiddenStatesLayout::NONE,
+                            "MTP hidden layout must be explicit when hidden states are present");
+    RTP_LLM_CHECK_WITH_INFO(!synced_has_mtp_hidden_states
+                                || inputs.last_hidden_states_layout != MtpHiddenStatesLayout::CP_LOCAL,
+                            "CP-local MTP hidden states must be attached after tpSyncModelInputs");
+    if (!synced_has_mtp_hidden_states) {
+        // A non-root GptModelInputs object may be reused across iterations.
+        // Keep tensor presence and synchronized layout metadata atomic.
+        inputs.clearLastHiddenStates();
+    }
+    inputs.skip_run       = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.is_fake_stream = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
     }

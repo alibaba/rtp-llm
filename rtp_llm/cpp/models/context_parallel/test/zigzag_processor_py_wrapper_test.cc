@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include <pybind11/pybind11.h>
@@ -10,6 +11,20 @@ namespace py = pybind11;
 using namespace rtp_llm;
 
 namespace unittest {
+
+class ScopedDisableCoreDumpOnException {
+public:
+    ScopedDisableCoreDumpOnException(): saved_(StaticConfig::user_ft_core_dump_on_exception) {
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+
+    ~ScopedDisableCoreDumpOnException() {
+        StaticConfig::user_ft_core_dump_on_exception = saved_;
+    }
+
+private:
+    bool saved_;
+};
 
 // Test-only wrapper class to expose protected methods for unit testing
 class ZigZagProcessorTestWrapper: public ZigZagProcessor {
@@ -68,10 +83,10 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
     ZigZagProcessor processor(parallelism_config);
 
     GptModelInputs model_input;
-    model_input.combo_tokens       = total_input_tokens.contiguous().clone();
-    model_input.input_lengths      = input_lengths.contiguous().clone();
-    model_input.sequence_lengths   = sequence_lengths.contiguous().clone();
-    model_input.last_hidden_states = hidden_states.contiguous().clone();
+    model_input.combo_tokens     = total_input_tokens.contiguous().clone();
+    model_input.input_lengths    = input_lengths.contiguous().clone();
+    model_input.sequence_lengths = sequence_lengths.contiguous().clone();
+    model_input.setLastHiddenStates(hidden_states.contiguous().clone(), MtpHiddenStatesLayout::GLOBAL);
 
     torch_ext::PyContextParallelParams cp_params;
     processor.handleInputs(model_input, cp_params);
@@ -80,6 +95,37 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                            model_input.input_lengths.cpu().clone(),
                            model_input.last_hidden_states.cpu().clone(),
                            cp_params.prefill_shuffle_indices.cpu().clone());
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t>
+zigzagHandleInputsWithHiddenLayout(const torch::Tensor& total_input_tokens,
+                                   const torch::Tensor& input_lengths,
+                                   const torch::Tensor& sequence_lengths,
+                                   const torch::Tensor& hidden_states,
+                                   int                  cp_rank,
+                                   int                  cp_size,
+                                   int64_t              hidden_layout) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens              = total_input_tokens.contiguous().clone();
+    model_input.input_lengths             = input_lengths.contiguous().clone();
+    model_input.sequence_lengths          = sequence_lengths.contiguous().clone();
+    model_input.last_hidden_states        = hidden_states.contiguous().clone();
+    model_input.last_hidden_states_layout = static_cast<MtpHiddenStatesLayout>(hidden_layout);
+
+    torch_ext::PyContextParallelParams cp_params;
+    ScopedDisableCoreDumpOnException   disable_core_dump;
+    processor.handleInputs(model_input, cp_params);
+
+    return std::make_tuple(model_input.combo_tokens.cpu().clone(),
+                           model_input.input_lengths.cpu().clone(),
+                           model_input.last_hidden_states.cpu().clone(),
+                           cp_params.prefill_shuffle_indices.cpu().clone(),
+                           static_cast<int64_t>(model_input.last_hidden_states_layout));
 }
 
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
@@ -140,6 +186,17 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
+    m.def("handle_inputs_with_hidden_layout",
+          &zigzagHandleInputsWithHiddenLayout,
+          py::arg("total_input_tokens"),
+          py::arg("input_lengths"),
+          py::arg("sequence_lengths"),
+          py::arg("hidden_states"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          py::arg("hidden_layout"),
+          "Run CP handleInputs with an explicit MTP hidden layout");
 
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,

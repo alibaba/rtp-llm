@@ -27,3 +27,19 @@ py_test(
         'gpu': 'H20',
     },
 )
+
+py_test(
+    name = "test_mega_moe_fp8_to_fp4",
+    srcs = ["test_mega_moe_fp8_to_fp4.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+py_test(
+    name = "test_mega_moe_strategy_classification",
+    srcs = ["test_mega_moe_strategy_classification.py"],
+    deps = py_test_deps,
+)

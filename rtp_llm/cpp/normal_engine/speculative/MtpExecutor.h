@@ -107,7 +107,9 @@ protected:
     GptModelOutputs runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups);
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
-    void            broadcastPostRejectionInputs(GptModelInputs& model_input, const StreamGroups& stream_groups);
+    void            broadcastPostRejectionInputs(GptModelInputs&     model_input,
+                                                 const StreamGroups& stream_groups,
+                                                 bool                broadcast_hidden_states);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -145,11 +147,12 @@ protected:
                         std::list<GenerateStreamPtr>&       decode_streams);
 
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
-    // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
-    // carrier. The source returns the full buffer; consumers slice as needed.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
+    // residual buffer (DSv4 pre-hc [T, hc*D]), attach the requested GLOBAL or
+    // CP_LOCAL view to the C++ hidden-state carrier.
+    bool maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs&       model_input,
+                                              ModelBase&            source,
+                                              MtpHiddenStatesLayout layout         = MtpHiddenStatesLayout::GLOBAL,
+                                              int64_t               requested_rows = -1);
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
 
     // Env-gated stream-async switch. Default off unless

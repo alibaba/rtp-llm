@@ -70,7 +70,8 @@ public:
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
-                                         TensorHolder&                                host_holder);
+                                         TensorHolder&                                host_holder,
+                                         bool use_model_output_hidden_states = true);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
