@@ -797,6 +797,18 @@ StreamState GenerateStream::moveToNext() {
     return state;
 }
 
+void GenerateStream::setPPInflight() {
+    pp_inflight_.store(true, std::memory_order_release);
+}
+
+void GenerateStream::clearPPInflight() {
+    pp_inflight_.store(false, std::memory_order_release);
+}
+
+bool GenerateStream::isPPInflight() const {
+    return pp_inflight_.load(std::memory_order_acquire);
+}
+
 bool GenerateStream::hasError() const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return hasErrorWithoutLock();
