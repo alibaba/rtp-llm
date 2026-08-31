@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * Cancel-path and terminal-idempotency contracts for {@link RequestLifecycle}.
+ * Cancel-path and terminal-idempotency contracts for {@link RequestState}.
  *
  * <p>{@code RequestLifecycleTest} already covers the single-step reducer matrix
  * (every state × every event). This suite covers the compositions it does not:
@@ -17,11 +17,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * absorbing behavior across every reducer, and delivery-claim retention through
  * cancellation. These are the request-lifecycle exception/cancel links.
  */
-@DisplayName("RequestLifecycle cancel-path and terminal idempotency")
+@DisplayName("RequestState cancel-path and terminal idempotency")
 class RequestLifecycleCancelPathTest {
 
-    private static RequestLifecycle lifecycle() {
-        return new RequestLifecycle(1L);
+    private static RequestState lifecycle() {
+        return new RequestState(1L);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -31,30 +31,30 @@ class RequestLifecycleCancelPathTest {
 
         @Test
         void cancelFromQueuedEndsCancelledWithDetail() {
-            RequestLifecycle rl = lifecycle();
-            RequestLifecycleSnapshot snap = rl.cancel("user aborted");
-            assertEquals(RequestLifecycleState.CANCELLED, snap.state());
+            RequestState rl = lifecycle();
+            RequestState.Snapshot snap = rl.cancel("user aborted");
+            assertEquals(RequestState.Phase.CANCELLED, snap.state());
             assertEquals("user aborted", snap.detail());
         }
 
         @Test
         void requestCancelThenCancelPropagatesLatestDetail() {
-            RequestLifecycle rl = lifecycle();
-            RequestLifecycleSnapshot requested = rl.requestCancel("frontend requested");
-            assertEquals(RequestLifecycleState.CANCEL_REQUESTED, requested.state());
+            RequestState rl = lifecycle();
+            RequestState.Snapshot requested = rl.requestCancel("frontend requested");
+            assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
             assertEquals("frontend requested", requested.detail());
 
-            RequestLifecycleSnapshot cancelled = rl.cancel("engine acked cancel");
-            assertEquals(RequestLifecycleState.CANCELLED, cancelled.state());
+            RequestState.Snapshot cancelled = rl.cancel("engine acked cancel");
+            assertEquals(RequestState.Phase.CANCELLED, cancelled.state());
             assertEquals("engine acked cancel", cancelled.detail());
         }
 
         @Test
         void cancelRetainsAnExistingBatchDeliveryClaim() {
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.startBatchEnqueue(7L); // DISPATCHING + BATCH_ENQUEUE, batchId 7
-            RequestLifecycleSnapshot snap = rl.cancel("x");
-            assertEquals(RequestLifecycleState.CANCELLED, snap.state());
+            RequestState.Snapshot snap = rl.cancel("x");
+            assertEquals(RequestState.Phase.CANCELLED, snap.state());
             assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, snap.deliveryClaimKind());
             assertEquals(7L, snap.batchId(),
                     "cancellation must not drop the batch ownership record");
@@ -68,10 +68,10 @@ class RequestLifecycleCancelPathTest {
 
         @Test
         void failFromCancelRequestedIsAllowed() {
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.requestCancel("c");
-            RequestLifecycleSnapshot snap = rl.fail("engine error");
-            assertEquals(RequestLifecycleState.FAILED, snap.state());
+            RequestState.Snapshot snap = rl.fail("engine error");
+            assertEquals(RequestState.Phase.FAILED, snap.state());
             assertEquals("engine error", snap.detail());
         }
 
@@ -79,18 +79,18 @@ class RequestLifecycleCancelPathTest {
         void completeFromCancelRequestedIsAllowed() {
             // A completion can still win over a pending cancel (cancel raced a
             // successful delivery).
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.requestCancel("c");
-            RequestLifecycleSnapshot snap = rl.complete("delivered before cancel");
-            assertEquals(RequestLifecycleState.COMPLETED, snap.state());
+            RequestState.Snapshot snap = rl.complete("delivered before cancel");
+            assertEquals(RequestState.Phase.COMPLETED, snap.state());
         }
 
         @Test
         void timeoutFromCancelRequestedIsAllowed() {
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.requestCancel("c");
-            RequestLifecycleSnapshot snap = rl.timeout("slo expired");
-            assertEquals(RequestLifecycleState.TIMED_OUT, snap.state());
+            RequestState.Snapshot snap = rl.timeout("slo expired");
+            assertEquals(RequestState.Phase.TIMED_OUT, snap.state());
         }
     }
 
@@ -101,14 +101,14 @@ class RequestLifecycleCancelPathTest {
 
         @Test
         void confirmInCancelRequestedIsANoOpAndKeepsTheClaim() {
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.startBatchEnqueue(5L);       // DISPATCHING + BATCH_ENQUEUE
             rl.requestCancel("cancel pending");
 
-            RequestLifecycleSnapshot snap = rl.markDeliveryConfirmed();
+            RequestState.Snapshot snap = rl.markDeliveryConfirmed();
             // Confirming a delivery for a request already asked to cancel must
             // not resurrect it to ACKNOWLEDGED.
-            assertEquals(RequestLifecycleState.CANCEL_REQUESTED, snap.state());
+            assertEquals(RequestState.Phase.CANCEL_REQUESTED, snap.state());
             assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, snap.deliveryClaimKind());
             assertEquals(5L, snap.batchId());
         }
@@ -121,27 +121,27 @@ class RequestLifecycleCancelPathTest {
 
         @Test
         void completedStateIgnoresAllLaterReducersAndKeepsDetail() {
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.startBatchEnqueue(3L);
             rl.markDeliveryConfirmed();
-            RequestLifecycleSnapshot completed = rl.complete("done");
-            assertEquals(RequestLifecycleState.COMPLETED, completed.state());
+            RequestState.Snapshot completed = rl.complete("done");
+            assertEquals(RequestState.Phase.COMPLETED, completed.state());
 
             // Every later reducer returns the frozen COMPLETED snapshot.
-            assertEquals(RequestLifecycleState.COMPLETED, rl.fail("late fail").state());
-            assertEquals(RequestLifecycleState.COMPLETED, rl.timeout("late timeout").state());
-            assertEquals(RequestLifecycleState.COMPLETED, rl.requestCancel("late cancel").state());
-            assertEquals(RequestLifecycleState.COMPLETED, rl.cancel("late cancel").state());
+            assertEquals(RequestState.Phase.COMPLETED, rl.fail("late fail").state());
+            assertEquals(RequestState.Phase.COMPLETED, rl.timeout("late timeout").state());
+            assertEquals(RequestState.Phase.COMPLETED, rl.requestCancel("late cancel").state());
+            assertEquals(RequestState.Phase.COMPLETED, rl.cancel("late cancel").state());
             assertEquals("done", rl.snapshot().detail(),
                     "a terminal detail is never overwritten by a later reducer");
         }
 
         @Test
         void cancelledStateIsAbsorbing() {
-            RequestLifecycle rl = lifecycle();
+            RequestState rl = lifecycle();
             rl.cancel("aborted");
-            assertEquals(RequestLifecycleState.CANCELLED, rl.fail("x").state());
-            assertEquals(RequestLifecycleState.CANCELLED, rl.complete("x").state());
+            assertEquals(RequestState.Phase.CANCELLED, rl.fail("x").state());
+            assertEquals(RequestState.Phase.CANCELLED, rl.complete("x").state());
             assertEquals("aborted", rl.snapshot().detail());
         }
     }

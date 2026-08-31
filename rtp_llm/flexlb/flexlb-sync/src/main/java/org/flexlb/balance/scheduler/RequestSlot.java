@@ -29,7 +29,7 @@ import java.util.function.Function;
  * explicitly says otherwise. Endpoint and transport code receives exact
  * capabilities, never a writable state field or a generic transition API.
  */
-final class RequestSlot extends RequestLifecycle {
+final class RequestSlot extends RequestState {
 
     private static final int OUTSTANDING_ADMISSION_CLOSED = -1;
 
@@ -225,7 +225,7 @@ final class RequestSlot extends RequestLifecycle {
             DeliveryClaimKind kind,
             long expectedBatchId) {
         requireSlotLock("delivery claim lookup");
-        RequestLifecycleSnapshot current = snapshot();
+        RequestState.Snapshot current = snapshot();
         return ownsActiveItem(expected)
                 && current.deliveryClaimKind() == kind
                 && current.batchId() == expectedBatchId
@@ -241,8 +241,8 @@ final class RequestSlot extends RequestLifecycle {
             DeliveryClaimKind expectedKind,
             long expectedBatchId) {
         requireSlotLock("delivery confirmation");
-        RequestLifecycleSnapshot current = snapshot();
-        if (current.state() != RequestLifecycleState.DISPATCHING
+        RequestState.Snapshot current = snapshot();
+        if (current.state() != RequestState.Phase.DISPATCHING
                 || !ownsDeliveryClaim(
                         expected, expectedKind, expectedBatchId)) {
             return null;
@@ -252,8 +252,8 @@ final class RequestSlot extends RequestLifecycle {
         boolean transferred = false;
         try {
             long enqueueStartedAtMs = getBatchEnqueueStartedAtMs();
-            RequestLifecycleSnapshot confirmed = markDeliveryConfirmed();
-            if (confirmed.state() != RequestLifecycleState.ACKNOWLEDGED) {
+            RequestState.Snapshot confirmed = markDeliveryConfirmed();
+            if (confirmed.state() != RequestState.Phase.ACKNOWLEDGED) {
                 throw new IllegalStateException(
                         "delivery confirmation did not acknowledge request "
                                 + requestId);
@@ -288,14 +288,14 @@ final class RequestSlot extends RequestLifecycle {
 
     boolean canClaimLocalTerminal() {
         requireSlotLock("local terminal eligibility");
-        RequestLifecycleSnapshot current = snapshot();
+        RequestState.Snapshot current = snapshot();
         return ownsActiveGeneration()
                 && !future.isDone()
                 && admissionMutation == null
                 && preemption == null
                 && engineFence == null
                 && engineOwnership == EngineOwnership.DECODE_PENDING
-                && current.state() != RequestLifecycleState.ACKNOWLEDGED
+                && current.state() != RequestState.Phase.ACKNOWLEDGED
                 && !current.deliveryClaimKind().isClaimed();
     }
 
@@ -308,13 +308,13 @@ final class RequestSlot extends RequestLifecycle {
      */
     boolean canClaimDelivery() {
         requireSlotLock("delivery eligibility");
-        RequestLifecycleSnapshot current = snapshot();
+        RequestState.Snapshot current = snapshot();
         return ownsActiveGeneration()
                 && !future.isDone()
                 && preemption == null
                 && engineFence == null
                 && engineOwnership == EngineOwnership.DECODE_PENDING
-                && current.state() != RequestLifecycleState.ACKNOWLEDGED
+                && current.state() != RequestState.Phase.ACKNOWLEDGED
                 && !current.deliveryClaimKind().isClaimed();
     }
 
@@ -338,7 +338,7 @@ final class RequestSlot extends RequestLifecycle {
 
     boolean isRemovableTombstone(long updatedBeforeMs) {
         requireSlotLock("tombstone retention lookup");
-        RequestLifecycleSnapshot current = snapshot();
+        RequestState.Snapshot current = snapshot();
         return isCurrentGeneration()
                 && slotPhase == SlotPhase.TOMBSTONE
                 && current.state().isTerminal()
@@ -506,7 +506,7 @@ final class RequestSlot extends RequestLifecycle {
     private record PendingPrefillRetirement(
             PrefillEndpoint source,
             ScheduledRequest item,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response) {
     }
 
@@ -719,7 +719,7 @@ final class RequestSlot extends RequestLifecycle {
         return cancellationReason;
     }
 
-    RequestLifecycleSnapshot rememberCancellation(
+    RequestState.Snapshot rememberCancellation(
             CancelReason reason,
             String detail) {
         requireSlotLock("cancellation claim");
@@ -742,7 +742,7 @@ final class RequestSlot extends RequestLifecycle {
             long attemptToken,
             String detail) {
         requireSlotLock("preemption installation");
-        RequestLifecycleSnapshot lifecycle = snapshot();
+        RequestState.Snapshot lifecycle = snapshot();
         DecodeEndpoint.ReservationHandle reservation =
                 item == null ? null : item.decodeReservation();
         if (!ownsActiveGeneration()
@@ -755,7 +755,7 @@ final class RequestSlot extends RequestLifecycle {
                 || (lifecycle.deliveryClaimKind()
                         == DeliveryClaimKind.ROUTE_DECISION
                     && lifecycle.state()
-                        == RequestLifecycleState.DISPATCHING)) {
+                        == RequestState.Phase.DISPATCHING)) {
             return null;
         }
         preemption = new PreemptionRegistration(
@@ -1026,7 +1026,7 @@ final class RequestSlot extends RequestLifecycle {
             PreemptionRegistration exact = preemptionOwner();
             if (engineOwnership == EngineOwnership.DECODE_OWNED
                     && terminal.deliveryFailure()) {
-                RequestLifecycleSnapshot lifecycle = snapshot();
+                RequestState.Snapshot lifecycle = snapshot();
                 DeliveryClaimKind deliveryKind = lifecycle.deliveryClaimKind();
                 long batchId = lifecycle.batchId();
                 if (exact == null) {
@@ -1137,7 +1137,7 @@ final class RequestSlot extends RequestLifecycle {
         PreemptionFact.DeliveryConfirmed delivered =
                 (PreemptionFact.DeliveryConfirmed) fact;
         ScheduledRequest active = activeItem();
-        RequestLifecycleSnapshot lifecycle = snapshot();
+        RequestState.Snapshot lifecycle = snapshot();
         DeliveryClaimKind deliveryKind = lifecycle.deliveryClaimKind();
         if (active == null
                 || !ownsDeliveryClaim(
@@ -1306,7 +1306,7 @@ final class RequestSlot extends RequestLifecycle {
         if (active == null) {
             return PreemptionReduction.Stale.INSTANCE;
         }
-        RequestLifecycleSnapshot lifecycle = snapshot();
+        RequestState.Snapshot lifecycle = snapshot();
         DeliveryConfirmation confirmation = confirmDeliveryForPublication(
                 active,
                 lifecycle.deliveryClaimKind(),
@@ -1441,7 +1441,7 @@ final class RequestSlot extends RequestLifecycle {
         requireSlotLock("Engine fence resource acquisition");
         ScheduledRequest active = activeItem();
         assert active != null : "Engine fence requires active item";
-        RequestLifecycleSnapshot lifecycle = snapshot();
+        RequestState.Snapshot lifecycle = snapshot();
         PrefillEndpoint prefill = active.prefillEp();
         PrefillState.Protection protection = null;
         if (prefill != null) {
@@ -1554,7 +1554,7 @@ final class RequestSlot extends RequestLifecycle {
     TerminalAction beginPrefillRetirementTerminal(
             PrefillEndpoint source,
             ScheduledRequest expected,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response) {
         requireSlotLock("Prefill retirement terminal claim");
         PendingPrefillRetirement pending = new PendingPrefillRetirement(
@@ -1604,7 +1604,7 @@ final class RequestSlot extends RequestLifecycle {
             boolean releaseDecode,
             boolean releasePrefill,
             Runnable counterpartCleanup,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response) {
         return beginTerminalizing(
                 removePrefillQueue,
@@ -1618,7 +1618,7 @@ final class RequestSlot extends RequestLifecycle {
 
     /** Claim a locally reversible terminal specifically for public-future use. */
     TerminalAction beginExternalTerminalizing(
-            Function<RequestSlot, RequestLifecycleSnapshot> transition) {
+            Function<RequestSlot, RequestState.Snapshot> transition) {
         requireSlotLock("external terminal claim");
         if (!canClaimLocalTerminal()) {
             return null;
@@ -1639,7 +1639,7 @@ final class RequestSlot extends RequestLifecycle {
             boolean releaseDecode,
             boolean releasePrefill,
             Runnable counterpartCleanup,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response,
             boolean requestPublication) {
         requireSlotLock("terminal claim");
@@ -1647,9 +1647,9 @@ final class RequestSlot extends RequestLifecycle {
         if (!ownsActiveGeneration() || admissionMutation != null) {
             return null;
         }
-        RequestLifecycleSnapshot current = snapshot();
+        RequestState.Snapshot current = snapshot();
         boolean publishable = requestPublication
-                && current.state() != RequestLifecycleState.ACKNOWLEDGED
+                && current.state() != RequestState.Phase.ACKNOWLEDGED
                 && !future.isDone();
         PublicationLease lease = publishable
                 ? requirePublicationLease() : null;
@@ -1714,7 +1714,7 @@ final class RequestSlot extends RequestLifecycle {
                                     + requestId),
                     null);
         }
-        RequestLifecycleSnapshot terminal;
+        RequestState.Snapshot terminal;
         Throwable transitionFailure = null;
         try {
             terminal = action.transition().apply(this);
@@ -1816,7 +1816,7 @@ final class RequestSlot extends RequestLifecycle {
         if (slotPhase != SlotPhase.TOMBSTONE) {
             return true;
         }
-        RequestLifecycleSnapshot lifecycle = snapshot();
+        RequestState.Snapshot lifecycle = snapshot();
         if (admissionOpen
                 || item != null
                 || priorityAdmission
@@ -2623,14 +2623,14 @@ record TerminalAction(
         boolean releasePrefill,
         Runnable counterpartCleanup,
         String queueReason,
-        Function<RequestSlot, RequestLifecycleSnapshot> transition,
+        Function<RequestSlot, RequestState.Snapshot> transition,
         Response response,
         PublicationLease publicationLease) {
 }
 
 /** Non-persistent proof that a claimed terminal action reached its tombstone. */
 record TombstoneResult(
-        RequestLifecycleSnapshot terminal,
+        RequestState.Snapshot terminal,
         Throwable transitionFailure,
         RequestSlot.PublicationPermit publication) {
 }

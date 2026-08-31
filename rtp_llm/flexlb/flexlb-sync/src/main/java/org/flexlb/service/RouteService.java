@@ -4,7 +4,7 @@ import com.google.protobuf.ByteString;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestScheduler;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -119,7 +119,7 @@ public class RouteService {
         return generateInput != null && !generateInput.isEmpty();
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
+    public RequestState.Snapshot getRequestState(long requestId,
                                                     long expectedBatchId) {
         return requestScheduler == null ? null
                 : requestScheduler.getRequestState(requestId, expectedBatchId);
@@ -132,7 +132,7 @@ public class RouteService {
      * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
      * same idempotency and generation-fencing semantics.</p>
      */
-    public RequestLifecycleSnapshot cancelRequest(long requestId,
+    public RequestState.Snapshot cancelRequest(long requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
         return requestScheduler == null ? null

@@ -273,7 +273,7 @@ public final class RequestScheduler {
         }
     }
 
-    public RequestLifecycleSnapshot cancelRequest(
+    public RequestState.Snapshot cancelRequest(
             long requestId,
             long expectedBatchId,
             CancelReason reason) {
@@ -296,11 +296,11 @@ public final class RequestScheduler {
         return (int) queued;
     }
 
-    public List<RequestLifecycleSnapshot> snapshotActiveRequests() {
+    public List<RequestState.Snapshot> snapshotActiveRequests() {
         return lifecycle.snapshotActiveRequests();
     }
 
-    public RequestLifecycleSnapshot getRequestState(
+    public RequestState.Snapshot getRequestState(
             long requestId, long expectedBatchId) {
         return lifecycle.getRequestState(requestId, expectedBatchId);
     }

@@ -590,7 +590,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
                     CancelReason pendingCancel =
                             completion.cancellationToResume();
                     Response terminalResponse = failure;
-                    Function<RequestSlot, RequestLifecycleSnapshot> transition;
+                    Function<RequestSlot, RequestState.Snapshot> transition;
                     if (pendingCancel == null) {
                         String detail = failure.getErrorMessage() == null
                                 ? "eviction admission failed"
@@ -650,7 +650,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
                                 + entry.requestId());
             }
             String detail = cancelDetail(firstCause);
-            RequestLifecycleSnapshot current = entry.snapshot();
+            RequestState.Snapshot current = entry.snapshot();
             ScheduledRequest item = entry.activeItem();
             if (item == null) {
                 localCompletion = beginTerminalLocked(
@@ -1000,7 +1000,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
      *         {@code null} when the request is unknown or {@code batchId}
      *         addresses a different generation
      */
-    public RequestLifecycleSnapshot cancelRequest(long requestId,
+    public RequestState.Snapshot cancelRequest(long requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
@@ -1010,12 +1010,12 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
         }
         RequestSlot.FenceReduction fenceReduction = null;
         TerminalAction localCompletion = null;
-        RequestLifecycleSnapshot result;
+        RequestState.Snapshot result;
         synchronized (entry) {
             if (!isCurrentSlot(entry)) {
                 return matchingTerminalState(requestId, expectedBatchId);
             }
-            RequestLifecycleSnapshot current = entry.snapshot();
+            RequestState.Snapshot current = entry.snapshot();
             if (!batchMatches(current, expectedBatchId)) {
                 return null;
             }
@@ -1025,7 +1025,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
             }
             if (reason == CancelReason.DEADLINE_EXCEEDED
                     && current.state()
-                        == RequestLifecycleState.ACKNOWLEDGED) {
+                        == RequestState.Phase.ACKNOWLEDGED) {
                 return current;
             }
 
@@ -1068,17 +1068,17 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
         return result;
     }
 
-    private RequestLifecycleSnapshot matchingTerminalState(long requestId,
+    private RequestState.Snapshot matchingTerminalState(long requestId,
                                                             long expectedBatchId) {
         RequestSlot slot = requestSlots.get(requestId);
-        RequestLifecycleSnapshot terminal = slot == null
+        RequestState.Snapshot terminal = slot == null
                 ? null : slot.snapshot();
         return batchMatches(terminal, expectedBatchId) ? terminal : null;
     }
 
     /** Called with both delivery and entry ownership held. */
     private static boolean isLocallyReversible(
-            RequestLifecycleSnapshot snapshot) {
+            RequestState.Snapshot snapshot) {
         // DeliveryClaimKind is the single point-of-no-return. Endpoint capacity
         // and this claim commit in one delivery transaction, so consulting a
         // timestamp or later ACK would recreate a second ownership mirror.
@@ -1258,7 +1258,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
     }
 
     /** Called only after local rollback or authoritative engine settlement. */
-    private static RequestLifecycleSnapshot settleCancellationLifecycle(
+    private static RequestState.Snapshot settleCancellationLifecycle(
             RequestSlot lifecycle,
             CancelReason reason,
             String detail) {
@@ -1405,7 +1405,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
                     settleCancellationFromWorkerStatusLocked(
                             entry, proof, observation.source()));
         }
-        Function<RequestSlot, RequestLifecycleSnapshot> transition;
+        Function<RequestSlot, RequestState.Snapshot> transition;
         Response response;
         if (observation.successful()) {
             transition = owner -> owner.complete("decode completed");
@@ -1448,8 +1448,8 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
      * lifecycles. The requestSlots map is authoritative; no diagnostic-only
      * shadow queue is maintained.
      */
-    public List<RequestLifecycleSnapshot> snapshotActiveRequests() {
-        List<RequestLifecycleSnapshot> snapshots = new ArrayList<>(requestSlots.size());
+    public List<RequestState.Snapshot> snapshotActiveRequests() {
+        List<RequestState.Snapshot> snapshots = new ArrayList<>(requestSlots.size());
         for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot entry = candidate.getValue();
             synchronized (entry) {
@@ -1467,10 +1467,10 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
         return List.copyOf(snapshots);
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
+    public RequestState.Snapshot getRequestState(long requestId,
                                                     long expectedBatchId) {
         RequestSlot entry = requestSlots.get(requestId);
-        RequestLifecycleSnapshot snapshot = entry == null
+        RequestState.Snapshot snapshot = entry == null
                 ? null : entry.snapshot();
         return batchMatches(snapshot, expectedBatchId) ? snapshot : null;
     }
@@ -1563,11 +1563,11 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
 
     /** Caller holds the exact RequestSlot. */
     private boolean ownsPreparedDelivery(RequestSlot entry, ScheduledRequest item) {
-        RequestLifecycleSnapshot snapshot = entry.snapshot();
+        RequestState.Snapshot snapshot = entry.snapshot();
         return entry.ownsActiveItem(item)
                 && entry.isOpen()
                 && entry.canClaimDelivery()
-                && snapshot.state() == RequestLifecycleState.QUEUED
+                && snapshot.state() == RequestState.Phase.QUEUED
                 && snapshot.deliveryClaimKind() == DeliveryClaimKind.NONE;
     }
 
@@ -1821,7 +1821,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
     private PreemptionWork confirmBatchEnqueueLocked(
             RequestSlot entry,
             ScheduledRequest item) {
-        RequestLifecycleSnapshot current = entry.snapshot();
+        RequestState.Snapshot current = entry.snapshot();
         long batchId = current.batchId();
         if (!entry.ownsDeliveryClaim(
                 item, DeliveryClaimKind.BATCH_ENQUEUE, batchId)) {
@@ -1862,7 +1862,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
             RequestSlot entry,
             boolean releaseDecode,
             boolean releasePrefill,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response) {
         return beginTerminalLocked(
                 entry, true, releaseDecode, releasePrefill, null,
@@ -1873,7 +1873,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
     static TerminalAction beginWorkerStatusTerminalLocked(
             RequestSlot entry,
             Runnable counterpartCleanup,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response) {
         return beginTerminalLocked(
                 entry, false, false, false, counterpartCleanup,
@@ -1886,7 +1886,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
             boolean releaseDecode,
             boolean releasePrefill,
             Runnable counterpartCleanup,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition,
+            Function<RequestSlot, RequestState.Snapshot> transition,
             Response response) {
         return entry.beginTerminalizing(
                 removePrefillQueue,
@@ -2188,7 +2188,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
      * Settle the canonical Prefill owner by exact committed item identity.
      *
      * <p>The Registry already knows whether this request is an individual or
-     * a batch member. Consulting RequestLifecycle here creates a commit window
+     * a batch member. Consulting RequestState here creates a commit window
      * in which Registry is committed but lifecycle delivery has not started.
      */
     private void releasePrefillAccounting(ScheduledRequest item) {
@@ -2226,7 +2226,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
             RequestSlot slot, Response response) {
         String detail = response != null && response.getErrorMessage() != null
                 ? response.getErrorMessage() : "external future completion";
-        Function<RequestSlot, RequestLifecycleSnapshot> transition =
+        Function<RequestSlot, RequestState.Snapshot> transition =
                 response != null && !response.isSuccess()
                         ? owner -> owner.fail(detail)
                         : owner -> owner.complete(detail);
@@ -2259,7 +2259,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
      */
     private TerminalAction claimExternalLocalTerminal(
             RequestSlot slot,
-            Function<RequestSlot, RequestLifecycleSnapshot> transition) {
+            Function<RequestSlot, RequestState.Snapshot> transition) {
         synchronized (slot) {
             if (!isCurrentSlot(slot) || !slot.canClaimLocalTerminal()) {
                 return null;
@@ -2293,7 +2293,7 @@ final class RequestLifecycleCoordinator implements SlotDeliveryPort,
         return first;
     }
 
-    private static boolean batchMatches(RequestLifecycleSnapshot snapshot,
+    private static boolean batchMatches(RequestState.Snapshot snapshot,
                                         long expectedBatchId) {
         if (snapshot == null) {
             return false;

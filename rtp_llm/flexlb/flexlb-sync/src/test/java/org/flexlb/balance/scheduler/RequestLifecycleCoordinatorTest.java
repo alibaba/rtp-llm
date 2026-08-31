@@ -87,7 +87,7 @@ class RequestLifecycleCoordinatorTest {
         assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(),
                 rejected.join().getCode());
 
-        RequestLifecycleSnapshot cancellation = lifecycle.cancelRequest(
+        RequestState.Snapshot cancellation = lifecycle.cancelRequest(
                 201L, 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(cancellation);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -145,10 +145,10 @@ class RequestLifecycleCoordinatorTest {
                 lifecycle.beginAdmission(301L, future);
         assertNotNull(scope);
 
-        RequestLifecycleSnapshot requested = lifecycle.cancelRequest(
+        RequestState.Snapshot requested = lifecycle.cancelRequest(
                 301L, 0L, CancelReason.CLIENT_CANCELLED);
 
-        assertEquals(RequestLifecycleState.CANCEL_REQUESTED, requested.state());
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
         assertFalse(future.isDone(),
                 "the admission mutation still owns rollback and terminal cleanup");
 
@@ -156,7 +156,7 @@ class RequestLifecycleCoordinatorTest {
 
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
-        assertEquals(RequestLifecycleState.CANCELLED,
+        assertEquals(RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState(301L, 0L).state());
     }
 
@@ -203,7 +203,7 @@ class RequestLifecycleCoordinatorTest {
                 501L, 91L, CancelReason.CLIENT_CANCELLED));
         assertFalse(future.isDone());
 
-        RequestLifecycleSnapshot exact = lifecycle.cancelRequest(
+        RequestState.Snapshot exact = lifecycle.cancelRequest(
                 501L, 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(exact);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -223,12 +223,12 @@ class RequestLifecycleCoordinatorTest {
 
         assertFalse(lifecycle.reduceStale(
                 slot, heartbeatAtMs + ttlMs - 1L, ttlMs));
-        assertEquals(RequestLifecycleState.QUEUED,
+        assertEquals(RequestState.Phase.QUEUED,
                 lifecycle.getRequestState(601L, 0L).state());
 
         assertTrue(lifecycle.reduceStale(
                 slot, heartbeatAtMs + ttlMs + 1L, ttlMs));
-        assertEquals(RequestLifecycleState.TIMED_OUT,
+        assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(601L, 0L).state());
         verify(engineCancelChannel, never()).cancel(
                 org.mockito.ArgumentMatchers.any(),
@@ -247,7 +247,7 @@ class RequestLifecycleCoordinatorTest {
         assertTrue(lifecycle.reduceStale(
                 slot, slot.createdAtMs() + ttlMs + 1L, ttlMs));
 
-        assertEquals(RequestLifecycleState.TIMED_OUT,
+        assertEquals(RequestState.Phase.TIMED_OUT,
                 lifecycle.getRequestState(602L, 0L).state());
         verify(registered.item().decodeEp()).releasePlacementExact(
                 registered.item().decodeReservation());

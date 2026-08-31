@@ -4,7 +4,7 @@ import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
@@ -375,7 +375,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 return;
             }
         }
-        RequestLifecycleSnapshot snapshot = routeService.getRequestState(
+        RequestState.Snapshot snapshot = routeService.getRequestState(
                 request.getRequestId(), request.getBatchId());
         FlexlbScheduleProtocol.GetRequestStateResponsePB.Builder response =
                 FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder().setFound(snapshot != null);
@@ -504,7 +504,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private FlexlbScheduleProtocol.FlexlbCancelResponsePB cancelLocally(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
-        RequestLifecycleSnapshot snapshot = routeService.cancelRequest(
+        RequestState.Snapshot snapshot = routeService.cancelRequest(
                 request.getRequestId(),
                 request.getBatchId(),
                 toCancelReason(request.getReason()));
@@ -592,7 +592,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
-            RequestLifecycleSnapshot lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
+            RequestState.Snapshot lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
             if (lifecycle != null) {
                 builder.setLifecycle(toLifecycleProto(lifecycle));
             }
@@ -905,7 +905,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(
-            RequestLifecycleSnapshot snapshot) {
+            RequestState.Snapshot snapshot) {
         FlexlbScheduleProtocol.RequestLifecyclePB.Builder lifecycle =
                 FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
                         .setRequestId(snapshot.requestId())

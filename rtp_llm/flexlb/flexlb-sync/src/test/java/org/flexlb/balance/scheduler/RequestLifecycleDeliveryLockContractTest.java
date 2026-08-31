@@ -230,14 +230,14 @@ class RequestLifecycleDeliveryLockContractTest {
                                 }));
                 assertTrue(publicationEntered.await(5, TimeUnit.SECONDS));
 
-                Future<RequestLifecycleSnapshot> cancellation =
+                Future<RequestState.Snapshot> cancellation =
                         operations.submit(() -> lifecycle.cancelRequest(
                                 registered.item().requestId(),
                                 0L,
                                 CancelReason.CLIENT_CANCELLED));
-                RequestLifecycleSnapshot pending =
+                RequestState.Snapshot pending =
                         cancellation.get(5, TimeUnit.SECONDS);
-                assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
+                assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                         pending.state());
                 assertFalse(publication.isDone(),
                         "cancellation must not resolve endpoint publication");
@@ -251,7 +251,7 @@ class RequestLifecycleDeliveryLockContractTest {
         }
 
         assertFalse(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
-        assertEquals(RequestLifecycleState.CANCELLED,
+        assertEquals(RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState(
                         registered.item().requestId(), 0L).state());
     }
@@ -280,12 +280,12 @@ class RequestLifecycleDeliveryLockContractTest {
                                 }));
                 assertTrue(queuePublished.await(5, TimeUnit.SECONDS));
 
-                Future<RequestLifecycleSnapshot> cancellation =
+                Future<RequestState.Snapshot> cancellation =
                         operations.submit(() -> lifecycle.cancelRequest(
                                 registered.item().requestId(),
                                 0L,
                                 CancelReason.CLIENT_CANCELLED));
-                assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
+                assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                         cancellation.get(5, TimeUnit.SECONDS).state());
 
                 returnFromPublication.countDown();
@@ -401,9 +401,9 @@ class RequestLifecycleDeliveryLockContractTest {
                 () -> true);
 
         assertNotNull(claim);
-        RequestLifecycleSnapshot snapshot = lifecycle.getRequestState(
+        RequestState.Snapshot snapshot = lifecycle.getRequestState(
                 registered.item().requestId(), 0L);
-        assertEquals(RequestLifecycleState.DISPATCHING, snapshot.state());
+        assertEquals(RequestState.Phase.DISPATCHING, snapshot.state());
         assertEquals(DeliveryClaimKind.BATCH_ENQUEUE,
                 snapshot.deliveryClaimKind());
         assertEquals(701L, snapshot.batchId());
@@ -427,15 +427,15 @@ class RequestLifecycleDeliveryLockContractTest {
                 claim, SlotDeliveryPort.Completion.Delivered.INSTANCE);
 
         assertTrue(registered.future().join().isSuccess());
-        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState(205L, 0L).state());
         awaitCondition(() -> lifecycle.decodeAcceptanceCount() == 0);
     }
 
     private void assertQueuedWithoutClaim(long requestId) {
-        RequestLifecycleSnapshot snapshot = lifecycle.getRequestState(
+        RequestState.Snapshot snapshot = lifecycle.getRequestState(
                 requestId, 0L);
-        assertEquals(RequestLifecycleState.QUEUED, snapshot.state());
+        assertEquals(RequestState.Phase.QUEUED, snapshot.state());
         assertEquals(DeliveryClaimKind.NONE, snapshot.deliveryClaimKind());
     }
 

@@ -627,7 +627,7 @@ class BatcherContext {
             long nowMs) {
         // OwnershipLost is not a terminal fact. In particular, the request's
         // admission mutation may still be closing after publishing the exact
-        // queue item. Removing it here would leave RequestLifecycle QUEUED
+        // queue item. Removing it here would leave RequestState QUEUED
         // without either a queue owner or a terminal callback.
         if (blockedItem == null
                 || blockedResult instanceof CapacityBoundary.Unavailable

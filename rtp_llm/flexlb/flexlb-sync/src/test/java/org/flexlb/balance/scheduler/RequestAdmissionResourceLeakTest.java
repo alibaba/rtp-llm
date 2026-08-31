@@ -184,9 +184,9 @@ class RequestAdmissionResourceLeakTest {
                         registered.item(), false, 1, 30_000L,
                         () -> true));
 
-        RequestLifecycleSnapshot requested = lifecycle.cancelRequest(
+        RequestState.Snapshot requested = lifecycle.cancelRequest(
                 201L, 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
+        assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 requested.state());
         assertEquals(1, lifecycle.decodeAcceptanceCount(),
                 "the open admission mutation still owns terminal cleanup");
@@ -224,7 +224,7 @@ class RequestAdmissionResourceLeakTest {
 
         assertDecodeOwned(registered.item().requestId());
         awaitCondition(() -> lifecycle.decodeAcceptanceCount() == 0);
-        assertEquals(RequestLifecycleState.ACKNOWLEDGED,
+        assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState(401L, 0L).state());
     }
 

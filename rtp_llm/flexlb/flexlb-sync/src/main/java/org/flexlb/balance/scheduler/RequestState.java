@@ -5,18 +5,86 @@ package org.flexlb.balance.scheduler;
  * RequestSlot inherits these fields, so every synchronized method locks that
  * exact slot rather than a delegated lifecycle object.
  */
-class RequestLifecycle {
+public class RequestState {
+
+    public enum Phase {
+        QUEUED,
+        DISPATCHING,
+        ACKNOWLEDGED,
+        CANCEL_REQUESTED,
+        CANCELLED,
+        TIMED_OUT,
+        FAILED,
+        COMPLETED;
+
+        boolean canTransitionTo(Phase next) {
+            if (this == next) {
+                return true;
+            }
+            return switch (this) {
+                case QUEUED -> next == DISPATCHING
+                        || next == CANCEL_REQUESTED
+                        || next == TIMED_OUT
+                        || next == FAILED;
+                case DISPATCHING -> next == ACKNOWLEDGED
+                        || next == CANCEL_REQUESTED
+                        || next == TIMED_OUT
+                        || next == FAILED
+                        || next == COMPLETED;
+                case ACKNOWLEDGED -> next == CANCEL_REQUESTED
+                        || next == TIMED_OUT
+                        || next == FAILED
+                        || next == COMPLETED;
+                case CANCEL_REQUESTED -> next == CANCELLED
+                        || next == TIMED_OUT
+                        || next == FAILED
+                        || next == COMPLETED;
+                case CANCELLED, TIMED_OUT, FAILED, COMPLETED -> false;
+            };
+        }
+
+        public boolean isTerminal() {
+            return this == CANCELLED || this == TIMED_OUT
+                    || this == FAILED || this == COMPLETED;
+        }
+    }
+
+    public record Snapshot(
+            long requestId,
+            Phase state,
+            DeliveryClaimKind deliveryClaimKind,
+            long batchId,
+            long createdAtMs,
+            long updatedAtMs,
+            String detail) {
+        public Snapshot {
+            java.util.Objects.requireNonNull(state, "state");
+            java.util.Objects.requireNonNull(
+                    deliveryClaimKind, "deliveryClaimKind");
+            java.util.Objects.requireNonNull(detail, "detail");
+            if (deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
+                    && batchId <= 0) {
+                throw new IllegalArgumentException(
+                        "batch enqueue delivery requires a positive batchId");
+            }
+            if (deliveryClaimKind != DeliveryClaimKind.BATCH_ENQUEUE
+                    && batchId != 0) {
+                throw new IllegalArgumentException(
+                        "only batch enqueue delivery may carry a batchId");
+            }
+        }
+    }
 
     private final long requestId;
     private final long createdAtMs;
-    private RequestLifecycleState state = RequestLifecycleState.QUEUED;
+    private Phase state = Phase.QUEUED;
     private long updatedAtMs;
     private String detail = "queued";
     private DeliveryClaimKind deliveryClaimKind = DeliveryClaimKind.NONE;
     private long batchId;
     private long batchEnqueueStartedAtMs;
 
-    RequestLifecycle(long requestId) {
+    RequestState(long requestId) {
         this.requestId = requestId;
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
@@ -32,12 +100,12 @@ class RequestLifecycle {
             throw new IllegalArgumentException("batchId must be positive");
         }
         requireCompatibleDelivery(DeliveryClaimKind.BATCH_ENQUEUE, assignedBatchId);
-        ensureTransitionAllowed(RequestLifecycleState.DISPATCHING);
+        ensureTransitionAllowed(Phase.DISPATCHING);
         if (deliveryClaimKind == DeliveryClaimKind.NONE) {
             deliveryClaimKind = DeliveryClaimKind.BATCH_ENQUEUE;
             batchId = assignedBatchId;
         }
-        transition(RequestLifecycleState.DISPATCHING, "batch enqueue started");
+        transition(Phase.DISPATCHING, "batch enqueue started");
     }
 
     /**
@@ -47,11 +115,11 @@ class RequestLifecycle {
      */
     synchronized void startRouteDecisionDelivery() {
         requireCompatibleDelivery(DeliveryClaimKind.ROUTE_DECISION, 0);
-        ensureTransitionAllowed(RequestLifecycleState.DISPATCHING);
+        ensureTransitionAllowed(Phase.DISPATCHING);
         if (deliveryClaimKind == DeliveryClaimKind.NONE) {
             deliveryClaimKind = DeliveryClaimKind.ROUTE_DECISION;
         }
-        transition(RequestLifecycleState.DISPATCHING, "route decision delivery started");
+        transition(Phase.DISPATCHING, "route decision delivery started");
     }
 
     /**
@@ -76,8 +144,8 @@ class RequestLifecycle {
         return batchEnqueueStartedAtMs;
     }
 
-    synchronized RequestLifecycleSnapshot markDeliveryConfirmed() {
-        if (state.isTerminal() || state == RequestLifecycleState.CANCEL_REQUESTED) {
+    synchronized Snapshot markDeliveryConfirmed() {
+        if (state.isTerminal() || state == Phase.CANCEL_REQUESTED) {
             return snapshot();
         }
         String confirmationDetail = switch (deliveryClaimKind) {
@@ -86,49 +154,49 @@ class RequestLifecycle {
             case NONE -> throw new IllegalStateException(
                     "cannot confirm delivery without a delivery claim");
         };
-        return transition(RequestLifecycleState.ACKNOWLEDGED, confirmationDetail);
+        return transition(Phase.ACKNOWLEDGED, confirmationDetail);
     }
 
-    synchronized RequestLifecycleSnapshot timeout(String message) {
+    synchronized Snapshot timeout(String message) {
         if (state.isTerminal()) {
             return snapshot();
         }
-        return transition(RequestLifecycleState.TIMED_OUT, message);
+        return transition(Phase.TIMED_OUT, message);
     }
 
-    synchronized RequestLifecycleSnapshot fail(String message) {
+    synchronized Snapshot fail(String message) {
         if (state.isTerminal()) {
             return snapshot();
         }
-        return transition(RequestLifecycleState.FAILED, message);
+        return transition(Phase.FAILED, message);
     }
 
-    synchronized RequestLifecycleSnapshot complete(String message) {
+    synchronized Snapshot complete(String message) {
         if (state.isTerminal()) {
             return snapshot();
         }
-        return transition(RequestLifecycleState.COMPLETED, message);
+        return transition(Phase.COMPLETED, message);
     }
 
-    synchronized RequestLifecycleSnapshot requestCancel(String message) {
+    synchronized Snapshot requestCancel(String message) {
         if (state.isTerminal()) {
             return snapshot();
         }
-        return transition(RequestLifecycleState.CANCEL_REQUESTED, message);
+        return transition(Phase.CANCEL_REQUESTED, message);
     }
 
-    synchronized RequestLifecycleSnapshot cancel(String message) {
+    synchronized Snapshot cancel(String message) {
         if (state.isTerminal()) {
             return snapshot();
         }
-        if (state != RequestLifecycleState.CANCEL_REQUESTED) {
-            transition(RequestLifecycleState.CANCEL_REQUESTED, message);
+        if (state != Phase.CANCEL_REQUESTED) {
+            transition(Phase.CANCEL_REQUESTED, message);
         }
-        return transition(RequestLifecycleState.CANCELLED, message);
+        return transition(Phase.CANCELLED, message);
     }
 
-    synchronized RequestLifecycleSnapshot snapshot() {
-        return new RequestLifecycleSnapshot(requestId, state, deliveryClaimKind, batchId,
+    synchronized Snapshot snapshot() {
+        return new Snapshot(requestId, state, deliveryClaimKind, batchId,
                 createdAtMs, updatedAtMs, detail);
     }
 
@@ -150,13 +218,13 @@ class RequestLifecycle {
         }
     }
 
-    private void ensureTransitionAllowed(RequestLifecycleState next) {
+    private void ensureTransitionAllowed(Phase next) {
         if (!state.canTransitionTo(next)) {
             throw new IllegalStateException("invalid request lifecycle transition " + state + " -> " + next);
         }
     }
 
-    private RequestLifecycleSnapshot transition(RequestLifecycleState next, String message) {
+    private Snapshot transition(Phase next, String message) {
         if (state == next) {
             return snapshot();
         }

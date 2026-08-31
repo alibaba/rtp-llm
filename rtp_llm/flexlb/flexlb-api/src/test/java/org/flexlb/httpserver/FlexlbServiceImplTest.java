@@ -7,8 +7,7 @@ import io.grpc.Context;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.CancelReason;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -671,7 +670,7 @@ class FlexlbServiceImplTest {
         response.setCode(200);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
         when(routeService.getRequestState(700L, 0)).thenReturn(
-                new RequestLifecycleSnapshot(700L, RequestLifecycleState.ACKNOWLEDGED,
+                new RequestState.Snapshot(700L, RequestState.Phase.ACKNOWLEDGED,
                         DeliveryClaimKind.BATCH_ENQUEUE, 1001L, 10L, 20L,
                         "engine acknowledged batch"));
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);

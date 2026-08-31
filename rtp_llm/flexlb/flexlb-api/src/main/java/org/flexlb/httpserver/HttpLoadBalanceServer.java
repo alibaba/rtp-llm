@@ -4,7 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.RequestScheduler;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -204,7 +204,7 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            List<RequestLifecycleSnapshot> snapshot =
+            List<RequestState.Snapshot> snapshot =
                     requestScheduler.snapshotActiveRequests();
             QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
@@ -219,7 +219,7 @@ public class HttpLoadBalanceServer {
     }
 
     private QueueSnapshotResponse persistSchedulerSnapshot(
-            List<RequestLifecycleSnapshot> snapshot) throws IOException {
+            List<RequestState.Snapshot> snapshot) throws IOException {
         Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
         cleanOldSchedulerSnapshots();
 
