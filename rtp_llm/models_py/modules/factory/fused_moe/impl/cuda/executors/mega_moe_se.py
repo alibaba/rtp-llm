@@ -335,6 +335,15 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._launch(y, tokens, x.device)
         return y
 
+    def forward_prepacked(self, tokens: int, device: torch.device) -> torch.Tensor:
+        """Run MegaMoE-SE after the CUDA extension populated its input buffer."""
+        tokens = int(tokens)
+        self._validate_capacity(tokens)
+        y = self._mega_y[:tokens]
+        # Empty ranks must still participate in the collective.
+        self._launch(y, tokens, device)
+        return y
+
     def forward_gate_pack(
         self,
         x: torch.Tensor,

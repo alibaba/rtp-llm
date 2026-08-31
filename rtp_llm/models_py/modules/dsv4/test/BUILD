@@ -139,3 +139,7 @@ test_suite(
         ":test_hc_impl",
     ] + [name + "_x86" for name in _PAIRED_GPU_TESTS],
 )
+
+dsv4_py_test(
+    name = "test_mega_moe_front_adapter",
+)

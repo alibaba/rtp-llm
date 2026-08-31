@@ -42,6 +42,7 @@ def _block_stub(adapter: object | None) -> Block:
     block.layer_id = 2
     block._mega_csa_adapter = adapter
     block._mega_hca_adapter = None
+    block._mega_front_adapter = None
     block.attn_norm = _IdentityNorm()
     block.ffn_norm = _IdentityNorm()
     block.attn = MagicMock()
@@ -66,6 +67,7 @@ class MegaCSARoutingTest(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.enable_mega_csa = MagicMock()
+                self.enable_mega_front = MagicMock()
 
         layer = _Layer()
         global_weights = MagicMock()
@@ -99,6 +101,7 @@ class MegaCSARoutingTest(unittest.TestCase):
         layer.enable_mega_csa.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
         )
+        layer.enable_mega_front.assert_called_once_with()
 
     def test_decode_q_len_one_uses_complete_mega_sublayer(self) -> None:
         adapter = MagicMock()
@@ -136,6 +139,24 @@ class MegaCSARoutingTest(unittest.TestCase):
         self.assertEqual(tuple(result.shape), tuple(hidden.shape))
         adapter.forward_attention_sublayer.assert_called_once()
         block.attn_hc.pre.assert_not_called()
+        block.attn.forward_decode.assert_not_called()
+
+    def test_dspark_attention_override_takes_priority_over_mega(self) -> None:
+        adapter = MagicMock()
+        adapter.supports_decode_shape.return_value = True
+        block = _block_stub(adapter)
+        attn_fn = MagicMock(side_effect=lambda value: value)
+
+        block.forward_decode(
+            torch.zeros(2, 1, 1, 4),
+            SimpleNamespace(batch_size=2, q_len_per_req=1),
+            torch.zeros(2, 1, dtype=torch.long),
+            attn_fn=attn_fn,
+        )
+
+        attn_fn.assert_called_once()
+        adapter.supports_decode_shape.assert_not_called()
+        adapter.forward_attention_sublayer.assert_not_called()
         block.attn.forward_decode.assert_not_called()
 
     def test_batch_above_kernel_limit_keeps_existing_attention_path(self) -> None:
@@ -211,6 +232,7 @@ class MegaCSARoutingTest(unittest.TestCase):
             layers = [_Layer()]
             norm = _IdentityNorm()
             _mtp_hidden_buffer = None
+            capture_aux_hidden_layer_ids = ()
 
             def __init__(self) -> None:
                 self.embed = torch.nn.Embedding(8, 4)
