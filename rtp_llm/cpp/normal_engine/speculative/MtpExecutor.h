@@ -241,6 +241,12 @@ private:
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool          is_dspark_ = false;
+    // A dedicated DSpARK PREFILL worker only executes the commit path that
+    // seeds the draft feature KV.  It must not construct the proposal model
+    // (or require proposal-only Markov weights); DECODE and PDFUSION retain
+    // the full two-wrapper runtime.  Keep this as an executor-level policy so
+    // the wrapper/weight contracts cannot drift between roles.
+    bool          dspark_prefill_commit_only_ = false;
     size_t        draft_vocab_size_;
     torch::Tensor dspark_markov_w1_;
     torch::Tensor dspark_markov_w2_;

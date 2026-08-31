@@ -557,6 +557,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
+    dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
@@ -723,12 +724,21 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // graphs there only consumes graph-pool memory and can turn CP-RR
             // startup into an avoidable OOM.
             const bool draft_graph_allowed = dsparkDraftGraphAllowed(is_dspark_, role_type_);
-            draft_model_.reset(new PyWrappedModel(model_params,
-                                                  params.py_sp_model,
-                                                  false,
-                                                  false,
-                                                  is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
-                                                  draft_graph_allowed));
+            // The PREFILL commit-only weight descriptors intentionally omit query,
+            // MoE, and Markov/proposal tensors.  Do not instantiate a
+            // PROPOSE wrapper with that graph: construction would either
+            // materialize the omitted modules or fail while looking up their
+            // weights.  Ordinary MTP and DSpARK DECODE/PDFUSION preserve the
+            // historical proposal wrapper.
+            if (!dspark_prefill_commit_only_) {
+                draft_model_.reset(new PyWrappedModel(
+                    model_params,
+                    params.py_sp_model,
+                    false,
+                    false,
+                    is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
+                    draft_graph_allowed));
+            }
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
             if (enable_cuda_graph || is_dspark_) {
@@ -748,7 +758,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
-    if (is_dspark_) {
+    if (is_dspark_ && !dspark_prefill_commit_only_) {
         dspark_markov_w1_ = draft_weights.dspark_markov_w1;
         dspark_markov_w2_ = draft_weights.dspark_markov_w2;
         RTP_LLM_CHECK_WITH_INFO(dspark_markov_w1_.defined() && dspark_markov_w2_.defined(),
@@ -759,6 +769,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                     && dspark_markov_w1_.size(0) == static_cast<int64_t>(draft_vocab_size_)
                                     && dspark_markov_w1_.scalar_type() == dspark_markov_w2_.scalar_type(),
                                 "DSpARK Markov weights must be matching CUDA [vocab,rank] tensors");
+    } else if (dspark_prefill_commit_only_) {
+        RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_dspark_) {
