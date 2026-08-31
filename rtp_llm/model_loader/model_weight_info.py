@@ -70,6 +70,7 @@ def _apply_mega_moe_fp4_wrappers(
     from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
         is_mega_moe_fused_strategy,
         is_mega_moe_strategy,
+        is_mxfp8_moe_ckpt,
         wrap_moe_for_mega_moe,
     )
 
@@ -78,6 +79,8 @@ def _apply_mega_moe_fp4_wrappers(
 
     include_shared_expert = is_mega_moe_fused_strategy()
     is_offline = is_offline_mega_moe_fp4_ckpt(database)
+    if not is_offline and is_mxfp8_moe_ckpt(database):
+        return weight_info
     if is_offline:
         logging.info(
             "[mega_moe] offline FP4 MoE detected in ckpt; using "

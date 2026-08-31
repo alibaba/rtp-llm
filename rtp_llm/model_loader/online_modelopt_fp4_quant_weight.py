@@ -754,6 +754,38 @@ def is_mega_moe_strategy() -> bool:
     }
 
 
+def is_mxfp8_moe_ckpt(database: Optional[Any]) -> bool:
+    import json
+    import os
+
+    if database is None:
+        return False
+    path = getattr(database, "path", None)
+    if not path:
+        return False
+    cfg_path = os.path.join(path, "config.json")
+    if not os.path.exists(cfg_path):
+        return False
+    try:
+        with open(cfg_path) as f:
+            qc = json.load(f).get("quantization_config") or {}
+    except Exception:
+        return False
+    if str(qc.get("quant_method", "")).lower() == "mxfp8":
+        return True
+    quantized_layers = (
+        qc.get("quantized_layers")
+        or (qc.get("quantization") or {}).get("quantized_layers")
+        or {}
+    )
+    algos = {
+        str(layer.get("quant_algo", "")).upper()
+        for layer in quantized_layers.values()
+        if isinstance(layer, dict)
+    }
+    return bool(algos) and algos == {"MXFP8"}
+
+
 def is_mega_moe_fused_strategy() -> bool:
     """Return True when MOE_STRATEGY=mega_moe_fused is set in the env."""
     import os
