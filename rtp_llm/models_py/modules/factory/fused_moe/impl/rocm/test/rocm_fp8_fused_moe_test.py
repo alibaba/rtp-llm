@@ -6,8 +6,10 @@ runs each executor against a BF16 reference (computed from the dequantized
 weights) and asserts shape, finiteness and approximate numerical agreement.
 """
 
+import os
 import unittest
 from unittest import SkipTest
+from unittest.mock import patch
 
 import torch
 
@@ -31,6 +33,9 @@ try:
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
         torch_moe_ref,
     )
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
+        _validate_runtime_mode,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
         RocmExpertsFp8PerBlock,
         RocmExpertsFp8PerChannel,
@@ -43,6 +48,29 @@ except ImportError as exc:  # stale librtp_compute_ops.so / missing aiter / etc.
     _IMPORT_ERROR = exc
 
 FP8_E4M3FNUZ_MAX = 240.0  # max representable in float8_e4m3fnuz
+
+
+class DeterministicFp8MoeConfigTest(unittest.TestCase):
+    @unittest.skipIf(
+        _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
+    )
+    def test_cuda_graph_conflict_fails_fast(self):
+        with patch.dict(
+            os.environ,
+            {"ENABLE_CUDA_GRAPH": "1", "ENABLE_NATIVE_CUDA_GRAPH": "0"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires CUDA/HIP graph"):
+                _validate_runtime_mode()
+
+    @unittest.skipIf(
+        _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
+    )
+    def test_graph_disabled_is_supported(self):
+        with patch.dict(
+            os.environ,
+            {"ENABLE_CUDA_GRAPH": "0", "ENABLE_NATIVE_CUDA_GRAPH": "0"},
+        ):
+            _validate_runtime_mode()
 
 
 def _per_channel_quant_fp8(w: torch.Tensor, fp8_dtype: torch.dtype):
@@ -194,15 +222,19 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
 
         # Build the executor.
         config_adapter = _make_config_adapter(self.E, self.TOP_K, 2 * self.N)
+        w1q_runtime = shuffle_weight(w1q, layout=(16, 16))
+        w2q_runtime = shuffle_weight(w2q, layout=(16, 16))
         weights = {
-            W.moe_w1: w1q,
-            W.moe_w2: w2q,
+            W.moe_w1: w1q_runtime,
+            W.moe_w2: w2q_runtime,
             W.moe_s1: s1,
             W.moe_s2: s2,
         }
         executor = RocmExpertsFp8PerChannel(
             config_adapter, FusedMoEQuantConfig(), weights
         )
+        self.assertTrue(executor.w1.is_shuffled)
+        self.assertTrue(executor.w2.is_shuffled)
 
         out = executor.execute(
             payload=payload,
