@@ -15,7 +15,7 @@ Spec schema（core.py 产）：
     'kpis':     [{'label': str, 'value': str, 'tone': Optional[str]}],
     'meta':     Optional[{        # 头部元数据面板（KPI 行下方三分区）
         'sources': {'runDir': str, 'aggregate': str,
-                    'summary': Optional[str], 'engineDist': Optional[str]},
+                    'engineDist': Optional[str]},
         'scale':   {'p': num, 'd': num, 'shards': num,
                     'replay': num, 'durationS': Optional[num]},
         'timeAxis': Optional[{'tEnd': num}],   # T_END 动态填入口径文案
@@ -247,7 +247,6 @@ SPEC.summary.kpis.forEach(k=>{
   const s1 = document.createElement('section'); s1.className='meta-sec';
   s1.appendChild(h4('数据源'));
   addRow(s1,'aggregate',so.aggregate);
-  addRow(s1,'summary',so.summary);
   addRow(s1,'engine_dist',so.engineDist);
   addRow(s1,'run 目录',so.runDir);
   host.appendChild(s1);

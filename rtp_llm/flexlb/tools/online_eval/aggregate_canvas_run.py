@@ -3,17 +3,18 @@
 
 Run inside a run dir on the remote host:
   cd <run_dir> && python3 aggregate_canvas_run.py
-Reads (legacy layout first, consolidated run-root files as fallback):
-  load_client/summary.json or client.json
-  load_client/slo_batch_analysis.json or client.json's slo_batch_analysis
-  load_client/shard_*/per_request.jsonl or per_request.jsonl / per_request.jsonl.gz
+Reads (consolidated run-root layout, the only supported form):
+  client.json (summary source: sh-merged scalar keys + embedded
+  server_latency / slo_batch_analysis)
+  per_request.jsonl / per_request.jsonl.gz (run root)
+  load_client/server_latency.json or client.json's server_latency
   mock_engine.log or mock.json (stats + final_snapshot),
   flexlb_logs/flexlb.log* or master.log (dispatch lines + server-schedule-latency rows),
   master.json (inflight_timeseries G4 / prometheus_timeseries G3 /
   counters_timeseries master per-second arrival/completion rates),
   run_meta.json (process_usage G5).
-Legacy files win whenever they exist: a successful consolidation deletes
-them, so a legacy file that is present means fresher data (RUN_DIR reuse).
+per_request rows are the sole metrics source (no-backward-compat: legacy
+summary passthrough / shard layout chains removed; rows missing -> None).
 Outputs meta/summary/batch/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
 send-series source of record) /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
@@ -39,8 +40,8 @@ trace_due_peak_qps over the 1/10/100/1000ms windows, success/error/
 completed qps, elapsed_s, counts, error_rate) and full-run percentiles for
 ttft/e2e/schedule (schedule dual-source adjudication via
 schedule_latency_source) — all computed from the merged per_request rows
-plus the server_latency terminal state; summary.json passthrough values
-serve only as legacy-run fallbacks.
+plus the server_latency terminal state; rows missing -> None (no
+summary.json passthrough, no-backward-compat).
 """
 import glob
 import gzip
@@ -246,22 +247,17 @@ def latency_summary(values, nd=1):
 # ---- shared-impl-end: exec 切块到此为止（下方数据加载不进共享段） ----
 
 
-# ---- inputs: legacy layout first, consolidated run-root fallback ----
-legacy_summary = load_json("load_client/summary.json")
-if legacy_summary:
-    summary = legacy_summary
-    client_json = {}
-else:
-    client_json = load_json("client.json") or {}
-    summary = client_json
-slo = load_json("load_client/slo_batch_analysis.json")
-if not slo and not legacy_summary:
-    # Only read the merged copy from client.json when it is the summary source;
-    # mixing a fresh legacy summary with a stale client.json slo would leak
-    # the previous run's data into this one.
-    slo = client_json.get("slo_batch_analysis")
-if not slo:
-    slo = {}
+# ---- inputs: consolidated run-root layout (the only supported form) ----
+# 当前格式（consolidate 后）：client.json（summary 源：SH 合并段标量键 +
+# server_latency / slo 嵌入）+ run 根 per_request.jsonl(.gz) + master.json +
+# mock.json。legacy load_client/summary.json 双源切换与 shard_* 布局读取链
+# 已删（no-backward-compat，旧 run 不再是支持对象）；summary.json 文件
+# 本身仍由 SH 合并段产出、skill do_result 直读，aggregate 不再从它读指标
+# ——仅从 client.json 直读个别不可自算的元数据（sent_task_count /
+# load_client_workers，Phase B 后自然消失为 None）。
+client_json = load_json("client.json") or {}
+summary = client_json
+slo = client_json.get("slo_batch_analysis") or {}
 
 # run_meta.json（params + client_env）：Phase A 派生统计需要 client_env 里的
 # CLIENT_PACING_LAG_P99_LIMIT_MS，提前到此处加载（原先在 compact time series
@@ -269,17 +265,14 @@ if not slo:
 run_meta = load_json("run_meta.json") or {}
 
 # ---- per_second from per_request.jsonl (bucket by wall-clock send time) ----
-# Legacy shard files first (deleted by consolidation, so their presence means
-# fresher data), then the run-root merged file (plain or gzip).
+# run 根合并文件（plain 或 gzip）唯一来源；shard_* 与 load_client/ 布局
+# 链已删（consolidate 成功即删 shard，残留仅意味着旧 run 复用，不支持）。
 rows = []
-per_request_files = sorted(glob.glob("load_client/shard_*/per_request.jsonl"))
-if not per_request_files:
-    per_request_files = sorted(glob.glob("load_client/per_request.jsonl"))
-if not per_request_files:
-    if os.path.isfile("per_request.jsonl"):
-        per_request_files = ["per_request.jsonl"]
-    elif os.path.isfile("per_request.jsonl.gz"):
-        per_request_files = ["per_request.jsonl.gz"]
+per_request_files = []
+if os.path.isfile("per_request.jsonl"):
+    per_request_files = ["per_request.jsonl"]
+elif os.path.isfile("per_request.jsonl.gz"):
+    per_request_files = ["per_request.jsonl.gz"]
 for f in per_request_files:
     opener = gzip.open if f.endswith(".gz") else open
     with opener(f, "rt", errors="replace") as stream:
@@ -323,7 +316,7 @@ ttft_samples = []  # is_ok 行 ttft_ms>0（全程分位，全量口径）
 e2e_samples = []  # is_ok 行 total_ms>0
 sched_client_samples = []  # is_ok 行 schedule_ms（schedule 双源的 client 口径）
 ok_count = 0  # is_ok 行数（success_count 自算口径）
-completed_count = 0  # status=="ok" 行数（completed 口径，Java 同义）
+completed_count = 0  # is_ok 行数（completed 口径；Java 成功态 "scheduled" / 旧 "ok"）
 wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 
 # ---- engine per-rid terminal lines: full_e2e + birth-axis exec join ----
@@ -421,8 +414,12 @@ for d in rows:
         # Phase A 全程样本（全量口径，与 error_breakdown 同级：含无时间戳
         # is_ok 行）。schedule_ms 缺省 0 与 per_second 桶化同规则。
         ok_count += 1
-        if d.get("status") == "ok":
-            completed_count += 1
+        # Bug #2 修复：completed 与 is_ok 成功口径对齐。原判 status=="ok"
+        # 只覆盖 sh 合并段的旧形态；Java load client 成功态写 "scheduled"
+        # （无 error 键），旧判使 completed_count/completed_qps 恒 0。此处
+        # 位于 _bucket_key is None 分支（即 is_ok(d) 为真），与全聚合器
+        # 唯一成功谓词一致：scheduled / ok 两种形态都计入。
+        completed_count += 1
         sched_client_samples.append(d.get("schedule_ms", 0))
         if d.get("total_ms"):
             e2e_samples.append(d["total_ms"])
@@ -562,19 +559,16 @@ if full_e2e_all:
     }
 
 # ---- Phase A 派生统计：validity / quick-stats / 全程分位（统一聚合侧） ----
-# 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）；单 worker
-# run（Java 直写 summary、无合并段）从此也产出同一套键。rows 为空（旧 run /
-# per_request 缺失）时自算值为 None，out.summary 组装处回退 summary 透传。
+# 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）。rows 是
+# 唯一指标源（no-backward-compat）：rows 缺失（收缩 run / 旧 run）时全部
+# 派生键输出 None，不再透传 summary 键；仅 schedule 双源的 server 口径
+# 与 server_* 直读键不依赖 rows（server_latency 是当前格式正式输入）。
 _have_rows = bool(rows)
 _actual_rpc_start_count = len(rpc_start_ms)  # sh: sum(shard actual_sent_count)
 _recorded_result_count = len(rows)  # sh: sum(shard recorded_result_count)
-# sent_task_count 无 row 级来源（未发出的任务不留行）→ summary 透传链：
-# 多 worker 合并键 sent_task_count → 单 worker Java 直写键 sent_count。
-_sent_task_count = None
-if summary.get("sent_task_count") is not None:
-    _sent_task_count = summary.get("sent_task_count")
-elif summary.get("sent_count") is not None:
-    _sent_task_count = summary.get("sent_count")
+# sent_task_count 无 row 级来源（未发出的任务不留行）→ 从 client.json
+# 单键直读（元数据，非指标回退；Phase B 后 SH 合并段删除、该键自然为 None）。
+_sent_task_count = summary.get("sent_task_count")
 _error_count_calc = len(rows) - ok_count  # 与 error_breakdown 同口径（全量行）
 _success_count_calc = ok_count
 # pacing 分布：sh distribution 的 round 3 精度（p99 与 limit 比较保真）。
@@ -660,7 +654,7 @@ else:
     validity_checks_calc = None
     test_valid_calc = None
 
-# quick-stats 族（rows 非空才有意义；空 rows → None 透传回退）
+# quick-stats 族（rows 非空才有意义；空 rows → None，no-backward-compat 无透传）
 if _have_rows:
     actual_send_qps_calc = rank_rate(rpc_start_ms)
     client_send_peak_qps_calc = {
@@ -1592,10 +1586,14 @@ for role, engines in age_role_engine.items():
     for pts in engines.values():
         for ts, v in pts:
             by_ts[ts] = max(by_ts.get(ts, 0.0), float(v))
-    rows = rel_axis(sorted(by_ts.items()))
-    if rows:
+    # Bug #1 修复（20260831 run 20260831_134508）：局部变量改名
+    # age_rows —— 原名 rows 遮蔽了全局 per_request rows，导致下游
+    # summary.total_requests = len(rows) 被污染为 inflight age 时间桶数
+    # （实测 261 而非 956179）。
+    age_rows = rel_axis(sorted(by_ts.items()))
+    if age_rows:
         inflight_age_by_role[role.lower()] = [
-            {"t": t, "age_ms": int(round(v))} for t, v in rows
+            {"t": t, "age_ms": int(round(v))} for t, v in age_rows
         ]
 
 # KV cache: used / available are per-engine gauges (engineIp labels) summed
@@ -1921,118 +1919,43 @@ out = {
         "fetch_output_stream": fetch_output_stream,
     },
     "summary": {
-        # ---- Phase A：自算优先（合并 per_request rows + server_latency 终态），
-        # ---- summary.json 透传仅旧 run（rows 缺失）回退 ----
-        "total_requests": (len(rows) if _have_rows else summary.get("total_requests")),
-        "success_count": (
-            _success_count_calc if _have_rows else summary.get("success_count")
-        ),
-        "error_count": (
-            _error_count_calc if _have_rows else summary.get("error_count")
-        ),
-        "error_rate": error_rate_calc if _have_rows else summary.get("error_rate"),
+        # ---- rows 唯一指标源（no-backward-compat）：全部自算，rows 缺失
+        # ---- 即 None；不透传 summary 键，不做旧键名映射。 ----
+        "total_requests": len(rows) if _have_rows else None,
+        "success_count": _success_count_calc if _have_rows else None,
+        "error_count": _error_count_calc if _have_rows else None,
+        "error_rate": error_rate_calc,
         # 错误构成（具名子桶细分，含无时间戳行，与 error_count 同口径；
-        # 空rows（无 per_request 数据的 run）输出空 dict。
+        # rows 缺失时空 dict（无数据，非透传）。
         "error_breakdown": dict(error_breakdown),
         "sent_task_count": _sent_task_count,
-        "actual_rpc_start_count": (
-            _actual_rpc_start_count
-            if _have_rows
-            else (
-                summary.get("actual_rpc_start_count")
-                if summary.get("actual_rpc_start_count") is not None
-                else summary.get("actual_sent_count")
-            )
-        ),
-        "recorded_result_count": (
-            _recorded_result_count
-            if _have_rows
-            else summary.get("recorded_result_count")
-        ),
-        "completed_count": (
-            completed_count if _have_rows else summary.get("completed")
-        ),
-        "elapsed_s": (
-            elapsed_s_calc if elapsed_s_calc is not None else summary.get("elapsed_s")
-        ),
-        "actual_send_qps": (
-            actual_send_qps_calc if _have_rows else summary.get("actual_send_qps")
-        ),
-        "success_qps": (success_qps_calc if _have_rows else summary.get("success_qps")),
-        "error_qps": (error_qps_calc if _have_rows else summary.get("error_qps")),
-        "completed_qps": (
-            completed_qps_calc if _have_rows else summary.get("completed_qps")
-        ),
-        "client_pacing_lag_ms": (
-            _pacing_dist if _have_rows else summary.get("client_pacing_lag_ms")
-        ),
-        "client_send_peak_qps": (
-            client_send_peak_qps_calc
-            if _have_rows
-            else summary.get("client_send_peak_qps")
-        ),
-        "trace_due_peak_qps": (
-            trace_due_peak_qps_calc if _have_rows else summary.get("trace_due_peak_qps")
-        ),
-        "server_arrival_qps": (
-            server_latency.get("arrival_qps")
-            if server_latency.get("arrival_qps") is not None
-            else summary.get("server_arrival_qps")
-        ),
-        "server_completion_qps": (
-            server_latency.get("completion_qps")
-            if server_latency.get("completion_qps") is not None
-            else summary.get("server_completion_qps")
-        ),
-        "schedule_latency_source": (
-            _schedule_source_calc
-            if _schedule_source_calc is not None
-            else summary.get("schedule_latency_source")
-        ),
-        "schedule_latency_ms": (
-            _schedule_latency_calc
-            if _schedule_latency_calc is not None
-            else summary.get("schedule_latency_ms")
-        ),
+        "load_client_workers": summary.get("load_client_workers"),
+        "actual_rpc_start_count": _actual_rpc_start_count if _have_rows else None,
+        "recorded_result_count": _recorded_result_count if _have_rows else None,
+        "completed_count": completed_count if _have_rows else None,
+        "elapsed_s": elapsed_s_calc,
+        "actual_send_qps": actual_send_qps_calc,
+        "success_qps": success_qps_calc,
+        "error_qps": error_qps_calc,
+        "completed_qps": completed_qps_calc,
+        "client_pacing_lag_ms": _pacing_dist if _have_rows else None,
+        "client_send_peak_qps": client_send_peak_qps_calc,
+        "trace_due_peak_qps": trace_due_peak_qps_calc,
+        # server_* 直读：server_latency 是当前格式正式输入，非 rows 依赖。
+        "server_arrival_qps": server_latency.get("arrival_qps"),
+        "server_completion_qps": server_latency.get("completion_qps"),
+        "schedule_latency_source": _schedule_source_calc,
+        "schedule_latency_ms": _schedule_latency_calc,
         # 跨两侧全链路分位（聚合层新算，非 summary.json 原生字段）；
         # full_e2e = client 发出 → 引擎 decode 正常终态，按 request_id
         # 关联，schedule-only（FETCH=0）下也覆盖完整链路。
         "full_e2e_latency_ms": full_e2e_latency_ms,
-        "server_stage_latency_ms": (
-            _server_stage_calc
-            if _server_stage_calc is not None
-            else summary.get("server_stage_latency_ms")
-        ),
-        # ttft/e2e 全程分位（聚合层新算）；旧 run 回退链：新键 →
-        # Java summary 的 ttft_ms / total_ms（同为 LatencySummary 形状）。
-        "ttft_latency_ms": (
-            _ttft_summary_calc
-            if _have_rows
-            else (
-                summary.get("ttft_latency_ms")
-                if summary.get("ttft_latency_ms") is not None
-                else summary.get("ttft_ms")
-            )
-        ),
-        "e2e_latency_ms": (
-            _e2e_summary_calc
-            if _have_rows
-            else (
-                summary.get("e2e_latency_ms")
-                if summary.get("e2e_latency_ms") is not None
-                else summary.get("total_ms")
-            )
-        ),
-        "validity_checks": (
-            validity_checks_calc
-            if validity_checks_calc is not None
-            else summary.get("validity_checks")
-        ),
-        "test_valid": (
-            test_valid_calc
-            if test_valid_calc is not None
-            else summary.get("test_valid")
-        ),
+        "server_stage_latency_ms": _server_stage_calc,
+        # ttft/e2e 全程分位（聚合层自算，幸存者口径）；rows 缺失即 None。
+        "ttft_latency_ms": _ttft_summary_calc if _have_rows else None,
+        "e2e_latency_ms": _e2e_summary_calc if _have_rows else None,
+        "validity_checks": validity_checks_calc,
+        "test_valid": test_valid_calc,
     },
     "batch": {
         "config": slo.get("config"),

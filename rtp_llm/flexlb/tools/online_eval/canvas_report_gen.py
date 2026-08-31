@@ -28,19 +28,19 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 
 用法：
   python3 canvas_report_gen.py --aggregate <agg.json> \
-      [--engine-dist <engine_dist.json>] [--summary <summary.json>] \
+      [--engine-dist <engine_dist.json>] \
       [--slo <slo_batch_analysis.json>] \
       --out <out.html> [--run-id <id>] \
       [--p-engines 750] [--d-engines 500] [--shards 8] [--replay 1000]
 
 缺省规则：
-  * --summary / --slo 未指定时取 aggregate 同目录同名文件（存在才读）；
+  * --slo 未指定时取 aggregate 同目录同名文件（存在才读）；
   * engine_dist 来源优先级：--engine-dist 显式指定 > aggregate 顶层内嵌键
     （aggregate_canvas_run.py 已把 engine_dist 计算进 aggregate，一个脚本
     出全部数据）> aggregate 同目录 engine_dist.json；
   * --run-id 未指定时取 aggregate 的 meta.run_dir；
   * P/D 引擎数优先取 engine_dist 的 engine_count，其次 --p-engines/--d-engines；
-  * shards 优先取 summary.json 的 load_client_workers，其次 --shards，再缺省 8。
+  * shards 优先取 aggregate.summary 的 load_client_workers，其次 --shards，再缺省 8。
 """
 
 from __future__ import annotations
@@ -513,10 +513,6 @@ def main():
         help="引擎维度分布 JSON（缺省取 aggregate 同目录 engine_dist.json，存在才读）",
     )
     ap.add_argument(
-        "--summary",
-        help="load_client summary.json（缺省取 aggregate 同目录 summary.json，存在才读）",
-    )
-    ap.add_argument(
         "--slo",
         help="slo_batch_analysis.json（缺省取 aggregate 同目录同名文件，存在才读）",
     )
@@ -570,13 +566,12 @@ def main():
     agg = load_json(args.aggregate)
     agg_dir = os.path.dirname(os.path.abspath(args.aggregate))
 
-    summary_path = args.summary or os.path.join(agg_dir, "summary.json")
     slo_path = args.slo or os.path.join(agg_dir, "slo_batch_analysis.json")
     ed_path = args.engine_dist or os.path.join(agg_dir, "engine_dist.json")
 
-    summary_standalone = (
-        load_json(summary_path) if os.path.isfile(summary_path) else None
-    )
+    # no-backward-compat：--summary / summary_standalone 独立输入已删
+    # （旧 run 不再支持）；summary 仅从 aggregate.summary 单键直读，
+    # 缺失即无数据按可选逻辑省略。
     slo = load_json(slo_path) if os.path.isfile(slo_path) else None
     # engine_dist 来源优先级：显式 --engine-dist > aggregate 顶层内嵌键
     # （aggregate_canvas_run.py 一个脚本出全部数据）> 同目录独立文件。
@@ -652,11 +647,7 @@ def main():
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
     if not mock_last and slo:
         mock_last = (slo.get("mock") or {}).get("last") or {}
-    validity = (
-        sm.get("validity_checks")
-        or (summary_standalone or {}).get("validity_checks")
-        or {}
-    )
+    validity = sm.get("validity_checks") or {}
 
     run_id = args.run_id or (agg.get("meta") or {}).get("run_dir") or "unknown"
 
@@ -671,7 +662,9 @@ def main():
             d_engines = int(de)
     shards = args.shards
     if shards is None:
-        shards = int((summary_standalone or {}).get("load_client_workers") or 8)
+        # load_client_workers：aggregate 透传的元数据键（client.json 直读，
+        # Phase B 后自然缺失 → 缺省 8）。
+        shards = int(sm.get("load_client_workers") or 8)
 
     if per_second:
         rel_ts = rel_times([p.get("t", 0) for p in per_second])
@@ -683,10 +676,6 @@ def main():
         # 会把 duration_s 拉长、ok_qps 压低。
         qps0 = sm.get("server_arrival_qps") or sm.get("actual_send_qps") or 0
         duration_s = int(round(total0 / float(qps0))) if qps0 else 0
-        # Phase A：qps0 也缺失时回退聚合层自算 elapsed_s（wall_clock_ts
-        # 窗口口径；旧 aggregate 无此键时保持 0 不变）。
-        if not duration_s:
-            duration_s = int(round(float(sm.get("elapsed_s") or 0)))
 
     # ---- Stat 六连 ----
     total_req = sm.get("total_requests")
@@ -2880,13 +2869,10 @@ def main():
         rows.append(["调度延迟", _lat_cell])
     else:
         rows.append(["调度延迟", "—"])
-    # ttft/e2e 全程分位（Phase A 聚合层自算，幸存者口径 = ok 行带值样本；
-    # 与 per_second 图的每秒分位互补）：旧 aggregate 无 ttft_latency_ms /
-    # e2e_latency_ms 键时回退 summary 独立文件的 Java 键（ttft_ms /
-    # total_ms，同为分位形状），仍无则整行不显示（full_e2e 行同例）。
+    # ttft/e2e 全程分位（聚合层自算，幸存者口径 = ok 行带值样本；
+    # 与 per_second 图的每秒分位互补）：单键直读，缺失整行不显示
+    # （full_e2e 行同例；no-backward-compat：ttft_ms / total_ms 旧键回退已删）。
     ttft_sum = sm.get("ttft_latency_ms")
-    if ttft_sum is None:
-        ttft_sum = (summary_standalone or {}).get("ttft_ms")
     if ttft_sum:
         _ttft_cell = (
             "p50 "
@@ -2899,8 +2885,6 @@ def main():
             _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
         rows.append(["TTFT（全程）", _ttft_cell])
     e2e_sum = sm.get("e2e_latency_ms")
-    if e2e_sum is None:
-        e2e_sum = (summary_standalone or {}).get("total_ms")
     if e2e_sum:
         _e2e_cell = (
             "p50 "
@@ -3086,8 +3070,6 @@ def main():
     lines.extend(table_lines)
 
     src_names = [os.path.basename(args.aggregate)]
-    if summary_standalone is not None:
-        src_names.append(os.path.basename(summary_path))
     if slo is not None:
         src_names.append(os.path.basename(slo_path))
     if ed is not None:
@@ -3133,11 +3115,6 @@ def main():
         "sources": {
             "runDir": _run_dir_abs,
             "aggregate": os.path.abspath(args.aggregate),
-            "summary": (
-                os.path.abspath(summary_path)
-                if summary_standalone is not None
-                else None
-            ),
             "engineDist": (
                 "(aggregate 内嵌 engine_dist)"
                 if ed_embedded
@@ -3409,8 +3386,6 @@ def main():
         TAG
         + " inputs: aggregate="
         + os.path.basename(args.aggregate)
-        + " summary="
-        + ("yes" if summary_standalone is not None else "no")
         + " slo="
         + ("yes" if slo is not None else "no")
         + " engine_dist="
