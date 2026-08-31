@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
+#include <algorithm>
+
 namespace rtp_llm {
 
 void IContextParallelProcessor::handleInputs(GptModelInputs&                     model_input,
@@ -174,17 +176,25 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         // Padding positions (valid_mask == 0) -> 0: a 0 text_tokens_mask makes the
         // embedding kernel skip the word-table lookup for the junk padded id, and a
         // 0 token-type is the natural default.
-        auto remap_token_field = [&](torch::Tensor& field) {
+        const int64_t global_token_num  = total_input_tokens.numel();
+        auto          remap_token_field = [&](torch::Tensor& field, const char* field_name) {
             if (!field.defined() || field.numel() == 0) {
                 return;
             }
+            RTP_LLM_CHECK_WITH_INFO(field.dim() == 1 && field.numel() == global_token_num,
+                                    "CP per-token field %s must be a 1-D tensor aligned with combo_tokens: "
+                                             "dim=%ld numel=%ld global_tokens=%ld",
+                                    field_name,
+                                    field.dim(),
+                                    field.numel(),
+                                    global_token_num);
             auto src = field.is_cuda() ? field.cpu() : field;
             auto out = src.index_select(0, select_indices).contiguous();
             out.masked_fill_(valid_mask.logical_not(), 0);
             field = out.to(torch::kCUDA, /*non_blocking=*/true);
         };
-        remap_token_field(model_input.text_tokens_mask);
-        remap_token_field(model_input.combo_tokens_type_ids);
+        remap_token_field(model_input.text_tokens_mask, "text_tokens_mask");
+        remap_token_field(model_input.combo_tokens_type_ids, "combo_tokens_type_ids");
 
         // CP-split multimodal features + locs. The injector overwrites local rows
         // [loc, loc+feature_rows) with feature rows; with CP, each global image
@@ -214,9 +224,46 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
             new_locs.reserve(num_features * 2);
 
             for (size_t f = 0; f < num_features; ++f) {
-                const int     g_start = orig_locs_acc[f];
-                const int64_t g_len   = orig_features[f].size(0);
-                const int64_t g_end   = static_cast<int64_t>(g_start) + g_len;
+                const int64_t orig_start = orig_locs_acc[f];
+                const int64_t orig_len   = orig_features[f].size(0);
+                RTP_LLM_CHECK_WITH_INFO(orig_len > 0, "multimodal feature %zu must contain at least one row", f);
+
+                // Generic MTP prefill shifts every request left by one token.
+                // When hidden states are globally aligned, this is the draft
+                // pass and the feature span must be CP-sliced in that shifted
+                // coordinate space.  If a feature starts at the request's
+                // first token, its first row is dropped rather than leaking
+                // into the preceding packed request.
+                int64_t request_start = static_cast<int64_t>(num_decode_stream);
+                int64_t request_end   = request_start;
+                bool    found_request = false;
+                for (size_t p = 0; p < num_prefill_stream; ++p) {
+                    request_end = request_start + input_lengths_cpu_tensor.data_ptr<int32_t>()[num_decode_stream + p];
+                    if (orig_start >= request_start && orig_start + orig_len <= request_end) {
+                        found_request = true;
+                        break;
+                    }
+                    request_start = request_end;
+                }
+                RTP_LLM_CHECK_WITH_INFO(found_request,
+                                        "multimodal feature %zu range [%ld,%ld) is outside a single prefill request "
+                                        "(global_tokens=%ld)",
+                                        f,
+                                        orig_start,
+                                        orig_start + orig_len,
+                                        global_token_num);
+
+                int64_t feature_row_offset = 0;
+                int64_t g_start            = orig_start;
+                if (split_hidden_states) {
+                    g_start            = std::max(orig_start - 1, request_start);
+                    feature_row_offset = std::max<int64_t>(0, request_start - orig_start + 1);
+                }
+                const int64_t g_len = orig_len - feature_row_offset;
+                const int64_t g_end = g_start + g_len;
+                if (g_len == 0) {
+                    continue;
+                }
 
                 int64_t i = 0;
                 while (i < local_tokens) {
@@ -227,13 +274,15 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                         continue;
                     }
                     const int64_t run_local_start = i;
-                    const int64_t run_feat_start  = static_cast<int64_t>(cp_select_indices[i]) - g_start;
-                    int64_t       expected_feat   = run_feat_start;
-                    int64_t       j               = i;
+                    const int64_t run_feat_start =
+                        feature_row_offset + static_cast<int64_t>(cp_select_indices[i]) - g_start;
+                    int64_t expected_feat = run_feat_start;
+                    int64_t j             = i;
                     while (j < local_tokens && cp_valid_mask[j] != 0
                            && static_cast<int64_t>(cp_select_indices[j]) >= g_start
                            && static_cast<int64_t>(cp_select_indices[j]) < g_end
-                           && (static_cast<int64_t>(cp_select_indices[j]) - g_start) == expected_feat) {
+                           && (feature_row_offset + static_cast<int64_t>(cp_select_indices[j]) - g_start)
+                                  == expected_feat) {
                         ++j;
                         ++expected_feat;
                     }

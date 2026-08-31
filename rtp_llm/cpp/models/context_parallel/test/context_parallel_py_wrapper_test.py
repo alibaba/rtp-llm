@@ -209,6 +209,104 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         )
 
 
+class TestHandleInputsWithMultimodal(unittest.TestCase):
+    @staticmethod
+    def _run(
+        tokens,
+        lengths,
+        hidden,
+        mask,
+        features,
+        locs,
+        rank,
+        size=2,
+    ):
+        return cp_test.handle_inputs_with_multimodal(
+            torch.tensor(tokens, dtype=torch.int32),
+            torch.tensor(lengths, dtype=torch.int32),
+            torch.empty((0,), dtype=torch.int32),
+            hidden,
+            torch.tensor(mask, dtype=torch.int32),
+            features,
+            torch.tensor(locs, dtype=torch.int32),
+            rank,
+            size,
+        )
+
+    def test_target_feature_is_sliced_in_original_coordinates(self):
+        feature = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        for rank, expected_tokens, expected_feature, expected_locs in (
+            (0, [10, -1, 16, 17], feature[0:1], [1]),
+            (1, [-2, -3, -4, 15], feature[1:4], [0]),
+        ):
+            tokens, lengths, mask, hidden, features, locs = self._run(
+                [10, -1, -2, -3, -4, 15, 16, 17],
+                [8],
+                torch.empty((0, 2), dtype=torch.float32),
+                [1, 0, 0, 0, 0, 1, 1, 1],
+                [feature],
+                [1],
+                rank,
+            )
+            self.assertEqual(tokens.tolist(), expected_tokens)
+            self.assertEqual(lengths.tolist(), [4])
+            self.assertEqual(mask.tolist(), [1, 0, 1, 1] if rank == 0 else [0, 0, 0, 1])
+            self.assertIsNone(hidden)
+            self.assertEqual(locs.tolist(), expected_locs)
+            self.assertEqual(len(features), 1)
+            self.assertTrue(torch.equal(features[0], expected_feature))
+
+    def test_mtp_draft_feature_is_sliced_after_request_local_shift(self):
+        feature = torch.arange(8, dtype=torch.float32).reshape(4, 2)
+        hidden = torch.arange(16, dtype=torch.float32).reshape(8, 2)
+        for rank, expected_feature in ((0, feature[0:2]), (1, feature[2:4])):
+            tokens, _, _, local_hidden, features, locs = self._run(
+                [-1, -2, -3, -4, 15, 16, 17, 18],
+                [8],
+                hidden,
+                [0, 0, 0, 0, 1, 1, 1, 1],
+                [feature],
+                [1],
+                rank,
+            )
+            self.assertEqual(
+                tokens.tolist(), [-1, -2, 17, 18] if rank == 0 else [-3, -4, 15, 16]
+            )
+            self.assertEqual(locs.tolist(), [0])
+            self.assertEqual(len(features), 1)
+            self.assertTrue(torch.equal(features[0], expected_feature))
+            expected_rows = [0, 1, 6, 7] if rank == 0 else [2, 3, 4, 5]
+            self.assertTrue(torch.equal(local_hidden, hidden[expected_rows]))
+
+    def test_mtp_shift_does_not_cross_packed_request_boundary(self):
+        feature = torch.tensor([[10.0, 11.0], [20.0, 21.0]])
+        hidden = torch.arange(16, dtype=torch.float32).reshape(8, 2)
+        _, _, _, _, features0, locs0 = self._run(
+            [1, 2, 3, 4, -1, -2, 7, 8],
+            [4, 4],
+            hidden,
+            [1, 1, 1, 1, 0, 0, 1, 1],
+            [feature],
+            [4],
+            0,
+        )
+        self.assertEqual(locs0.tolist(), [2])
+        self.assertEqual(len(features0), 1)
+        self.assertTrue(torch.equal(features0[0], feature[1:2]))
+
+        _, _, _, _, features1, locs1 = self._run(
+            [1, 2, 3, 4, -1, -2, 7, 8],
+            [4, 4],
+            hidden,
+            [1, 1, 1, 1, 0, 0, 1, 1],
+            [feature],
+            [4],
+            1,
+        )
+        self.assertEqual(features1, [])
+        self.assertEqual(locs1.numel(), 0)
+
+
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

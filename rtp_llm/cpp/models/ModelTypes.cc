@@ -53,6 +53,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::comboPositionIds] =
         inputs.combo_position_ids.defined() ? inputs.combo_position_ids.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::comboTokensTypeIds] =
+        inputs.combo_tokens_type_ids.defined() ? inputs.combo_tokens_type_ids.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::textTokensMask] =
         inputs.text_tokens_mask.defined() ? inputs.text_tokens_mask.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs] =
@@ -101,6 +103,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
         }
+        if (inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokensTypeIds;
+        }
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     }
 
@@ -126,9 +131,19 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({(int64_t)mm_features_num}, torch::kInt32).pin_memory();
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int32_t>();
-        for (size_t i = 0; i < mm_features_num; ++i) {
-            mm_features_shape_ptr[i] =
-                inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
+        if (parallelism_config.tp_rank == 0) {
+            RTP_LLM_CHECK_WITH_INFO(
+                inputs.multimodal_features.has_value() && inputs.multimodal_features.value().size() == mm_features_num,
+                "root multimodal feature count mismatch: expected=%zu actual=%zu",
+                mm_features_num,
+                inputs.multimodal_features.has_value() ? inputs.multimodal_features.value().size() : 0);
+            for (size_t i = 0; i < mm_features_num; ++i) {
+                const auto& feature = inputs.multimodal_features.value()[i];
+                RTP_LLM_CHECK_WITH_INFO(feature.defined() && feature.dim() == 2,
+                                        "root multimodal feature %zu must be a defined 2-D tensor",
+                                        i);
+                mm_features_shape_ptr[i] = feature.size(0);
+            }
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
         execBroadcastCpu({{mm_features_shape_t}, 0});
@@ -140,26 +155,35 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_extra_input_num) {
         mm_extra_input_shape_t   = torch::empty({(int64_t)mm_extra_input_num}, torch::kInt64).pin_memory();
         mm_extra_input_shape_ptr = mm_extra_input_shape_t.data_ptr<int64_t>();
-        for (size_t i = 0; i < mm_extra_input_num; ++i) {
-            mm_extra_input_shape_ptr[i] =
-                inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value()[i].numel() : 0;
+        if (parallelism_config.tp_rank == 0) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.mm_extra_input.has_value()
+                                        && inputs.mm_extra_input.value().size() == mm_extra_input_num,
+                                    "root multimodal extra-input count mismatch: expected=%zu actual=%zu",
+                                    mm_extra_input_num,
+                                    inputs.mm_extra_input.has_value() ? inputs.mm_extra_input.value().size() : 0);
+            for (size_t i = 0; i < mm_extra_input_num; ++i) {
+                const auto& extra = inputs.mm_extra_input.value()[i];
+                RTP_LLM_CHECK_WITH_INFO(extra.defined(), "root multimodal extra-input %zu must be defined", i);
+                mm_extra_input_shape_ptr[i] = extra.numel();
+            }
         }
         execBroadcast({{mm_extra_input_shape_t}, 0});
         execSyncCommunication(false);
         cudaSyncAndCheck();
     }
 
-    auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
-    auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
-    auto   cache_keys_width        = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
-    auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
-    auto   layer_to_group_len      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen];
-    auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
-    auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
-    auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
-    auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-    auto   hidden_states_size      = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
-    size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
+    auto   max_kernel_blocks         = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
+    auto   max_blocks                = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+    auto   cache_keys_width          = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
+    auto   kv_cache_group_num        = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
+    auto   layer_to_group_len        = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen];
+    auto   group_types_len           = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
+    auto   combo_position_ids_size   = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
+    auto   combo_token_type_ids_size = shape_hints_ptr[GptModelInputIndex::comboTokensTypeIds];
+    auto   text_tokens_mask_size     = shape_hints_ptr[GptModelInputIndex::textTokensMask];
+    auto   mm_features_locs_size     = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
+    auto   hidden_states_size        = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
+    size_t request_length            = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<size_t>     dims,
@@ -235,6 +259,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
         }
+        if (combo_token_type_ids_size) {
+            inputs.combo_tokens_type_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                    {(size_t)combo_token_type_ids_size},
+                                                    pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokensTypeIds));
+        }
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
             auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
             auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
@@ -306,6 +335,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.lm_output_indexes);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);
+    }
+    if (combo_token_type_ids_size) {
+        collect(inputs.combo_tokens_type_ids);
     }
     if (text_tokens_mask_size) {
         collect(inputs.text_tokens_mask);

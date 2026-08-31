@@ -16,11 +16,11 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
-    prepare_mtp_multimodal_inputs,
-)
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     write_typed_aux_cache_regions,
+)
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    prepare_mtp_multimodal_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -82,6 +82,10 @@ class GenericMoeMTPModel(GptModelBase):
         self.moe_config = moe_config
         self.max_generate_batch_size = max_generate_batch_size
         self.device_resource_config = device_resource_config
+        cp_config = getattr(parallelism_config, "prefill_cp_config", None)
+        self.context_parallel_enabled = bool(
+            cp_config is not None and cp_config.is_enabled()
+        )
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -158,6 +162,7 @@ class GenericMoeMTPModel(GptModelBase):
         clone.moe_config = self.moe_config
         clone.max_generate_batch_size = self.max_generate_batch_size
         clone.device_resource_config = self.device_resource_config
+        clone.context_parallel_enabled = self.context_parallel_enabled
 
         clone.embed_tokens = self.embed_tokens
         clone.multimodal_embedding_injector = self.multimodal_embedding_injector
@@ -301,6 +306,7 @@ class GenericMoeMTPModel(GptModelBase):
                 inputs.multimodal_inputs.mm_features_locs,
                 inputs.attention_inputs.cu_seqlens,
                 getattr(inputs.attention_inputs, "cu_seqlens_host", None),
+                already_shifted=self.context_parallel_enabled,
             )
             inputs_embeds = self.embed_tokens(input_ids)
             inputs_embeds = self.multimodal_embedding_injector(
@@ -357,9 +363,7 @@ class GenericMoeMTPModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
             prev_topk_indices = output.topk_indices
-            write_typed_aux_cache_regions(
-                typed_aux_cache_store, self.kv_cache, i
-            )
+            write_typed_aux_cache_regions(typed_aux_cache_store, self.kv_cache, i)
 
         if (
             self._mtp_indexer_share_enabled

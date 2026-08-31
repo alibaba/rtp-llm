@@ -13,22 +13,26 @@ class MtpMultimodalEmbeddingTest(TestCase):
     IMAGE_B = torch.tensor([[3000.0, 3001.0], [4000.0, 4001.0]])
     EMBEDDING = torch.arange(64 * 2, dtype=torch.float32).reshape(64, 2)
 
-    def _embed(self, input_ids, features, locations, cu_seqlens):
+    def _embed(
+        self,
+        input_ids,
+        features,
+        locations,
+        cu_seqlens,
+        already_shifted=False,
+    ):
         ids, shifted_features, shifted_locs = prepare_mtp_multimodal_inputs(
             torch.tensor(input_ids, dtype=torch.int32),
             features,
             torch.tensor(locations, dtype=torch.int32),
             torch.tensor(cu_seqlens, dtype=torch.int32),
+            already_shifted=already_shifted,
         )
         embeddings = self.EMBEDDING.index_select(0, ids.to(torch.long))
-        return MultimodalEmbeddingInjector()(
-            embeddings, shifted_features, shifted_locs
-        )
+        return MultimodalEmbeddingInjector()(embeddings, shifted_features, shifted_locs)
 
     def test_shifts_features_and_masks_hash_ids(self):
-        output = self._embed(
-            [-101, -102, 11, 12], [self.IMAGE_A], [1], [0, 4]
-        )
+        output = self._embed([-101, -102, 11, 12], [self.IMAGE_A], [1], [0, 4])
         self.assertTrue(torch.equal(output[0:2], self.IMAGE_A))
         self.assertTrue(torch.equal(output[2], self.EMBEDDING[11]))
         self.assertTrue(torch.equal(output[3], self.EMBEDDING[12]))
@@ -52,6 +56,18 @@ class MtpMultimodalEmbeddingTest(TestCase):
         self.assertTrue(torch.equal(output[3], self.IMAGE_B[1]))
         self.assertTrue(torch.equal(output[4], self.EMBEDDING[22]))
         self.assertTrue(torch.equal(output[5], self.EMBEDDING[21]))
+
+    def test_cp_pre_shifted_span_is_only_masked_and_injected(self):
+        output = self._embed(
+            [-101, -102, 11, 12],
+            [self.IMAGE_A],
+            [0],
+            [0, 4],
+            already_shifted=True,
+        )
+        self.assertTrue(torch.equal(output[0:2], self.IMAGE_A))
+        self.assertTrue(torch.equal(output[2], self.EMBEDDING[11]))
+        self.assertTrue(torch.equal(output[3], self.EMBEDDING[12]))
 
 
 if __name__ == "__main__":

@@ -32,14 +32,15 @@ using namespace std;
 namespace spec = speculative;
 
 struct MtpExecutorTestConfig {
-    size_t max_seq_len         = 2048;
-    size_t vocab_size          = 4;
-    size_t num_layers          = 1;
-    size_t gen_num_per_cycle   = 4;
-    size_t vocab_size_override = 0;  // 0 means use vocab_size
-    size_t hidden_size         = 2;
-    size_t target_hc_mult      = 1;
-    size_t draft_hc_mult       = 1;
+    size_t max_seq_len                  = 2048;
+    size_t vocab_size                   = 4;
+    size_t num_layers                   = 1;
+    size_t gen_num_per_cycle            = 4;
+    size_t vocab_size_override          = 0;  // 0 means use vocab_size
+    size_t hidden_size                  = 2;
+    size_t target_hc_mult               = 1;
+    size_t draft_hc_mult                = 1;
+    bool   use_requested_model_geometry = false;
 };
 
 template<typename T>
@@ -355,7 +356,16 @@ public:
         sp_buffer->tokens = torch::tensor({-1, -1}, torch::kInt32).reshape({1, 2});
 
         stream->setSPOutputBuffer(sp_buffer);
-        stream->specUpdate(spec_update_info);
+        // Production decode publishes both host bookkeeping and the matching
+        // device mirrors in one update. Keep this helper faithful to that
+        // contract: zero/undefined mirrors make the executor consume a fake
+        // token even though the CPU speculative buffer contains valid data.
+        auto update_info             = spec_update_info;
+        update_info.draft_token_gpu  = torch::tensor({spec_update_info.draft_token}, torch::kInt32).to(torch::kCUDA);
+        update_info.target_token_gpu = spec_update_info.new_tokens.reshape({-1})
+                                           .narrow(0, spec_update_info.num_new_tokens - 1, 1)
+                                           .to(torch::kCUDA);
+        stream->specUpdate(update_info);
         return stream;
     }
 
@@ -423,19 +433,40 @@ public:
                                                          rtp_llm::TYPE_INT8,
                                                          /*local_head_num_kv=*/128,
                                                          /*size_per_head=*/256);
+        // BlockPool stores the one-layer MTP layout after target layer 0.
+        // Keep all child-config mappings in the same global coordinate space;
+        // getMTPModuleCacheLayerLayout and KVCacheAllocator consume different
+        // fields, so updating only one of them silently aliases target layer 0.
+        constexpr int mtp_global_layer       = 1;
+        mtp_config.local_to_global_layer_ids = {mtp_global_layer};
+        mtp_config.global_layer_ids[0]       = {mtp_global_layer};
+        mtp_config.layer_ids[0]              = {mtp_global_layer};
+        cache_config.layer_all_num           = 2;
         cache_config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(mtp_config));
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-        params.sp_config        = sp_config;
+        // Most legacy fake-model cases intentionally use MockEngine's fixed
+        // geometry. Only the focused target/draft HC contract test requests
+        // custom geometry; changing every fixture also changes decode stream
+        // bookkeeping and invalidates their established input expectations.
+        if (test_config.use_requested_model_geometry) {
+            model_config.max_seq_len = test_config.max_seq_len;
+            model_config.vocab_size  = test_config.vocab_size;
+            model_config.num_layers  = test_config.num_layers;
+            model_config.hidden_size = test_config.hidden_size;
+            model_config.hc_mult     = test_config.target_hc_mult;
+            params.model_config_     = model_config;
+        }
+        params.sp_config = sp_config;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
 
         // Create propose model engine init params
-        auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
-        auto mtp_params         = std::make_unique<EngineInitParams>(params);
+        auto mtp_model_params             = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+        auto mtp_params                   = std::make_unique<EngineInitParams>(params);
         mtp_params->model_config_.hc_mult = test_config.draft_hc_mult;
-        mtp_params->py_sp_model = py::none();
+        mtp_params->py_sp_model           = py::none();
 
         mtp_model_params->push_back(std::move(mtp_params));
 
@@ -528,10 +559,11 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
 
 TEST_F(MtpExecutorTest, testDraftHiddenGeometryDoesNotFollowTargetHyperConnections) {
     MtpExecutorTestConfig test_config;
-    test_config.hidden_size    = 8;
-    test_config.target_hc_mult = 4;
-    test_config.draft_hc_mult  = 1;
-    auto components            = createMtpExecutorComponents(test_config);
+    test_config.hidden_size                  = 8;
+    test_config.target_hc_mult               = 4;
+    test_config.draft_hc_mult                = 1;
+    test_config.use_requested_model_geometry = true;
+    auto components                          = createMtpExecutorComponents(test_config);
 
     // GLM-5.3 contracts the target's four residual streams before handing the
     // hidden state to its ordinary (non-HC) MTP block.
@@ -539,7 +571,7 @@ TEST_F(MtpExecutorTest, testDraftHiddenGeometryDoesNotFollowTargetHyperConnectio
 
     auto draft_model_config    = components.model_config;
     draft_model_config.hc_mult = test_config.draft_hc_mult;
-    auto fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+    auto fake_stream           = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
                                                               components.model_config,
                                                               components.runtime_config,
                                                               components.resource_context,
@@ -550,7 +582,7 @@ TEST_F(MtpExecutorTest, testDraftHiddenGeometryDoesNotFollowTargetHyperConnectio
     // DSv4 keeps its pre-HC handoff; the same draft-owned rule preserves that
     // wider contract without consulting the target's internal geometry.
     draft_model_config.hc_mult = 7;
-    auto pre_hc_fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+    auto pre_hc_fake_stream    = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
                                                                      components.model_config,
                                                                      components.runtime_config,
                                                                      components.resource_context,
@@ -1253,19 +1285,19 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream1_hidden_states;
 
     draft_input_2.combo_tokens       = torch::tensor({2}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({1}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
@@ -1394,7 +1426,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto draft_output_1              = GptModelOutputs{};
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_1.last_hidden_states = stream_hidden_states;
     draft_output_1.logits            = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f}).reshape({1, 4});
@@ -1567,9 +1599,9 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
@@ -1577,12 +1609,13 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     stream->logits_processor_list_.push_back(std::make_shared<IneligibleSpecProcessor>());
     stream->reportError(ErrorCode::INVALID_PARAMS, "grammar accept_token error: parser rejected token");
 
-    auto target_input              = GptModelInputs{};
-    auto target_output             = GptModelOutputs{};
-    // GLM5's MtpBatchStreamProcessor zero-fills target tokens for streams that
-    // have already entered an error state; the executor must still avoid
-    // escalating the request-level grammar failure into a process abort.
-    target_input.combo_tokens      = torch::tensor({0, 0}, torch::kInt32);
+    auto target_input  = GptModelInputs{};
+    auto target_output = GptModelOutputs{};
+    // The device mirror remains a valid batch-shape placeholder after the
+    // request enters an error state. The executor may forward those tokens,
+    // but must not escalate the request-level grammar failure into a process
+    // abort or commit another response update.
+    target_input.combo_tokens      = torch::tensor({2, 3}, torch::kInt32);
     target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1}, torch::kInt32);
@@ -1682,19 +1715,19 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
 
     draft_input_1.combo_tokens       = torch::tensor({2, 3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_1.sequence_lengths   = torch::tensor({3, 2}, torch::kInt32);
+    draft_input_1.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
     draft_input_1.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_1.last_hidden_states = torch::tensor({0.03f, 0.04f, 2.1f, 2.12f}).reshape({2, 2});
 
     draft_input_2.combo_tokens       = torch::tensor({1, 0}, torch::kInt32);
     draft_input_2.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_2.sequence_lengths   = torch::tensor({4, 3}, torch::kInt32);
+    draft_input_2.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
     draft_input_2.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_2.last_hidden_states = draft_output_1.all_hidden_states;
 
     draft_input_3.combo_tokens       = torch::tensor({2, 2}, torch::kInt32);
     draft_input_3.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
-    draft_input_3.sequence_lengths   = torch::tensor({5, 4}, torch::kInt32);
+    draft_input_3.sequence_lengths   = torch::tensor({6, 5}, torch::kInt32);
     draft_input_3.lm_output_indexes  = torch::tensor({0, 1}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 

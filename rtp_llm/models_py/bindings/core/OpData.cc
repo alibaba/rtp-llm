@@ -50,6 +50,18 @@ std::string GptModelInputs::debugString(bool force) const {
     if (combo_position_ids.defined()) {
         debug_string << ", combo_position_ids: " << tb(combo_position_ids);
     }
+    if (combo_tokens_type_ids.defined()) {
+        debug_string << ", combo_tokens_type_ids: " << tb(combo_tokens_type_ids);
+    }
+    if (text_tokens_mask.defined()) {
+        debug_string << ", text_tokens_mask: " << tb(text_tokens_mask);
+    }
+    if (mm_features_locs.defined()) {
+        debug_string << ", mm_features_locs: " << tb(mm_features_locs);
+    }
+    if (multimodal_features.has_value()) {
+        debug_string << ", multimodal_features: " << multimodal_features->size();
+    }
     if (kv_cache_kernel_block_id.defined()) {
         debug_string << ", kv_cache_kernel_block_id: " << tb(kv_cache_kernel_block_id);
     }

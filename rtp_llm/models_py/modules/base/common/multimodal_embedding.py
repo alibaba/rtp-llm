@@ -35,13 +35,16 @@ def prepare_mtp_multimodal_inputs(
     multimodal_locs: torch.Tensor,
     cu_seqlens: torch.Tensor,
     cu_seqlens_host: Optional[torch.Tensor] = None,
+    already_shifted: bool = False,
 ) -> Tuple[torch.Tensor, List[torch.Tensor], torch.Tensor]:
     """Shift multimodal spans with MTP prefill and mask feature-hash token IDs.
 
     MTP prefill shifts each packed request left by one token and appends the
-    target sample. Multimodal feature rows must follow that shift. Their token
-    IDs are cache feature hashes rather than vocab IDs, so rows overwritten by
-    the feature injector are replaced with a safe ID before embedding lookup.
+    target sample. Multimodal feature rows must follow that shift. Context
+    parallel preprocessing performs the shift before rank-local slicing and
+    sets ``already_shifted`` so it is not applied twice. Feature token IDs are
+    cache hashes rather than vocab IDs, so injected rows are replaced with a
+    safe ID before embedding lookup.
     """
     if multimodal_locs.numel() != len(multimodal_features):
         raise ValueError(
@@ -56,17 +59,21 @@ def prepare_mtp_multimodal_inputs(
     locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
     shifted_features: List[torch.Tensor] = []
     shifted_locs: List[int] = []
-    for feature, loc in zip(multimodal_features, locs):
-        feature_end = loc + feature.size(0) - 1
-        request_starts = [start for start, _ in ranges if start <= feature_end]
-        if not request_starts:
-            raise ValueError(
-                f"multimodal feature ending at {feature_end} is outside packed requests"
-            )
-        request_start = max(request_starts)
-        dropped_rows = max(0, request_start - loc + 1)
-        shifted_features.append(feature[dropped_rows:])
-        shifted_locs.append(max(loc - 1, request_start))
+    if already_shifted:
+        shifted_features = list(multimodal_features)
+        shifted_locs = locs
+    else:
+        for feature, loc in zip(multimodal_features, locs):
+            feature_end = loc + feature.size(0) - 1
+            request_starts = [start for start, _ in ranges if start <= feature_end]
+            if not request_starts:
+                raise ValueError(
+                    f"multimodal feature ending at {feature_end} is outside packed requests"
+                )
+            request_start = max(request_starts)
+            dropped_rows = max(0, request_start - loc + 1)
+            shifted_features.append(feature[dropped_rows:])
+            shifted_locs.append(max(loc - 1, request_start))
 
     shifted_locs_tensor = torch.tensor(shifted_locs, dtype=torch.int32)
     masked_ids = input_ids.clone()

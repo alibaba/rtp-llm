@@ -1295,16 +1295,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // profiling state to the worker thread can crash while perf timelines are
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
-    const auto& draft_engine_params    = propose_params->getEngineInitParams();
-    const auto& draft_model_config     = draft_engine_params.model_config_;
-    data_type_        = params.model_config_.data_type;
-    hidden_size_      = draft_model_config.hidden_size * draft_model_config.hc_mult;
-    propose_step_     = propose_params->gen_num_per_circle;
-    vocab_size_       = params.model_config_.vocab_size;
-    draft_vocab_size_ = draft_model_config.vocab_size;
+    const auto& draft_engine_params = propose_params->getEngineInitParams();
+    const auto& draft_model_config  = draft_engine_params.model_config_;
+    data_type_                      = params.model_config_.data_type;
+    hidden_size_                    = draft_model_config.hidden_size * draft_model_config.hc_mult;
+    propose_step_                   = propose_params->gen_num_per_circle;
+    vocab_size_                     = params.model_config_.vocab_size;
+    draft_vocab_size_               = draft_model_config.vocab_size;
 
-    const bool  has_python_draft_model = !params.py_sp_model.is_none();
-    const bool  python_draft_share_capable =
+    const bool has_python_draft_model = !params.py_sp_model.is_none();
+    const bool python_draft_share_capable =
         kMtpIndexerShareFlag.on && has_python_draft_model && pythonDraftSupportsMtpIndexerShare(params.py_sp_model);
     const bool context_parallel_enabled = params.parallelism_config.prefill_cp_config.is_enabled()
                                           || draft_engine_params.parallelism_config.prefill_cp_config.is_enabled();
@@ -1663,17 +1663,34 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // ``model_input.combo_tokens`` and ``model_input.input_lengths`` in
     // place to the rank-local zigzag chunk layout for the target forward.
     // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
-    // draft re-CP-slice) needs the FULL/global view, so snapshot both
-    // tensors here while they still hold the global sequence and restore
-    // on rank 0 before the second tpSync (which then broadcasts the
-    // restored full view to every rank for the draft pass).
-    const bool    cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
-    torch::Tensor saved_combo_tokens;
-    torch::Tensor saved_input_lengths;
+    // draft re-CP-slice) needs the FULL/global view. handleInputs mutates not
+    // only token/length tensors but also every multimodal side input, so keep
+    // one complete snapshot and restore it on rank 0 before the second tpSync.
+    // Otherwise the draft pass combines global shifted tokens with rank-local
+    // masks/features from the target pass.
+    const bool                                cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    torch::Tensor                             saved_combo_tokens;
+    torch::Tensor                             saved_input_lengths;
+    torch::Tensor                             saved_text_tokens_mask;
+    torch::Tensor                             saved_combo_tokens_type_ids;
+    torch::Tensor                             saved_mm_features_locs;
+    std::optional<std::vector<torch::Tensor>> saved_multimodal_features;
     if (cp_enabled) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens          = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths         = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_text_tokens_mask      = model_input.text_tokens_mask;
+        saved_combo_tokens_type_ids = model_input.combo_tokens_type_ids;
+        saved_mm_features_locs      = model_input.mm_features_locs;
+        saved_multimodal_features   = model_input.multimodal_features;
     }
+    auto restore_cp_global_inputs = [&]() {
+        model_input.combo_tokens          = saved_combo_tokens;
+        model_input.input_lengths         = saved_input_lengths;
+        model_input.text_tokens_mask      = saved_text_tokens_mask;
+        model_input.combo_tokens_type_ids = saved_combo_tokens_type_ids;
+        model_input.mm_features_locs      = saved_mm_features_locs;
+        model_input.multimodal_features   = saved_multimodal_features;
+    };
     const bool saved_need_all_hidden_states = model_input.need_all_hidden_states;
     if (cp_enabled) {
         // CP+MTP prefill feeds the target model's per-token hidden states into
@@ -1718,8 +1735,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (model_input.is_fake_stream) {
             if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
+                restore_cp_global_inputs();
             }
             model_input.last_hidden_states = model_output.all_hidden_states;
         } else {
@@ -1766,8 +1782,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // contiguous full sequence (offset += input_length, last token
             // overwrite at offset+input_length-1).
             if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
+                restore_cp_global_inputs();
             }
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 model_input, model_output, sampler_output, buffer_holder_);

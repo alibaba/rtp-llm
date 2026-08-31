@@ -82,6 +82,50 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                            cp_params.prefill_shuffle_indices.cpu().clone());
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<torch::Tensor>, torch::Tensor>
+zigzagHandleInputsWithMultimodal(const torch::Tensor&              total_input_tokens,
+                                 const torch::Tensor&              input_lengths,
+                                 const torch::Tensor&              sequence_lengths,
+                                 const torch::Tensor&              hidden_states,
+                                 const torch::Tensor&              text_tokens_mask,
+                                 const std::vector<torch::Tensor>& multimodal_features,
+                                 const torch::Tensor&              mm_features_locs,
+                                 int                               cp_rank,
+                                 int                               cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens        = total_input_tokens.contiguous().clone();
+    model_input.input_lengths       = input_lengths.contiguous().clone();
+    model_input.sequence_lengths    = sequence_lengths.contiguous().clone();
+    model_input.text_tokens_mask    = text_tokens_mask.contiguous().clone();
+    model_input.mm_features_locs    = mm_features_locs.contiguous().clone();
+    model_input.multimodal_features = multimodal_features;
+    if (hidden_states.numel() > 0) {
+        model_input.last_hidden_states = hidden_states.contiguous().clone();
+    }
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+
+    std::vector<torch::Tensor> features_cpu;
+    if (model_input.multimodal_features.has_value()) {
+        for (const auto& feature : model_input.multimodal_features.value()) {
+            features_cpu.push_back(feature.cpu().clone());
+        }
+    }
+    return std::make_tuple(model_input.combo_tokens.cpu().clone(),
+                           model_input.input_lengths.cpu().clone(),
+                           model_input.text_tokens_mask.cpu().clone(),
+                           model_input.last_hidden_states.defined() ? model_input.last_hidden_states.cpu().clone() :
+                                                                      torch::Tensor(),
+                           std::move(features_cpu),
+                           model_input.mm_features_locs.cpu().clone());
+}
+
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
 // to the gathered last-token hidden (no comm). The Python test sums these across
 // ranks to simulate the all-reduce in handleOutputsLastHidden.
@@ -140,6 +184,19 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
+    m.def("handle_inputs_with_multimodal",
+          &zigzagHandleInputsWithMultimodal,
+          py::arg("total_input_tokens"),
+          py::arg("input_lengths"),
+          py::arg("sequence_lengths"),
+          py::arg("hidden_states"),
+          py::arg("text_tokens_mask"),
+          py::arg("multimodal_features"),
+          py::arg("mm_features_locs"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs with per-token and multimodal side inputs");
 
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,
