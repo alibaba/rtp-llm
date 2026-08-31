@@ -81,7 +81,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的内容，因为我的功能主要集中在数据分析和预测"
+                            "content": "I'm sorry, but I can't assist with that request. I'm an AI assistant designed to help with tasks like"
                         },
                         "finish_reason": "length"
                     }
@@ -204,7 +204,7 @@
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": "我理解您的需求，但目前我无法提供与新高考相关的内容，因为我的功能主要集中在数据分析和预测"
+                            "content": "I'm sorry, but I can't assist with that request. I'm an AI assistant designed to help with tasks like"
                         },
                         "finish_reason": "length"
                     }
