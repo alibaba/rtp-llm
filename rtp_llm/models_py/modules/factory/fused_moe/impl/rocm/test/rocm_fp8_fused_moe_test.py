@@ -6,8 +6,11 @@ runs each executor against a BF16 reference (computed from the dequantized
 weights) and asserts shape, finiteness and approximate numerical agreement.
 """
 
+import os
 import unittest
+from types import SimpleNamespace
 from unittest import SkipTest
+from unittest.mock import patch
 
 import torch
 
@@ -34,6 +37,9 @@ try:
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deepep_normal_fused_moe_executor import (
         torch_moe_ref,
     )
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
+        _validate_runtime_mode,
+    )
     from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.rocm_moe import (
         RocmExpertsFp8PerBlock,
         RocmExpertsFp8PerChannel,
@@ -48,6 +54,99 @@ except ImportError as exc:  # stale librtp_compute_ops.so / missing aiter / etc.
     _IMPORT_ERROR = exc
 
 FP8_E4M3FNUZ_MAX = 240.0  # max representable in float8_e4m3fnuz
+
+
+class DeterministicFp8MoeConfigTest(unittest.TestCase):
+    def tearDown(self):
+        if _IMPORT_ERROR is None:
+            deterministic_fp8_moe._runtime_unsupported_reason.cache_clear()
+
+    def _runtime_reason(
+        self,
+        *,
+        gfx: str = "gfx942",
+        cu_count: int = 80,
+        version: str | None = None,
+        stage1=None,
+        stage2=None,
+        implementation=None,
+    ):
+        if version is None:
+            version = deterministic_fp8_moe.AITER_FMOE_SUPPORTED_VERSION
+        if stage1 is None:
+            stage1 = lambda: None
+        if stage2 is None:
+            stage2 = lambda: None
+        if implementation is None:
+            implementation = lambda: None
+        fused_moe_module = SimpleNamespace(
+            ck_moe_stage1=stage1,
+            _fused_moe_impl=implementation,
+        )
+        deterministic_fp8_moe._runtime_unsupported_reason.cache_clear()
+        with (
+            patch.object(
+                deterministic_fp8_moe.torch.cuda,
+                "get_device_properties",
+                return_value=SimpleNamespace(
+                    gcnArchName=f"{gfx}:sramecc+:xnack-",
+                    multi_processor_count=cu_count,
+                ),
+            ),
+            patch.object(
+                deterministic_fp8_moe.importlib.metadata,
+                "version",
+                return_value=version,
+            ),
+            patch.object(
+                deterministic_fp8_moe.importlib,
+                "import_module",
+                return_value=fused_moe_module,
+            ),
+            patch.object(
+                deterministic_fp8_moe.aiter,
+                "ck_moe_stage2_fwd",
+                stage2,
+                create=True,
+            ),
+        ):
+            return deterministic_fp8_moe._runtime_unsupported_reason("cuda:0")
+
+    @unittest.skipIf(
+        _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
+    )
+    def test_runtime_support_matrix_requires_target_device_version_and_symbols(self):
+        self.assertIsNone(self._runtime_reason())
+        cases = (
+            ({"gfx": "gfx950"}, "GPU architecture"),
+            ({"cu_count": 79}, "GPU CU count"),
+            ({"version": "future-aiter"}, "AITER version"),
+            ({"implementation": False}, "required AITER symbols"),
+        )
+        for overrides, expected_reason in cases:
+            with self.subTest(overrides=overrides):
+                self.assertIn(expected_reason, self._runtime_reason(**overrides))
+
+    @unittest.skipIf(
+        _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
+    )
+    def test_cuda_graph_conflict_fails_fast(self):
+        with patch.dict(
+            os.environ,
+            {"ENABLE_CUDA_GRAPH": "1", "ENABLE_NATIVE_CUDA_GRAPH": "0"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires CUDA/HIP graph"):
+                _validate_runtime_mode()
+
+    @unittest.skipIf(
+        _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
+    )
+    def test_graph_disabled_is_supported(self):
+        with patch.dict(
+            os.environ,
+            {"ENABLE_CUDA_GRAPH": "0", "ENABLE_NATIVE_CUDA_GRAPH": "0"},
+        ):
+            _validate_runtime_mode()
 
 
 def _per_channel_quant_fp8(w: torch.Tensor, fp8_dtype: torch.dtype):
@@ -245,15 +344,19 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
 
         # Build the executor.
         config_adapter = _make_config_adapter(self.E, self.TOP_K, 2 * self.N)
+        w1q_runtime = shuffle_weight(w1q, layout=(16, 16))
+        w2q_runtime = shuffle_weight(w2q, layout=(16, 16))
         weights = {
-            W.moe_w1: w1q,
-            W.moe_w2: w2q,
+            W.moe_w1: w1q_runtime,
+            W.moe_w2: w2q_runtime,
             W.moe_s1: s1,
             W.moe_s2: s2,
         }
         executor = RocmExpertsFp8PerChannel(
             config_adapter, FusedMoEQuantConfig(), weights
         )
+        self.assertTrue(executor.w1.is_shuffled)
+        self.assertTrue(executor.w2.is_shuffled)
 
         out = executor.execute(
             payload=payload,
