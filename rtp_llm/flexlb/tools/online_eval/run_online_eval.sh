@@ -556,30 +556,13 @@ start_master_counter_poller() {
   if [[ "${START_FLEXLB}" != "1" ]]; then
     return 0
   fi
-  python3 - "${FLEXLB_HTTP_ADDR}" "${MASTER_COUNTERS_FILE}" \
-    "${MASTER_COUNTER_POLL_INTERVAL_S}" <<'PY' &
-import json
-import sys
-import time
-import urllib.request
-
-addr, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
-url = f"http://{addr}/rtp_llm/server_latency"
-with open(out_path, "a", encoding="utf-8") as out:
-    while True:
-        started = time.time()
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:
-                data = json.load(response)
-            out.write(
-                f"ts_epoch_ms={int(started * 1000)} "
-                f"arrival_count={data.get('arrival_count', 0)} "
-                f"completion_count={data.get('completion_count', 0)}\n")
-            out.flush()
-        except Exception:
-            pass  # master briefly unavailable; skip this sample
-        time.sleep(max(0.0, interval_s - (time.time() - started)))
-PY
+  # Stage 2 (unified py entry): the heredoc body moved to
+  # eval_collectors.py run_master_counter_poller (same URL/parsing/output
+  # line format/interval semantics); this thin wrapper just starts it.
+  python3 "${SCRIPT_DIR}/eval_collectors.py" --group counter \
+    --counter-http-addr "${FLEXLB_HTTP_ADDR}" \
+    --counter-out "${MASTER_COUNTERS_FILE}" \
+    --counter-interval "${MASTER_COUNTER_POLL_INTERVAL_S}" &
   MASTER_COUNTER_POLLER_PID="$!"
 }
 
@@ -591,12 +574,14 @@ stop_master_counter_poller() {
 }
 
 # ---- Secondary 1s collectors (unified-analysis data audit G1/G3/G4/G5) ----
-# All four pollers follow the master counter poller pattern: a python3
-# background heredoc that appends to a one-shot file under RUN_DIR, a *POLLER_PID
-# bookkeeping variable, best-effort semantics (a failed sample or a missing
-# dependency — e.g. no `ps` binary — is a WARNING, never a load-test blocker),
-# and a stop path wired into the load-client stop point, consolidate_run_outputs_now
-# and the EXIT trap. None of them needs curl: urllib covers both HTTP planes.
+# All four pollers follow the master counter poller pattern: collector
+# threads inside the single eval_collectors.py background process started
+# by start_secondary_pollers below, each appending to a one-shot file under
+# RUN_DIR, *POLLER_PID bookkeeping variables, best-effort semantics (a
+# failed sample or a missing dependency — e.g. no `ps` binary — is a
+# WARNING, never a load-test blocker), and a stop path wired into the
+# load-client stop point, consolidate_run_outputs_now and the EXIT trap.
+# None of them needs curl: urllib covers both HTTP planes.
 # Consolidation later merges each file into its component JSON and deletes it
 # (same one-shot-source treatment as master_counters_timeseries.txt).
 
@@ -618,6 +603,13 @@ FLEXLB_SECONDARY_POLLERS_ENABLED="${FLEXLB_SECONDARY_POLLERS_ENABLED:-1}"
 # granularity for disk (e.g. 1250 engines x 120s: 1s -> ~260MB text, 5s ->
 # ~52MB) without touching the other 1s pollers.
 MOCK_PER_ENGINE_POLL_INTERVAL_S="${MOCK_PER_ENGINE_POLL_INTERVAL_S:-1}"
+# Stage 2 (unified py entry): argv accumulator for the four secondary
+# collectors. Each start_*_poller below appends its group's arguments (the
+# START_MOCK/START_FLEXLB/ps guards are unchanged); start_secondary_pollers
+# then launches ONE eval_collectors.py process with everything accumulated,
+# and the four legacy *POLLER_PID variables all capture that single process
+# pid (stop_secondary_pollers' kill stays idempotent and unchanged).
+SECONDARY_COLLECTOR_ARGS=()
 
 # G1: per-second mock per-engine Prometheus time series. The mock control
 # plane (MOCK_BASE_GRPC_PORT-1) already serves /metrics?per_engine=true
@@ -634,42 +626,15 @@ start_mock_per_engine_poller() {
   if [[ "${START_MOCK}" != "1" ]]; then
     return 0
   fi
-  python3 - "$((MOCK_BASE_GRPC_PORT - 1))" "${MOCK_PER_ENGINE_METRICS_FILE}" \
-    "${MOCK_PER_ENGINE_POLL_INTERVAL_S}" <<'PY' &
-import sys
-import time
-import urllib.request
-
-port, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
-keep = {
-    "mock_engine_running", "mock_engine_waiting",
-    "mock_engine_active_kv_tokens", "mock_engine_available_kv_tokens",
-    "mock_engine_accepted_total", "mock_engine_completed_total",
-}
-url = f"http://127.0.0.1:{port}/metrics?per_engine=true"
-with open(out_path, "a", encoding="utf-8") as out:
-    while True:
-        started = time.time()
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:
-                body = response.read().decode("utf-8", "replace")
-            # C: keep only the six analyzer-consumed series — the raw
-            # endpoint still emits the full ~22-per-engine surface (server
-            # cost unchanged), but the appended bytes drop to ~1/4.
-            kept = [
-                line for line in body.splitlines()
-                if not line.startswith("#")
-                and line.split("{", 1)[0].split(" ", 1)[0] in keep
-            ]
-            if kept:
-                out.write(f"# ts={int(started * 1000)}\n")
-                out.write("\n".join(kept) + "\n")
-                out.flush()
-        except Exception:
-            pass  # control plane briefly unavailable; skip this sample
-        time.sleep(max(0.0, interval_s - (time.time() - started)))
-PY
-  MOCK_PER_ENGINE_POLLER_PID="$!"
+  # Stage 2: heredoc body moved to eval_collectors.py
+  # run_mock_per_engine_poller (same URL/whitelist/output format); this
+  # wrapper only registers the group argv (the process itself is started
+  # by start_secondary_pollers).
+  SECONDARY_COLLECTOR_ARGS+=(
+    --mock-port "$((MOCK_BASE_GRPC_PORT - 1))"
+    --mock-out "${MOCK_PER_ENGINE_METRICS_FILE}"
+    --mock-interval "${MOCK_PER_ENGINE_POLL_INTERVAL_S}"
+  )
 }
 
 # G3: per-second master business-metric time series. /actuator/prometheus on
@@ -686,46 +651,13 @@ start_master_prometheus_poller() {
   if [[ "${START_FLEXLB}" != "1" ]]; then
     return 0
   fi
-  python3 - "${FLEXLB_MANAGEMENT_PORT}" "${MASTER_PROMETHEUS_TS_FILE}" \
-    "${SECONDARY_POLL_INTERVAL_S}" <<'PY' &
-import sys
-import time
-import urllib.request
-
-port, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
-urls = [f"http://127.0.0.1:{port}/{path}" for path in ("actuator/prometheus", "prometheus")]
-# C whitelist — every entry is a consumer-backed series (B3 queue curves,
-# M3/S7 inflight age, S7 hit-ratio curves, dispatch reasons, cpu/mem):
-prefixes = (
-    "flexlb_app_cache_",
-    "flexlb_app_flexlb_batcher_queue_size",
-    "flexlb_app_routing_queue_length",
-    "flexlb_app_flexlb_inflight_max_age_ms",
-    "flexlb_app_engine_balancing_master_dispatch_reason_total",
-    "flexlb_app_engine_balancing_master_batch_size",
-    "jvm_memory_used",
-    "jvm_gc_pause",
-    "process_cpu",
-    "system_cpu",
-)
-with open(out_path, "a", encoding="utf-8") as out:
-    while True:
-        started = time.time()
-        for url in urls:
-            try:
-                with urllib.request.urlopen(url, timeout=2) as response:
-                    body = response.read().decode("utf-8", "replace")
-            except Exception:
-                continue  # try the next path / skip this sample
-            kept = [line for line in body.splitlines() if line.startswith(prefixes)]
-            if kept:
-                out.write(f"# ts={int(started * 1000)}\n")
-                out.write("\n".join(kept) + "\n")
-                out.flush()
-            break
-        time.sleep(max(0.0, interval_s - (time.time() - started)))
-PY
-  MASTER_PROMETHEUS_POLLER_PID="$!"
+  # Stage 2: heredoc body moved to eval_collectors.py
+  # run_master_prometheus_poller (same URL fallback order/prefix
+  # whitelist/output format); this wrapper only registers the group argv.
+  SECONDARY_COLLECTOR_ARGS+=(
+    --prometheus-port "${FLEXLB_MANAGEMENT_PORT}"
+    --prometheus-out "${MASTER_PROMETHEUS_TS_FILE}"
+  )
 }
 
 # G4: per-second inflight snapshot. GET /rtp_llm/inflight_status on the
@@ -736,28 +668,13 @@ start_master_inflight_poller() {
   if [[ "${START_FLEXLB}" != "1" ]]; then
     return 0
   fi
-  python3 - "${FLEXLB_HTTP_ADDR}" "${MASTER_INFLIGHT_TS_FILE}" \
-    "${SECONDARY_POLL_INTERVAL_S}" <<'PY' &
-import json
-import sys
-import time
-import urllib.request
-
-addr, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
-url = f"http://{addr}/rtp_llm/inflight_status"
-with open(out_path, "a", encoding="utf-8") as out:
-    while True:
-        started = time.time()
-        try:
-            with urllib.request.urlopen(url, timeout=2) as response:
-                payload = json.load(response)
-            out.write(json.dumps({"ts_epoch_ms": int(started * 1000), "inflight": payload}) + "\n")
-            out.flush()
-        except Exception:
-            pass  # master briefly unavailable; skip this sample
-        time.sleep(max(0.0, interval_s - (time.time() - started)))
-PY
-  MASTER_INFLIGHT_POLLER_PID="$!"
+  # Stage 2: heredoc body moved to eval_collectors.py
+  # run_master_inflight_poller (same URL/JSONL line format); this wrapper
+  # only registers the group argv.
+  SECONDARY_COLLECTOR_ARGS+=(
+    --inflight-http-addr "${FLEXLB_HTTP_ADDR}"
+    --inflight-out "${MASTER_INFLIGHT_TS_FILE}"
+  )
 }
 
 # G5: per-second CPU/RSS sampling of the three JVM groups (mock cluster,
@@ -771,47 +688,13 @@ start_process_usage_poller() {
     echo "WARNING: ps not found; process CPU/RSS sampling disabled" >&2
     return 0
   fi
-  python3 - "${PROCESS_POLL_PID_FILE}" "${PROCESS_USAGE_TS_FILE}" \
-    "${SECONDARY_POLL_INTERVAL_S}" <<'PY' &
-import subprocess
-import sys
-import time
-
-pid_file, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
-with open(out_path, "a", encoding="utf-8") as out:
-    while True:
-        started = time.time()
-        try:
-            entries = []
-            with open(pid_file, "r", encoding="utf-8") as pids:
-                for line in pids:
-                    parts = line.split()
-                    if len(parts) == 2 and parts[0].isdigit():
-                        entries.append((parts[0], parts[1]))
-            if entries:
-                result = subprocess.run(
-                    ["ps", "-o", "pid,%cpu,rss,etime", "-p",
-                     ",".join(pid for pid, _ in entries)],
-                    capture_output=True, text=True, timeout=2)
-                if result.returncode == 0:
-                    rows = {}
-                    for line in result.stdout.splitlines()[1:]:
-                        cols = line.split(None, 3)
-                        if len(cols) == 4:
-                            rows[cols[0]] = cols
-                    for pid, label in entries:
-                        cols = rows.get(pid)
-                        if cols:
-                            out.write(
-                                f"ts_epoch_ms={int(started * 1000)} label={label} "
-                                f"pid={pid} cpu_pct={cols[1]} rss_kb={cols[2]} "
-                                f"etime={cols[3]}\n")
-                    out.flush()
-        except Exception:
-            pass  # best-effort sampling; skip this round
-        time.sleep(max(0.0, interval_s - (time.time() - started)))
-PY
-  PROCESS_USAGE_POLLER_PID="$!"
+  # Stage 2: heredoc body moved to eval_collectors.py
+  # run_process_usage_poller (same per-round pid-file re-read/ps output
+  # format); this wrapper only registers the group argv.
+  SECONDARY_COLLECTOR_ARGS+=(
+    --pid-file "${PROCESS_POLL_PID_FILE}"
+    --process-out "${PROCESS_USAGE_TS_FILE}"
+  )
 }
 
 # Seed the poller pid list with the processes started so far; load client
@@ -838,10 +721,29 @@ start_secondary_pollers() {
     return 0
   fi
   write_process_poll_pids
+  # Stage 2: the four start_*_poller calls below only accumulate group argv
+  # (see SECONDARY_COLLECTOR_ARGS); re-registered from scratch here so a
+  # hypothetical second call never inherits stale arguments.
+  SECONDARY_COLLECTOR_ARGS=()
   start_mock_per_engine_poller
   start_master_prometheus_poller
   start_master_inflight_poller
   start_process_usage_poller
+  if [[ "${#SECONDARY_COLLECTOR_ARGS[@]}" -eq 0 ]]; then
+    return 0
+  fi
+  # One process, four collector threads (G1/G3/G4/G5). The four legacy PID
+  # variables all capture this single pid: stop_secondary_pollers' kill
+  # loop stays unchanged (idempotent SIGTERM x4 on the same pid is
+  # harmless).
+  python3 "${SCRIPT_DIR}/eval_collectors.py" --group secondary \
+    --secondary-interval "${SECONDARY_POLL_INTERVAL_S}" \
+    "${SECONDARY_COLLECTOR_ARGS[@]}" &
+  local group_pid="$!"
+  MOCK_PER_ENGINE_POLLER_PID="${group_pid}"
+  MASTER_PROMETHEUS_POLLER_PID="${group_pid}"
+  MASTER_INFLIGHT_POLLER_PID="${group_pid}"
+  PROCESS_USAGE_POLLER_PID="${group_pid}"
 }
 
 stop_secondary_pollers() {
