@@ -6,6 +6,11 @@ from typing import Any, List, Optional, Union
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from rtp_llm.config.pp_layout import (
+    stage_has_embedding,
+    stage_has_lm_head,
+    stage_layer_range,
+)
 from rtp_llm.ops import VitSeparation
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
@@ -49,6 +54,15 @@ class LoadConfig(BaseModel):
     bit: int = 16
     merge_lora: bool = False
 
+    # PP stage identity, fed from ParallelismConfig (see
+    # ModelWeightInfo.create_load_config). Defaults keep single-stage
+    # behavior. The layer partition rides in as materialized per-stage
+    # counts (decided once by config/pp_layout.resolve_pp_partition);
+    # capability flags are computed by config/pp_layout.py.
+    pp_size: int = 1
+    pp_rank: int = 0
+    pp_stage_layer_counts: Optional[List[int]] = None
+
     compute_dtype: Any = torch.float16
 
     quant_algo: Any = None
@@ -79,6 +93,29 @@ class LoadConfig(BaseModel):
                 f"Field '{field_name}' expects type {expected}, got {type(value)}"
             )
         return value
+
+    # ---- PP stage view (single source: config/pp_layout.py) ----
+
+    def pp_layer_range(self) -> range:
+        """Global layer ids this stage loads: lookup over the materialized
+        partition; pp_size=1 is trivially all layers (single-stage
+        deployments never materialize)."""
+        return stage_layer_range(
+            self.num_layers, self.pp_size, self.pp_rank, self.pp_stage_layer_counts
+        )
+
+    def is_layer_in_pp_range(self, layer_id: int) -> bool:
+        return layer_id in self.pp_layer_range()
+
+    @property
+    def has_pp_embedding(self) -> bool:
+        """First stage loads embedding / positional embedding."""
+        return stage_has_embedding(self.pp_rank)
+
+    @property
+    def has_pp_lm_head(self) -> bool:
+        """Last stage loads lm_head / final layernorm."""
+        return stage_has_lm_head(self.pp_rank, self.pp_size)
 
     @model_validator(mode="after")
     def _set_default_phy2log(self) -> "LoadConfig":

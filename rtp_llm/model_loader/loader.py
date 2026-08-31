@@ -498,7 +498,9 @@ class ModelLoader:
 
     def prepare_weights(self, device: str):
         if not self._is_attn_model:
-            for id in range(self._load_config.num_layers):
+            # PP: only enumerate layers assigned to this stage
+            # (pp_size=1 -> full range, unchanged behavior).
+            for id in self._load_config.pp_layer_range():
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
                     yield (id, name, tensor)
@@ -531,7 +533,9 @@ class ModelLoader:
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
         if self._model_weights_info.layer_weights != []:
-            for layer_id in range(self._load_config.num_layers):
+            # PP: only enumerate layers assigned to this stage
+            # (pp_size=1 -> full range, unchanged behavior).
+            for layer_id in self._load_config.pp_layer_range():
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
                     # For CompositeWeight (e.g. MoeWithSharedWeight), split into
@@ -579,9 +583,20 @@ class ModelLoader:
     def _maybe_skip_weight(self, weight: WeightModule):
         if weight.name in self._global_weight_aliases:
             return True
-        if self._task_type == TaskType.LANGUAGE_MODEL:
-            return False
-        return weight.name in [W.lm_head]
+        if self._task_type != TaskType.LANGUAGE_MODEL and weight.name in [W.lm_head]:
+            return True
+        # PP capability filtering (config/pp_layout.py): embedding-family
+        # weights belong to the first stage only; lm_head / final layernorm
+        # belong to the last stage only.
+        # pp_size=1: both capabilities true -> nothing skipped.
+        name = weight.name or ""
+        if name in (W.embedding, W.positional_embedding):
+            return not self._load_config.has_pp_embedding
+        if name == W.lm_head or name.startswith("final_layernorm."):
+            return not self._load_config.has_pp_lm_head
+        # TODO(PP+MTP): multi_tokens_predict_* (MTP head) weights must be
+        # restricted to the last stage once PP+MTP lands.
+        return False
 
     @staticmethod
     def force_clean_cuda_memory():
@@ -744,15 +759,18 @@ class ModelLoader:
             )
 
         if self._task_type == TaskType.LANGUAGE_MODEL:
-            lm_head_w = weight.steal_global_weight(W.lm_head)
-            if lm_head_w == None:
-                lm_head_w = weight.global_weights[W.embedding]
-            if self._weights_info.model_config.normalize_lm_head_weight:
-                lm_head_w = F.normalize(lm_head_w)
-            logit_scale = self._weights_info.model_config.logit_scale
-            if logit_scale != 1.0:
-                lm_head_w = logit_scale * lm_head_w
-            weight.set_global_weight(W.lm_head, lm_head_w)
+            # PP: only the last stage owns lm_head; other stages must NOT fall
+            # back to embedding (that tie only makes sense where both exist).
+            if self._load_config.has_pp_lm_head:
+                lm_head_w = weight.steal_global_weight(W.lm_head)
+                if lm_head_w == None:
+                    lm_head_w = weight.global_weights[W.embedding]
+                if self._weights_info.model_config.normalize_lm_head_weight:
+                    lm_head_w = F.normalize(lm_head_w)
+                logit_scale = self._weights_info.model_config.logit_scale
+                if logit_scale != 1.0:
+                    lm_head_w = logit_scale * lm_head_w
+                weight.set_global_weight(W.lm_head, lm_head_w)
         else:
             # Some LLM can be used for other tasks, e.g. classification, in which case lm_head is not needed
             weight.steal_global_weight(W.lm_head)
