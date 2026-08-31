@@ -3192,10 +3192,12 @@ def main():
     # 2) Gini：aggregate 提供 _all 全量键时，HTML 必含全量口径标注；
     # 3) 分位数样本量：schedule 全终态 count 必须出现在面板 caption；
     # 4) route_submit 幸存者口径：样本 < 全终态时 caption 必须标注；
-    # 5) 发送序列换源（20260830）：master 每秒 arrivals 序列存在时，
-    #    其峰值必须与 server_arrival_qps（全程均值口径）同数量级
-    #    （0.5x-3x），防止图表序列与 KPI 再次错位；HTML 必含 master
-    #    到达口径与客户端参考线的双口径标注。
+    # 5) 发送序列换源（20260830，20260831 改均值口径）：master 每秒
+    #    arrivals 序列存在时，其 active 桶均值必须与 server_arrival_qps
+    #    （全程均值口径）同数量级（0.5x-3x），防止图表序列与 KPI 再次
+    #    错位；峰值口径对 burst 双峰流量过严（快速失败语义下峰值可达
+    #    均值 4x+），降级为 stderr 警告；HTML 必含 master 到达口径与
+    #    客户端参考线的双口径标注。
     if send_qps_master:
         assert "发送 QPS（master）" in html_out, (
             TAG + " KPI send-QPS must carry the master-scope label"
@@ -3215,18 +3217,45 @@ def main():
             + "reference series label is missing"
         )
         if send_qps_master:
-            m_peak = max(m_arr_by_t.values())
-            _ratio = float(m_peak) / float(send_qps_master)
-            assert 0.5 <= _ratio <= 3.0, (
+            # 20260831 口径修正：防「序列与 KPI 接错源」的判据必须是同
+            # 口径对比——active 桶均值 vs 全程均值 KPI。峰值口径在 burst
+            # 双峰流量下（p50 每秒几百、峰值桶近 9k）可达均值 4x+，属真
+            # 实过载形态而非错位，故峰值超 3x 仅告警不阻断。
+            _m_active_vals = [v for v in m_arr_by_t.values() if v > 0]
+            m_active_mean = (
+                sum(_m_active_vals) / len(_m_active_vals) if _m_active_vals else 0.0
+            )
+            _mean_ratio = (
+                float(m_active_mean) / float(send_qps_master)
+                if send_qps_master
+                else 0.0
+            )
+            assert 0.5 <= _mean_ratio <= 3.0, (
                 TAG
-                + " master arrivals per-second peak "
-                + fmt_int_trunc(m_peak)
-                + " inconsistent with server_arrival_qps "
+                + " master arrivals active-mean "
+                + ("%.1f" % m_active_mean)
+                + "/s inconsistent with server_arrival_qps "
                 + fmt_int_trunc(send_qps_master)
                 + " (ratio "
-                + ("%.2f" % _ratio)
+                + ("%.2f" % _mean_ratio)
                 + ") — send series and KPI disagree again"
             )
+            m_peak = max(m_arr_by_t.values())
+            _ratio = float(m_peak) / float(send_qps_master)
+            if not 0.5 <= _ratio <= 3.0:
+                print(
+                    TAG
+                    + " burst warning: master arrivals peak "
+                    + fmt_int_trunc(m_peak)
+                    + "/s is "
+                    + ("%.2f" % _ratio)
+                    + "x server_arrival_qps "
+                    + fmt_int_trunc(send_qps_master)
+                    + " (burst shape; series/KPI mean ratio "
+                    + ("%.2f" % _mean_ratio)
+                    + " OK)",
+                    file=sys.stderr,
+                )
     if gini_is_all:
         assert "全量" in html_out, (
             TAG + " all-scope Gini data present but not labelled in HTML"
