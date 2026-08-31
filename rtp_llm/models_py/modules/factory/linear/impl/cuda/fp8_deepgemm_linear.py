@@ -27,6 +27,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     supports_deferred_bias = True
     supports_fused_bias_gelu_quant = True
     supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}

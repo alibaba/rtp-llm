@@ -123,6 +123,9 @@ class DenseMLP(nn.Module):
             and self.enable_fused_activation_quant
             and self.up_proj.supports_fused_bias_gelu_quant
             and self.down_proj.supports_fused_bias_gelu_quant
+            and self.up_proj.fused_activation_quant_format is not None
+            and self.up_proj.fused_activation_quant_format
+            == self.down_proj.fused_activation_quant_format
         ):
             if quantized_x is not None:
                 quantized_activation = (
