@@ -614,6 +614,12 @@ def start_server(py_env_configs: PyEnvConfigs):
     except RuntimeError as e:
         logging.warning(str(e))
 
+    # Resolve region-mapped OTLP env vars BEFORE spawning children so both the
+    # Python frontend and the C++ backend (env-only reader) inherit them.
+    from rtp_llm.telemetry import resolve_region_env
+
+    resolve_region_env()
+
     logging.info(
         f"dp_size:  parallelism_config={py_env_configs.parallelism_config.dp_size}"
     )

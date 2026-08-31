@@ -94,11 +94,18 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
-    static void                           logReadFailures(int64_t                         request_id,
-                                                          const std::string&              peer_addr,
-                                                          ErrorCode                       error_code,
-                                                          const std::string&              error_message,
-                                                          const std::vector<std::string>& buffer_debug_infos);
+    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
+    // Classifies error.type for the synthesized Decode phase spans. Static and
+    // side-effect free so the classification itself is unit testable.
+    static const char* phaseErrorType(bool                         request_ok,
+                                      DecodeStatInfo::ExecuteStage stage,
+                                      const ErrorInfo&             error_info,
+                                      const grpc::Status&          error_status);
+    static void        logReadFailures(int64_t                         request_id,
+                                       const std::string&              peer_addr,
+                                       ErrorCode                       error_code,
+                                       const std::string&              error_message,
+                                       const std::vector<std::string>& buffer_debug_infos);
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;
