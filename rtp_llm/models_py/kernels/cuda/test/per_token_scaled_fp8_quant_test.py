@@ -73,6 +73,12 @@ class PerTokenFp8QuantTest(TestCase):
         self.assertEqual(scale.shape, (0, 1))
         resolve_op.assert_not_called()
 
+    def test_rejects_nonempty_batch_with_zero_width(self):
+        input = torch.empty((2, 0), dtype=torch.bfloat16, device="cuda")
+
+        with self.assertRaisesRegex(ValueError, "width must be positive"):
+            scaled_fp8_per_token_quant(input)
+
     def test_reuses_preallocated_scale(self):
         input = torch.ones((2, 128), dtype=torch.bfloat16, device="cuda")
         scale = torch.empty((2, 1), dtype=torch.float32, device="cuda")
