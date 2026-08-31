@@ -39,10 +39,10 @@ FlexLB 是面向 AI 模型推理负载（RTP-LLM）的高性能智能负载均�
 | 模块 | 职责 |
 |---|---|
 | **flexlb-api** | Web 层：`HttpLoadBalanceServer`（调度）、`FlexlbControlServer`（控制）、`HealthCheckServer`、`AppStateHookServer`（生命周期 hook）；主端口 7001 |
-| **flexlb-common** | 共享模型（`WorkerStatus`、`Request`/`Response`、`RoleType`、`BalanceContext`）、`FlexlbConfig`/`ConfigService`、`FlexMonitor` 指标抽象、`BlockCacheKeyCalculator` |
+| **flexlb-common** | 共享模型（`WorkerStatus`、`Request`/`Response`、`RoleType`、`BalanceContext`）、`FlexlbConfig`/`ConfigService`、`FlexMonitor` 指标抽象 |
 | **flexlb-grpc** | 引擎 gRPC 客户端（worker status / cache status）+ KVCM meta-service 客户端（`KvcmGrpcClient`、leader 解析、健康探测） |
 | **flexlb-sync** | 核心：路由与策略、排队调度、动态资源管理、worker 状态同步、主选举、生命周期 Hook、监控上报 |
-| **flexlb-cache** | KV cache 匹配：LOCAL_SYNC 两级索引（`KvCacheManager`/`GlobalCacheIndex`/`EngineLocalView`）、KVCM provider、Local Standby 兜底索引、failover 编排、block hash 计算 |
+| **flexlb-cache** | KV cache 匹配：LOCAL_SYNC 两级索引（`KvCacheManager`/`GlobalCacheIndex`/`EngineLocalView`）、KVCM provider、Local Standby 兜底索引、failover 编排、`BlockHashStrategy` block hash 计算 |
 
 flexlb-sync 内部包结构（`org.flexlb`）：
 

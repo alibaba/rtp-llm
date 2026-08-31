@@ -1,7 +1,7 @@
 package org.flexlb.cache.hash;
 
 import org.flexlb.cache.domain.BlockHashCalculationResult;
-import org.flexlb.cache.domain.BlockHashConfig;
+import org.flexlb.cache.domain.WorkerBlockHashConfig;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -84,7 +84,7 @@ class RequestBlockHashServiceTest {
         request.setBlockCacheKeys(List.of());
         request.setInputIds(new int[]{1, 2, 3, 4, 5});
         BalanceContext context = contextFor(request);
-        when(blockHashConfigResolver.resolve()).thenReturn(new BlockHashConfig(4L, 0));
+        when(blockHashConfigResolver.resolve()).thenReturn(new WorkerBlockHashConfig(4L, 0));
         when(blockHashExecutor.calculate(request.getInputIds(), 4L, 0))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(List.of(2164874634404590027L), 12, 34)));
 
@@ -103,7 +103,7 @@ class RequestBlockHashServiceTest {
         request.setInputIds(new int[]{1, 2});
         request.setBlockSize(4);
         BalanceContext context = contextFor(request);
-        when(blockHashConfigResolver.resolve()).thenReturn(new BlockHashConfig(64L, 1));
+        when(blockHashConfigResolver.resolve()).thenReturn(new WorkerBlockHashConfig(64L, 1));
         when(blockHashExecutor.calculate(request.getInputIds(), 4L, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(List.of(), 5, 8)));
 
@@ -148,7 +148,7 @@ class RequestBlockHashServiceTest {
         int[] inputIds = new int[]{1, 2, 3, 4};
         request.setInputIds(inputIds);
         BalanceContext context = contextFor(request);
-        when(blockHashConfigResolver.resolve()).thenReturn(new BlockHashConfig(2192, 1));
+        when(blockHashConfigResolver.resolve()).thenReturn(new WorkerBlockHashConfig(2192, 1));
         when(blockHashExecutor.calculate(inputIds, 2192, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(List.of(11L, 22L), 12, 34)));
 
@@ -175,7 +175,7 @@ class RequestBlockHashServiceTest {
         int[] inputIds = new int[]{1, 2, 3, 4};
         request.setInputIds(inputIds);
         List<Long> calculatedKeys = List.of(11L, 22L);
-        when(blockHashConfigResolver.resolve()).thenReturn(new BlockHashConfig(2192, 1));
+        when(blockHashConfigResolver.resolve()).thenReturn(new WorkerBlockHashConfig(2192, 1));
         when(blockHashExecutor.calculate(inputIds, 2192, 1))
                 .thenReturn(Mono.just(new BlockHashCalculationResult(calculatedKeys, 12, 34)));
 
@@ -197,7 +197,7 @@ class RequestBlockHashServiceTest {
                 new LocalStandbyHashService(
                         configuration, monitor, new SglangBlockHashStrategy());
         RequestBlockHashService service = new RequestBlockHashService(
-                () -> new BlockHashConfig(4, 1),
+                () -> new WorkerBlockHashConfig(4, 1),
                 executor,
                 standbyHashService,
                 configuration);

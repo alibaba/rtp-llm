@@ -131,11 +131,12 @@ hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，�
 
 ## Block hash 计算
 
-- 策略：`BlockHashStrategy`（flexlb-cache）由 `FlexlbConfig.blockHashStrategy` 选择，默认
-  `VLLM`；`FLEXLB_CONFIG` JSON 或 `BLOCK_HASH_STRATEGY` 环境变量可切换为 `SGLANG`。
-- `VllmBlockHashStrategy` 委托 `BlockCacheKeyCalculator`（flexlb-common）计算 vLLM 兼容的
-  `sha256_cbor` 链式块哈希（`PYTHONHASHSEED=0` 语义）：每满块 CBOR 编码
-  `[parentHash, tokens, null]` → SHA-256 → 取低 64 位为 Long key；末尾不满块丢弃。
+- 配置侧：`org.flexlb.config.BlockHashConfig` 位于 `FlexlbConfig.blockHashConfig`。其 `type`
+  选择 `VLLM` / `SGLANG`；缺失时才回退到已废弃的 `FlexlbConfig.blockHashStrategy`。策略 bean
+  在启动时创建，因此修改 `type` 需重启。其 `hashSeed` 仅用于 vLLM，默认 `0`；`ConfigService`
+  更新会让正在运行的 vLLM 策略重算初始 hash，后续请求使用新 seed。
+- `VllmBlockHashStrategy` 在 flexlb-cache 内计算 vLLM 兼容的 `sha256_cbor` 链式块哈希：每满块
+  CBOR 编码 `[parentHash, tokens, null]` → SHA-256 → 取低 64 位为 Long key；末尾不满块丢弃。
 - `SglangBlockHashStrategy`：每页计算
   `SHA256(parentFullDigest || tokenIdsAsUint32LittleEndian)`，用完整 32-byte digest 串联下一页，
   取 digest 高 64 位作为有符号 Long key；与 SGLang page_size 对齐，末尾不满页不计算。
@@ -144,8 +145,10 @@ hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，�
   overlapping `(t_i, t_{i+1})`，每个 pair 的两个 token 都写入 hash。其他 lookahead 值请求失败。
   可缓存前缀同样按完整页截取：普通模式按 `floor(N/blockSize)`、EAGLE 按
   `floor((N-1)/blockSize)`。
-- 配置解析：`WorkerBlockHashConfigResolver` 每 1 分钟从存活 PREFILL（退化 PDFUSION）worker
-  的 `blockSize` + `blockHashLookaheadTokens` 刷新，不可用时保留上次有效值。
+- Worker-status 侧：`org.flexlb.cache.domain.WorkerBlockHashConfig` 只包含 `blockSize` 和
+  `lookaheadTokens`。`WorkerBlockHashConfigResolver` 每 1 分钟从存活 PREFILL（退化 PDFUSION）
+  worker status 的 `CacheStatus.blockSize` 与 `WorkerStatus.blockHashLookaheadTokens` 刷新；它们
+  不能通过配置侧 `BlockHashConfig` 设置。不可用或不一致时保留上次有效值。
 - 执行：`BlockHashExecutor` 专用线程池（默认 core 8 / max 32 / 队列 16384，
   `flexlb.block-hash.*` 可调），出队等待/执行耗时指标，完成后 `publishOn(parallel)` 不占
   hash 线程。请求自带 `block_cache_keys` 时直接采用不再计算。

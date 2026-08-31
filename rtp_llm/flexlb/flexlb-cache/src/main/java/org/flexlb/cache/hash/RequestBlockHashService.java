@@ -1,6 +1,6 @@
 package org.flexlb.cache.hash;
 
-import org.flexlb.cache.domain.BlockHashConfig;
+import org.flexlb.cache.domain.WorkerBlockHashConfig;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -57,7 +57,7 @@ public class RequestBlockHashService {
             return Mono.error(new IllegalArgumentException("block_cache_keys and input_ids must not both be empty"));
         }
 
-        BlockHashConfig hashConfig = blockHashConfigResolver.resolve();
+        WorkerBlockHashConfig hashConfig = blockHashConfigResolver.resolve();
         long blockSize = request.getBlockSize() > 0 ? request.getBlockSize() : hashConfig.blockSize();
         request.setBlockSize(blockSize);
 

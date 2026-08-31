@@ -1,6 +1,6 @@
 package org.flexlb.sync.status;
 
-import org.flexlb.cache.domain.BlockHashConfig;
+import org.flexlb.cache.domain.WorkerBlockHashConfig;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
@@ -107,8 +107,8 @@ class WorkerBlockHashConfigResolverTest {
         modelWorkerStatus.getVitStatusMap().clear();
     }
 
-    private BlockHashConfig config(long blockSize, int lookaheadTokens) {
-        return new BlockHashConfig(blockSize, lookaheadTokens);
+    private WorkerBlockHashConfig config(long blockSize, int lookaheadTokens) {
+        return new WorkerBlockHashConfig(blockSize, lookaheadTokens);
     }
 
     private WorkerStatus worker(long blockSize, int lookaheadTokens) {
