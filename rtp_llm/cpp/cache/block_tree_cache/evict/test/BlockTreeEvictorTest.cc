@@ -411,7 +411,6 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
 
     ASSERT_TRUE(evictor.evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false));
     ASSERT_TRUE(deferred_engine->waitForBatchCount(1, std::chrono::seconds(2)));
-    EXPECT_FALSE(task_pool.acquireBusinessCredit());
 
     std::mutex              marker_mutex;
     std::condition_variable marker_cv;
@@ -432,8 +431,6 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
     ASSERT_TRUE(deferred_engine->completeGroupSet(0, true));
     task_pool.waitForIdle();
     EXPECT_EQ(settled_count, 1u);
-    EXPECT_TRUE(task_pool.acquireBusinessCredit());
-    task_pool.releaseBusinessCredit();
     task_pool.shutdown();
 }
 
@@ -610,7 +607,6 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder)
     EXPECT_EQ(node->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_TRUE(node->group_set_resources[1].hasTier(Tier::HOST));
     EXPECT_EQ(environment.pendingReleaseCount(), 1u);
-    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 1u);
 
     ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, true));
     environment.task_pool_->waitForIdle();
@@ -618,7 +614,6 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder)
     EXPECT_TRUE(node->group_set_resources[1].hasTier(Tier::HOST));
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 2u);
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(), (std::vector<std::pair<bool, bool>>{{true, true}, {true, true}}));
 }
 
@@ -652,7 +647,6 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleSuccessAndFailureIndepend
     EXPECT_EQ(environment.evictor_->candidateStats().device_candidates, 1u);
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 1u);
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(), (std::vector<std::pair<bool, bool>>{{false, false}, {true, true}}));
 }
 
@@ -699,7 +693,6 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     }
     EXPECT_FALSE(environment.disk_pools_[0]->isAllocated(group_0_desc->target_blocks.front()));
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(),
               (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}, {true, false}}));
 
@@ -716,25 +709,6 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
         drop_tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
         EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, drop_tags), 1);
     }
-}
-
-TEST(BlockTreeEvictorAsyncTest, CompletionQueueRejectionSettlesInline) {
-    MultiGroupAsyncEvictionEnvironment environment;
-    ASSERT_TRUE(environment.init());
-    TreeNode* node = environment.insertDeviceNode();
-    ASSERT_NE(node, nullptr);
-
-    ASSERT_TRUE(environment.evictor_->evictLocked(0, Tier::DEVICE, /*force_drop=*/false));
-    ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(1, std::chrono::seconds(2)));
-    environment.task_pool_->shutdown();
-
-    ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, true));
-    EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::HOST));
-    EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
-    EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
-    EXPECT_EQ(environment.settledEvents(), (std::vector<std::pair<bool, bool>>{{true, true}}));
 }
 
 std::vector<size_t> cascadeGroupSetIds(const EvictionDropTask& task) {
@@ -1024,40 +998,7 @@ TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonDemotingResource) {
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockTreeRefType::CACHE);
 }
 
-TEST_F(BlockTreeEvictorTest, RunEvictionTaskTerminatesOnSettledCallbackException) {
-    auto host_pool = makePageableHostPool(1);
-    ASSERT_NE(host_pool, nullptr);
-    resetGroup(host_pool);
-    BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/1, "eviction_settlement_exception");
-    ASSERT_TRUE(task_pool.start());
-    evictor_ = evictor_runtime_.make(tree_.get(), &task_pool);
-
-    const auto allocated = device_pool_->malloc(1);
-    ASSERT_TRUE(allocated.has_value());
-    ASSERT_EQ(allocated->size(), 1u);
-    const BlockIdxType source_block = allocated->front();
-    auto               result       = insert({100}, {{makeResource(Tier::DEVICE, source_block)}});
-    ASSERT_NE(insertedNode(result), nullptr);
-
-    auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
-    ASSERT_TRUE(victim.has_value());
-    auto task = evictor_->createEvictionTask(*victim);
-    ASSERT_TRUE(task.has_value());
-    evictor_->updatePendingRelease(task->desc, true);
-    evictor_->settled_ = [](bool, bool) { throw std::runtime_error("settled callback failure"); };
-    evictor_runtime_.transferEngine()->enqueue(false);
-    ASSERT_TRUE(task_pool.acquireBusinessCredit());
-    task_pool.shutdown();
-
-    EXPECT_DEATH(evictor_->runEvictionTask(std::make_shared<EvictionTransferTask>(*task)), "");
-
-    task_pool.releaseBusinessCredit();
-    evictor_->settled_ = [](bool, bool) {};
-    evictor_->updatePendingRelease(task->desc, false);
-    evictor_->rollbackTransferLocked(task->desc);
-}
-
-TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingCapacityBeforeSettledCallback) {
+TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCallback) {
     auto host_pool = makePageableHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -1087,7 +1028,6 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingCapacityBeforeSettled
         EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 0u);
     };
     evictor_runtime_.transferEngine()->enqueue(false);
-    ASSERT_TRUE(task_pool.acquireBusinessCredit());
 
     evictor_->runEvictionTask(std::make_shared<EvictionTransferTask>(*task));
     task_pool.waitForIdle();

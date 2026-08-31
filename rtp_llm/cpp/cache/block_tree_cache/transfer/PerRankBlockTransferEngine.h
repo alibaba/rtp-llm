@@ -14,14 +14,18 @@
 
 namespace rtp_llm {
 
+namespace block_tree_cache_test {
+class BlockTreeCacheTestPeer;
+}
+
 class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
-                                        DeviceHostCopyOptions    device_host_options             = {},
-                                        size_t                   device_disk_staging_block_count = 4,
-                                        size_t                   max_device_host_descriptors_per_batch = 8,
-                                        size_t                   transfer_worker_count                = 4,
-                                        size_t max_non_device_host_descriptors_per_batch              = 1);
+                                        DeviceHostCopyOptions    device_host_options                       = {},
+                                        size_t                   device_disk_staging_block_count           = 4,
+                                        size_t                   max_device_host_descriptors_per_batch     = 8,
+                                        size_t                   transfer_worker_count                     = 4,
+                                        size_t                   max_non_device_host_descriptors_per_batch = 1);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
@@ -30,14 +34,16 @@ public:
     void                                  stopAdmission();
     void                                  shutdown();
 
-    size_t  transferWorkerCount() const {
+    size_t transferWorkerCount() const {
         return transfer_worker_count_;
     }
 
 private:
-    TransferStatus execute(const std::vector<HostBufferView>&       hosts,
-                           const std::vector<TransferDescriptor>& descriptors,
-                           const std::vector<const GroupSet*>&    group_sets) const;
+    friend class block_tree_cache_test::BlockTreeCacheTestPeer;
+
+    TransferStatus        execute(const std::vector<HostBufferView>&     hosts,
+                                  const std::vector<TransferDescriptor>& descriptors,
+                                  const std::vector<const GroupSet*>&    group_sets) const;
     static HostBufferView resolveHostView(const GroupSet& group_set, BlockIdxType host_block);
 
     std::vector<GroupSetPtr> group_sets_;
