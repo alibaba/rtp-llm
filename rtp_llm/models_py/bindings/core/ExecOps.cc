@@ -596,6 +596,10 @@ ExecStatus getGpuExecStatus() {
 
 torch::Device getTorchCudaDevice() {
 #if USING_ASCEND
+    // torch_npu resolves index=-1 to the current device (same as CUDA),
+    // verified: torch.device("npu") allocates on the set_device() target.
+    // Multi-card correctness relies on setup_device_and_accl_env having
+    // bound the process to local_rank beforehand.
     return torch::Device(torch::kPrivateUse1);
 #else
     return torch::Device(torch::kCUDA);

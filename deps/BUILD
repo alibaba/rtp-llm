@@ -7,6 +7,8 @@ exports_files([
     "requirements_base.txt",
     "requirements_lock_rocm.txt",
     "requirements_rocm.txt",
+    "requirements_ascend_x86.txt",
+    "requirements_lock_ascend_x86.txt",
 ])
 
 py_package(

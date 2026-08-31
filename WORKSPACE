@@ -27,7 +27,7 @@ local_repository(
 git_repository(
     name = "aclnn_custom_ops_src",
     remote = "https://gitcode.com/skywang2/rtp-llm-AscendC.git",
-    commit = "6af5e08",
+    commit = "6af5e0834580fcfd3094ea23485e5700513ebdc1",
 )
 
 load("@rtp_deps//:http.bzl", "http_deps")

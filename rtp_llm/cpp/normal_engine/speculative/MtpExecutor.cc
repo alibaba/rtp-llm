@@ -1302,9 +1302,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            #if !USING_ASCEND
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-#endif
+            #if USING_ASCEND
+                spec_bookkeeping_runner_.sync();  // host join; single-stream ordering
+            #else
+                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            #endif
             stream_groups                           = StreamGroups(streams);
             prev_bookkeeping_synced_for_spec_logits = true;
         }
@@ -1384,9 +1386,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (useStreamAsync() && useDropBroadSync()) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                 "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            #if !USING_ASCEND
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-#endif
+            #if USING_ASCEND
+                spec_bookkeeping_runner_.sync();  // host join; single-stream ordering
+            #else
+                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            #endif
             stream_groups                           = StreamGroups(streams);
             prev_bookkeeping_synced_for_spec_logits = true;
         }
@@ -1401,9 +1405,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (spec_logits_async_launched) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_spec_logits_verify_async)");
-    #if !USING_ASCEND
-    spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
-#endif
+    #if USING_ASCEND
+        spec_logits_verify_async_runner_.sync();  // host join; single-stream ordering
+    #else
+        spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+    #endif
     }
     if (spec_logits_processor_present && !spec_logits_result->has_active_processor) {
         return absl::InternalError("MTP async spec logits processor is present but no verify artifact was produced; "
@@ -1434,9 +1440,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (useStreamAsync() && useDropBroadSync() && !prev_bookkeeping_synced_for_spec_logits) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
-            #if !USING_ASCEND
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-#endif
+            #if USING_ASCEND
+                spec_bookkeeping_runner_.sync();  // host join; single-stream ordering
+            #else
+                spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            #endif
                 // Rebuild after waiting so cached maxSeqLen/batch sizes reflect
                 // the host stream state that sampler input is about to read.
                 stream_groups = StreamGroups(streams);
@@ -1494,9 +1502,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     broadcastPostRejectionInputs(model_input);
 
-    #if !USING_ASCEND
-    draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
-#endif
+    #if USING_ASCEND
+        draft_prefill_prepare_runner_.sync();  // host join; single-stream ordering
+    #else
+        draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+    #endif
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1555,9 +1565,11 @@ void MtpExecutor::waitPreviousBookkeepingAndKvSwaps(const std::list<GenerateStre
     if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(wait_prev_bookkeeping,stream_count=%zu)",
                                       streams.size());
-        #if !USING_ASCEND
+#if USING_ASCEND
+        spec_bookkeeping_runner_.sync();  // host join; single-stream ordering
+#else
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-        #endif
+#endif
     }
 
     // Linear attention may rewrite KV mappings via swapLinearBlocks; wait on
@@ -1696,7 +1708,9 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         model_input.input_lengths.size(0),
         model_input.prefix_lengths.size(0),
         model_input.sequence_lengths.size(0));
-    #if !USING_ASCEND
+#if USING_ASCEND
+    target_verify_prepare_runner_.sync();  // host join; single-stream ordering
+#else
     target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 #endif
 
@@ -1705,9 +1719,11 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     // cycle, so the re-gather is skipped there.
     if (is_linear_attention_model_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_kv_cache_kernel_block_id)");
-        #if !USING_ASCEND
+#if USING_ASCEND
+        spec_bookkeeping_runner_.sync();  // host join; single-stream ordering
+#else
         spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-        #endif
+#endif
 
         if (tp_rank_ == 0) {
             model_input.kv_cache_kernel_block_id =

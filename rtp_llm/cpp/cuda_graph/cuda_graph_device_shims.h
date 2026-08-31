@@ -25,6 +25,14 @@
 
 namespace py = pybind11;
 
+namespace at {
+namespace cuda {
+// Forward declaration suffices for the reference parameter below; Ascend
+// builds never include ATen/cuda/CUDAGraph.h (it pulls cuda_runtime_api.h).
+struct CUDAGraph;
+}  // namespace cuda
+}  // namespace at
+
 namespace rtp_llm {
 #if USING_ROCM
 namespace rocm {
@@ -154,6 +162,7 @@ inline void graphBlockEvent(const torch::Event& event, GraphStream stream) {
     event.block(stream);
 #endif
 }
+
 
 #if USING_ROCM
 py::module_& getCollectiveTorchModule();

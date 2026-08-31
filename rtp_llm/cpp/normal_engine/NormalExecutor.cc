@@ -77,8 +77,10 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_finish_(std::move(profile_step_finish)),
 #if USING_ASCEND
     // Ascend async dispatch is not stream-async; AsyncRunner tasks run on a
-    // worker thread against the default NPU stream.
-    dispatch_runner_(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0))) {
+    // worker thread over this rank's default NPU stream (host join via no-arg sync()).
+    dispatch_runner_(torch::Stream(c10::Stream::DEFAULT,
+                                   c10::Device(c10::DeviceType::PrivateUse1,
+                                               static_cast<c10::DeviceIndex>(params.parallelism_config.local_rank)))) {
 #else
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
 #endif
@@ -200,10 +202,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     bool worker_synced = false;
     if (useStreamAsync() && !useDropBroadSync()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
-#if !USING_ASCEND
-        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+#if USING_ASCEND
+            dispatch_runner_.sync();  // host join; single-stream ordering
 #else
-        dispatch_runner_.sync(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0)));
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
 #endif
         worker_synced = true;
     }
@@ -213,10 +215,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
-#if !USING_ASCEND
-        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+#if USING_ASCEND
+            dispatch_runner_.sync();  // host join; single-stream ordering
 #else
-        dispatch_runner_.sync(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0)));
+            dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
 #endif
         worker_synced = true;
         // Rebuild StreamGroups after waiting: cached maxSeqLen/batch sizes can
@@ -317,10 +319,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // earlier host-fallback gather already waited.
         if (useStreamAsync() && useDropBroadSync() && !worker_synced) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)", streams.size());
-    #if !USING_ASCEND
-        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+#if USING_ASCEND
+                dispatch_runner_.sync();  // host join; single-stream ordering
 #else
-        dispatch_runner_.sync(torch::Stream(c10::Stream::DEFAULT, c10::Device(c10::DeviceType::PrivateUse1, 0)));
+                dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
 #endif
             worker_synced = true;
             // Rebuild after waiting so sampler buffers use the current seqLength
@@ -351,9 +353,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Record as soon as sampler outputs are valid so the worker waits with
         // cudaStreamWaitEvent before pinned D2H staging.
         auto sampler_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-#if !USING_ASCEND
-        sampler_event->record(cuda_graph::graphGetCurrentStream());
-#endif
+        cuda_graph::graphRecordEvent(*sampler_event, cuda_graph::graphGetCurrentStream());
 
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
@@ -736,9 +736,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         // Queue a stream wait, then do pinned D2H on the worker stream while
         // the main thread continues to the next gather.
         if (sampler_event) {
-#if !USING_ASCEND
-            sampler_event->block(cuda_graph::graphGetCurrentStream());
-#endif
+            cuda_graph::graphBlockEvent(*sampler_event, cuda_graph::graphGetCurrentStream());
         }
 
         auto status =

@@ -1,5 +1,5 @@
 load("@hedron_compile_commands//:refresh_compile_commands.bzl", "refresh_compile_commands")
-load("//:def.bzl", "copts", "cuda_copts")
+load("//:def.bzl", "copts", "cuda_copts", "if_ascend")
 load("@arch_config//:arch_select.bzl", "torch_deps", "flashinfer_deps", "select_py_bindings")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 flashinfer_deps()
@@ -147,10 +147,14 @@ config_setting(
 cc_binary(
     name = "th_transformer_config",
     copts = copts(),
-    linkopts = [
-        "-Wl,-rpath='$$ORIGIN'",
-        "-Wl,-Bsymbolic-functions", # Fox CXX abi mismatch issue, import torch_npu would link several CANN libraries, which include library with CXXabi=1 and CXXabi=0, and will cause std::regex memory issue. This linking option will cause the program to use internal symbols at runtime.
-    ],
+    linkopts = ["-Wl,-rpath='$$ORIGIN'"] + if_ascend([
+        # For the CXX-ABI mismatch across CANN libraries that import torch_npu
+        # pulls in (mixed ABI=1/0 cause a std::regex runtime memory error): bind
+        # symbol references internally so this .so does not accidentally become
+        # the interposer for other modules' symbols. Ascend-only concern; other
+        # platforms keep default link semantics.
+        "-Wl,-Bsymbolic-functions",
+    ]),
     linkshared = 1,
     visibility = ["//visibility:public"],
     deps = [

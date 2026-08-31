@@ -212,6 +212,10 @@ GraphPoolHandle graphPoolHandle() {
 void graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool) {
 #if USING_CUDA
     graph.capture_begin(pool);
+#elif USING_ROCM
+    // HIP graphs do not use mempools; GraphPoolHandle is an empty struct here.
+    (void)pool;
+    graph.capture_begin();
 #else
     (void)pool;
     (void)graph;

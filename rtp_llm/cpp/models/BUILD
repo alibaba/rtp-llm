@@ -92,7 +92,6 @@ cc_library(
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
         ],
-        "@//:using_ascend": [],
         "//conditions:default": [],
     }),
     copts = copts(),
@@ -188,7 +187,6 @@ cc_library(
     ] + select({
         "//:using_cuda": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
         "@//:using_rocm": ["//rtp_llm/cpp/cuda_graph:cuda_graph_impl"],
-        "@//:using_ascend": [],
         "//conditions:default": [],
     }) + [
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",

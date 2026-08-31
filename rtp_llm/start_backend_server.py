@@ -17,6 +17,7 @@ from setproctitle import setproctitle
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.device.device_type import device_count, is_ascend
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
@@ -123,7 +124,7 @@ def local_rank_start(
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     """Calculate local world size based on environment and hardware"""
     world_size = py_env_configs.parallelism_config.world_size
-    _dev_count = torch.npu.device_count() if (not torch.cuda.is_available()) else torch.cuda.device_count()
+    _dev_count = device_count()
     local_world_size = min(_dev_count, world_size)
     if "LOCAL_WORLD_SIZE" in os.environ:
         logging.info(
@@ -139,13 +140,17 @@ def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:
     return local_world_size
 
 
-def _get_cuda_device_list() -> List[str]:
-    """Get CUDA device list from environment or hardware detection"""
-    cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+def _get_cuda_device_list(dev_count: int) -> List[str]:
+    """Get accelerator device list from environment or hardware detection"""
+    visible_devices = (
+        os.environ.get("CUDA_VISIBLE_DEVICES", None)
+        if not is_ascend()
+        else os.environ.get("ASCEND_RT_VISIBLE_DEVICES")  # CANN only honors the NPU var; unset -> full range
+    )
     return (
-        cuda_devices.split(",")
-        if cuda_devices is not None
-        else [str(i) for i in range(_dev_count if "_dev_count" in dir() else (torch.npu.device_count() if not torch.cuda.is_available() else torch.cuda.device_count()))]
+        visible_devices.split(",")
+        if visible_devices is not None
+        else [str(i) for i in range(dev_count)]
     )
 
 
@@ -169,13 +174,16 @@ def _create_rank_processes(
     guards proc.pid to skip any that never started."""
     pc = py_env_configs.parallelism_config
     local_world_size = _get_local_world_size(py_env_configs)
-    cuda_device_list = _get_cuda_device_list()
+    cuda_device_list = _get_cuda_device_list(device_count())
     _validate_dp_configuration(py_env_configs)
 
     for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
         reader, writer = ctx.Pipe(duplex=False)
         rank_pipe_readers.append(reader)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
+        if is_ascend():
+            os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
         os.environ["WORLD_RANK"] = str(world_rank)
         proc = ctx.Process(
             target=local_rank_start,
@@ -435,7 +443,7 @@ def start_backend_server(
         return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
 
     pc = py_env_configs.parallelism_config
-    _dev_count = torch.npu.device_count() if (not torch.cuda.is_available()) else torch.cuda.device_count()
+    _dev_count = device_count()
     if (
         pc.world_size % _dev_count != 0
         and pc.world_size > _dev_count
