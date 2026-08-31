@@ -332,7 +332,7 @@ class DeepSeekV4VisionEmbedding(nn.Module):
         self, images: List[Image.Image], start_pos: int = 0
     ) -> List[torch.Tensor]:
         outputs = []
-        cfg = self.config.config
+        cfg = self.mm_related_params.config
         for image in images:
             patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = preprocess_image(image, cfg)
             patches = patches.to(device=self._device, dtype=self._data_type)
