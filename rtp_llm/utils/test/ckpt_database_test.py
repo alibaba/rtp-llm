@@ -92,6 +92,7 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
         self._saved_fastsafetensors = sys.modules.get("fastsafetensors")
         self._had_fastsafetensors = "fastsafetensors" in sys.modules
         self._config_env_names = (
+            "FASTSAFETENSORS_CONFIG",
             "FASTSAFETENSORS_CONFIG_JSON",
             "FASTSAFETENSORS_NOGDS",
         )
@@ -115,35 +116,28 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
             else:
                 os.environ.pop(name, None)
 
-    def test_stacked_experts_are_cloned_and_renamed(self) -> None:
-        cloned = []
+    def test_default_stacked_experts_are_split_before_delivery(self) -> None:
         closed = []
+        observed_split_templates = []
 
         class FakeSingleGroup:
             def rank(self) -> int:
                 return 0
 
-        class FakeExpertSlice:
-            def __init__(self, expert_id: int) -> None:
-                self.expert_id = expert_id
-
-            def clone(self):
-                result = object()
-                cloned.append((self.expert_id, result))
-                return result
-
-        class FakeStackedTensor:
-            shape = (3, 2)
-
-            def __getitem__(self, expert_id: int):
-                return FakeExpertSlice(expert_id)
-
         class FakeAutoLoader:
-            def __init__(self, pg, files, device) -> None:
-                pass
+            def __init__(
+                self,
+                pg,
+                files,
+                device,
+                local_copyout_filter=None,
+                dim0_split_templates=None,
+            ) -> None:
+                observed_split_templates.append(dim0_split_templates)
 
             def iterate_weights(self):
-                yield "stacked", FakeStackedTensor()
+                for expert_id in range(3):
+                    yield f"experts.{expert_id}.weight", f"expert-{expert_id}"
                 yield "plain", "plain-tensor"
 
             def close(self) -> None:
@@ -173,10 +167,156 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
                 "plain",
             ],
         )
-        self.assertEqual([expert_id for expert_id, _ in cloned], [0, 1, 2])
-        self.assertEqual([tensor for _, tensor in result[:3]], [x[1] for x in cloned])
+        self.assertEqual(
+            [tensor for _, tensor in result[:3]],
+            ["expert-0", "expert-1", "expert-2"],
+        )
         self.assertEqual(result[3], ("plain", "plain-tensor"))
+        self.assertEqual(
+            observed_split_templates,
+            [{"stacked": "experts.{expert_id}.weight"}],
+        )
         self.assertEqual(closed, [True])
+
+    def test_rank_local_copyout_filter_is_forwarded_to_auto_loader(self) -> None:
+        observed_filters = []
+
+        class FakeSingleGroup:
+            def rank(self) -> int:
+                return 0
+
+        class FakeAutoLoader:
+            def __init__(
+                self,
+                pg,
+                files,
+                device,
+                local_copyout_filter=None,
+                dim0_split_templates=None,
+            ) -> None:
+                observed_filters.append(local_copyout_filter)
+
+            def iterate_weights(self):
+                return iter(())
+
+            def close(self) -> None:
+                pass
+
+        fake_module = types.ModuleType("fastsafetensors")
+        fake_module.SingleGroup = FakeSingleGroup
+        fake_module.AutoLoader = FakeAutoLoader
+        sys.modules["fastsafetensors"] = fake_module
+
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+        required_keys = {"needed"}
+        predicate = required_keys.__contains__
+
+        list(
+            database.fastsafetensors_weights_iterator(
+                "cuda",
+                False,
+                local_copyout_filter=predicate,
+            )
+        )
+
+        self.assertEqual(observed_filters, [predicate])
+
+    def test_full_stacked_mode_disables_prebroadcast_split(self) -> None:
+        observed_split_templates = []
+
+        class FakeSingleGroup:
+            def rank(self) -> int:
+                return 0
+
+        class FakeAutoLoader:
+            def __init__(
+                self,
+                pg,
+                files,
+                device,
+                local_copyout_filter=None,
+                dim0_split_templates=None,
+            ) -> None:
+                observed_split_templates.append(dim0_split_templates)
+
+            def iterate_weights(self):
+                yield "stacked", torch.tensor([[1, 2], [3, 4]])
+
+            def close(self) -> None:
+                pass
+
+        fake_module = types.ModuleType("fastsafetensors")
+        fake_module.SingleGroup = FakeSingleGroup
+        fake_module.AutoLoader = FakeAutoLoader
+        sys.modules["fastsafetensors"] = fake_module
+
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+        result = list(
+            database.fastsafetensors_weights_iterator(
+                "cuda",
+                False,
+                stacked_key_config={"stacked": "experts.{expert_id}.weight"},
+                stacked_moe_mode="full-stacked",
+            )
+        )
+
+        self.assertEqual(observed_split_templates, [None])
+        self.assertEqual(
+            [name for name, _tensor in result],
+            [
+                "experts.0.weight",
+                "experts.1.weight",
+            ],
+        )
+        torch.testing.assert_close(result[0][1], torch.tensor([1, 2]))
+        torch.testing.assert_close(result[1][1], torch.tensor([3, 4]))
+
+    def test_wrapper_without_auto_loader_fails_instead_of_legacy_fallback(self) -> None:
+        class FakeSingleGroup:
+            def rank(self) -> int:
+                return 0
+
+        fake_module = types.ModuleType("fastsafetensors")
+        fake_module.SingleGroup = FakeSingleGroup
+        sys.modules["fastsafetensors"] = fake_module
+
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+
+        with self.assertRaisesRegex(ImportError, "AutoLoader"):
+            list(database.fastsafetensors_weights_iterator("cuda", False))
+
+    def test_per_expert_mode_fails_fast_when_wrapper_lacks_split_capability(
+        self,
+    ) -> None:
+        class FakeSingleGroup:
+            def rank(self) -> int:
+                return 0
+
+        class FakeAutoLoader:
+            def __init__(self, pg, files, device, local_copyout_filter=None) -> None:
+                pass
+
+        fake_module = types.ModuleType("fastsafetensors")
+        fake_module.SingleGroup = FakeSingleGroup
+        fake_module.AutoLoader = FakeAutoLoader
+        sys.modules["fastsafetensors"] = fake_module
+
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+
+        with self.assertRaisesRegex(
+            RuntimeError, "does not support bounded-memory stacked MoE delivery"
+        ):
+            list(
+                database.fastsafetensors_weights_iterator(
+                    "cuda",
+                    False,
+                    stacked_key_config={"stacked": "experts.{expert_id}.weight"},
+                )
+            )
 
     def test_legacy_nogds_overrides_config_json(self) -> None:
         observed_config = []
@@ -186,7 +326,14 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
                 return 0
 
         class FakeAutoLoader:
-            def __init__(self, pg, files, device) -> None:
+            def __init__(
+                self,
+                pg,
+                files,
+                device,
+                local_copyout_filter=None,
+                dim0_split_templates=None,
+            ) -> None:
                 observed_config.append(
                     json.loads(os.environ["FASTSAFETENSORS_CONFIG_JSON"])
                 )

@@ -299,6 +299,90 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
         result = ModelLoader._build_stacked_key_config([wi])
         self.assertEqual(len(result), 0)
 
+    def test_rank_local_copyout_keys_include_direct_and_stacked_raw_keys(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        result = ModelLoader._build_fastsafetensors_local_copyout_keys(
+            {"direct.weight": object(), "expanded.experts.0": object()},
+            {"stacked.raw": "expanded.experts.{expert_id}"},
+        )
+
+        self.assertEqual(
+            result,
+            frozenset({"direct.weight", "expanded.experts.0", "stacked.raw"}),
+        )
+
+    def test_rank_local_copyout_filter_is_always_applied(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        collector = MagicMock()
+        collector.store_tensor.return_value = True
+        collector.is_collection_complete.return_value = True
+        weight = MagicMock()
+        weight.name = "needed-weight"
+        weight.load.return_value = {}
+        weight_info = ModelLoader.WeightInfo(weight, 7, collector)
+        database = MagicMock()
+
+        observed_filter = []
+        observed_modes = []
+
+        def iterate(*args, **kwargs):
+            predicate = kwargs["local_copyout_filter"]
+            observed_modes.append(kwargs["stacked_moe_mode"])
+            observed_filter.extend(
+                [
+                    predicate("needed.tensor"),
+                    predicate("stacked.raw"),
+                    predicate("unused.tensor"),
+                ]
+            )
+            return iter((("needed.tensor", torch.ones(1)),))
+
+        database.fastsafetensors_weights_iterator.side_effect = iterate
+
+        loader = object.__new__(ModelLoader)
+        loader._load_config = types.SimpleNamespace(database=database)
+        loader._create_model_weights = MagicMock(return_value=MagicMock())
+        loader._generate_weight_info = MagicMock(
+            return_value=({"needed.tensor": weight_info}, [weight_info])
+        )
+        loader._build_stacked_key_config = MagicMock(
+            return_value={"stacked.raw": "experts.{expert_id}.weight"}
+        )
+        loader._is_online_ptpc = MagicMock(return_value=False)
+
+        loader._load_from_fastsafetensor("cuda:0")
+
+        self.assertEqual(observed_filter, [True, True, False])
+        self.assertEqual(observed_modes, ["per-expert"])
+        weight.load.assert_called_once()
+
+    def test_full_stacked_mode_is_explicit_opt_in(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        with patch.dict(
+            "os.environ",
+            {"RTP_FASTSAFETENSORS_STACKED_MOE_MODE": "full-stacked"},
+            clear=False,
+        ):
+            self.assertEqual(
+                ModelLoader._fastsafetensors_stacked_moe_mode(), "full-stacked"
+            )
+
+    def test_unknown_stacked_moe_mode_is_rejected(self):
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"RTP_FASTSAFETENSORS_STACKED_MOE_MODE": "surprise"},
+                clear=False,
+            ),
+            self.assertRaisesRegex(ValueError, "per-expert.*full-stacked"),
+        ):
+            ModelLoader._fastsafetensors_stacked_moe_mode()
+
 
 class TestFastsafetensorsTransientBudget(unittest.TestCase):
     def test_uses_configured_bounded_peak(self):

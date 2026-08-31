@@ -223,3 +223,16 @@ RTP-LLM directly overrides `FASTSAFETENSORS_CONFIG_JSON` with
 `{"loader":"base","base":{"copier_type":"nogds"}}`. This compatibility switch
 therefore takes priority over other fastsafetensors configuration. Prefer one
 of the standard configuration variables above for new deployments.
+
+Stacked MoE checkpoints use bounded-memory per-expert delivery by default: the
+source rank slices the stacked tensor first, then every rank broadcasts one
+expert at a time. The higher-memory full-stacked path is retained only for
+controlled performance comparisons:
+
+```bash
+export RTP_FASTSAFETENSORS_STACKED_MOE_MODE=full-stacked
+```
+
+The accepted values are `per-expert` (default) and `full-stacked`. This RTP
+switch only selects how stacked MoE tensors are delivered; ordinary tensors
+continue to use the FastSafeTensors bucket and rank-local-copy settings.

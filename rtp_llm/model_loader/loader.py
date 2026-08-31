@@ -383,6 +383,40 @@ class ModelLoader:
                         stacked_key_config[stacked_key] = template
         return stacked_key_config
 
+    @staticmethod
+    def _build_fastsafetensors_local_copyout_keys(
+        tensor_to_weight_map: Mapping[str, "ModelLoader.WeightInfo"],
+        stacked_key_config: Mapping[str, str],
+    ) -> frozenset[str]:
+        """Return checkpoint keys that the current RTP rank can consume.
+
+        Stacked MoE entries must be retained under their raw checkpoint key;
+        the database adapter expands them to per-expert collector keys only
+        after FastSafeTensors has yielded the copied tensor.
+        """
+
+        return frozenset((*tensor_to_weight_map.keys(), *stacked_key_config.keys()))
+
+    @staticmethod
+    def _fastsafetensors_stacked_moe_mode() -> str:
+        """Select the stacked-MoE delivery strategy.
+
+        ``per-expert`` preserves the bounded-memory production behavior: the
+        source rank slices first and ranks broadcast one expert at a time.
+        ``full-stacked`` is the opt-in performance comparison path that
+        broadcasts/copies the complete stacked tensor before RTP splits it.
+        """
+
+        mode = os.environ.get(
+            "RTP_FASTSAFETENSORS_STACKED_MOE_MODE", "per-expert"
+        ).strip()
+        if mode not in {"per-expert", "full-stacked"}:
+            raise ValueError(
+                "RTP_FASTSAFETENSORS_STACKED_MOE_MODE must be "
+                f"'per-expert' or 'full-stacked', got {mode!r}"
+            )
+        return mode
+
     def _is_online_ptpc(self) -> bool:
         quant_config = getattr(self._weights_info, "_quant_config", None)
         return (
@@ -420,10 +454,22 @@ class ModelLoader:
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
 
         stacked_key_config = self._build_stacked_key_config(weight_info_list)
+        stacked_moe_mode = self._fastsafetensors_stacked_moe_mode()
         if stacked_key_config:
             logging.info(
-                f"fastsafetensors per-expert split enabled for {len(stacked_key_config)} stacked keys"
+                "fastsafetensors stacked MoE mode=%s keys=%d",
+                stacked_moe_mode,
+                len(stacked_key_config),
             )
+
+        required_checkpoint_keys = self._build_fastsafetensors_local_copyout_keys(
+            tensor_to_weight_map, stacked_key_config
+        )
+        logging.info(
+            "fastsafetensors rank-local copyout filter: keys=%d stacked_keys=%d",
+            len(required_checkpoint_keys),
+            len(stacked_key_config),
+        )
 
         inline_fp8 = self._is_online_ptpc()
         if inline_fp8:
@@ -441,6 +487,8 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            local_copyout_filter=required_checkpoint_keys.__contains__,
+            stacked_moe_mode=stacked_moe_mode,
         )
 
         _inline_count = 0
