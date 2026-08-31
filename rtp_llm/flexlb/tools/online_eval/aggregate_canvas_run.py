@@ -31,6 +31,16 @@ cancel_qps_ts additionally carries master/prefill/decode cancel split rates
 cancelled_rids matched against master terminal lines for prefill/decode).
 All series are rebased to the first
 per-request send time (negative t = pre-send warmup).
+
+Phase A (aggregator-side unification): the summary section additionally
+carries validity_checks / test_valid (six checks, now also produced for
+single-worker runs), quick-stats (actual_send_qps, client_send_peak_qps /
+trace_due_peak_qps over the 1/10/100/1000ms windows, success/error/
+completed qps, elapsed_s, counts, error_rate) and full-run percentiles for
+ttft/e2e/schedule (schedule dual-source adjudication via
+schedule_latency_source) — all computed from the merged per_request rows
+plus the server_latency terminal state; summary.json passthrough values
+serve only as legacy-run fallbacks.
 """
 import glob
 import gzip
@@ -54,6 +64,12 @@ def load_json(path):
             return json.load(f)
     except (OSError, ValueError):
         return None
+
+
+# ---- shared-impl-begin: consolidate_run_outputs.py 经 exec 切块复用本段 ----
+# （is_ok / 17 桶 classify_error / Phase A 统计原语；修改本段时同步检查
+# consolidate_run_outputs.py 的 load_shared_impl 切块边界：本段只能依赖
+# re / Counter 与内置函数，不得引用本文件其它名字）。
 
 
 def is_ok(d):
@@ -167,6 +183,69 @@ def classify_error(status, err):
     return "err_other"
 
 
+# ---- Phase A 共享统计原语（consolidate_run_outputs.py 经 sentinel 受限 ----
+# ---- exec 复用同一份实现；本块只能依赖其上方定义，不得引用其后名字） ----
+# percentile/rate/peak/summary 四族在全仓库统一为 nearest-rank 口径，
+# 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1397-1448）与
+# JavaLoadClient.LatencySummary 形状。
+
+
+def percentile_nr(values, p, nd=1):
+    """Nearest-rank 分位：int(n*p) 取秩（全仓库统一实现，Phase A）。
+
+    与旧 pct 逐字等价（v[min(n-1, int(n*p))]）；空表返回 0。nd=1 与
+    aggregate 旧 pct 精度对齐；pacing 分布用 nd=3（sh 合并段 distribution
+    的 round 3——p99 与 limit 比较需保留亚毫秒精度，round 1 会在边界值
+    上翻转判定）。
+    """
+    if not values:
+        return 0
+    v = sorted(values)
+    return round(v[min(len(v) - 1, int(len(v) * p))], nd)
+
+
+def rank_rate(epoch_ms_values):
+    """全程速率：(n-1)*1000/(max-min)（sh L1397-1401 同式；<2 样本→0）。"""
+    if len(epoch_ms_values) < 2:
+        return 0.0
+    lo, hi = min(epoch_ms_values), max(epoch_ms_values)
+    if hi <= lo:
+        return 0.0
+    return round((len(epoch_ms_values) - 1) * 1000.0 / (hi - lo), 3)
+
+
+def peak_bucket_qps(epoch_ms_values, window_ms):
+    """窗口桶峰值 QPS：bucket=int(ts//w)，max(桶计数)*1000/w（sh L1403-1405）。"""
+    buckets = Counter(int(v // window_ms) for v in epoch_ms_values)
+    return round(max(buckets.values(), default=0) * 1000.0 / window_ms, 3)
+
+
+def latency_summary(values, nd=1):
+    """LatencySummary 形状：count/p50/p90/p95/p99/max/mean（nearest-rank）。"""
+    if not values:
+        return {
+            "count": 0,
+            "p50": 0.0,
+            "p90": 0.0,
+            "p95": 0.0,
+            "p99": 0.0,
+            "max": 0.0,
+            "mean": 0.0,
+        }
+    return {
+        "count": len(values),
+        "p50": percentile_nr(values, 0.50, nd),
+        "p90": percentile_nr(values, 0.90, nd),
+        "p95": percentile_nr(values, 0.95, nd),
+        "p99": percentile_nr(values, 0.99, nd),
+        "max": round(max(values), nd),
+        "mean": round(sum(values) / len(values), nd),
+    }
+
+
+# ---- shared-impl-end: exec 切块到此为止（下方数据加载不进共享段） ----
+
+
 # ---- inputs: legacy layout first, consolidated run-root fallback ----
 legacy_summary = load_json("load_client/summary.json")
 if legacy_summary:
@@ -183,6 +262,11 @@ if not slo and not legacy_summary:
     slo = client_json.get("slo_batch_analysis")
 if not slo:
     slo = {}
+
+# run_meta.json（params + client_env）：Phase A 派生统计需要 client_env 里的
+# CLIENT_PACING_LAG_P99_LIMIT_MS，提前到此处加载（原先在 compact time series
+# 段才读；纯 load，无副作用）。
+run_meta = load_json("run_meta.json") or {}
 
 # ---- per_second from per_request.jsonl (bucket by wall-clock send time) ----
 # Legacy shard files first (deleted by consolidation, so their presence means
@@ -222,6 +306,25 @@ epoch0 = min(_send_ts_values) if _send_ts_values else 0
 # surfaced through the integrity marker instead.
 per_second_unstamped = 0
 error_breakdown = defaultdict(int)
+
+# ---- Phase A 派生统计原始样本（单遍收集；公式见 sh 多 worker 合并段） ----
+# server_latency 终态双路径：多 worker 合并段写 load_client/server_latency.json
+# （consolidate 保留在原地），consolidate 布局则嵌入 client.json；两条都试。
+# 均缺失（旧 run / 单 worker 未采）→ 空 dict，validity 对应检查项按
+# “数据缺失”（None）标注而非误报失败。
+server_latency = load_json("load_client/server_latency.json")
+if not isinstance(server_latency, dict) or not server_latency:
+    _embedded_sl = client_json.get("server_latency")
+    server_latency = dict(_embedded_sl) if isinstance(_embedded_sl, dict) else {}
+rpc_start_ms = []  # stamped 行 send_start（actual_send_qps / client peak 轴）
+send_due_ms = []  # stamped 行 send_due（trace_due_peak_qps 轴）
+pacing_lag_samples = []  # stamped 行 pacing_lag（Java 同规则：仅 send_start>0）
+ttft_samples = []  # is_ok 行 ttft_ms>0（全程分位，全量口径）
+e2e_samples = []  # is_ok 行 total_ms>0
+sched_client_samples = []  # is_ok 行 schedule_ms（schedule 双源的 client 口径）
+ok_count = 0  # is_ok 行数（success_count 自算口径）
+completed_count = 0  # status=="ok" 行数（completed 口径，Java 同义）
+wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 
 # ---- engine per-rid terminal lines: full_e2e + birth-axis exec join ----
 # JavaMockEngineCluster prints one "mock_decode_done rid=... ts_epoch_ms=...
@@ -314,9 +417,28 @@ for d in rows:
     _bucket_key = classify_error(d.get("status"), err) if not is_ok(d) else None
     if _bucket_key is not None:
         error_breakdown[_bucket_key] += 1
+    else:
+        # Phase A 全程样本（全量口径，与 error_breakdown 同级：含无时间戳
+        # is_ok 行）。schedule_ms 缺省 0 与 per_second 桶化同规则。
+        ok_count += 1
+        if d.get("status") == "ok":
+            completed_count += 1
+        sched_client_samples.append(d.get("schedule_ms", 0))
+        if d.get("total_ms"):
+            e2e_samples.append(d["total_ms"])
+        if d.get("ttft_ms"):
+            ttft_samples.append(d["ttft_ms"])
+    if d.get("wall_clock_ts"):
+        wall_clock_vals.append(d["wall_clock_ts"])
     if not _send_ts:
         per_second_unstamped += 1
         continue
+    # 三时间轴样本仅 stamped 行（sh 合并段 L1273-1278 同规则：
+    # send_start<=0 跳过——合成 timeout/exception 行无该键；send_due /
+    # pacing_lag 无值时记 0，与 sh 逐字一致）。
+    rpc_start_ms.append(float(_send_ts))
+    send_due_ms.append(float(d.get("send_due_epoch_ms", 0.0) or 0.0))
+    pacing_lag_samples.append(float(d.get("pacing_lag_ms", 0.0) or 0.0))
     t = int((_send_ts - epoch0) // 1000)
     b = per_sec[t]
     b["arrivals"] += 1
@@ -365,10 +487,8 @@ for d in rows:
 
 
 def pct(v, p):
-    if not v:
-        return 0
-    v = sorted(v)
-    return round(v[min(len(v) - 1, int(len(v) * p))], 1)
+    # Phase A 统一：per_second 桶分位改走共享 nearest-rank 实现（逐字等价）。
+    return percentile_nr(v, p)
 
 
 per_second = []
@@ -440,6 +560,137 @@ if full_e2e_all:
         "p95": pct(full_e2e_all, 0.95),
         "p99": pct(full_e2e_all, 0.99),
     }
+
+# ---- Phase A 派生统计：validity / quick-stats / 全程分位（统一聚合侧） ----
+# 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）；单 worker
+# run（Java 直写 summary、无合并段）从此也产出同一套键。rows 为空（旧 run /
+# per_request 缺失）时自算值为 None，out.summary 组装处回退 summary 透传。
+_have_rows = bool(rows)
+_actual_rpc_start_count = len(rpc_start_ms)  # sh: sum(shard actual_sent_count)
+_recorded_result_count = len(rows)  # sh: sum(shard recorded_result_count)
+# sent_task_count 无 row 级来源（未发出的任务不留行）→ summary 透传链：
+# 多 worker 合并键 sent_task_count → 单 worker Java 直写键 sent_count。
+_sent_task_count = None
+if summary.get("sent_task_count") is not None:
+    _sent_task_count = summary.get("sent_task_count")
+elif summary.get("sent_count") is not None:
+    _sent_task_count = summary.get("sent_count")
+_error_count_calc = len(rows) - ok_count  # 与 error_breakdown 同口径（全量行）
+_success_count_calc = ok_count
+# pacing 分布：sh distribution 的 round 3 精度（p99 与 limit 比较保真）。
+_pacing_dist = latency_summary(pacing_lag_samples, nd=3)
+_ttft_summary_calc = latency_summary(ttft_samples)
+_e2e_summary_calc = latency_summary(e2e_samples)
+
+# pacing limit：client_env 快照（run_meta.client_env，字符串值）；缺省
+# 100.0（run_online_eval.sh 的 CLIENT_PACING_LAG_P99_LIMIT_MS 默认值）。
+_pacing_limit_raw = (run_meta.get("client_env") or {}).get(
+    "CLIENT_PACING_LAG_P99_LIMIT_MS"
+)
+try:
+    pacing_limit_ms = float(_pacing_limit_raw)
+except (TypeError, ValueError):
+    pacing_limit_ms = 100.0
+
+# elapsed_s 主口径 wall_clock_ts 窗口（秒）；无 wall_clock 行回退发送窗口。
+if wall_clock_vals:
+    elapsed_s_calc = round(max(wall_clock_vals) - min(wall_clock_vals), 3)
+elif len(rpc_start_ms) >= 2:
+    elapsed_s_calc = round((max(rpc_start_ms) - min(rpc_start_ms)) / 1000.0, 3)
+else:
+    elapsed_s_calc = None
+
+# schedule 双源裁决：server_total_ms 有样本（count>0）→ server 口径（master
+# 侧算好的分位对象，透传不重算）；否则 rows 有 ok 样本 → client 口径
+# （本层 nearest-rank 重算）；两者皆无 → None（透传回退）。
+_server_total = server_latency.get("server_total_ms")
+_schedule_latency_calc = None
+_schedule_source_calc = None
+if isinstance(_server_total, dict) and _server_total.get("count"):
+    _schedule_latency_calc = dict(_server_total)
+    _schedule_source_calc = "server"
+elif sched_client_samples:
+    _schedule_latency_calc = latency_summary(sched_client_samples)
+    _schedule_source_calc = "client"
+# server 五阶段延迟（sh L1355-1358 同键集；server 缺某阶段 → 空 dict 透传）
+_server_stage_calc = None
+if server_latency:
+    _server_stage_calc = {
+        key: (server_latency.get(key) or {})
+        for key in (
+            "grpc_queue_ms",
+            "route_submit_ms",
+            "batch_wait_ms",
+            "dispatch_ack_ms",
+            "ack_response_ms",
+        )
+    }
+
+# validity 六项（sh L1315-1322 语义；缺输入 → None = 数据缺失标注，
+# test_valid 保守判 invalid：None 不是 True）。与 sh 的两处有意差异：
+# master_arrival/completion 的 server 侧计数缺失时 sh 当 0 比较（必 False），
+# 本层改为 None（旧 run 无 server_latency.json 时不误报“失败”）。
+if _have_rows:
+    validity_checks_calc = {
+        "zero_errors": _error_count_calc == 0,
+        "all_scheduled_tasks_started": (
+            _sent_task_count == _actual_rpc_start_count
+            if _sent_task_count is not None
+            else None
+        ),
+        "all_started_rpcs_recorded": (
+            _actual_rpc_start_count == _recorded_result_count
+        ),
+        "master_arrival_matches_success": (
+            server_latency.get("arrival_count") == _success_count_calc
+            if server_latency.get("arrival_count") is not None
+            else None
+        ),
+        "master_completion_matches_success": (
+            server_latency.get("completion_count") == _success_count_calc
+            if server_latency.get("completion_count") is not None
+            else None
+        ),
+        "client_pacing_p99_within_limit": (
+            _pacing_dist["p99"] <= pacing_limit_ms if pacing_lag_samples else None
+        ),
+    }
+    test_valid_calc = all(v is True for v in validity_checks_calc.values())
+else:
+    validity_checks_calc = None
+    test_valid_calc = None
+
+# quick-stats 族（rows 非空才有意义；空 rows → None 透传回退）
+if _have_rows:
+    actual_send_qps_calc = rank_rate(rpc_start_ms)
+    client_send_peak_qps_calc = {
+        "%dms" % w: peak_bucket_qps(rpc_start_ms, w) for w in (1, 10, 100, 1000)
+    }
+    trace_due_peak_qps_calc = {
+        "%dms" % w: peak_bucket_qps(send_due_ms, w) for w in (1, 10, 100, 1000)
+    }
+    _es = elapsed_s_calc or 0.0
+    success_qps_calc = round(ok_count / _es, 3) if ok_count and _es else 0.0
+    error_qps_calc = (
+        round(_error_count_calc / _es, 3) if _error_count_calc and _es else 0.0
+    )
+    completed_qps_calc = (
+        round(completed_count / _es, 3) if completed_count and _es else 0.0
+    )
+    # error_rate：sh L1363-1365 同式（round 6；分母 recorded 口径）。
+    error_rate_calc = (
+        round(_error_count_calc / _recorded_result_count, 6)
+        if _recorded_result_count
+        else 0.0
+    )
+else:
+    actual_send_qps_calc = None
+    client_send_peak_qps_calc = None
+    trace_due_peak_qps_calc = None
+    success_qps_calc = None
+    error_qps_calc = None
+    completed_qps_calc = None
+    error_rate_calc = None
 
 # ---- queue_timeseries from java_mock_stats (legacy log first, mock.json) ----
 mock_payload = load_json("mock.json") or {}
@@ -553,7 +804,11 @@ if not _stats_anchor:
 _cancel_role_events = {"prefill": [], "decode": []}
 _cancel_role_unmatched = {"prefill": 0, "decode": 0}
 _fs_engines = (
-    mock_payload.get("final_snapshot", {}).get("engines")
+    # 防御 final_snapshot 为显式 null（consolidate 在 live snapshot fetch
+    # 不可用时写入 null + final_snapshot_source=missing/fallback）：键存在但
+    # 值为 None 时 .get("engines") 会壁，归一为空 dict 走无快照路径
+    # （旧 bug：部分 run 的 consolidate 布局 mock.json 直接让 aggregate 壁）。
+    (mock_payload.get("final_snapshot") or {}).get("engines")
     if isinstance(mock_payload, dict)
     else None
 )
@@ -898,8 +1153,9 @@ else:
 # send (epoch0). Negative t = pre-send warmup. A series whose source file is
 # missing comes out empty; the generator renders charts conditionally.
 
+# run_meta 已在头部加载（Phase A 提前：client_env 的 pacing limit 与
+# params 的 fetch_output_stream 双消费点）。
 master_json = load_json("master.json") or {}
-run_meta = load_json("run_meta.json") or {}
 prom_ts = master_json.get("prometheus_timeseries") or []
 
 # mock per-engine 1s 时序（mock_per_engine_timeseries.json.gz，mock 引擎自身
@@ -1665,27 +1921,118 @@ out = {
         "fetch_output_stream": fetch_output_stream,
     },
     "summary": {
-        "total_requests": summary.get("total_requests"),
-        "success_count": summary.get("success_count"),
-        "error_count": summary.get("error_count"),
-        "error_rate": summary.get("error_rate"),
+        # ---- Phase A：自算优先（合并 per_request rows + server_latency 终态），
+        # ---- summary.json 透传仅旧 run（rows 缺失）回退 ----
+        "total_requests": (len(rows) if _have_rows else summary.get("total_requests")),
+        "success_count": (
+            _success_count_calc if _have_rows else summary.get("success_count")
+        ),
+        "error_count": (
+            _error_count_calc if _have_rows else summary.get("error_count")
+        ),
+        "error_rate": error_rate_calc if _have_rows else summary.get("error_rate"),
         # 错误构成（具名子桶细分，含无时间戳行，与 error_count 同口径；
-        # 旧生成器无此键时退化不崩）。空 rows（无 per_request 数据的 run）
-        # 输出空 dict。
+        # 空rows（无 per_request 数据的 run）输出空 dict。
         "error_breakdown": dict(error_breakdown),
-        "actual_send_qps": summary.get("actual_send_qps"),
-        "client_send_peak_qps": summary.get("client_send_peak_qps"),
-        "trace_due_peak_qps": summary.get("trace_due_peak_qps"),
-        "server_arrival_qps": summary.get("server_arrival_qps"),
-        "server_completion_qps": summary.get("server_completion_qps"),
-        "schedule_latency_ms": summary.get("schedule_latency_ms"),
+        "sent_task_count": _sent_task_count,
+        "actual_rpc_start_count": (
+            _actual_rpc_start_count
+            if _have_rows
+            else (
+                summary.get("actual_rpc_start_count")
+                if summary.get("actual_rpc_start_count") is not None
+                else summary.get("actual_sent_count")
+            )
+        ),
+        "recorded_result_count": (
+            _recorded_result_count
+            if _have_rows
+            else summary.get("recorded_result_count")
+        ),
+        "completed_count": (
+            completed_count if _have_rows else summary.get("completed")
+        ),
+        "elapsed_s": (
+            elapsed_s_calc if elapsed_s_calc is not None else summary.get("elapsed_s")
+        ),
+        "actual_send_qps": (
+            actual_send_qps_calc if _have_rows else summary.get("actual_send_qps")
+        ),
+        "success_qps": (success_qps_calc if _have_rows else summary.get("success_qps")),
+        "error_qps": (error_qps_calc if _have_rows else summary.get("error_qps")),
+        "completed_qps": (
+            completed_qps_calc if _have_rows else summary.get("completed_qps")
+        ),
+        "client_pacing_lag_ms": (
+            _pacing_dist if _have_rows else summary.get("client_pacing_lag_ms")
+        ),
+        "client_send_peak_qps": (
+            client_send_peak_qps_calc
+            if _have_rows
+            else summary.get("client_send_peak_qps")
+        ),
+        "trace_due_peak_qps": (
+            trace_due_peak_qps_calc if _have_rows else summary.get("trace_due_peak_qps")
+        ),
+        "server_arrival_qps": (
+            server_latency.get("arrival_qps")
+            if server_latency.get("arrival_qps") is not None
+            else summary.get("server_arrival_qps")
+        ),
+        "server_completion_qps": (
+            server_latency.get("completion_qps")
+            if server_latency.get("completion_qps") is not None
+            else summary.get("server_completion_qps")
+        ),
+        "schedule_latency_source": (
+            _schedule_source_calc
+            if _schedule_source_calc is not None
+            else summary.get("schedule_latency_source")
+        ),
+        "schedule_latency_ms": (
+            _schedule_latency_calc
+            if _schedule_latency_calc is not None
+            else summary.get("schedule_latency_ms")
+        ),
         # 跨两侧全链路分位（聚合层新算，非 summary.json 原生字段）；
         # full_e2e = client 发出 → 引擎 decode 正常终态，按 request_id
         # 关联，schedule-only（FETCH=0）下也覆盖完整链路。
         "full_e2e_latency_ms": full_e2e_latency_ms,
-        "server_stage_latency_ms": summary.get("server_stage_latency_ms"),
-        "validity_checks": summary.get("validity_checks"),
-        "test_valid": summary.get("test_valid"),
+        "server_stage_latency_ms": (
+            _server_stage_calc
+            if _server_stage_calc is not None
+            else summary.get("server_stage_latency_ms")
+        ),
+        # ttft/e2e 全程分位（聚合层新算）；旧 run 回退链：新键 →
+        # Java summary 的 ttft_ms / total_ms（同为 LatencySummary 形状）。
+        "ttft_latency_ms": (
+            _ttft_summary_calc
+            if _have_rows
+            else (
+                summary.get("ttft_latency_ms")
+                if summary.get("ttft_latency_ms") is not None
+                else summary.get("ttft_ms")
+            )
+        ),
+        "e2e_latency_ms": (
+            _e2e_summary_calc
+            if _have_rows
+            else (
+                summary.get("e2e_latency_ms")
+                if summary.get("e2e_latency_ms") is not None
+                else summary.get("total_ms")
+            )
+        ),
+        "validity_checks": (
+            validity_checks_calc
+            if validity_checks_calc is not None
+            else summary.get("validity_checks")
+        ),
+        "test_valid": (
+            test_valid_calc
+            if test_valid_calc is not None
+            else summary.get("test_valid")
+        ),
     },
     "batch": {
         "config": slo.get("config"),

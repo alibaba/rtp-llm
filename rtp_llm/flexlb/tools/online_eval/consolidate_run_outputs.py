@@ -75,6 +75,7 @@ import re
 import shutil
 import sys
 import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -387,12 +388,33 @@ def endpoints_summary(endpoints: dict) -> dict:
     }
 
 
-def percentile(values: list[float], quantile: float) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, int(len(ordered) * quantile)))
-    return round(ordered[index], 1)
+# ---- shared impl（Phase A）：从 aggregate_canvas_run.py 切块复用统一口径 ----
+# is_ok 谓词 / classify_error 17 桶错误分类 / nearest-rank 分位等统计原语
+# 的唯一实现在 aggregate_canvas_run.py 的 shared-impl 段（sentinel 注释
+# 划界）。本文件原先自带一份 6+1 桶的重复实现（桶缺 11 个、谓词内联、
+# epoch0 把无时间戳行当 0.0 入桶），与 aggregate 口径漂移；现改为 exec
+# 切块复用同一份——不直接 import（aggregate 是脚本式顶层执行，import
+# 即跑一次完整聚合）。切块失败（文件缺失 / sentinel 漂移）直接 raise：
+# 两份口径静默漂移比立即失败更糟。
+SHARED_IMPL_BEGIN = "# ---- shared-impl-begin:"
+SHARED_IMPL_END = "# ---- shared-impl-end:"
+
+
+def load_shared_impl() -> dict:
+    """Exec the shared-impl block of aggregate_canvas_run.py into a namespace."""
+    src_path = Path(__file__).with_name("aggregate_canvas_run.py")
+    source = src_path.read_text(encoding="utf-8")
+    begin = source.index(SHARED_IMPL_BEGIN)
+    end = source.index(SHARED_IMPL_END)
+    namespace = {"re": re, "Counter": Counter}
+    exec(compile(source[begin:end], str(src_path), "exec"), namespace)
+    return namespace
+
+
+_SHARED = load_shared_impl()
+is_ok = _SHARED["is_ok"]
+classify_error = _SHARED["classify_error"]
+percentile_nr = _SHARED["percentile_nr"]
 
 
 class PerSecondAggregator:
@@ -402,26 +424,56 @@ class PerSecondAggregator:
     schedule_ms scalars needed for the p50/p95/p99 percentiles, so peak memory
     stays bounded by the per-second scalar arrays instead of holding every row
     dict (a ~500MB per_request stream would otherwise OOM the process).
-    Output shape matches the canvas per_second aggregation.
+    Output shape matches the canvas per_second aggregation: the shared is_ok
+    predicate, the 17-bucket classify_error taxonomy and the nearest-rank
+    percentiles all come from aggregate_canvas_run.py's shared-impl block
+    (Phase A: replaces the local 6+1-bucket duplicate; the epoch0 anchoring is
+    likewise unified to skip unstamped rows instead of counting them as 0.0).
     """
+
+    ERROR_BUCKETS = (
+        "err_no_decode",
+        "err_no_prefill",
+        "err_queue_full",
+        "err_deadline",
+        "err_priority",
+        "err_preempted",
+        "err_yielded",
+        "err_backpressure",
+        "err_queue_timeout",
+        "err_rst_stream",
+        "err_goaway",
+        "err_unavailable",
+        "err_cancelled",
+        "err_internal",
+        "err_empty_response",
+        "err_duplicate_rid",
+        "err_other",
+    )
 
     def __init__(self) -> None:
         self.epoch0: float | None = None
         self.row_count = 0
+        self.unstamped = 0
         self._buckets: dict[int, dict] = {}
 
     def scan_start_floor(self, path: Path) -> None:
         """First pass: regex-scan the send_start_epoch_ms floor.
 
-        Runs without json.loads (a regex per line is cheap); lines without the
-        field count as 0.0, matching the ``row.get(..., 0) or 0`` semantics of
-        the original non-streaming implementation.
+        Runs without json.loads (a regex per line is cheap). Lines without the
+        field — or carrying 0, as synthesized timeout/exception rows do — are
+        SKIPPED: the floor is the min over rows that actually carry a truthy
+        send_start_epoch_ms (aggregate's epoch0 anchoring, Phase A unified).
         """
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt", encoding="utf-8", errors="replace") as stream:
             for line in stream:
                 match = SEND_START_RE.search(line)
-                value = float(match.group(1)) if match else 0.0
+                if not match:
+                    continue
+                value = float(match.group(1))
+                if not value:
+                    continue
                 if self.epoch0 is None or value < self.epoch0:
                     self.epoch0 = value
 
@@ -441,10 +493,18 @@ class PerSecondAggregator:
                     self.add_row(row)
 
     def add_row(self, row: dict) -> None:
-        started = float(row.get("send_start_epoch_ms", 0) or 0)
+        started = row.get("send_start_epoch_ms")
+        self.row_count += 1
+        if not started:
+            # Skip-unstamped anchoring (aggregate parity): rows without a
+            # usable send timestamp cannot be placed on the time axis; they
+            # are counted separately instead of landing in a huge-negative
+            # second bucket.
+            self.unstamped += 1
+            return
+        started = float(started)
         if self.epoch0 is None:
             self.epoch0 = started
-        self.row_count += 1
         second = int((started - self.epoch0) // 1000)
         bucket = self._buckets.setdefault(
             second,
@@ -452,35 +512,17 @@ class PerSecondAggregator:
                 "arrivals": 0,
                 "success": 0,
                 "errors": 0,
-                "err_no_decode": 0,
-                "err_queue_full": 0,
-                "err_deadline": 0,
-                "err_preempted": 0,
-                "err_yielded": 0,
-                "err_other": 0,
+                **{key: 0 for key in self.ERROR_BUCKETS},
                 "sched": [],
             },
         )
         bucket["arrivals"] += 1
-        error = row.get("error") or ""
-        status = row.get("status", "")
-        if status == "ok" or (not error and status not in ("schedule_error",)):
+        if is_ok(row):
             bucket["success"] += 1
             bucket["sched"].append(float(row.get("schedule_ms", 0) or 0))
         else:
             bucket["errors"] += 1
-            if "preempted by higher-priority" in error or "8429" in error:
-                bucket["err_preempted"] += 1
-            elif "yielded to higher-priority" in error:
-                bucket["err_yielded"] += 1
-            elif "NO_DECODE_WORKER" in error or "NO_AVAILABLE_WORKER" in error:
-                bucket["err_no_decode"] += 1
-            elif "queue full" in error:
-                bucket["err_queue_full"] += 1
-            elif "SLO expired" in error or "deadline" in error:
-                bucket["err_deadline"] += 1
-            else:
-                bucket["err_other"] += 1
+            bucket[classify_error(row.get("status", ""), row.get("error") or "")] += 1
 
     def timeline(self) -> list[dict]:
         buckets: list[dict] = []
@@ -492,15 +534,10 @@ class PerSecondAggregator:
                     "arrivals": bucket["arrivals"],
                     "success": bucket["success"],
                     "errors": bucket["errors"],
-                    "err_no_decode": bucket["err_no_decode"],
-                    "err_queue_full": bucket["err_queue_full"],
-                    "err_deadline": bucket["err_deadline"],
-                    "err_preempted": bucket["err_preempted"],
-                    "err_yielded": bucket["err_yielded"],
-                    "err_other": bucket["err_other"],
-                    "sched_p50": percentile(bucket["sched"], 0.5),
-                    "sched_p95": percentile(bucket["sched"], 0.95),
-                    "sched_p99": percentile(bucket["sched"], 0.99),
+                    **{key: bucket[key] for key in self.ERROR_BUCKETS},
+                    "sched_p50": percentile_nr(bucket["sched"], 0.5),
+                    "sched_p95": percentile_nr(bucket["sched"], 0.95),
+                    "sched_p99": percentile_nr(bucket["sched"], 0.99),
                 }
             )
         return buckets

@@ -683,6 +683,10 @@ def main():
         # 会把 duration_s 拉长、ok_qps 压低。
         qps0 = sm.get("server_arrival_qps") or sm.get("actual_send_qps") or 0
         duration_s = int(round(total0 / float(qps0))) if qps0 else 0
+        # Phase A：qps0 也缺失时回退聚合层自算 elapsed_s（wall_clock_ts
+        # 窗口口径；旧 aggregate 无此键时保持 0 不变）。
+        if not duration_s:
+            duration_s = int(round(float(sm.get("elapsed_s") or 0)))
 
     # ---- Stat 六连 ----
     total_req = sm.get("total_requests")
@@ -712,6 +716,11 @@ def main():
         leak_label = "—"
     pacing_ok = bool(validity.get("client_pacing_p99_within_limit"))
     pacing_label, pacing_tone = ("good", "success") if pacing_ok else ("bad", "danger")
+    # Phase A：chip 附 pacing p99 数值（聚合层自算 client_pacing_lag_ms；
+    # 无样本或旧 run 无键时退回纯 good/bad 文案不变）。
+    _pacing_dist = sm.get("client_pacing_lag_ms") or {}
+    if _pacing_dist.get("count") and _pacing_dist.get("p99") is not None:
+        pacing_label += " · p99 " + fmt_ms(_pacing_dist["p99"]) + "ms"
 
     pg = (ed.get("prefill") or {}).get("gini_cum") if ed else None
     dg = (ed.get("decode") or {}).get("gini_cum") if ed else None
@@ -2863,9 +2872,46 @@ def main():
             _lat_cell += (
                 " · n=" + fmt_int_trunc(lat_summary.get("count")) + "（全终态）"
             )
+        # Phase A：schedule 双源口径标注（server=master 侧 / client=client
+        # 行；旧 aggregate 无 schedule_latency_source 键时省略）。
+        _sched_src = sm.get("schedule_latency_source")
+        if _sched_src:
+            _lat_cell += " · 口径 " + str(_sched_src)
         rows.append(["调度延迟", _lat_cell])
     else:
         rows.append(["调度延迟", "—"])
+    # ttft/e2e 全程分位（Phase A 聚合层自算，幸存者口径 = ok 行带值样本；
+    # 与 per_second 图的每秒分位互补）：旧 aggregate 无 ttft_latency_ms /
+    # e2e_latency_ms 键时回退 summary 独立文件的 Java 键（ttft_ms /
+    # total_ms，同为分位形状），仍无则整行不显示（full_e2e 行同例）。
+    ttft_sum = sm.get("ttft_latency_ms")
+    if ttft_sum is None:
+        ttft_sum = (summary_standalone or {}).get("ttft_ms")
+    if ttft_sum:
+        _ttft_cell = (
+            "p50 "
+            + fmt_ms(ttft_sum.get("p50"))
+            + " / p99 "
+            + fmt_ms(ttft_sum.get("p99"))
+            + " ms"
+        )
+        if ttft_sum.get("count"):
+            _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
+        rows.append(["TTFT（全程）", _ttft_cell])
+    e2e_sum = sm.get("e2e_latency_ms")
+    if e2e_sum is None:
+        e2e_sum = (summary_standalone or {}).get("total_ms")
+    if e2e_sum:
+        _e2e_cell = (
+            "p50 "
+            + fmt_ms(e2e_sum.get("p50"))
+            + " / p99 "
+            + fmt_ms(e2e_sum.get("p99"))
+            + " ms"
+        )
+        if e2e_sum.get("count"):
+            _e2e_cell += " · n=" + fmt_int_trunc(e2e_sum.get("count"))
+        rows.append(["端到端延迟（全程）", _e2e_cell])
     # full_e2e（跨两侧全链路）：旧 aggregate 无 full_e2e_latency_ms 键时
     # 整行不显示（回退），不显示 "—" 占位——该指标依赖新引擎日志行，
     # 旧数据本来就没有。
@@ -3007,6 +3053,21 @@ def main():
         )
     else:
         rows.append(["batch", "—"])
+    # Phase A quick-stats：sent/started/recorded/completed 四计数
+    # （validity 六项的原始量；旧 aggregate 无这些键时整行跳过）。
+    _cnt_parts = []
+    if sm.get("sent_task_count") is not None:
+        _cnt_parts.append("sent " + fmt_int_trunc(sm.get("sent_task_count")))
+    if sm.get("actual_rpc_start_count") is not None:
+        _cnt_parts.append("started " + fmt_int_trunc(sm.get("actual_rpc_start_count")))
+    if sm.get("recorded_result_count") is not None:
+        _cnt_parts.append("recorded " + fmt_int_trunc(sm.get("recorded_result_count")))
+    if sm.get("completed_count") is not None:
+        _cnt_parts.append("completed " + fmt_int_trunc(sm.get("completed_count")))
+    if _cnt_parts:
+        rows.append(
+            ["请求计数（sent/started/recorded/completed）", " / ".join(_cnt_parts)]
+        )
     rows.append(["泄漏判定", leak_label])
 
     table_lines = ["      <Table"]
