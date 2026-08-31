@@ -37,6 +37,7 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.deepseek_v4_vision import shard_image_feature_for_tp
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -1131,6 +1132,12 @@ class DeepSeekV4Model(GptModelBase):
         hidden = self.v4.embed(safe_ids)
         for feature, location in zip(features, locations):
             feature = feature.to(device=hidden.device, dtype=hidden.dtype)
+            feature = shard_image_feature_for_tp(
+                feature,
+                hidden.size(1),
+                int(self._v4_args.tp_rank),
+                int(self._v4_args.tp_size),
+            )
             start, end = int(location), int(location) + int(feature.size(0))
             rows = valid_rows & (original_indices >= start) & (original_indices < end)
             hidden[rows] = feature.index_select(0, original_indices[rows] - start)

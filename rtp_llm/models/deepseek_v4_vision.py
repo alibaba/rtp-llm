@@ -16,6 +16,30 @@ IMAGE_START, IMAGE_PAD, IMAGE, IMAGE_NEW_LINE, IMAGE_END = range(5)
 COMPRESS_PAD_TO = 4
 
 
+def shard_image_feature_for_tp(
+    feature: torch.Tensor, hidden_width: int, tp_rank: int, tp_size: int
+) -> torch.Tensor:
+    """Match a replicated image feature to a column-sharded token embedding."""
+    if feature.dim() != 2:
+        raise RuntimeError(
+            f"DeepSeek-V4 image feature must be 2-D, got {tuple(feature.shape)}"
+        )
+    if feature.size(1) == hidden_width:
+        return feature
+    if (
+        tp_size <= 1
+        or tp_rank < 0
+        or tp_rank >= tp_size
+        or feature.size(1) != hidden_width * tp_size
+    ):
+        raise RuntimeError(
+            "DeepSeek-V4 image/token embedding width mismatch: "
+            f"feature={feature.size(1)} token={hidden_width} "
+            f"tp_rank={tp_rank} tp_size={tp_size}"
+        )
+    return feature.narrow(1, tp_rank * hidden_width, hidden_width)
+
+
 def grid_tokens(best_height, best_width, patch_size, downsample_ratio):
     n_llm_h = math.ceil((best_height // patch_size) / downsample_ratio)
     n_llm_w = math.ceil((best_width // patch_size) / downsample_ratio)

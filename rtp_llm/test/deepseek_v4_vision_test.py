@@ -9,6 +9,7 @@ from rtp_llm.models.deepseek_v4_vision import (
     IMAGE_START,
     DeepSeekV4VisionEmbedding,
     build_image_block,
+    shard_image_feature_for_tp,
 )
 
 
@@ -42,6 +43,17 @@ class DeepSeekV4VisionTest(TestCase):
         output = encoder.image_embedding([Image.new("RGB", (4, 4))], start_pos=3)[0]
         self.assertEqual(output.shape, (10, 8))
         self.assertTrue(torch.isfinite(output).all())
+
+    def test_image_feature_matches_tp_embedding_shard(self):
+        feature = torch.arange(24).reshape(3, 8)
+        rank_0 = shard_image_feature_for_tp(feature, 4, tp_rank=0, tp_size=2)
+        rank_1 = shard_image_feature_for_tp(feature, 4, tp_rank=1, tp_size=2)
+
+        self.assertTrue(torch.equal(rank_0, feature[:, :4]))
+        self.assertTrue(torch.equal(rank_1, feature[:, 4:]))
+        self.assertIs(shard_image_feature_for_tp(feature, 8, 0, 1), feature)
+        with self.assertRaisesRegex(RuntimeError, "width mismatch"):
+            shard_image_feature_for_tp(feature, 3, tp_rank=0, tp_size=2)
 
 
 if __name__ == "__main__":
