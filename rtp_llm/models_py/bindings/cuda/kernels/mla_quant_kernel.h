@@ -44,16 +44,27 @@ void cp_gather_and_upconvert_fp8_kv_cache(const torch::Tensor& src_cache,       
                                           const torch::Tensor& workspace_starts,   // [BATCH]
                                           int64_t              batch_size);
 
-// V2: Gather and upconvert FP8 KV cache to a fused BF16 buffer.
-// Supports DeepSeek's [total_tokens, 576] and GLM-5.3's NoPE [total_tokens, 512].
-// One CUDA block per token for full GPU utilization.
-void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE, 656]
-                                             torch::Tensor&       dst_fused,         // [TOT_TOKENS, 576]
-                                             const torch::Tensor& block_table,       // [BATCH, BLOCK_INDICES]
-                                             const torch::Tensor& seq_lens,          // [BATCH]
+// V2: Gather a paged MLA KV cache to a fused BF16 buffer.
+// The source may be FP8 byte-packed cache or an ordinary BF16 cache. It supports
+// DeepSeek's [total_tokens, 576] and GLM-5.3's NoPE [total_tokens, 512].
+// Four warps per CUDA block each gather one token.
+void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,    // paged uint8[528/656] or bf16[512/576]
+                                             torch::Tensor&       dst_fused,    // [TOT_TOKENS, 512/576]
+                                             const torch::Tensor& block_table,  // [BATCH, BLOCK_INDICES]
+                                             const torch::Tensor& seq_lens,     // [BATCH]
                                              const torch::Tensor& workspace_starts,  // [BATCH]
                                              int64_t              batch_size,
                                              int64_t              total_tokens);
+
+// Dtype-neutral name for cp_gather_and_upconvert_fp8_kv_cache_v2. Keep the old
+// symbol above for existing callers while new code uses this entry point.
+void cp_gather_mla_kv_cache_v2(const torch::Tensor& src_cache,
+                               torch::Tensor&       dst_fused,
+                               const torch::Tensor& block_table,
+                               const torch::Tensor& seq_lens,
+                               const torch::Tensor& workspace_starts,
+                               int64_t              batch_size,
+                               int64_t              total_tokens);
 
 // Gather only the physical token positions selected by sparse attention.
 // GLM-5.3 FP8 entries are 512 FP8 bytes followed by four float scales.

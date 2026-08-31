@@ -925,7 +925,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         assert self.sharded_actual_local_kv_lens is not None
         assert self.sharded_actual_workspace_starts is not None
 
-        src = _as_uint8(kv_cache.kv_cache_base)
+        src = kv_cache.kv_cache_base
+        if src.dtype != torch.bfloat16:
+            src = _as_uint8(src)
         if src.ndim == 4:
             src = src.squeeze(2)
 
@@ -947,7 +949,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 dtype=fused_kv.dtype,
                 device=fused_kv.device,
             )
-            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+            rtp_llm_ops.cp_gather_mla_kv_cache_v2(
                 src,
                 actual_fused,
                 self.block_table.to(torch.int32),
@@ -1034,10 +1036,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if self.kv_cache_sharded:
             self._gather_sharded_kv_cache(kv_cache, fused_kv)
         else:
-            src = _as_uint8(kv_cache.kv_cache_base)
+            src = kv_cache.kv_cache_base
+            if src.dtype != torch.bfloat16:
+                src = _as_uint8(src)
             if src.ndim == 4:
                 src = src.squeeze(2)
-            rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+            rtp_llm_ops.cp_gather_mla_kv_cache_v2(
                 src,
                 fused_kv,
                 self.block_table.to(torch.int32),

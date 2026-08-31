@@ -302,9 +302,7 @@ class SparseMlaFp8CPOpTest(TestCase):
         op.precomputed_raw_sequence_lengths = torch.tensor(
             [10, 8], dtype=torch.int32, device=self.device
         )
-        pooled = torch.tensor(
-            [[0, 1], [1, -1]], dtype=torch.int32, device=self.device
-        )
+        pooled = torch.tensor([[0, 1], [1, -1]], dtype=torch.int32, device=self.device)
 
         actual = op._prepare_cp_local_topk_indices(pooled)
 
@@ -425,7 +423,7 @@ class SparseMlaFp8CPOpTest(TestCase):
             lambda *_args, **_kwargs: None,
         ), patch.object(
             rtp_llm_ops,
-            "cp_gather_and_upconvert_fp8_kv_cache_v2",
+            "cp_gather_mla_kv_cache_v2",
             side_effect=_record_cp_gather,
         ):
             out = op.forward(
@@ -445,6 +443,53 @@ class SparseMlaFp8CPOpTest(TestCase):
             "empty-Q sharded ranks must still join the KV all_gather",
         )
         self.assertEqual(cp_gather_shapes, [(64, 576)])
+
+    def test_sharded_bf16_cache_is_not_reinterpreted_as_uint8(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            SparseMlaFp8CPOp,
+        )
+
+        op = object.__new__(SparseMlaFp8CPOp)
+        op._gather = SimpleNamespace(total_kv_len=2, batch_size=1)
+        op.block_table = torch.zeros((1, 1), dtype=torch.int32, device=self.device)
+        op.sharded_local_kv_lens = torch.tensor(
+            [2], dtype=torch.int32, device=self.device
+        )
+        op.sharded_actual_local_kv_lens = op.sharded_local_kv_lens
+        op.sharded_actual_workspace_starts = torch.tensor(
+            [0], dtype=torch.int32, device=self.device
+        )
+        op.sharded_actual_total_local_kv_len = 2
+        op.sharded_total_local_kv_len = 2
+        op.sharded_kv_restore_indices = torch.arange(
+            2, dtype=torch.long, device=self.device
+        )
+
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.randn(
+            1, 8, 512, dtype=torch.bfloat16, device=self.device
+        )
+        fused_kv = torch.empty(2, 512, dtype=torch.bfloat16, device=self.device)
+        observed = []
+
+        def _record_gather(src, dst, *_args):
+            observed.append((src.dtype, tuple(src.shape)))
+            dst.copy_(kv_cache.kv_cache_base[0, :2])
+
+        with patch.object(
+            rtp_llm_ops,
+            "cp_gather_mla_kv_cache_v2",
+            side_effect=_record_gather,
+        ), patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl.all_gather",
+            side_effect=lambda tensor, **_kwargs: tensor,
+        ):
+            op._gather_sharded_kv_cache(kv_cache, fused_kv)
+
+        self.assertEqual(observed, [(torch.bfloat16, (1, 8, 512))])
+        torch.testing.assert_close(
+            fused_kv, kv_cache.kv_cache_base[0, :2], rtol=0, atol=0
+        )
 
     def test_total_local_ids_identity_detection(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (

@@ -8,6 +8,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cmath>
+#include <cstdint>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -458,6 +459,9 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
         }
         bid = lo;
     }
+    if (bid >= batch_size) {
+        return;
+    }
 
     const int32_t seq_start = workspace_starts[bid];
     const int32_t local_idx = static_cast<int32_t>(token_global_idx - seq_start);
@@ -512,8 +516,68 @@ cp_gather_and_upconvert_fp8_kv_cache_v2_kernel(const uint8_t* __restrict__ src_c
 
     if (copy_rope) {
         // Rope: 32 lanes x 2 bf16 = 64 bf16
-        *reinterpret_cast<int32_t*>(dst_ptr + 512 + lane * 2) =
-            *reinterpret_cast<const int32_t*>(rope_ptr + lane * 2);
+        *reinterpret_cast<int32_t*>(dst_ptr + 512 + lane * 2) = *reinterpret_cast<const int32_t*>(rope_ptr + lane * 2);
+    }
+}
+
+// BF16 paged-cache gather. The mapping is identical to the FP8 path above,
+// but no dequantization is needed. Each uint4 copies eight BF16 values and a
+// warp copies one 512/576-wide token row.
+__global__ void cp_gather_bf16_kv_cache_v2_kernel(const __nv_bfloat16* __restrict__ src_cache,
+                                                  __nv_bfloat16* __restrict__ dst_fused,
+                                                  const int32_t* __restrict__ block_table,
+                                                  const int32_t* __restrict__ seq_lens,
+                                                  const int32_t* __restrict__ workspace_starts,
+                                                  const int32_t block_size,
+                                                  const int64_t block_table_stride,
+                                                  const int64_t cache_block_stride,
+                                                  const int64_t cache_entry_stride,
+                                                  const int64_t dst_fused_stride,
+                                                  const int32_t batch_size,
+                                                  const int64_t total_tokens,
+                                                  const int32_t fused_width) {
+    const int     warp_id          = threadIdx.x >> 5;
+    const int     lane             = threadIdx.x & 31;
+    const int64_t token_global_idx = (int64_t)blockIdx.x * (blockDim.x >> 5) + warp_id;
+    if (token_global_idx >= total_tokens) {
+        return;
+    }
+
+    int bid = 0;
+    if (batch_size > 1) {
+        int lo = 0, hi = batch_size;
+        while (lo < hi) {
+            const int mid = (lo + hi) / 2;
+            if (token_global_idx < workspace_starts[mid] + seq_lens[mid]) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        bid = lo;
+    }
+    if (bid >= batch_size) {
+        return;
+    }
+
+    const int32_t seq_start = workspace_starts[bid];
+    const int32_t local_idx = static_cast<int32_t>(token_global_idx - seq_start);
+    if (local_idx < 0 || local_idx >= seq_lens[bid]) {
+        return;
+    }
+
+    const int32_t page_idx    = local_idx / block_size;
+    const int32_t page_offset = local_idx % block_size;
+    const int32_t block_id    = block_table[bid * block_table_stride + page_idx];
+
+    const __nv_bfloat16* src_ptr = src_cache + block_id * cache_block_stride + page_offset * cache_entry_stride;
+    __nv_bfloat16*       dst_ptr = dst_fused + token_global_idx * dst_fused_stride;
+
+    const uint4* src_vec = reinterpret_cast<const uint4*>(src_ptr);
+    uint4*       dst_vec = reinterpret_cast<uint4*>(dst_ptr);
+    const int    vec_num = fused_width / 8;
+    for (int vec = lane; vec < vec_num; vec += 32) {
+        dst_vec[vec] = src_vec[vec];
     }
 }
 
@@ -527,19 +591,50 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
     const c10::cuda::CUDAGuard device_guard(src_cache.device());
     const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
 
-    int32_t block_size = static_cast<int32_t>(src_cache.size(1));
-
     TORCH_CHECK(block_table.dtype() == torch::kInt32, "block_table must be int32");
     TORCH_CHECK(seq_lens.dtype() == torch::kInt32, "seq_lens must be int32");
     TORCH_CHECK(workspace_starts.dtype() == torch::kInt32, "workspace_starts must be int32");
-    TORCH_CHECK(src_cache.dtype() == torch::kUInt8, "src_cache must be uint8");
+    TORCH_CHECK(src_cache.dtype() == torch::kUInt8 || src_cache.dtype() == torch::kBFloat16,
+                "src_cache must be uint8 FP8-packed cache or bfloat16 cache");
     TORCH_CHECK(dst_fused.dtype() == torch::kBFloat16, "dst_fused must be bfloat16");
+    TORCH_CHECK(dst_fused.dim() == 2, "dst_fused must be a 2D tensor");
     const bool copy_rope = dst_fused.size(1) == 576;
     TORCH_CHECK(copy_rope || dst_fused.size(1) == 512,
                 "dst_fused dim1 must be 512 (GLM-5.3 NoPE) or 576 (DeepSeek MLA)");
     TORCH_CHECK(src_cache.dim() == 3, "src_cache must be a 3D paged tensor");
-    TORCH_CHECK(src_cache.size(2) == (copy_rope ? 656 : 528),
-                "src_cache entry width must match the selected MLA layout");
+    TORCH_CHECK(block_table.dim() == 2 && block_table.stride(1) == 1, "block_table must be a 2D row-contiguous tensor");
+    TORCH_CHECK(seq_lens.dim() == 1 && seq_lens.is_contiguous(), "seq_lens must be contiguous 1D");
+    TORCH_CHECK(workspace_starts.dim() == 1 && workspace_starts.is_contiguous(),
+                "workspace_starts must be contiguous 1D");
+    TORCH_CHECK(src_cache.is_cuda() && dst_fused.is_cuda() && block_table.is_cuda() && seq_lens.is_cuda()
+                    && workspace_starts.is_cuda(),
+                "all gather tensors must be CUDA tensors");
+    TORCH_CHECK(src_cache.device() == dst_fused.device() && src_cache.device() == block_table.device()
+                    && src_cache.device() == seq_lens.device() && src_cache.device() == workspace_starts.device(),
+                "all gather tensors must be on the same CUDA device");
+    TORCH_CHECK(batch_size > 0 && batch_size <= block_table.size(0) && batch_size <= seq_lens.numel()
+                    && batch_size <= workspace_starts.numel(),
+                "batch_size exceeds gather metadata rows");
+    TORCH_CHECK(total_tokens >= 0 && total_tokens <= dst_fused.size(0), "total_tokens must fit in dst_fused rows");
+    TORCH_CHECK(src_cache.stride(2) == 1 && dst_fused.stride(1) == 1,
+                "src_cache and dst_fused must be contiguous in their last dimension");
+    TORCH_CHECK(src_cache.stride(0) % 8 == 0 && src_cache.stride(1) % 8 == 0 && dst_fused.stride(0) % 8 == 0,
+                "BF16 token rows must remain 16-byte aligned for uint4 vector copies");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(src_cache.data_ptr()) % alignof(uint4) == 0
+                    && reinterpret_cast<uintptr_t>(dst_fused.data_ptr()) % alignof(uint4) == 0,
+                "src_cache and dst_fused data pointers must be 16-byte aligned");
+    if (src_cache.dtype() == torch::kUInt8) {
+        TORCH_CHECK(src_cache.size(2) == (copy_rope ? 656 : 528),
+                    "FP8 src_cache entry width must be 528 (GLM-5.3 NoPE) or 656 (DeepSeek MLA)");
+    } else {
+        TORCH_CHECK(src_cache.size(2) == dst_fused.size(1), "BF16 src_cache entry width must equal dst_fused width");
+    }
+
+    const int32_t block_size = static_cast<int32_t>(src_cache.size(1));
+    TORCH_CHECK(block_size > 0, "src_cache block_size must be positive");
+    if (total_tokens == 0) {
+        return;
+    }
 
     int64_t block_table_stride = block_table.stride(0);
     int64_t cache_block_stride = src_cache.stride(0);
@@ -549,20 +644,48 @@ void cp_gather_and_upconvert_fp8_kv_cache_v2(const torch::Tensor& src_cache,
     dim3 grid(static_cast<unsigned>((total_tokens + 3) / 4));
     dim3 block(128);  // 4 warps, 1 warp per token
 
-    cp_gather_and_upconvert_fp8_kv_cache_v2_kernel<<<grid, block, 0, stream>>>(
-        src_cache.data_ptr<uint8_t>(),
-        reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
-        block_table.data_ptr<int32_t>(),
-        seq_lens.data_ptr<int32_t>(),
-        workspace_starts.data_ptr<int32_t>(),
-        block_size,
-        block_table_stride,
-        cache_block_stride,
-        cache_entry_stride,
-        dst_fused_stride,
-        static_cast<int32_t>(batch_size),
-        total_tokens,
-        copy_rope);
+    if (src_cache.dtype() == torch::kUInt8) {
+        cp_gather_and_upconvert_fp8_kv_cache_v2_kernel<<<grid, block, 0, stream>>>(
+            src_cache.data_ptr<uint8_t>(),
+            reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
+            block_table.data_ptr<int32_t>(),
+            seq_lens.data_ptr<int32_t>(),
+            workspace_starts.data_ptr<int32_t>(),
+            block_size,
+            block_table_stride,
+            cache_block_stride,
+            cache_entry_stride,
+            dst_fused_stride,
+            static_cast<int32_t>(batch_size),
+            total_tokens,
+            copy_rope);
+    } else {
+        cp_gather_bf16_kv_cache_v2_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(src_cache.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
+            block_table.data_ptr<int32_t>(),
+            seq_lens.data_ptr<int32_t>(),
+            workspace_starts.data_ptr<int32_t>(),
+            block_size,
+            block_table_stride,
+            cache_block_stride,
+            cache_entry_stride,
+            dst_fused_stride,
+            static_cast<int32_t>(batch_size),
+            total_tokens,
+            static_cast<int32_t>(dst_fused.size(1)));
+    }
+}
+
+void cp_gather_mla_kv_cache_v2(const torch::Tensor& src_cache,
+                               torch::Tensor&       dst_fused,
+                               const torch::Tensor& block_table,
+                               const torch::Tensor& seq_lens,
+                               const torch::Tensor& workspace_starts,
+                               int64_t              batch_size,
+                               int64_t              total_tokens) {
+    cp_gather_and_upconvert_fp8_kv_cache_v2(
+        src_cache, dst_fused, block_table, seq_lens, workspace_starts, batch_size, total_tokens);
 }
 
 __global__ void gather_selected_glm53_fp8_mla_kv_kernel(const uint8_t* __restrict__ src_cache,
@@ -581,9 +704,9 @@ __global__ void gather_selected_glm53_fp8_mla_kv_kernel(const uint8_t* __restric
         return;
     }
 
-    const int32_t   physical_idx = physical_indices[selected_idx];
+    const int32_t  physical_idx = physical_indices[selected_idx];
     __nv_bfloat16* dst_ptr      = dst_fused + selected_idx * dst_stride;
-    const int       base         = lane * 16;
+    const int      base         = lane * 16;
     if (physical_idx < 0 || physical_idx >= num_cache_entries) {
 #pragma unroll
         for (int i = 0; i < 16; ++i) {
@@ -592,11 +715,10 @@ __global__ void gather_selected_glm53_fp8_mla_kv_kernel(const uint8_t* __restric
         return;
     }
 
-    const int32_t block_id     = physical_idx / block_size;
-    const int32_t block_offset = physical_idx % block_size;
-    const uint8_t* token_ptr =
-        src_cache + static_cast<int64_t>(block_id) * cache_block_stride
-        + static_cast<int64_t>(block_offset) * cache_entry_stride;
+    const int32_t  block_id     = physical_idx / block_size;
+    const int32_t  block_offset = physical_idx % block_size;
+    const uint8_t* token_ptr    = src_cache + static_cast<int64_t>(block_id) * cache_block_stride
+                               + static_cast<int64_t>(block_offset) * cache_entry_stride;
     const float*    scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
     const float     scale      = __ldg(scales_ptr + (base >> 7));
     const uint4     packed     = *reinterpret_cast<const uint4*>(token_ptr + base);
@@ -633,12 +755,11 @@ void gather_selected_glm53_fp8_mla_kv(const torch::Tensor& src_cache,
                 "dst_fused must be bfloat16 [num_selected, 512]");
     TORCH_CHECK(physical_indices.dtype() == torch::kInt32 && physical_indices.is_contiguous(),
                 "physical_indices must be contiguous int32");
-    TORCH_CHECK(dst_fused.size(0) == physical_indices.numel(),
-                "dst_fused rows must equal physical_indices.numel()");
+    TORCH_CHECK(dst_fused.size(0) == physical_indices.numel(), "dst_fused rows must equal physical_indices.numel()");
 
     const int64_t num_selected = physical_indices.numel();
-    dim3         grid(static_cast<unsigned>((num_selected + 3) / 4));
-    dim3         block(128);
+    dim3          grid(static_cast<unsigned>((num_selected + 3) / 4));
+    dim3          block(128);
     gather_selected_glm53_fp8_mla_kv_kernel<<<grid, block, 0, stream>>>(
         src_cache.data_ptr<uint8_t>(),
         reinterpret_cast<__nv_bfloat16*>(dst_fused.data_ptr()),
@@ -1083,7 +1204,7 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
             } else {                                                                                                   \
                 TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE);                                 \
             }                                                                                                          \
-        } else if (KV_DTYPE == "fp8_ds_mla" || KV_DTYPE == "fp8_glm53_mla") {                                        \
+        } else if (KV_DTYPE == "fp8_ds_mla" || KV_DTYPE == "fp8_glm53_mla") {                                          \
             if (SRC_DTYPE == torch::kFloat) {                                                                          \
                 FN(float, uint8_t, Fp8KVCacheDataType::kFp8E4M3);                                                      \
             } else if (SRC_DTYPE == torch::kHalf) {                                                                    \

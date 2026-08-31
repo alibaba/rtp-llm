@@ -352,6 +352,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("batch_size"),
                   py::arg("total_tokens"));
 
+    rtp_ops_m.def("cp_gather_mla_kv_cache_v2",
+                  &rtp_llm::cp_gather_mla_kv_cache_v2,
+                  "Gather an FP8-packed or BF16 paged MLA cache to a fused BF16 workspace",
+                  py::arg("src_cache"),
+                  py::arg("dst_fused"),
+                  py::arg("block_table"),
+                  py::arg("seq_lens"),
+                  py::arg("workspace_starts"),
+                  py::arg("batch_size"),
+                  py::arg("total_tokens"));
+
     rtp_ops_m.def("gather_selected_glm53_fp8_mla_kv",
                   &rtp_llm::gather_selected_glm53_fp8_mla_kv,
                   "Gather selected GLM-5.3 FP8 MLA entries into a BF16 sparse-attention workspace",
