@@ -73,13 +73,13 @@ class Glm53FlashRendererTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not support video input"):
             renderer.render_chat(request)
 
-    def test_checkpoint_forced_think_mode_is_enabled_by_default(self):
+    def test_checkpoint_forced_think_mode_is_always_enabled(self):
         renderer = self._renderer()
         request = ChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
 
         self.assertTrue(renderer.in_think_mode(request))
 
-    def test_explicit_disable_returns_generated_text_as_content(self):
+    def test_explicit_disable_cannot_bypass_checkpoint_forced_parser(self):
         renderer = self._renderer()
         renderer._build_prompt = lambda request: "<think>"
         request = ChatCompletionRequest(
@@ -88,8 +88,14 @@ class Glm53FlashRendererTest(unittest.TestCase):
         )
 
         parser = renderer._create_reasoning_parser(request)
-        self.assertFalse(renderer.in_think_mode(request))
-        self.assertIsNone(parser)
+        self.assertTrue(request.disable_thinking())
+        self.assertTrue(renderer.in_think_mode(request))
+        self.assertIsNotNone(parser)
+        reasoning, content = parser.parse_non_stream(
+            "I should answer briefly.</think>Hello!"
+        )
+        self.assertEqual(reasoning, "I should answer briefly.")
+        self.assertEqual(content, "Hello!")
 
     def test_default_think_parser_splits_implicit_reasoning(self):
         renderer = self._renderer()
