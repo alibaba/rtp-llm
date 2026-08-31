@@ -305,9 +305,9 @@ class MiniMaxM3VLMTP(MiniMaxM3MTP):
         with open(config_path) as reader:
             config_json = json.load(reader)
 
-        from rtp_llm.models.minimax_m3_vl import _apply_minimax_m3_vl_config
+        from rtp_llm.models.minimax_m3_vl import _apply_minimax_m3_vl_mtp_config
 
-        _apply_minimax_m3_vl_config(config, config_json, ckpt_path)
+        _apply_minimax_m3_vl_mtp_config(config, config_json)
         return config
 
     @classmethod

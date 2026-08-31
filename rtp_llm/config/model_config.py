@@ -241,7 +241,7 @@ class ModelConfig(CppModelConfig):
             + self.word_emb_param_count(vocab_size) * 2
         )  # maybe some model donot have lm_head
 
-        if self.mm_model_config.is_multimodal:
+        if self.mm_model_config.is_multimodal and not getattr(self, "is_mtp", False):
             model_size += get_multimodal_mixin_cls(self.model_type).eval_mm_model_size(
                 self.mm_related_params, self.extra_data_path, self.local_extra_data_path
             )
@@ -336,7 +336,7 @@ class ModelConfig(CppModelConfig):
             + self.hidden_size
         )
 
-        if self.mm_model_config.is_multimodal:
+        if self.mm_model_config.is_multimodal and not getattr(self, "is_mtp", False):
             param_count += get_multimodal_mixin_cls(
                 self.model_type
             ).eval_mm_model_param_count(

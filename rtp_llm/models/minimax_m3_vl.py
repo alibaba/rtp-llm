@@ -41,9 +41,7 @@ from rtp_llm.models.minimax_m3 import MiniMaxM3, MiniMaxM3Weight
 
 
 def _apply_minimax_m3_vl_config(config, config_json, ckpt_path):
-    """Apply VL-only fields shared by the target and the MTP draft model."""
-    # The MTP draft consumes features produced by the target/ViT path. It needs
-    # the same token alignment metadata, but does not construct a ViT itself.
+    """Apply the full VL configuration for the target model."""
     config.mm_model_config.is_multimodal = True
 
     image_token_id = config_json.get("image_token_index", 200025)
@@ -74,6 +72,18 @@ def _apply_minimax_m3_vl_config(config, config_json, ckpt_path):
     MiniMaxM3._from_text_config(config, text_cfg)
 
 
+def _apply_minimax_m3_vl_mtp_config(config, config_json):
+    """Apply only metadata needed by the MTP draft for multimodal inputs."""
+    config.mm_model_config.is_multimodal = True
+
+    image_token_id = config_json.get("image_token_index", 200025)
+    video_token_id = config_json.get("video_token_index", 200026)
+    config.mm_model_config.mm_sep_tokens = [[image_token_id], [video_token_id]]
+    config.mm_model_config.mm_position_ids_style = 0
+    config.mm_related_params.special_tokens["default_mm_token"] = "]<]image[>["
+
+    text_cfg = config_json.get("text_config", config_json)
+    MiniMaxM3._from_text_config(config, text_cfg)
 class MiniMaxM3_VL(MiniMaxM3):
     """MiniMax-M3 VL LLM container; ViT runs in the multimodal path."""
 
