@@ -115,6 +115,7 @@ private:
     IsTierEnabledFn                     is_tier_enabled_;
     SettledFn                           settled_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
+    int                                 disk_timeout_ms_{0};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;
