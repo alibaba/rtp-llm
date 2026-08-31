@@ -238,18 +238,9 @@ class CudaAsyncCPGatherImpl:
         gather_stream = stream if stream is not None else current_stream
         if stream is not None:
             gather_stream.wait_stream(current_stream)
-        # ``local_2d`` is allocated on ``current_stream`` but read by the NCCL
-        # kernel on ``gather_stream``. Without ``record_stream`` the caching
-        # allocator can reuse its storage before NCCL finishes, corrupting the
-        # input. ``wait_stream`` above gives NCCL a happens-after edge but NOT
-        # allocator lifetime extension — that is what ``record_stream`` does.
-        #
-        # ``gathered`` does NOT need ``record_stream``: it's a view into the
-        # per-forward workspace (reused across layers, never recycled by the
-        # allocator). Cross-layer reuse of the same sub-region is ordered by
-        # the ``gather_stream.wait_stream(current_stream)`` edge above, which
-        # waits on the prior layer's restore (the consumer of ``gathered``).
-        local_2d.record_stream(gather_stream)
+        # ``local_2d`` stays owned by the handle until ``wait`` joins the gather
+        # on the compute stream. ``gathered`` is a per-forward workspace view.
+        # Together those lifetimes replace allocator ``record_stream`` calls.
         try:
             with torch.cuda.stream(gather_stream):
                 with record_function_range(f"{profile_name}.launch"):

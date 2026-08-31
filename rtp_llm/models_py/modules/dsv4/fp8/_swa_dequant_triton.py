@@ -51,7 +51,7 @@ class CPByteSlicedSwaPrefixPending:
     work: Any
     stream: Any
     completion_event: Any
-    local_slices: torch.Tensor
+    out: Optional[torch.Tensor] = None
     ready_event: Any = None
     work_waited: bool = False
 
@@ -1398,7 +1398,6 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             dtype=k_cache_raw.dtype,
             device=device,
         )
-        local_slices.record_stream(gather_stream)
         with record_function_range(f"{profile_name}.launch"):
             work = torch.distributed.all_gather_into_tensor(
                 gathered,
@@ -1429,7 +1428,6 @@ def start_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         work=work,
         stream=gather_stream,
         completion_event=completion_event,
-        local_slices=local_slices,
     )
 
 
@@ -1451,16 +1449,12 @@ def prepare_dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     # current-stream workspace writes; the caller decides how early to invoke
     # prepare based on which ranges are disjoint.
     assemble_stream.wait_stream(current_stream)
+    pending.out = out
     with torch.cuda.stream(assemble_stream):
         assemble_stream.wait_event(pending.completion_event)
         # Fence NCCL on the stream that will read the gathered bytes below.
         with record_function_range("dsv4.cp.all_gather.swa_prefix.wait_host"):
             _wait_swa_prefix_work_once(pending)
-        pending.gathered.record_stream(assemble_stream)
-        pending.local_slices.record_stream(assemble_stream)
-        pending.compact_slots.record_stream(assemble_stream)
-        pending.gather_lens.record_stream(assemble_stream)
-        out.record_stream(assemble_stream)
         if cp_swa_direct_dequant_scatter_enabled():
             _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
                 out,

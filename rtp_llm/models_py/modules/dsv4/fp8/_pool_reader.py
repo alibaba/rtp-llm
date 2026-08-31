@@ -172,6 +172,7 @@ class CPShardConfig:
 
 @dataclass
 class CPShardedPoolReadHandle:
+    local_flat: torch.Tensor
     gathered: torch.Tensor
     work: Any
     completion_event: torch.cuda.Event
@@ -274,7 +275,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
 
         current_stream = torch.cuda.current_stream(device)
         stream.wait_stream(current_stream)
-        local_flat.record_stream(stream)
         with torch.cuda.stream(stream):
             gathered = torch.empty(
                 (world_size * int(local_flat.shape[0]), ENTRY_BYTES),
@@ -301,6 +301,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 raise
 
         return CPShardedPoolReadHandle(
+            local_flat=local_flat,
             gathered=gathered,
             work=work,
             completion_event=completion_event,
@@ -333,8 +334,6 @@ class CPShardedPoolReader(CompressedKPoolReader):
                 "dsv4.cp.all_gather.pool_reader.gather_cmp.wait_work"
             ):
                 self._wait_fill_work_once(handle)
-            handle.gathered.record_stream(stream)
-            handle.out.record_stream(stream)
             try:
                 self._restore_dequant_scatter(
                     handle.gathered,

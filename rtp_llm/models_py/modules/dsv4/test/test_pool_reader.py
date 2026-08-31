@@ -624,6 +624,7 @@ def test_cp_sharded_async_waits_work_once_before_restore_enqueue():
     )
     work = _CountingWork()
     handle = PR.CPShardedPoolReadHandle(
+        local_flat=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
         gathered=torch.empty((0, PR.ENTRY_BYTES), dtype=torch.uint8),
         work=work,
         completion_event=None,

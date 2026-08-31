@@ -74,6 +74,8 @@ class IndexerKCPGatherHandle:
     work_s: Any
     completion_event: torch.cuda.Event
     stream: torch.cuda.Stream
+    local_k_quant: torch.Tensor
+    local_k_scale: torch.Tensor
     out_k_quant: torch.Tensor
     out_k_scale: torch.Tensor
     done_event: Optional[torch.cuda.Event] = None
@@ -320,8 +322,6 @@ def start_assemble_indexer_k_async(
     device = local_k_quant.device
     current_stream = torch.cuda.current_stream(device)
     stream.wait_stream(current_stream)
-    local_k_quant.record_stream(stream)
-    local_k_scale.record_stream(stream)
     with torch.cuda.stream(stream):
         gathered_q = torch.empty(
             (world_size * int(local_k_quant.shape[0]), local_k_quant.shape[1]),
@@ -370,6 +370,8 @@ def start_assemble_indexer_k_async(
         work_s=work_s,
         completion_event=completion_event,
         stream=stream,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
         out_k_quant=out_k_quant,
         out_k_scale=out_k_scale,
     )
@@ -394,10 +396,6 @@ def prepare_assemble_indexer_k_async(
         # Fence NCCL on the stream that will restore into out_k_* below.
         with record_function_range("dsv4.cp.all_gather.indexer_k.wait_host"):
             _wait_indexer_k_work_once(handle)
-        handle.gathered_q.record_stream(stream)
-        handle.gathered_s.record_stream(stream)
-        handle.out_k_quant.record_stream(stream)
-        handle.out_k_scale.record_stream(stream)
         try:
             restore_indexer_k(
                 handle.plan,
