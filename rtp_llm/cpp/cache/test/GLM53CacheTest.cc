@@ -232,7 +232,7 @@ TEST(GLM53CacheConfigTest, PhysicalMlaSpecIsNotExpandedTwice) {
     EXPECT_EQ(config.group_kv_block_stride_bytes[2], 8u * 32u * 132u);
 }
 
-TEST(GLM53CacheConfigTest, RejectsInvalidGeometryOwnershipAndPrefillCp) {
+TEST(GLM53CacheConfigTest, RejectsInvalidGeometryAndOwnership) {
     ParallelismConfig pc;
     auto              kv_config = makeKvConfig();
 
@@ -252,8 +252,63 @@ TEST(GLM53CacheConfigTest, RejectsInvalidGeometryOwnershipAndPrefillCp) {
     kv_config.kernel_seq_size_per_block = 64;
     EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 0), "");
 
-    pc.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, makeKvConfig(), false, 0), "");
+}
+
+TEST(GLM53CacheConfigTest, PrefillCp8AndDecodeDp8UseMatchingKPoolStateRing) {
+    constexpr uint32_t cp_size = 8;
+
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = cp_size;
+    prefill_pc.ep_size                            = cp_size;
+    prefill_pc.world_size                         = cp_size;
+    prefill_pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+
+    ParallelismConfig decode_pc;
+    decode_pc.role_type                          = RoleType::DECODE;
+    decode_pc.tp_size                            = 1;
+    decode_pc.dp_size                            = cp_size;
+    decode_pc.ep_size                            = cp_size;
+    decode_pc.world_size                         = cp_size;
+    decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    decode_pc.prefill_cp_config.kv_cache_sharded = true;
+    decode_pc.prefill_cp_config.prefill_cp_size  = cp_size;
+
+    auto prefill_config =
+        HybridPoolConfigCreator::createConfig(makeGlm53Config(), prefill_pc, makeKvConfig(), false, 3);
+    auto decode_config =
+        HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 3);
+
+    auto* prefill_kv = dynamic_cast<DSV4KVSpec*>(prefill_config.cache_specs[2].get());
+    auto* decode_kv  = dynamic_cast<DSV4KVSpec*>(decode_config.cache_specs[2].get());
+    ASSERT_NE(prefill_kv, nullptr);
+    ASSERT_NE(decode_kv, nullptr);
+    EXPECT_EQ(prefill_kv->entries_per_block, 32u);
+    EXPECT_EQ(decode_kv->entries_per_block, prefill_kv->entries_per_block);
+
+    auto* prefill_state = dynamic_cast<DSV4StateSpec*>(prefill_config.cache_specs[3].get());
+    auto* decode_state  = dynamic_cast<DSV4StateSpec*>(decode_config.cache_specs[3].get());
+    ASSERT_NE(prefill_state, nullptr);
+    ASSERT_NE(decode_state, nullptr);
+    EXPECT_EQ(prefill_state->entries_per_block, 1u);
+    EXPECT_EQ(decode_state->entries_per_block, cp_size);
+    EXPECT_EQ(decode_state->entries_per_block, prefill_state->entries_per_block * cp_size);
+    EXPECT_EQ(prefill_state->seq_size_per_block, makeKvConfig().seq_size_per_block * cp_size);
+    EXPECT_EQ(decode_state->seq_size_per_block, prefill_state->seq_size_per_block);
+}
+
+TEST(GLM53CacheConfigTest, DecodeShardedPrefillCpRequiresExplicitCpSize) {
+    ParallelismConfig decode_pc;
+    decode_pc.role_type                          = RoleType::DECODE;
+    decode_pc.dp_size                            = 8;
+    decode_pc.ep_size                            = 8;
+    decode_pc.world_size                         = 8;
+    decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    decode_pc.prefill_cp_config.kv_cache_sharded = true;
+
+    EXPECT_DEATH(
+        HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 0), "");
 }
 
 TEST(GLM53CacheConfigTest, PropagatesLinearReusePolicy) {

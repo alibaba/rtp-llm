@@ -310,7 +310,8 @@ class MMEmbeddingRes:
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
-        # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
+        # Model-specific extra input, one opaque flat 1-D tensor per feature
+        # segment (for example, deepstack metadata or a video-frame layout).
         self.extra_input = extra_input if extra_input is not None else []
 
     def __str__(self) -> str:

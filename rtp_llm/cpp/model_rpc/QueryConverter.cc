@@ -346,8 +346,9 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
     }
 
     if (contain_extra_input) {
-        // Each extra-input is an opaque flat 1-D tensor (one per image), reshaped by the
-        // model-specific consumer; no split needed here.
+        // Each extra-input is an opaque flat 1-D tensor (one per multimodal
+        // feature segment), reshaped by the model-specific consumer; no split
+        // is needed here. A video may expose multiple temporal segments.
         std::vector<torch::Tensor> extra_inputs;
         extra_inputs.reserve(output_pb->multimodal_extra_input_size());
         for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {

@@ -300,6 +300,10 @@ def parse_glm53_flash_config(
                 int(config_json.get("image_start_token_id", 154830)),
                 int(config_json.get("image_end_token_id", 154831)),
             ],
+            [
+                int(config_json.get("video_start_token_id", 154832)),
+                int(config_json.get("video_end_token_id", 154833)),
+            ],
         ]
         config.mm_model_config.mm_position_ids_style = 0
         config.mm_related_params.special_tokens["default_mm_token"] = (
@@ -318,6 +322,20 @@ def parse_glm53_flash_config(
                 "vision_config": vision_config,
                 "processor_config": processor_config,
                 "swiglu_limit": config.swiglu_limit,
+                "vision_special_token_ids": {
+                    "image_start": int(
+                        config_json.get("image_start_token_id", 154830)
+                    ),
+                    "image_end": int(
+                        config_json.get("image_end_token_id", 154831)
+                    ),
+                    "video_start": int(
+                        config_json.get("video_start_token_id", 154832)
+                    ),
+                    "video_end": int(
+                        config_json.get("video_end_token_id", 154833)
+                    ),
+                },
             }
         )
     return config

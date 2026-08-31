@@ -399,6 +399,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.cu_kv_seqlens_global: Optional[torch.Tensor] = None
         self.total_kv_len: int = 0
         self.precomputed_req_ids: Optional[torch.Tensor] = None
+        self.precomputed_raw_sequence_lengths: Optional[torch.Tensor] = None
         self.full_rope_pos_ids: Optional[torch.Tensor] = None
         self.sharded_slot_mapping: Optional[torch.Tensor] = None
         self.sharded_local_kv_lens: Optional[torch.Tensor] = None
@@ -695,6 +696,19 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             "CP sparse MLA precomputed_req_ids",
             self.use_cuda_graph,
         )
+        new_raw_sequence_lengths = (
+            (mla_params.positions_d[self.total_global_ids] + 1)
+            .to(torch.int32)
+            .contiguous()
+            if n_q > 0 and self.indexer_group_size > 1
+            else None
+        )
+        self.precomputed_raw_sequence_lengths = _copy_or_replace_graph_tensor(
+            self.precomputed_raw_sequence_lengths,
+            new_raw_sequence_lengths,
+            "CP sparse MLA precomputed_raw_sequence_lengths",
+            self.use_cuda_graph,
+        )
 
         # Pack rope positions for the local padded q/k buffer; padding rows keep
         # pos=0 and are never selected by total_local_ids.
@@ -767,9 +781,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         assert self.block_table is not None and self.mla_params is not None
         assert self.precomputed_req_ids is not None
-        topk_2d = _topk_2d(topk_indices)
+        topk_2d = self._prepare_cp_local_topk_indices(topk_indices)
         topk = topk_2d.shape[1]
-        assert topk == self.top_k
+        assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.precomputed_req_ids,
             block_table=self.block_table,
@@ -786,6 +800,21 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             HAS_PREFILL_WORKSPACE=False,
         )
         return global_2d.unsqueeze(1)
+
+    def _prepare_cp_local_topk_indices(
+        self, topk_indices: torch.Tensor
+    ) -> torch.Tensor:
+        """Expand compressed KPool ids before CP cache lookup/attention."""
+        raw_lengths = (
+            self.precomputed_raw_sequence_lengths
+            if self.indexer_group_size > 1
+            else None
+        )
+        if self.indexer_group_size > 1 and raw_lengths is None:
+            raise RuntimeError(
+                "grouped CP sparse MLA requires per-query raw sequence lengths"
+            )
+        return self._prepare_local_topk_indices(topk_indices, raw_lengths)
 
     def forward(
         self,
@@ -1018,7 +1047,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 ws.total_kv_len,
             )
         offsets = ws.workspace_starts[self.precomputed_req_ids]
-        topk_2d = _topk_2d(topk)
+        topk_2d = self._prepare_cp_local_topk_indices(topk)
         # FIX: topk_2d contains -1 as padding (invalid KV position).
         # Adding offsets to -1 turns it into a large positive index that
         # points into another request's KV region in fused_kv, causing

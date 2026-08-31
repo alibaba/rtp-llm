@@ -1,6 +1,7 @@
 import math
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
@@ -11,6 +12,7 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _sparse_prefill_fast_path_limit,
 )
+from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     IndexerCompressorCacheLayout,
     compress_indexer_projection_reference,
@@ -200,6 +202,76 @@ class Glm53KPoolReferenceTest(unittest.TestCase):
         )
         self.assertEqual(tuple(compressed.shape), (0, 128))
         self.assertEqual(boundaries.numel(), 0)
+
+
+class Glm53CompressedIndexerCPTest(unittest.TestCase):
+    def test_prefill_cp_uses_global_kpool_metadata_and_selects_owned_queries(
+        self,
+    ) -> None:
+        indexer = object.__new__(Indexer)
+        indexer.index_head_dim = 128
+        indexer.index_topk = 3
+        indexer._prefill_cp_enabled = Mock(return_value=True)
+        indexer._bind_compressed_pools = Mock(
+            return_value=(torch.ones((1, 1), dtype=torch.int32), 32)
+        )
+
+        compressed = Mock()
+        compressed.prepare.return_value = object()
+        compressed.return_value = torch.arange(12, dtype=torch.int32).reshape(4, 3)
+        compressed.compressor = Mock()
+        indexer.compressed_indexer = compressed
+
+        cp_info = SimpleNamespace(
+            prefill_qkv_padding_mask=torch.tensor(
+                [1, 1, 1, 1, 1, 1, 1, 0], dtype=torch.int32
+            ),
+            prefill_qkv_restore_indice=torch.arange(8, dtype=torch.int64),
+            prefill_actual_input_lengths_cpu=torch.tensor([7], dtype=torch.int32),
+            prefill_cp_chunk_lengths=torch.tensor([4], dtype=torch.int32),
+        )
+        attention_inputs = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            is_draft_extend=False,
+            context_parallel_info=cp_info,
+            input_lengths=torch.tensor([4], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            prefix_lengths_host=torch.tensor([0], dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 4], dtype=torch.int32),
+        )
+        cp_params = SimpleNamespace(
+            cp_size=2,
+            cp_rank=0,
+            kv_cache_sharded=True,
+            total_local_ids=torch.tensor([0, 2], dtype=torch.int64),
+        )
+        fmha_params = SimpleNamespace(
+            positions_d=torch.arange(4, dtype=torch.int32),
+            batch_indice_d=torch.zeros(4, dtype=torch.int32),
+        )
+
+        actual = Indexer._forward_compressed(
+            indexer,
+            torch.zeros((4, 8), dtype=torch.bfloat16),
+            torch.zeros((4, 4), dtype=torch.bfloat16),
+            fmha_params,
+            attention_inputs,
+            object(),
+            False,
+            cp_params,
+        )
+
+        self.assertEqual(actual.tolist(), [[0, 1, 2], [6, 7, 8]])
+        prepare_kwargs = compressed.prepare.call_args.kwargs
+        self.assertEqual(prepare_kwargs["input_lengths"].tolist(), [7])
+        self.assertEqual(prepare_kwargs["cu_seqlens"].tolist(), [0, 4])
+        self.assertEqual(prepare_kwargs["position_ids"].tolist(), [0, 1, 6, 6])
+        self.assertIsNotNone(compressed.call_args.kwargs["workspace"])
+        self.assertEqual(compressed.set_cp_ctx.call_args_list[-1].args, (None,))
+        self.assertEqual(
+            compressed.compressor.set_cp_ctx.call_args_list[-1].args, (None,)
+        )
 
 
 if __name__ == "__main__":

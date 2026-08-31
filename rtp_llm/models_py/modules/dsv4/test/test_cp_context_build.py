@@ -16,6 +16,7 @@ import importlib.util
 import os
 import sys
 import types
+from contextlib import nullcontext
 
 import torch
 
@@ -44,6 +45,11 @@ def _load_cp_module():
         if name not in sys.modules:
             sys.modules[name] = types.ModuleType(name)
     sys.modules["rtp_llm.models_py.distributed.collective_torch"] = _CT
+    profiler_name = "rtp_llm.models_py.modules.dsv4._profiler"
+    if profiler_name not in sys.modules:
+        profiler = types.ModuleType(profiler_name)
+        profiler.record_function_range = lambda *args, **kwargs: nullcontext()
+        sys.modules[profiler_name] = profiler
 
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))

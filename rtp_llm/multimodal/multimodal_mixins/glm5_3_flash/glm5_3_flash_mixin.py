@@ -2,10 +2,17 @@ import math
 from types import SimpleNamespace
 from typing import List
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
+
+try:
+    from decord import VideoReader, cpu
+except ModuleNotFoundError:
+    VideoReader = None
+    cpu = None
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
@@ -23,6 +30,81 @@ from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl imp
 )
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
+
+GLM53_MM_LAYOUT_MAGIC = -53530053
+GLM53_DEFAULT_VIDEO_MAX_TOKENS = 30000
+GLM53_DEFAULT_VIDEO_MAX_FRAMES = 2048
+
+
+def glm5_sample_frame_indices(
+    total_frames: int,
+    fps: float,
+    duration: float,
+    *,
+    target_fps: float = 2.0,
+    max_frame_count: int = GLM53_DEFAULT_VIDEO_MAX_FRAMES,
+    temporal_patch_size: int = 2,
+) -> list[int]:
+    """Sample GLM-5.3 video frames with the training-reference policy."""
+    if total_frames <= 0:
+        raise ValueError("GLM-5.3-Flash video must contain at least one frame")
+    if fps <= 0:
+        raise ValueError("GLM-5.3-Flash video source fps must be positive")
+    if target_fps <= 0:
+        raise ValueError("GLM-5.3-Flash requested video fps must be positive")
+    if temporal_patch_size <= 0:
+        raise ValueError("GLM-5.3-Flash temporal_patch_size must be positive")
+    if max_frame_count < temporal_patch_size:
+        raise ValueError(
+            "GLM-5.3-Flash max_frames must be at least temporal_patch_size"
+        )
+    # The ViT consumes frames in complete temporal groups.  Round the budget
+    # down so duplicating an odd tail can never exceed the caller's max_frames.
+    max_frame_count = (
+        int(max_frame_count) // temporal_patch_size * temporal_patch_size
+    )
+
+    max_frame_idx = total_frames - 1
+    if duration <= 0:
+        duration = round(max_frame_idx / fps) + 1
+    extract_t = min(
+        max(int(duration * target_fps), 1),
+        max_frame_count,
+    )
+
+    duration_per_frame = 1 / fps
+    max_second = int(duration)
+    if total_frames < extract_t:
+        frame_indices = [
+            math.floor(i * total_frames / extract_t) for i in range(extract_t)
+        ]
+    else:
+        frame_indices = []
+        current_second = 0.0
+        interval = 1 / (temporal_patch_size * target_fps)
+        for frame_index in range(total_frames):
+            if frame_index * duration_per_frame >= current_second:
+                current_second += interval
+                frame_indices.append(frame_index)
+                if current_second >= max_second:
+                    break
+
+    if len(frame_indices) < extract_t:
+        start = frame_indices[0] if frame_indices else 0
+        end = frame_indices[-1] if frame_indices else max_frame_idx
+        frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+    elif len(frame_indices) > extract_t:
+        frame_indices = np.linspace(
+            0, total_frames - 1, extract_t, dtype=int
+        ).tolist()
+
+    unique_indices = list(dict.fromkeys(int(index) for index in frame_indices))
+    if len(unique_indices) % temporal_patch_size:
+        unique_indices.extend(
+            [unique_indices[-1]]
+            * (temporal_patch_size - len(unique_indices) % temporal_patch_size)
+        )
+    return unique_indices
 
 
 def _ceil_to_factor(value: int, factor: int) -> int:
@@ -63,9 +145,11 @@ def glm5_smart_resize(
     factor: int,
     min_pixels: int,
     max_pixels: int,
+    frames: int | None = None,
 ) -> tuple[int, int]:
     """Return GLM's upward-aligned, aspect-preserving padded canvas."""
-    frames = temporal_patch_size
+    frames = frames if frames is not None else temporal_patch_size
+    frames = _ceil_to_factor(frames, temporal_patch_size)
     canvas = (
         _ceil_to_factor(height, factor),
         _ceil_to_factor(width, factor),
@@ -310,6 +394,11 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         config["swiglu_limit"] = mm_related_params.config["swiglu_limit"]
         self.visual = Glm53FlashVisionModel(SimpleNamespace(**config))
         self.processor_config = mm_related_params.config["processor_config"]
+        self.ckpt_path = mm_related_params.config["ckpt_path"]
+        self.special_token_ids = mm_related_params.config[
+            "vision_special_token_ids"
+        ]
+        self._timestamp_tokenizer = None
         processor_config = self.processor_config["image_processor"]
         self.processor = Qwen2VLImageProcessor(
             do_resize=False,
@@ -319,6 +408,16 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
             patch_size=processor_config["patch_size"],
             temporal_patch_size=processor_config["temporal_patch_size"],
             merge_size=processor_config["merge_size"],
+        )
+        video_processor_config = self.processor_config["video_processor"]
+        self.video_processor = Qwen2VLImageProcessor(
+            do_resize=False,
+            do_rescale=video_processor_config.get("do_rescale", True),
+            image_mean=video_processor_config["image_mean"],
+            image_std=video_processor_config["image_std"],
+            patch_size=video_processor_config["patch_size"],
+            temporal_patch_size=video_processor_config["temporal_patch_size"],
+            merge_size=video_processor_config["merge_size"],
         )
 
     @property
@@ -334,25 +433,124 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         mm_inputs: List[MultimodalInput],
         vit_config: VitConfig,
         processor,
+        video_processor,
         processor_config,
     ):
         if len(mm_inputs) != 1:
             raise ValueError("GLM-5.3-Flash preprocessing expects one multimodal input")
         mm_input = mm_inputs[0]
-        if mm_input.mm_type not in (MMUrlType.DEFAULT, MMUrlType.IMAGE):
-            raise ValueError("GLM-5.3-Flash supports image input only")
-        image = Image.open(
-            get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
-        ).convert("RGB")
-        patch_size = processor_config["patch_size"]
-        temporal_patch_size = processor_config["temporal_patch_size"]
-        merge_size = processor_config["merge_size"]
+        if mm_input.mm_type not in (
+            MMUrlType.DEFAULT,
+            MMUrlType.IMAGE,
+            MMUrlType.VIDEO,
+        ):
+            raise ValueError(f"unsupported GLM-5.3-Flash media type: {mm_input.mm_type}")
+        media_config = (
+            processor_config["video_processor"]
+            if mm_input.mm_type == MMUrlType.VIDEO
+            else processor_config["image_processor"]
+        )
+        patch_size = media_config["patch_size"]
+        temporal_patch_size = media_config["temporal_patch_size"]
+        merge_size = media_config["merge_size"]
         factor = (
-            patch_size * merge_size * processor_config.get("patch_expand_factor", 1)
+            patch_size * merge_size * media_config.get("patch_expand_factor", 1)
         )
         token_pixels = temporal_patch_size * (patch_size * merge_size) ** 2
-        min_pixels = processor_config["min_image_tokens"] * token_pixels
-        max_pixels = processor_config["max_image_tokens"] * token_pixels
+        min_pixels = media_config["min_image_tokens"] * token_pixels
+        max_pixels = media_config["max_image_tokens"] * token_pixels
+        request_min_pixels = int(mm_input.mm_preprocess_config.min_pixels)
+        request_max_pixels = int(mm_input.mm_preprocess_config.max_pixels)
+        if request_min_pixels > 0:
+            min_pixels = request_min_pixels
+        if request_max_pixels > 0:
+            max_pixels = min(max_pixels, request_max_pixels)
+        if min_pixels > max_pixels:
+            raise ValueError(
+                "GLM-5.3-Flash min_pixels must not exceed the effective max_pixels"
+            )
+
+        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+        if mm_input.mm_type == MMUrlType.VIDEO:
+            if VideoReader is None:
+                raise ImportError(
+                    "decord is required for GLM-5.3-Flash video processing"
+                )
+            video_reader = VideoReader(data, ctx=cpu(0), num_threads=1)
+            total_frames = len(video_reader)
+            source_fps = float(video_reader.get_avg_fps())
+            requested_fps = float(mm_input.mm_preprocess_config.fps)
+            if requested_fps <= 0:
+                requested_fps = float(
+                    media_config.get(
+                        "fps_interval", media_config.get("fps", 2.0)
+                    )
+                )
+            request_max_frames = int(mm_input.mm_preprocess_config.max_frames)
+            processor_max_frames = int(
+                media_config.get(
+                    "max_frame_count_dynamic", GLM53_DEFAULT_VIDEO_MAX_FRAMES
+                )
+            )
+            server_max_frames = int(vit_config.mm_video_max_frames)
+            max_frames = min(
+                value
+                for value in (
+                    request_max_frames,
+                    processor_max_frames,
+                    server_max_frames,
+                )
+                if value > 0
+            )
+            indices = glm5_sample_frame_indices(
+                total_frames,
+                source_fps,
+                total_frames / source_fps,
+                target_fps=requested_fps,
+                max_frame_count=max_frames,
+                temporal_patch_size=temporal_patch_size,
+            )
+            raw_frames = video_reader.get_batch(indices).asnumpy()
+            del video_reader
+
+            video_max_tokens = min(
+                int(media_config["max_image_tokens"]),
+                GLM53_DEFAULT_VIDEO_MAX_TOKENS,
+            )
+            max_pixels = min(max_pixels, video_max_tokens * token_pixels)
+            if min_pixels > max_pixels:
+                raise ValueError(
+                    "GLM-5.3-Flash video min_pixels exceeds the 30000-token cap"
+                )
+            frame_height, frame_width = raw_frames.shape[1:3]
+            canvas = glm5_smart_resize(
+                frame_height,
+                frame_width,
+                temporal_patch_size=temporal_patch_size,
+                factor=factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+                frames=len(indices),
+            )
+            upscale = len(indices) * frame_height * frame_width < min_pixels
+            frames = [
+                _resize_and_pad(Image.fromarray(frame).convert("RGB"), canvas, upscale)
+                for frame in raw_frames
+            ]
+            result = video_processor.preprocess(
+                videos=frames, return_tensors="pt", do_resize=False
+            )
+            timestamps = [
+                int(indices[i] / source_fps)
+                for i in range(0, len(indices), temporal_patch_size)
+            ]
+            return (
+                result["pixel_values_videos"],
+                result["video_grid_thw"],
+                timestamps,
+            )
+
+        image = Image.open(data).convert("RGB")
         canvas = glm5_smart_resize(
             image.height,
             image.width,
@@ -372,14 +570,74 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
     def get_preprocess_params(self):
         return {
             "processor": self.processor,
-            "processor_config": self.processor_config["image_processor"],
+            "video_processor": self.video_processor,
+            "processor_config": self.processor_config,
         }
+
+    def _encode_timestamp(self, seconds: int) -> list[int]:
+        if self._timestamp_tokenizer is None:
+            from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
+                TokenizerFactory,
+            )
+
+            self._timestamp_tokenizer = TokenizerFactory.create(
+                self.ckpt_path, self.ckpt_path, "glm5_3_flash"
+            )
+        return self._timestamp_tokenizer.encode(
+            f"{float(seconds):.1f} seconds", add_special_tokens=False
+        )
+
+    @staticmethod
+    def _layout_tensor(
+        *, group_start: bool, prefix_ids: list[int], suffix_ids: list[int]
+    ) -> torch.Tensor:
+        return torch.tensor(
+            [
+                GLM53_MM_LAYOUT_MAGIC,
+                int(group_start),
+                len(prefix_ids),
+                len(suffix_ids),
+                *prefix_ids,
+                *suffix_ids,
+            ],
+            dtype=torch.int32,
+        )
 
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         pixel_values = data[0].to(self._device, dtype=self._data_type)
         grid_thw = data[1].to(self._device)
-        return self.visual(pixel_values, grid_thw), None
+        embeddings = self.visual(pixel_values, grid_thw)
+        if len(data) == 2:
+            layout = self._layout_tensor(
+                group_start=True, prefix_ids=[], suffix_ids=[]
+            )
+            return [embeddings], None, [layout]
+
+        timestamps = data[2]
+        grid_t = int(grid_thw[0, 0].item())
+        if grid_t <= 0 or embeddings.shape[0] % grid_t != 0:
+            raise ValueError(
+                "GLM-5.3-Flash video embedding count is not divisible by grid_t"
+            )
+        if len(timestamps) != grid_t:
+            raise ValueError(
+                "GLM-5.3-Flash timestamp count does not match temporal grid"
+            )
+        frame_embeddings = list(embeddings.chunk(grid_t, dim=0))
+        layouts = []
+        for index, timestamp in enumerate(timestamps):
+            layouts.append(
+                self._layout_tensor(
+                    group_start=index == 0,
+                    prefix_ids=[self.special_token_ids["image_start"]],
+                    suffix_ids=[
+                        self.special_token_ids["image_end"],
+                        *self._encode_timestamp(timestamp),
+                    ],
+                )
+            )
+        return frame_embeddings, None, layouts
 
 
 class Glm53FlashVitWeight(BaseVitWeights):

@@ -104,6 +104,21 @@ py_test(
 )
 
 py_test(
+    name = "glm53_grouped_cp_topk_test",
+    srcs = ["flashmla_sparse_cp_op_test.py"],
+    main = "flashmla_sparse_cp_op_test.py",
+    args = ["SparseMlaFp8CPOpTest.test_grouped_cp_topk_expands_pool_ids_and_appends_raw_tail"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {
+        'gpu': 'L20A_DEV',
+        'gpu_count': '1',
+    },
+)
+
+py_test(
     name = "test_target_verify_kernel",
     srcs = ["test_target_verify_kernel.py"],
     deps = [

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+#include <utility>
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
@@ -19,15 +21,24 @@ class ServerContext;
 namespace rtp_llm {
 
 struct ExpandedOutput {
-    torch::Tensor expanded_ids;
-    torch::Tensor token_type_ids;
-    torch::Tensor text_tokens_mask;
-    torch::Tensor locs;
-    ExpandedOutput(torch::Tensor expanded_ids     = {},
-                   torch::Tensor token_type_ids   = {},
-                   torch::Tensor text_tokens_mask = {},
-                   torch::Tensor locs             = {}):
-        expanded_ids(expanded_ids), token_type_ids(token_type_ids), text_tokens_mask(text_tokens_mask), locs(locs) {}
+    torch::Tensor                expanded_ids;
+    torch::Tensor                token_type_ids;
+    torch::Tensor                text_tokens_mask;
+    torch::Tensor                locs;
+    std::vector<MultimodalInput> multimodal_inputs;
+    bool                         consumed_mm_layout = false;
+    ExpandedOutput(torch::Tensor                expanded_ids       = {},
+                   torch::Tensor                token_type_ids     = {},
+                   torch::Tensor                text_tokens_mask   = {},
+                   torch::Tensor                locs               = {},
+                   std::vector<MultimodalInput> multimodal_inputs  = {},
+                   bool                         consumed_mm_layout = false):
+        expanded_ids(std::move(expanded_ids)),
+        token_type_ids(std::move(token_type_ids)),
+        text_tokens_mask(std::move(text_tokens_mask)),
+        locs(std::move(locs)),
+        multimodal_inputs(std::move(multimodal_inputs)),
+        consumed_mm_layout(consumed_mm_layout) {}
 };
 
 class MultimodalProcessor {
@@ -53,10 +64,12 @@ private:
                                                               int64_t              request_id                     = 0,
                                                               grpc::ServerContext* server_context = nullptr) = 0;
 
-    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
-                                               const torch::Tensor&                        token_ids,
-                                               const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                               torch::Tensor                               token_type_ids = {});
+    ErrorResult<ExpandedOutput>
+    expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
+                   const torch::Tensor&                             token_ids,
+                   const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
+                   torch::Tensor                                    token_type_ids = {},
+                   const std::optional<std::vector<torch::Tensor>>& mm_extra_input = std::nullopt);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 

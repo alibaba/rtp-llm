@@ -459,7 +459,9 @@ class Glm53FlashConfigTest(unittest.TestCase):
         ):
             config = parse_glm53_flash_config(config_json, "/model")
         self.assertTrue(config.mm_model_config.is_multimodal)
-        self.assertEqual(config.mm_model_config.mm_sep_tokens, [[11, 12]])
+        self.assertEqual(
+            config.mm_model_config.mm_sep_tokens, [[11, 12], [13, 14]]
+        )
         self.assertEqual(
             config.mm_related_params.special_tokens["default_mm_token"],
             "<|begin_of_image|><|image|><|end_of_image|>",
@@ -467,6 +469,15 @@ class Glm53FlashConfigTest(unittest.TestCase):
         self.assertEqual(
             config.mm_related_params.config["vision_config"],
             {"hidden_size": 16, "rms_norm_eps": 1e-6},
+        )
+        self.assertEqual(
+            config.mm_related_params.config["vision_special_token_ids"],
+            {
+                "image_start": 11,
+                "image_end": 12,
+                "video_start": 13,
+                "video_end": 14,
+            },
         )
 
     def test_rejects_mismatched_layer_schedule(self):

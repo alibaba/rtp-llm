@@ -290,6 +290,32 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         self.assertNotIn("fused_kv", _GatherWorkspace.__dataclass_fields__)
 
+    def test_grouped_cp_topk_expands_pool_ids_and_appends_raw_tail(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+            SparseMlaFp8CPOp,
+        )
+
+        op = object.__new__(SparseMlaFp8CPOp)
+        op.indexer_top_k = 2
+        op.indexer_group_size = 4
+        op.top_k = 11
+        op.precomputed_raw_sequence_lengths = torch.tensor(
+            [10, 8], dtype=torch.int32, device=self.device
+        )
+        pooled = torch.tensor(
+            [[0, 1], [1, -1]], dtype=torch.int32, device=self.device
+        )
+
+        actual = op._prepare_cp_local_topk_indices(pooled)
+
+        self.assertEqual(
+            actual.cpu().tolist(),
+            [
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1],
+                [4, 5, 6, 7, -1, -1, -1, -1, -1, -1, -1],
+            ],
+        )
+
     def test_bf16_cache_uses_sparse_fwd(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
             SparseMlaFp8CPOp,
@@ -299,6 +325,9 @@ class SparseMlaFp8CPOpTest(TestCase):
         op.kv_cache_sharded = False
         op.kv_lora_rank = 8
         op.scale = 0.125
+        # object.__new__ deliberately bypasses SparseMlaOp.__init__, which
+        # normally derives the physical FlashMLA width from semantic top_k.
+        op.kernel_top_k = 4
         op._convert_topk_indices_to_global = lambda _topk: torch.zeros(
             (2, 1, 4), dtype=torch.int32, device=self.device
         )

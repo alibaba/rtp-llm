@@ -122,6 +122,7 @@ class Glm53FlashRenderer(ChatGlm45Renderer):
     """GLM-5.3 renderer that preserves media inputs for the ViT pipeline."""
 
     _IMAGE_TOKEN = "<|begin_of_image|><|image|><|end_of_image|>"
+    _VIDEO_TOKEN = "<|begin_of_video|><|video|><|end_of_video|>"
 
     @override
     def in_think_mode(self, request: ChatCompletionRequest) -> bool:
@@ -131,6 +132,18 @@ class Glm53FlashRenderer(ChatGlm45Renderer):
         # asks to disable thinking, otherwise the hidden preamble and literal
         # ``</think>`` leak into ``content``.
         return True
+
+    @override
+    def _build_prompt(self, request: ChatCompletionRequest) -> str:
+        prompt = super()._build_prompt(request)
+        if request.disable_thinking() and prompt.endswith("<think>"):
+            # GLM-5.3-Flash's checkpoint template always opens the generated
+            # assistant turn with <think> and does not consume
+            # enable_thinking.  Close only that final generation prefix so an
+            # explicit opt-out starts on the direct-answer path.  If a newer
+            # checkpoint template already handles the flag, leave it intact.
+            prompt += "</think>"
+        return prompt
 
     @staticmethod
     def _preprocess_config(content_part, media_url):
@@ -173,9 +186,17 @@ class Glm53FlashRenderer(ChatGlm45Renderer):
                         )
                     )
                 elif part.type == ContentPartTypeEnum.video_url:
-                    raise ValueError(
-                        "GLM-5.3-Flash does not support video input; "
-                        "send image_url content only"
+                    assert part.video_url is not None
+                    urls.append(part.video_url.url)
+                    types.append(MMUrlType.VIDEO)
+                    preprocess_configs.append(
+                        self._preprocess_config(part, part.video_url)
+                    )
+                    rewritten.append(
+                        ContentPart(
+                            type=ContentPartTypeEnum.text,
+                            text=self._VIDEO_TOKEN + "\n",
+                        )
                     )
                 else:
                     rewritten.append(part)

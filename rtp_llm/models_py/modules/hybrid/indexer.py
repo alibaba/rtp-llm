@@ -112,10 +112,6 @@ class Indexer(nn.Module):
         )
 
         if self.compress_ratio > 1:
-            if self._prefill_cp_enabled():
-                raise ValueError(
-                    "GLM-5.3-Flash compressed indexer does not support prefill CP"
-                )
             if self.compress_ratio != 4:
                 raise ValueError(
                     "GLM-5.3-Flash compressed indexer requires ratio 4, got "
@@ -273,6 +269,7 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         global_kv_cache: KVCache,
         use_fast_path: bool,
+        cp_params: Any,
     ) -> Optional[torch.Tensor]:
         kv_block_table, kv_eb = self._bind_compressed_pools(
             global_kv_cache, attention_inputs
@@ -283,9 +280,100 @@ class Indexer(nn.Module):
         is_regular_prefill = bool(attention_inputs.is_prefill) and not (
             is_multi_token_decode
         )
+        cp_ctx = None
+        workspace = None
         try:
             if is_regular_prefill:
-                batch_size = int(attention_inputs.input_lengths.numel())
+                position_ids = fmha_params.positions_d
+                req_id_per_token = fmha_params.batch_indice_d
+                input_lengths = attention_inputs.input_lengths
+                prefix_lengths = attention_inputs.prefix_lengths
+                cu_seqlens = attention_inputs.cu_seqlens
+                batch_size = int(input_lengths.numel())
+
+                if self._prefill_cp_enabled():
+                    if cp_params is None:
+                        raise RuntimeError(
+                            "GLM-5.3-Flash compressed prefill CP requires cp_params"
+                        )
+                    cp_info = getattr(
+                        attention_inputs, "context_parallel_info", None
+                    )
+                    if cp_info is None:
+                        raise RuntimeError(
+                            "GLM-5.3-Flash compressed prefill CP requires "
+                            "context_parallel_info"
+                        )
+                    from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
+                    from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+                        PrefillWorkspace,
+                    )
+
+                    cp_size = int(getattr(cp_params, "cp_size", 0))
+                    cp_rank = int(getattr(cp_params, "cp_rank", -1))
+                    if cp_size <= 1 or cp_rank < 0 or cp_rank >= cp_size:
+                        raise RuntimeError(
+                            "invalid GLM-5.3-Flash compressed prefill CP geometry: "
+                            f"cp_size={cp_size} cp_rank={cp_rank}"
+                        )
+                    cp_ctx = build_cp_context(
+                        cp_info,
+                        cp_size,
+                        cp_rank,
+                        int(hidden_states.shape[0]),
+                        hidden_states.device,
+                        position_offset=prefix_lengths,
+                        kv_cache_sharded=bool(
+                            getattr(cp_params, "kv_cache_sharded", False)
+                        ),
+                    )
+                    if cp_ctx.input_lengths_global is None:
+                        raise RuntimeError(
+                            "GLM-5.3-Flash compressed prefill CP requires global "
+                            "input lengths"
+                        )
+                    if cp_ctx.req_id_per_token is None:
+                        raise RuntimeError(
+                            "GLM-5.3-Flash compressed prefill CP requires per-token "
+                            "request ids"
+                        )
+
+                    # IndexerFP8's nested KPool compressor gathers the rank-local
+                    # projections, restores global request order, and then writes
+                    # only the page-RR entries owned by this CP rank.  Its CP
+                    # gather/restore implementation deliberately requires an
+                    # explicit workspace; the KPool projection width is 2*128.
+                    workspace = PrefillWorkspace(
+                        hidden_states.device,
+                        q_rows=0,
+                        q_dim=0,
+                        reserve_cp=True,
+                        cp_rows=cp_ctx.padded_seq_len,
+                        main_w=0,
+                        idx_w=2 * self.index_head_dim,
+                        swa_w=0,
+                        align_bytes=256,
+                    )
+                    self.compressed_indexer.set_cp_ctx(cp_ctx)
+                    self.compressed_indexer.compressor.set_cp_ctx(cp_ctx)
+
+                    position_ids = cp_ctx.global_positions
+                    req_id_per_token = cp_ctx.req_id_per_token
+                    input_lengths = cp_ctx.input_lengths_global
+                    prefix_lengths = cp_ctx.prefix_lengths
+                    batch_size = int(input_lengths.numel())
+                    local_lengths = torch.tensor(
+                        cp_ctx.chunk_lengths_per_req,
+                        dtype=torch.int32,
+                        device=hidden_states.device,
+                    )
+                    cu_seqlens = torch.zeros(
+                        batch_size + 1,
+                        dtype=torch.int32,
+                        device=hidden_states.device,
+                    )
+                    cu_seqlens[1:] = torch.cumsum(local_lengths, dim=0)
+
                 meta = self.compressed_indexer.prepare(
                     bsz=1,
                     seqlen=int(hidden_states.shape[0]),
@@ -295,19 +383,29 @@ class Indexer(nn.Module):
                     kv_eb=kv_eb,
                     use_varlen=True,
                     batch_size=batch_size,
-                    cu_seqlens=attention_inputs.cu_seqlens,
-                    input_lengths=attention_inputs.input_lengths,
-                    prefix_lengths=attention_inputs.prefix_lengths,
-                    position_ids=fmha_params.positions_d,
-                    req_id_per_token=fmha_params.batch_indice_d,
+                    cu_seqlens=cu_seqlens,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    position_ids=position_ids,
+                    req_id_per_token=req_id_per_token,
                     has_prefix=self._has_prefix(attention_inputs),
                 )
                 topk = self.compressed_indexer(
                     hidden_states,
                     q_lora,
                     meta,
-                    workspace=None,
+                    workspace=workspace,
                 )
+                if cp_ctx is not None:
+                    total_local_ids = getattr(cp_params, "total_local_ids", None)
+                    if total_local_ids is None:
+                        raise RuntimeError(
+                            "GLM-5.3-Flash compressed prefill CP requires "
+                            "total_local_ids"
+                        )
+                    topk = topk.index_select(
+                        0, total_local_ids.to(device=topk.device, dtype=torch.long)
+                    )
             else:
                 batch_size = int(attention_inputs.input_lengths.numel())
                 total_tokens = int(hidden_states.shape[0])
@@ -372,6 +470,8 @@ class Indexer(nn.Module):
             return None if use_fast_path else topk
         finally:
             self.compressed_indexer.clear_pool_context()
+            self.compressed_indexer.set_cp_ctx(None)
+            self.compressed_indexer.compressor.set_cp_ctx(None)
 
     def _prefill_cp_enabled(self) -> bool:
         if self.parallelism_config is None:
@@ -611,6 +711,7 @@ class Indexer(nn.Module):
                 attention_inputs,
                 global_kv_cache,
                 use_fast_path,
+                cp_params,
             )
         if use_fast_path:
             key = self._get_k_bf16(hidden_states, fmha_params)

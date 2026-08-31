@@ -14,6 +14,28 @@ uint32_t evenCeil(uint32_t value) {
     return (value + 1u) & ~1u;
 }
 
+uint32_t fixedRegionCpSize(const ParallelismConfig& parallelism_config) {
+    if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
+        return 1;
+    }
+    if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
+        return static_cast<uint32_t>(parallelism_config.tp_size);
+    }
+    if (parallelism_config.role_type == RoleType::DECODE
+        && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.prefill_cp_config.prefill_cp_size > 1,
+                                "GLM-5.3-Flash KPool decode requires explicit prefill_cp_size when "
+                                "PREFILL_CP and kv_cache_sharded are enabled");
+        return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
+    }
+    return 1;
+}
+
+uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
+    RTP_LLM_CHECK_WITH_INFO(multiple > 0, "GLM-5.3-Flash KPool alignment must be positive");
+    return ((value + multiple - 1u) / multiple) * multiple;
+}
+
 std::vector<int> resolveIndexerLayers(const ModelConfig& model_config) {
     const auto&      attn = model_config.attn_config;
     std::vector<int> layers;
@@ -90,9 +112,6 @@ void GLM53CacheConfigHelper::appendIndexerPools(CacheConfig&             config,
                             attn.sparse_attention_topk);
     RTP_LLM_CHECK_WITH_INFO(
         gen_num_per_cycle >= 0, "GLM-5.3-Flash gen_num_per_cycle must be non-negative, got %d", gen_num_per_cycle);
-    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
-                            "GLM-5.3-Flash KPool prefill context parallelism is not supported yet");
-
     const uint32_t physical_tokens_per_block = kv_cache_config.seq_size_per_block > 0 ?
                                                    static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
                                                    static_cast<uint32_t>(attn.tokens_per_block);
@@ -121,8 +140,14 @@ void GLM53CacheConfigHelper::appendIndexerPools(CacheConfig&             config,
     RTP_LLM_CHECK_WITH_INFO(indexer_entries == 32 || indexer_entries == 64 || indexer_entries == 128,
                             "GLM-5.3-Flash KPool kernel block must contain 32, 64, or 128 pooled entries, got %u",
                             indexer_entries);
-    const uint32_t state_entries = evenCeil(static_cast<uint32_t>(ratio + gen_num_per_cycle));
-    const uint32_t state_width   = 2u * static_cast<uint32_t>(attn.indexer_head_dim);
+    const uint32_t fixed_cp_size     = fixedRegionCpSize(parallelism_config);
+    const uint32_t full_state_entries =
+        alignUpToMultiple(evenCeil(static_cast<uint32_t>(ratio + gen_num_per_cycle)), fixed_cp_size);
+    const bool     prefill_cp_sliced = parallelism_config.role_type == RoleType::PREFILL && fixed_cp_size > 1;
+    const uint32_t state_entries     = prefill_cp_sliced ? full_state_entries / fixed_cp_size : full_state_entries;
+    const uint32_t state_width       = 2u * static_cast<uint32_t>(attn.indexer_head_dim);
+    const uint32_t state_tokens_per_block =
+        fixed_cp_size > 1 ? physical_tokens_per_block * fixed_cp_size : physical_tokens_per_block;
 
     auto indexer_kv    = std::make_shared<DSV4KVSpec>(KVCacheRegionName::INDEXER_KV,
                                                    static_cast<uint32_t>(indexer_layers.size()),
@@ -135,7 +160,7 @@ void GLM53CacheConfigHelper::appendIndexerPools(CacheConfig&             config,
                                                          state_width,
                                                          state_entries,
                                                          DataType::TYPE_FP32,
-                                                         physical_tokens_per_block);
+                                                         state_tokens_per_block);
 
     appendPool(config, indexer_layers, CacheGroupType::FULL, KVCacheRegionName::INDEXER_KV, indexer_kv);
     appendPool(config, indexer_layers, CacheGroupType::SWA, KVCacheRegionName::INDEXER_STATE, indexer_state);
@@ -148,14 +173,18 @@ void GLM53CacheConfigHelper::appendIndexerPools(CacheConfig&             config,
     config.dsv4_fixed_pool_blocks                   = kv_cache_config.dsv4_fixed_pool_blocks;
 
     RTP_LLM_LOG_INFO("GLM-5.3-Flash KPool cache: layers=%zu pooled_topk=%d attention_topk=%d "
-                     "physical_tpb=%u kernel_tpb=%u indexer_entries=%u state_entries=%u",
+                     "physical_tpb=%u kernel_tpb=%u indexer_entries=%u state_entries=%u "
+                     "full_state_entries=%u fixed_cp_size=%u prefill_cp_sliced=%d",
                      indexer_layers.size(),
                      attn.indexer_topk,
                      attn.sparse_attention_topk,
                      physical_tokens_per_block,
                      kernel_tokens_per_block,
                      indexer_entries,
-                     state_entries);
+                     state_entries,
+                     full_state_entries,
+                     fixed_cp_size,
+                     prefill_cp_sliced);
 }
 
 }  // namespace rtp_llm

@@ -23,6 +23,14 @@ class Glm53FlashRendererTest(unittest.TestCase):
         )
         return renderer
 
+    def _template_renderer(self):
+        renderer = Glm53FlashRenderer.__new__(Glm53FlashRenderer)
+        renderer.tokenizer = _Tokenizer()
+        renderer.chat_template = (
+            "{% if add_generation_prompt %}<|assistant|><think>{% endif %}"
+        )
+        return renderer
+
     def test_image_content_is_forwarded_to_vit(self):
         renderer = self._renderer()
         request = ChatCompletionRequest(
@@ -54,7 +62,7 @@ class Glm53FlashRendererTest(unittest.TestCase):
         )
         self.assertEqual(len(rendered.input_ids), len(rendered.rendered_prompt))
 
-    def test_video_is_rejected_at_renderer_boundary(self):
+    def test_video_content_is_forwarded_to_vit(self):
         renderer = self._renderer()
         request = ChatCompletionRequest(
             messages=[
@@ -70,8 +78,21 @@ class Glm53FlashRendererTest(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(ValueError, "does not support video input"):
-            renderer.render_chat(request)
+        rendered = renderer.render_chat(request)
+
+        self.assertEqual(
+            rendered.rendered_prompt,
+            "<|begin_of_video|><|video|><|end_of_video|>\n",
+        )
+        self.assertEqual(
+            [item.url for item in rendered.multimodal_inputs], ["/tmp/video.mp4"]
+        )
+        self.assertEqual(
+            [item.mm_type for item in rendered.multimodal_inputs], [MMUrlType.VIDEO]
+        )
+        self.assertAlmostEqual(
+            rendered.multimodal_inputs[0].mm_preprocess_config.fps, 2.0
+        )
 
     def test_checkpoint_forced_think_mode_is_always_enabled(self):
         renderer = self._renderer()
@@ -79,17 +100,42 @@ class Glm53FlashRendererTest(unittest.TestCase):
 
         self.assertTrue(renderer.in_think_mode(request))
 
-    def test_explicit_disable_cannot_bypass_checkpoint_forced_parser(self):
-        renderer = self._renderer()
-        renderer._build_prompt = lambda request: "<think>"
+    def test_explicit_disable_closes_checkpoint_forced_think_prefix(self):
+        for request_kwargs in (
+            {"enable_thinking": False},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ):
+            with self.subTest(request_kwargs=request_kwargs):
+                renderer = self._template_renderer()
+                request = ChatCompletionRequest(
+                    messages=[{"role": "user", "content": "hello"}],
+                    **request_kwargs,
+                )
+
+                rendered = renderer.render_chat(request)
+                parser = renderer._create_reasoning_parser(request)
+
+                self.assertTrue(request.disable_thinking())
+                self.assertTrue(renderer.in_think_mode(request))
+                self.assertEqual(
+                    rendered.rendered_prompt,
+                    "<|assistant|><think></think>",
+                )
+                self.assertIsNotNone(parser)
+                reasoning, content = parser.parse_non_stream("Hello!")
+                self.assertEqual(reasoning, "")
+                self.assertEqual(content, "Hello!")
+
+    def test_default_generation_keeps_checkpoint_forced_think_prefix(self):
+        renderer = self._template_renderer()
         request = ChatCompletionRequest(
-            messages=[{"role": "user", "content": "hello"}],
-            chat_template_kwargs={"enable_thinking": False},
+            messages=[{"role": "user", "content": "hello"}]
         )
 
+        rendered = renderer.render_chat(request)
         parser = renderer._create_reasoning_parser(request)
-        self.assertTrue(request.disable_thinking())
-        self.assertTrue(renderer.in_think_mode(request))
+
+        self.assertEqual(rendered.rendered_prompt, "<|assistant|><think>")
         self.assertIsNotNone(parser)
         reasoning, content = parser.parse_non_stream(
             "I should answer briefly.</think>Hello!"
