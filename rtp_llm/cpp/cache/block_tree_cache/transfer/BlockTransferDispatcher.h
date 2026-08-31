@@ -13,14 +13,18 @@ namespace rtp_llm {
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
 
+namespace block_tree_cache_test {
+class BlockTreeCacheTestPeer;
+}
+
 class BlockTransferDispatcher {
 public:
     using TransferDoneCallback = std::function<void(ErrorInfo)>;
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine = nullptr,
-                            size_t max_device_host_descriptors_per_batch = 8,
-                            size_t max_non_device_host_descriptors_per_batch = 1);
+                            size_t                                        max_device_host_descriptors_per_batch = 8,
+                            size_t max_non_device_host_descriptors_per_batch                                    = 1);
 
     std::shared_ptr<AsyncContext> executePerRank(const std::vector<TransferDescriptor>& descriptors) const;
     std::shared_ptr<AsyncContext> executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
@@ -38,6 +42,8 @@ public:
     void shutdown() const;
 
 private:
+    friend class block_tree_cache_test::BlockTreeCacheTestPeer;
+
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
     size_t                                        max_device_host_descriptors_per_batch_{8};
