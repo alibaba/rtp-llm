@@ -10,7 +10,10 @@ py_library(
     name = "fla",
     srcs = glob(["fla/*.py"]),
     deps = [":common"] + select({
-        "@rtp_llm//:using_rocm": [requirement_gpu_rocm("flydsl")],
+        "@rtp_llm//:using_rocm": [
+            requirement_gpu_rocm("aiter"),
+            requirement_gpu_rocm("flydsl"),
+        ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"]

@@ -29,6 +29,24 @@ import sys
 import urllib.error
 import urllib.request
 
+
+def _install_typing_compat() -> None:
+    """Expose PEP 655 typing names for dependencies running on Python 3.10."""
+    import typing
+
+    if hasattr(typing, "NotRequired") and hasattr(typing, "Required"):
+        return
+
+    from typing_extensions import NotRequired, Required
+
+    if not hasattr(typing, "NotRequired"):
+        typing.NotRequired = NotRequired
+    if not hasattr(typing, "Required"):
+        typing.Required = Required
+
+
+_install_typing_compat()
+
 # === 日志压制 ===
 # tau2 内部用 loguru 打 user_simulator / orchestrator / domains.* 的 DEBUG+INFO,
 # 满屏刷 "Step 3. Sending message ..." 那类。LOGURU_LEVEL 必须在 `from loguru import

@@ -3,6 +3,15 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "deepep_normal_router_hook_test",
+    srcs = ["deepep_normal_router_hook_test.py"],
+    deps = py_test_deps,
+    # Imports the CUDA router but exercises the extension contract with CPU tensors.
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "deepep_normal_router_test",
     srcs = ["deepep_normal_router_test.py"],
     deps = py_test_deps + [

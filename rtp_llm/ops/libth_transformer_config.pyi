@@ -1382,6 +1382,8 @@ class QuantAlgo:
         ...
     def isW4a8Int4PTPC(self) -> bool:
         ...
+    def isW8a8Int8PTPC(self) -> bool:
+        ...
     def isWeightOnlyPerCol(self) -> bool:
         ...
     def setQuantAlgo(self, arg0: str, arg1: int, arg2: int) -> None:
@@ -1413,6 +1415,8 @@ class QuantMethod:
       ModelOptFP4
 
       QuarkMXFP4
+
+      W8A8INT8PTPC
     """
     Awq: typing.ClassVar[QuantMethod]  # value = <QuantMethod.Awq: 3>
     FP8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.FP8PTPC: 8>
@@ -1425,8 +1429,9 @@ class QuantMethod:
     PerTensorQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.PerTensorQuant: 6>
     SmoothQuant: typing.ClassVar[QuantMethod]  # value = <QuantMethod.SmoothQuant: 4>
     W4A8INT4PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.W4A8INT4PTPC: 9>
+    W8A8INT8PTPC: typing.ClassVar[QuantMethod]  # value = <QuantMethod.W8A8INT8PTPC: 12>
     WeightOnlyPerCol: typing.ClassVar[QuantMethod]  # value = <QuantMethod.WeightOnlyPerCol: 1>
-    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'W4A8INT4PTPC': <QuantMethod.W4A8INT4PTPC: 9>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 10>}
+    __members__: typing.ClassVar[dict[str, QuantMethod]]  # value = {'None': <QuantMethod.None: 0>, 'WeightOnlyPerCol': <QuantMethod.WeightOnlyPerCol: 1>, 'GptQ': <QuantMethod.GptQ: 2>, 'Awq': <QuantMethod.Awq: 3>, 'SmoothQuant': <QuantMethod.SmoothQuant: 4>, 'OmniQuant': <QuantMethod.OmniQuant: 5>, 'PerTensorQuant': <QuantMethod.PerTensorQuant: 6>, 'FP8Quant': <QuantMethod.FP8Quant: 7>, 'FP8PTPC': <QuantMethod.FP8PTPC: 8>, 'W4A8INT4PTPC': <QuantMethod.W4A8INT4PTPC: 9>, 'ModelOptFP4': <QuantMethod.ModelOptFP4: 10>, 'QuarkMXFP4': <QuantMethod.QuarkMXFP4: 11>, 'W8A8INT8PTPC': <QuantMethod.W8A8INT8PTPC: 12>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
