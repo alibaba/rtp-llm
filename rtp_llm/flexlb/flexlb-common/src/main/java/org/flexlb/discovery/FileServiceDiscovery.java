@@ -20,6 +20,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * FileServiceDiscovery - File-based service discovery with dynamic reload.
  *
+ * <p>Assembled by {@link org.flexlb.config.ServiceDiscoveryConfiguration} when
+ * the {@code flexlb.discovery.file} property (env {@code FLEXLB_DISCOVERY_FILE})
+ * is set, enabling dynamic engine discovery for elastic tests.
+ *
  * <p>Replaces the env-var-only {@link NoOpServiceDiscovery} for mock/test
  * deployments: the domain → hosts mapping lives in a small JSON file that an
  * external orchestrator (or the mock engine control plane) rewrites atomically
