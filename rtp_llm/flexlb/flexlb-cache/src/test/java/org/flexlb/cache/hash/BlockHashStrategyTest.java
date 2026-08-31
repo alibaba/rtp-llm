@@ -9,7 +9,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class BlockHashStrategyTest {
@@ -37,6 +39,19 @@ class BlockHashStrategyTest {
         assertInstanceOf(
                 SglangBlockHashStrategy.class,
                 configuration.blockHashStrategy(configService));
+    }
+
+    @Test
+    void registersConfigUpdateListenerForVllmStrategy() {
+        BlockHashStrategyConfiguration configuration = new BlockHashStrategyConfiguration();
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+
+        assertInstanceOf(
+                VllmBlockHashStrategy.class,
+                configuration.blockHashStrategy(configService));
+
+        verify(configService).addUpdateListener(any());
     }
 
     @Test
