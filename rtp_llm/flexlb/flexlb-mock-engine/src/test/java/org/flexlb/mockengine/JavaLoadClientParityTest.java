@@ -41,7 +41,7 @@ class JavaLoadClientParityTest {
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
-                "engine_service", "", false,
+                "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true);
         return new JavaLoadClient(config);
     }

@@ -25,6 +25,17 @@ class ConfigServiceTest {
         assertInstanceOf(BatchDispatcherConfig.class, config.getDispatcher());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(2, config.getSchemaVersion());
+
+        // An omitted estimator keeps the upstream default expression
+        // (the legacy 1 ms/token sum). Test lines that need the production
+        // DSv4 prefill fit inject it explicitly in their FLEXLB_CONFIG
+        // documents (harness.py / master_fixed_window.json).
+        FormulaEstimatorConfig estimator = assertInstanceOf(
+                FormulaEstimatorConfig.class,
+                config.getRouter().getRoles().getPrefill()
+                        .getExecutionTimeEstimator());
+        assertEquals("sum(computeTokens) + 0.3*sum(hitCacheTokens)",
+                estimator.getExpression());
     }
 
     @Test

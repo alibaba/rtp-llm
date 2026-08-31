@@ -85,7 +85,7 @@ class ClusterConfigParamTest {
         assertEquals(0, config.blockSize, "block-size defaults to 0 (keep perf-file value)");
         assertEquals(JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY,
                 config.decodeMaxConcurrency);
-        assertEquals(132, config.decodeMaxConcurrency);
+        assertEquals(128, config.decodeMaxConcurrency);
         assertEquals(5000, config.statsIntervalMs, "stats interval keeps the historical 5s cadence");
     }
 

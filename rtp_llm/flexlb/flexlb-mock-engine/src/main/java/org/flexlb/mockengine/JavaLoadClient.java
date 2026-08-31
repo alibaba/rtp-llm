@@ -17,6 +17,7 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.util.PriorityNormalizer;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -55,6 +56,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * optional engine stream reading for TTFT/total latency, and generates summary.json +
  * per_request.jsonl matching the Python client format.
  *
+ * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
+ * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
+ * the client stops after a successful Schedule RPC; the engine still executes the
+ * request in full (BATCH dispatcher: master enqueued it via EnqueueBatch during the
+ * Schedule RPC). This trims the client's stream-reading network cost from load tests
+ * while keeping engine-side load identical to the read-stream mode.
+ *
  * <p>Configuration is read exclusively from environment variables at startup (no
  * multi-layer override). Run as:
  * <pre>{@code
@@ -65,6 +73,15 @@ public final class JavaLoadClient {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BLOCK_SIZE = 1024;
+    /**
+     * Sweep cadence for the outstanding-result collector: completed futures are
+     * harvested at this granularity while slow RPCs are still in flight. All
+     * latency timestamps are stamped inside handleRequest when the event
+     * happens, so sweep latency only delays row collection, never per-row data
+     * fidelity.
+     */
+    private static final long COLLECTION_SWEEP_INTERVAL_NANOS =
+            TimeUnit.MILLISECONDS.toNanos(100);
 
     private final Config config;
     private final EventLoopGroup eventLoopGroup;
@@ -172,6 +189,13 @@ public final class JavaLoadClient {
                     "send mode: uniform — target_qps=%.3f, per_shard_qps=%.3f "
                             + "(interval %.3fms), trace timestamps ignored",
                     config.sendModeQps, perShardQps, 1000.0 / perShardQps));
+            if (config.rampUpSeconds > 0) {
+                System.out.println(String.format(
+                        "ramp-up: per-shard QPS climbs linearly 0 -> %.3f over %.1fs, "
+                                + "then constant (ramp sends ≈ %.1f per shard)",
+                        perShardQps, config.rampUpSeconds,
+                        perShardQps * config.rampUpSeconds / 2.0));
+            }
         }
 
         if (config.enableFallback && !config.endpointsFile.isEmpty()) {
@@ -188,6 +212,10 @@ public final class JavaLoadClient {
 
         if (config.gradient && config.isUniform()) {
             System.out.println("WARNING: GRADIENT is ignored in uniform send mode");
+        }
+        if (!config.isUniform() && config.rampUpSeconds > 0) {
+            System.out.println("WARNING: RAMP_UP_SECONDS is ignored outside "
+                    + "uniform send mode");
         }
         if (config.gradient && !config.isUniform() && config.durationS <= 0) {
             System.out.println("WARNING: GRADIENT requires DURATION_S > 0, "
@@ -258,7 +286,15 @@ public final class JavaLoadClient {
                     // Uniform arrival process: the ideal send schedule is
                     // t0 + i*interval, paced with the same sleep-until-due
                     // mechanism as replay so pacing_lag_ms stays meaningful.
-                    dueSeconds = sentCount * uniformIntervalS;
+                    // RAMP_UP_SECONDS > 0 replaces the fixed interval with a
+                    // linear-QPS-climb schedule (see uniformDueSeconds):
+                    // pacing lag keeps measuring send_start against the
+                    // ramped ideal schedule, so it is not polluted by ramp.
+                    dueSeconds = config.rampUpSeconds > 0
+                            ? uniformDueSeconds(sentCount,
+                                    config.sendModeQps / config.numShards,
+                                    config.rampUpSeconds)
+                            : sentCount * uniformIntervalS;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
                     if (sleepNanos > 0) {
@@ -344,34 +380,7 @@ public final class JavaLoadClient {
 
         long deadlineNanos = System.nanoTime()
                 + TimeUnit.SECONDS.toNanos(config.responseTimeoutSeconds);
-        for (int i = 0; i < futures.size(); i++) {
-            long remaining = deadlineNanos - System.nanoTime();
-            if (remaining <= 0) {
-                futures.get(i).cancel(true);
-                // Count timed-out requests as errors so they are reflected in error_count
-                RequestResult timeoutResult = new RequestResult();
-                timeoutResult.status = "timeout";
-                timeoutResult.error = "response deadline exceeded";
-                results.add(timeoutResult);
-                continue;
-            }
-            try {
-                RequestResult result = futures.get(i).get(remaining, TimeUnit.NANOSECONDS);
-                results.add(result);
-            } catch (java.util.concurrent.TimeoutException e) {
-                futures.get(i).cancel(true);
-                RequestResult timeoutResult = new RequestResult();
-                timeoutResult.status = "timeout";
-                timeoutResult.error = "response timeout";
-                results.add(timeoutResult);
-            } catch (Exception e) {
-                futures.get(i).cancel(true);
-                RequestResult errorResult = new RequestResult();
-                errorResult.status = "exception";
-                errorResult.error = e.toString();
-                results.add(errorResult);
-            }
-        }
+        results.addAll(collectOutstandingResults(futures, deadlineNanos));
         progressMonitor.shutdownNow();
         executor.shutdownNow();
 
@@ -387,6 +396,133 @@ public final class JavaLoadClient {
         stopPushgateway();
     }
 
+    /**
+     * Collects one result row per outstanding request future without letting a
+     * single slow RPC block the collection cursor.
+     *
+     * <p>The legacy finalization loop blocked on {@code future.get(remaining)}
+     * for each future in submission order, so one slow RPC parked the cursor
+     * until the global deadline; every later future — including requests that
+     * had long completed — was then synthesized as an empty timeout row with
+     * no send_start. On run 20260829_094522 (A档) that truncated the real
+     * per_request.jsonl rows to the first ~58% of the send window (cursor only
+     * reached send_start≈70s of the 0-120s window; 206,628 synthesized rows).
+     *
+     * <p>This collector never blocks on an individual future. Completed futures
+     * are harvested by periodic sweeps while slow ones are still in flight, so
+     * every request that reaches a terminal state before the deadline
+     * contributes a REAL row (send_start + terminal status) even when earlier
+     * requests are still stuck. Only futures still incomplete at the deadline
+     * are cancelled and synthesized. Guarantees:
+     * <ul>
+     *   <li>exactly one row per future — a real row when terminal before the
+     *       deadline, a synthetic timeout row otherwise;</li>
+     *   <li>row count conservation: real + synthetic == futures.size();</li>
+     *   <li>total collection time bounded by the deadline (at most one sweep
+     *       interval beyond it);</li>
+     *   <li>rows returned in future submission order (legacy ordering).</li>
+     * </ul>
+     *
+     * <p>Package-visible for the collection-semantics unit tests.
+     *
+     * @param futures outstanding futures as submitted by the send loop (may
+     *         already contain completed entries; loop mode may have removed
+     *         already-collected ones)
+     * @param deadlineNanos absolute System.nanoTime() after which incomplete
+     *         futures are cancelled and synthesized
+     * @return one result row per future, in submission order
+     */
+    static List<RequestResult> collectOutstandingResults(List<Future<RequestResult>> futures,
+            long deadlineNanos) {
+        if (futures.isEmpty()) {
+            return new ArrayList<>();
+        }
+        RequestResult[] collected = new RequestResult[futures.size()];
+        int[] pending = new int[futures.size()];
+        for (int i = 0; i < pending.length; i++) {
+            pending[i] = i;
+        }
+        int pendingCount = pending.length;
+        while (pendingCount > 0) {
+            pendingCount = sweepCompletedFutures(futures, collected, pending, pendingCount);
+            if (pendingCount == 0) {
+                break;
+            }
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                break;
+            }
+            long sleepNanos = Math.min(remainingNanos, COLLECTION_SWEEP_INTERVAL_NANOS);
+            try {
+                // Sleep is capped by the remaining deadline budget so the final
+                // sweep cannot overshoot the deadline by a full interval.
+                Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        for (int i = 0; i < pendingCount; i++) {
+            int idx = pending[i];
+            Future<RequestResult> future = futures.get(idx);
+            // A future may race to completion between the last sweep and this
+            // cancellation — prefer its real row when already available.
+            if (future.isDone()) {
+                collected[idx] = harvestFutureResult(future);
+                continue;
+            }
+            future.cancel(true);
+            RequestResult timeoutResult = new RequestResult();
+            timeoutResult.status = "timeout";
+            timeoutResult.error = "response deadline exceeded";
+            timeoutResult.synthetic = true;
+            collected[idx] = timeoutResult;
+        }
+        List<RequestResult> rows = new ArrayList<>(collected.length);
+        for (RequestResult row : collected) {
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    /**
+     * One sweep over the pending index list: harvests futures that reached a
+     * terminal state since the last sweep and compacts the list in place.
+     * Returns the new pending count.
+     */
+    private static int sweepCompletedFutures(List<Future<RequestResult>> futures,
+            RequestResult[] collected, int[] pending, int pendingCount) {
+        int kept = 0;
+        for (int i = 0; i < pendingCount; i++) {
+            int idx = pending[i];
+            if (futures.get(idx).isDone()) {
+                collected[idx] = harvestFutureResult(futures.get(idx));
+            } else {
+                pending[kept++] = idx;
+            }
+        }
+        return kept;
+    }
+
+    /**
+     * Retrieves the terminal result of a finished future. handleRequest always
+     * returns a RequestResult (it converts its own exceptions into error rows),
+     * so the catch only fires when the task itself died or the future was
+     * cancelled externally — a synthetic exception row keeps the
+     * one-row-per-future invariant (legacy catch-Exception parity).
+     */
+    private static RequestResult harvestFutureResult(Future<RequestResult> future) {
+        try {
+            return future.get();
+        } catch (Exception e) {
+            RequestResult errorResult = new RequestResult();
+            errorResult.status = "exception";
+            errorResult.error = e.toString();
+            errorResult.synthetic = true;
+            return errorResult;
+        }
+    }
+
     // Package-visible for loop-mode rid disjointness assertions in tests.
     TraceRecord makeLoopRequest(TraceRecord req, int loopIdx, int sentCount) {
         // Suffix carries the shard index defensively: even though loop mode shards
@@ -396,8 +532,22 @@ public final class JavaLoadClient {
         String newSourceRid = req.sourceRid + loopSuffix;
         String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
         long newRequestId = stableRequestId(newSourceRid);
+        // REPLAY_UNIQUE_PREFIX (default on): without re-salting, every loop
+        // round presents byte-identical block_cache_keys, so cache affinity
+        // routes each rid to the SAME prefill engine round after round and
+        // the P-side load collapses onto a handful of engines (Gini ~0.56).
+        // Re-salting only keys[0] keeps the shared suffix blocks (cross-
+        // request prefix reuse) while giving every round a unique routing
+        // prefix. The source list is shared across rounds, so it is copied
+        // here and never mutated in place.
+        List<Long> blockKeys = req.blockKeys;
+        if (config.replayUniquePrefix && !blockKeys.isEmpty()) {
+            List<Long> salted = new ArrayList<>(blockKeys);
+            salted.set(0, roundSaltedKey(blockKeys.get(0), loopIdx));
+            blockKeys = salted;
+        }
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, req.blockKeys, req.tokenIds, req.priority);
+                req.inputLen, req.outputLen, blockKeys, req.tokenIds, req.priority);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -461,7 +611,24 @@ public final class JavaLoadClient {
                 result.prefill = roleAddr(scheduleResponse, "PREFILL");
                 result.decode = roleAddr(scheduleResponse, "DECODE");
 
-                if (!config.fetchResponseEnabled) {
+                if (!config.fetchOutputStream) {
+                    // Under a NON_BATCH dispatcher the engine only receives the
+                    // request through the client's own GenerateStreamCall
+                    // (submission and stream reading are the same streaming
+                    // call), so skipping the fetch would mean the request
+                    // never reaches any engine. Fail fast instead of silently
+                    // producing a run with zero engine load.
+                    if (!scheduleResponse.getEnqueuedByMaster()) {
+                        System.err.println(
+                                "FATAL: FETCH_OUTPUT_STREAM=0 requires dispatcher.type=BATCH: "
+                                + "schedule response reports enqueued_by_master=false "
+                                + "(request_id=" + record.requestId + "). Under a NON_BATCH "
+                                + "dispatcher the engine only receives requests through the "
+                                + "client's GenerateStreamCall stream, so skipping the fetch "
+                                + "would leave the engine idle. Re-enable stream reading or "
+                                + "switch the master to a BATCH dispatcher.");
+                        System.exit(86);
+                    }
                     result.status = "scheduled";
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
                     // Route through tallyResult so the result lands in
@@ -500,7 +667,7 @@ public final class JavaLoadClient {
         }
 
         // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchResponseEnabled) {
+        if (scheduleResponse != null && config.fetchOutputStream) {
             try {
                 Double firstFrameNanos = null;
                 Double terminalNanos = null;
@@ -963,9 +1130,27 @@ public final class JavaLoadClient {
             blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
         }
 
-        // Auto-TPM QoS priority: per-record "priority" field wins, else the
-        // client-wide PRIORITY env default; 0 keeps the field unset on the wire.
-        int priority = raw.path("priority").asInt(config.priority);
+        // Auto-TPM QoS priority: FORCE_PRIORITY > 0 pins every replayed
+        // request to that single level (single-QoS runs); otherwise the
+        // per-record "priority" field wins, else the client-wide PRIORITY env
+        // default (50, the neutral QoS level — p0 traffic is rejected by
+        // master admission); an explicit PRIORITY=0 keeps the field unset
+        // on the wire (legacy behavior). A trace value outside 1-100 is not
+        // clamped into the QoS domain: warn and fall back to the config
+        // default so one messy line cannot skew a whole run (robustness
+        // over strictness for a load-test tool).
+        int priority;
+        if (config.forcePriority > 0) {
+            priority = config.forcePriority;
+        } else {
+            priority = raw.path("priority").asInt(config.priority);
+            if (priority != 0 && !PriorityNormalizer.isValid(priority)) {
+                System.err.println("ignoring invalid trace priority " + priority
+                        + " (must be 1-100) for rid=" + sourceRid
+                        + "; falling back to PRIORITY=" + config.priority);
+                priority = config.priority;
+            }
+        }
 
         return new TraceRecord(requestId, sourceRid, traceId, tsMs,
                 inputLen, outputLen, blockKeys, tokenIds, priority);
@@ -1026,6 +1211,17 @@ public final class JavaLoadClient {
                 .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
     }
 
+    // Package-visible for loop-mode unique-prefix assertions in tests.
+    // Deterministic per-round salt: the same (key, loop) pair always maps to
+    // the same value, different loops map to different values.
+    static long roundSaltedKey(long blockKey, int loopIdx) {
+        return Hashing.murmur3_128().newHasher()
+                .putLong(blockKey)
+                .putInt(loopIdx)
+                .hash()
+                .asLong();
+    }
+
     private static long toSignedInt64(BigInteger value) {
         BigInteger mod = value.mod(BigInteger.ONE.shiftLeft(64));
         if (mod.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0) {
@@ -1070,31 +1266,45 @@ public final class JavaLoadClient {
         Path perRequestPath = Path.of(config.outputDir, "per_request.jsonl");
         try (BufferedWriter writer = Files.newBufferedWriter(perRequestPath)) {
             for (RequestResult result : results) {
-                ObjectNode node = MAPPER.createObjectNode();
-                node.put("rid", result.rid);
-                node.put("trace_id", result.traceId);
-                node.put("request_id", result.requestId);
-                node.put("ts", result.ts);
-                node.put("input_len", result.inputLen);
-                node.put("output_len", result.outputLen);
-                node.put("status", result.status);
-                node.put("schedule_ms", result.scheduleMs);
-                node.put("ttft_ms", result.ttftMs);
-                node.put("total_ms", result.totalMs);
-                node.put("enqueued_by_master", result.enqueuedByMaster);
-                node.put("prefill", result.prefill);
-                node.put("decode", result.decode);
-                node.put("error", result.error);
-                node.put("route_path", result.routePath);
-                node.put("wall_clock_ts", result.wallClockTs);
-                node.put("send_due_epoch_ms", result.sendDueEpochMs);
-                node.put("send_start_epoch_ms", result.sendStartEpochMs);
-                node.put("pacing_lag_ms", result.pacingLagMs);
-                node.put("priority", result.priority);
-                writer.write(node.toString());
+                writer.write(perRequestNode(result).toString());
                 writer.newLine();
             }
         }
+    }
+
+    /**
+     * Serializes one per-request row. Synthesized rows (collector timeout /
+     * dead-future exception fallbacks) omit the "priority" key entirely
+     * instead of writing a misleading 0: they never carried a request, so
+     * downstream aggregation (run_online_eval.sh priority_rows) distinguishes
+     * them by key absence rather than counting them as unset p0 traffic.
+     */
+    // Package-visible for per-request row serialization assertions in tests.
+    static ObjectNode perRequestNode(RequestResult result) {
+        ObjectNode node = MAPPER.createObjectNode();
+        node.put("rid", result.rid);
+        node.put("trace_id", result.traceId);
+        node.put("request_id", result.requestId);
+        node.put("ts", result.ts);
+        node.put("input_len", result.inputLen);
+        node.put("output_len", result.outputLen);
+        node.put("status", result.status);
+        node.put("schedule_ms", result.scheduleMs);
+        node.put("ttft_ms", result.ttftMs);
+        node.put("total_ms", result.totalMs);
+        node.put("enqueued_by_master", result.enqueuedByMaster);
+        node.put("prefill", result.prefill);
+        node.put("decode", result.decode);
+        node.put("error", result.error);
+        node.put("route_path", result.routePath);
+        node.put("wall_clock_ts", result.wallClockTs);
+        node.put("send_due_epoch_ms", result.sendDueEpochMs);
+        node.put("send_start_epoch_ms", result.sendStartEpochMs);
+        node.put("pacing_lag_ms", result.pacingLagMs);
+        if (!result.synthetic) {
+            node.put("priority", result.priority);
+        }
+        return node;
     }
 
     private ObjectNode writeSummary(JsonNode serverLatency, double elapsedS, double sendDurationS, int sentCount)
@@ -1168,6 +1378,7 @@ public final class JavaLoadClient {
             summary.put("per_shard_qps", config.sendModeQps / config.numShards);
             summary.put("uniform_interval_ms",
                     Math.round(1000.0 * config.numShards / config.sendModeQps * 1000) / 1000.0);
+            summary.put("ramp_up_seconds", config.rampUpSeconds);
         }
 
         ObjectNode peakQps = MAPPER.createObjectNode();
@@ -1421,6 +1632,44 @@ public final class JavaLoadClient {
         return startSpeed + (gradientMaxSpeed - startSpeed) * progress;
     }
 
+    /**
+     * Ideal send time of the {@code index}-th request (0-based, per shard) in
+     * uniform mode with traffic ramp-up.
+     *
+     * <p>During the ramp the per-shard instantaneous rate climbs linearly,
+     * {@code q(t) = perShardQps * t / rampUpSeconds} for
+     * {@code t <= rampUpSeconds}, then holds at {@code perShardQps}.
+     * Integrating gives the cumulative send count
+     * {@code N(t) = perShardQps * t^2 / (2 * rampUpSeconds)}; inverting
+     * {@code N(t) = index} yields the ideal send time:
+     * <ul>
+     *   <li>ramp phase ({@code index < perShardQps * rampUpSeconds / 2}):
+     *       {@code t = sqrt(2 * rampUpSeconds * index / perShardQps)};</li>
+     *   <li>steady phase: {@code t = rampUpSeconds
+     *       + (index - rampCount) / perShardQps}.</li>
+     * </ul>
+     *
+     * <p>Properties: both pieces meet at {@code t = rampUpSeconds} with
+     * matching slope {@code 1 / perShardQps} (the rate reaches exactly
+     * {@code perShardQps} when the ramp ends), the send count during the
+     * ramp equals the triangle integral {@code perShardQps * rampUpSeconds / 2}
+     * (no lost or extra sends — pacing quality is conserved), and
+     * {@code rampUpSeconds <= 0} degenerates to the fixed-interval schedule
+     * {@code index / perShardQps} (legacy behavior).
+     *
+     * <p>Package-visible for the ramp-up schedule unit tests.
+     */
+    static double uniformDueSeconds(int index, double perShardQps, double rampUpSeconds) {
+        if (rampUpSeconds <= 0) {
+            return index / perShardQps;
+        }
+        double rampCount = perShardQps * rampUpSeconds / 2.0;
+        if (index < rampCount) {
+            return Math.sqrt(2.0 * rampUpSeconds * index / perShardQps);
+        }
+        return rampUpSeconds + (index - rampCount) / perShardQps;
+    }
+
     /** Nearest-rank percentile (parity with Python LoadClient._percentile). */
     static double percentileNearestRank(List<Double> values, double p) {
         if (values.isEmpty()) {
@@ -1621,23 +1870,34 @@ public final class JavaLoadClient {
         return node;
     }
 
+    /** Sentinel bucket key for rows without a real priority (synthesized
+     *  rows, or explicitly unset on the wire); serialized as the "unset" group. */
+    private static final int UNSET_PRIORITY_BUCKET = -1;
+
     /**
-     * Per-priority breakdown for Auto-TPM assertions: for every priority value
-     * observed (0 = unset) reports total/completed/rejected counts and the mean
-     * schedule latency of completed requests. "Completed" means the master
-     * accepted the schedule ("ok"/"scheduled"); "rejected" is every other
-     * terminal status (schedule_error/exception/...).
+     * Per-priority breakdown for Auto-TPM assertions: for every priority
+     * level carried on the wire (1-100) reports total/completed/rejected
+     * counts and the mean schedule latency of completed requests.
+     * "Completed" means the master accepted the schedule ("ok"/"scheduled");
+     * "rejected" is every other terminal status (schedule_error/exception/...).
+     * Rows without a real priority — synthesized timeout/exception rows that
+     * never carried a request, and rows explicitly sent unset (PRIORITY=0
+     * legacy) — stay out of the numeric buckets and surface under "unset",
+     * so per-priority totals still reconcile with the recorded row count.
      */
     static ObjectNode priorityBreakdown(List<RequestResult> rows) {
         Map<Integer, int[]> counts = new java.util.TreeMap<>();
         Map<Integer, double[]> scheduleSums = new HashMap<>();
         for (RequestResult row : rows) {
-            int[] c = counts.computeIfAbsent(row.priority, k -> new int[3]);
+            boolean unset = row.synthetic
+                    || !PriorityNormalizer.hasPriority(row.priority);
+            int bucket = unset ? UNSET_PRIORITY_BUCKET : row.priority;
+            int[] c = counts.computeIfAbsent(bucket, k -> new int[3]);
             c[0]++;
             if ("ok".equals(row.status) || "scheduled".equals(row.status)) {
                 c[1]++;
                 if (row.scheduleMs > 0) {
-                    double[] sum = scheduleSums.computeIfAbsent(row.priority, k -> new double[2]);
+                    double[] sum = scheduleSums.computeIfAbsent(bucket, k -> new double[2]);
                     sum[0] += row.scheduleMs;
                     sum[1]++;
                 }
@@ -1647,7 +1907,8 @@ public final class JavaLoadClient {
         }
         ObjectNode node = MAPPER.createObjectNode();
         counts.forEach((priority, c) -> {
-            ObjectNode group = node.putObject(String.valueOf(priority));
+            ObjectNode group = node.putObject(
+                    priority == UNSET_PRIORITY_BUCKET ? "unset" : String.valueOf(priority));
             group.put("total", c[0]);
             group.put("completed", c[1]);
             group.put("rejected", c[2]);
@@ -1691,7 +1952,12 @@ public final class JavaLoadClient {
         final long timeoutMs;
         final double slaTtftMs;
         final String zeroOutputPolicy;
-        final boolean scheduleOnly;
+        /** When false the client skips reading engine output streams (FetchResponse/
+         *  GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
+         *  still executes prefill + decode in full — only the client-side read is
+         *  trimmed. Requires a BATCH dispatcher (see the enqueued_by_master
+         *  fail-fast in handleRequest). */
+        final boolean fetchOutputStream;
         final boolean loop;
         final int nChannels;
         final int eventLoopThreads;
@@ -1700,7 +1966,6 @@ public final class JavaLoadClient {
         final boolean skipServerLatency;
         final String model;
         final String apiKey;
-        final boolean fetchResponseEnabled;
         final boolean gradient;
         final int gradientStartSpeed;
         final int gradientMaxSpeed;
@@ -1710,67 +1975,111 @@ public final class JavaLoadClient {
         final boolean enableFallback;
         final String endpointsFile;
         final boolean dryRun;
-        /** Default Auto-TPM QoS priority for all replayed requests; 0 = unset. */
+        /** Default Auto-TPM QoS priority for all replayed requests. Defaults to
+         *  the neutral level 50 (same as scheduler.ordering.defaultPriority):
+         *  priority 0 is not a valid QoS level — load-test traffic at 0 gets
+         *  100% rejected by master admission. Pass PRIORITY=0 explicitly to
+         *  restore the old "leave the field unset on the wire" behavior. */
         final int priority;
+        /** Single-priority override: > 0 pins every request to that level. */
+        final int forcePriority;
         /** Arrival process: "replay" (trace ts pacing) or "uniform" (fixed interval). */
         final String sendMode;
         /** Total target QPS across all shards; required > 0 in uniform mode. */
         final double sendModeQps;
+        /** Uniform-mode traffic ramp-up: per-shard QPS climbs linearly from 0
+         *  to sendModeQps/numShards over RAMP_UP_SECONDS, then stays constant.
+         *  0 (default) disables it — the arrival process stays a fixed
+         *  interval, byte-identical to the pre-ramp behavior. Ignored in
+         *  replay mode. Distinct from the orchestrator-level
+         *  FLEXLB_WARMUP_SECONDS (a no-traffic prepare sleep before load
+         *  starts); this knob shapes the arrival process once traffic begins. */
+        final double rampUpSeconds;
+        /**
+         * REPLAY_UNIQUE_PREFIX: re-salt blockKeys[0] per loop round so every
+         * replay round presents a fresh cache-affinity prefix (default on).
+         */
+        final boolean replayUniquePrefix;
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, scheduleOnly, loop, nChannels,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
+                    skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
-                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, "replay", 0.0);
+                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0,
+                    true);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, scheduleOnly, loop, nChannels,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, fetchResponseEnabled, gradient,
+                    skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    "replay", 0.0);
+                    0, "replay", 0.0, true);
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean scheduleOnly, boolean loop,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean fetchResponseEnabled,
-               boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
-               int priority, String sendMode, double sendModeQps) {
+               int priority, int forcePriority, String sendMode, double sendModeQps,
+               boolean replayUniquePrefix) {
+            this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
+                    loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
+                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
+                    eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
+                    skipServerLatency, model, apiKey, gradient,
+                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
+                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
+                    forcePriority, sendMode, sendModeQps, 0.0, replayUniquePrefix);
+        }
+
+        Config(String traceFile, String targetAddr, String grpcTarget,
+               int durationS, int maxConcurrency, double replaySpeed,
+               int loadClientWorkers, String outputDir, int numShards,
+               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
+               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
+               int nChannels, int eventLoopThreads, long startAtEpochMs,
+               int responseTimeoutSeconds, boolean skipServerLatency,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
+               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
+               boolean enableFallback, String endpointsFile, boolean dryRun,
+               int priority, int forcePriority, String sendMode, double sendModeQps,
+               double rampUpSeconds, boolean replayUniquePrefix) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1785,7 +2094,7 @@ public final class JavaLoadClient {
             this.timeoutMs = timeoutMs;
             this.slaTtftMs = slaTtftMs;
             this.zeroOutputPolicy = zeroOutputPolicy;
-            this.scheduleOnly = scheduleOnly;
+            this.fetchOutputStream = fetchOutputStream;
             this.loop = loop;
             this.nChannels = nChannels;
             this.eventLoopThreads = eventLoopThreads;
@@ -1794,7 +2103,6 @@ public final class JavaLoadClient {
             this.skipServerLatency = skipServerLatency;
             this.model = model;
             this.apiKey = apiKey;
-            this.fetchResponseEnabled = fetchResponseEnabled;
             this.gradient = gradient;
             this.gradientStartSpeed = gradientStartSpeed;
             this.gradientMaxSpeed = gradientMaxSpeed;
@@ -1805,8 +2113,11 @@ public final class JavaLoadClient {
             this.endpointsFile = endpointsFile;
             this.dryRun = dryRun;
             this.priority = priority;
+            this.forcePriority = forcePriority;
             this.sendMode = sendMode;
             this.sendModeQps = sendModeQps;
+            this.rampUpSeconds = rampUpSeconds;
+            this.replayUniquePrefix = replayUniquePrefix;
             if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
                 throw new IllegalArgumentException(
                         "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
@@ -1814,6 +2125,10 @@ public final class JavaLoadClient {
             if ("uniform".equals(sendMode) && sendModeQps <= 0) {
                 throw new IllegalArgumentException(
                         "SEND_MODE=uniform requires SEND_MODE_QPS > 0 (total target QPS)");
+            }
+            if (rampUpSeconds < 0) {
+                throw new IllegalArgumentException(
+                        "RAMP_UP_SECONDS must be >= 0, got " + rampUpSeconds);
             }
         }
 
@@ -1830,12 +2145,7 @@ public final class JavaLoadClient {
                 int httpPort = Integer.parseInt(targetAddr.substring(colon + 1));
                 grpcTarget = host + ":" + (httpPort + 2);
             }
-            boolean scheduleOnly = envBool("SCHEDULE_ONLY", false);
-            String expectFetchResponse = env("FLEXLB_EXPECT_FETCH_RESPONSE", "");
-            boolean fetchResponseEnabled = !scheduleOnly
-                    && !expectFetchResponse.equalsIgnoreCase("0")
-                    && !expectFetchResponse.equalsIgnoreCase("false")
-                    && !expectFetchResponse.equalsIgnoreCase("no");
+            boolean fetchOutputStream = envBool("FETCH_OUTPUT_STREAM", true);
             return new Config(
                     env("TRACE_FILE", ""),
                     targetAddr,
@@ -1851,7 +2161,7 @@ public final class JavaLoadClient {
                     envLong("TIMEOUT_MS", 3_600_000L),
                     envDouble("SLA_TTFT_MS", 500.0),
                     env("ZERO_OUTPUT_POLICY", "skip"),
-                    scheduleOnly,
+                    fetchOutputStream,
                     envBool("LOOP", false),
                     envInt("N_CHANNELS", 8),
                     envInt("EVENT_LOOP_THREADS", 32),
@@ -1860,7 +2170,6 @@ public final class JavaLoadClient {
                     envBool("SKIP_SERVER_LATENCY", false),
                     env("MODEL", "engine_service"),
                     env("API_KEY", ""),
-                    fetchResponseEnabled,
                     envBool("GRADIENT", false),
                     envInt("GRADIENT_START_SPEED", 10),
                     envInt("GRADIENT_MAX_SPEED", 1000),
@@ -1870,9 +2179,16 @@ public final class JavaLoadClient {
                     envBool("ENABLE_FALLBACK", false),
                     env("ENDPOINTS_FILE", ""),
                     envBool("DRY_RUN", false),
-                    envInt("PRIORITY", 0),
+                    // Default 50, not 0: priority 0 is rejected by master
+                    // admission (all-p0 load-test traffic never enters the
+                    // scheduling pool), and 50 is the scheduler's neutral
+                    // defaultPriority — see docs/priority-scheduler-delivery-modes.md.
+                    sanitizePriority(envInt("PRIORITY", 50)),
+                    sanitizeForcePriority(envInt("FORCE_PRIORITY", 0)),
                     env("SEND_MODE", "replay"),
-                    envDouble("SEND_MODE_QPS", 0.0)
+                    envDouble("SEND_MODE_QPS", 0.0),
+                    envDouble("RAMP_UP_SECONDS", 0.0),
+                    envBool("REPLAY_UNIQUE_PREFIX", true)
             );
         }
 
@@ -1892,7 +2208,6 @@ public final class JavaLoadClient {
             System.out.println("  TIMEOUT_MS=" + timeoutMs);
             System.out.println("  SLA_TTFT_MS=" + slaTtftMs);
             System.out.println("  ZERO_OUTPUT_POLICY=" + zeroOutputPolicy);
-            System.out.println("  SCHEDULE_ONLY=" + scheduleOnly);
             System.out.println("  LOOP=" + loop);
             System.out.println("  N_CHANNELS=" + nChannels);
             System.out.println("  EVENT_LOOP_THREADS=" + eventLoopThreads);
@@ -1901,7 +2216,7 @@ public final class JavaLoadClient {
             System.out.println("  SKIP_SERVER_LATENCY=" + skipServerLatency);
             System.out.println("  MODEL=" + model);
             System.out.println("  API_KEY=" + (apiKey.isEmpty() ? "<empty>" : "<set>"));
-            System.out.println("  FETCH_RESPONSE_ENABLED=" + fetchResponseEnabled);
+            System.out.println("  FETCH_OUTPUT_STREAM=" + fetchOutputStream);
             System.out.println("  GRADIENT=" + gradient);
             System.out.println("  GRADIENT_START_SPEED=" + gradientStartSpeed);
             System.out.println("  GRADIENT_MAX_SPEED=" + gradientMaxSpeed);
@@ -1911,8 +2226,11 @@ public final class JavaLoadClient {
             System.out.println("  ENABLE_FALLBACK=" + enableFallback);
             System.out.println("  ENDPOINTS_FILE=" + endpointsFile);
             System.out.println("  PRIORITY=" + priority);
+            System.out.println("  FORCE_PRIORITY=" + forcePriority);
             System.out.println("  SEND_MODE=" + sendMode);
             System.out.println("  SEND_MODE_QPS=" + sendModeQps);
+            System.out.println("  RAMP_UP_SECONDS=" + rampUpSeconds);
+            System.out.println("  REPLAY_UNIQUE_PREFIX=" + replayUniquePrefix);
             System.out.println("=====================================");
         }
 
@@ -1942,6 +2260,35 @@ public final class JavaLoadClient {
                 return def;
             }
             return val.equals("1") || val.equalsIgnoreCase("true") || val.equalsIgnoreCase("yes");
+        }
+
+        /**
+         * PRIORITY must be a valid QoS level (1-100) or the explicit 0
+         * "leave unset on the wire" legacy value; anything else warns and
+         * falls back to the neutral default 50 — a load-test tool stays
+         * robust on config typos instead of failing the run.
+         */
+        // Package-visible for env-validation assertions in tests.
+        static int sanitizePriority(int value) {
+            if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
+                return value;
+            }
+            System.err.println("invalid PRIORITY=" + value + " (must be 0-100); falling back to 50");
+            return PriorityNormalizer.DEFAULT_PRIORITY;
+        }
+
+        /**
+         * FORCE_PRIORITY is either disabled (0) or a valid QoS level (1-100);
+         * an invalid pin warns and disables instead of failing the run.
+         */
+        // Package-visible for env-validation assertions in tests.
+        static int sanitizeForcePriority(int value) {
+            if (value == PriorityNormalizer.NO_PRIORITY || PriorityNormalizer.isValid(value)) {
+                return value;
+            }
+            System.err.println("invalid FORCE_PRIORITY=" + value
+                    + " (must be 0-100); disabling the priority pin");
+            return PriorityNormalizer.NO_PRIORITY;
         }
     }
 
@@ -1999,6 +2346,11 @@ public final class JavaLoadClient {
         double pacingLagMs;
         /** Auto-TPM QoS priority carried by the schedule request; 0 means unset. */
         int priority;
+        /** True for rows synthesized by the collector (deadline timeout /
+         *  dead-future exception) rather than produced by a real request:
+         *  they carry no priority and stay out of priority-scoped output
+         *  and aggregates. */
+        boolean synthetic;
     }
 
     record LatencySummary(int count, double p50, double p90, double p95, double p99,

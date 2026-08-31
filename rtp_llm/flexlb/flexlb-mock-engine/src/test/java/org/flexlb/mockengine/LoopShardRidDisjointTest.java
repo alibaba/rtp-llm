@@ -42,7 +42,7 @@ class LoopShardRidDisjointTest {
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), NUM_SHARDS, shardIndex, 0,
                 120_000L, 500.0, "skip", false, true, 1, 1, 0L, 120, true,
-                "engine_service", "", false,
+                "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true);
         return new JavaLoadClient(config);
     }

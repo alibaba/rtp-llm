@@ -52,13 +52,15 @@ class UniformSendModeTest {
                                          int durationS, int limit, int numShards, int shardIndex,
                                          boolean loop, String sendMode, double sendModeQps) {
         // Full constructor: priority 0 (unset) keeps the Auto-TPM QoS
-        // passthrough path untouched by uniform-mode tests.
+        // passthrough path untouched by uniform-mode tests; forcePriority 0
+        // likewise leaves per-record priority resolution alone.
         return new JavaLoadClient.Config(
                 traceFile, "127.0.0.1:7001", "127.0.0.1:7003",
                 durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
                 120_000L, 500.0, "skip", false, loop, 1, 1, 0L, 120, true,
-                "engine_service", "", false,
-                false, 10, 1000, 0, 0, "", false, "", true, 0, sendMode, sendModeQps);
+                "engine_service", "",
+                false, 10, 1000, 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
+                true);
     }
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {
