@@ -668,8 +668,8 @@ def _design_final_pattern(
     precedence is the DESIGNED pull-model behaviour, not an inversion;
     the flip contract lives in EXPECTED_BASELINES ("[EV-1-FIXED]")."""
     order = _dispatch_order(ops, fires)
-    pos = {rid: i for i, rid in enumerate(order)}
-    wave_order = [r for r in ordered_rids if r in pos]
+    wave_set = set(ordered_rids)
+    wave_order = [r for r in order if r in wave_set]
     first_parker = ordered_rids[0] if ordered_rids else None
     if len(wave_order) != len(ordered_rids):
         return first_parker, False, wave_order
