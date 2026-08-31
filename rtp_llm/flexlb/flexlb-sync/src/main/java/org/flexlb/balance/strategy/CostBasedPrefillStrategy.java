@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
@@ -218,6 +219,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             if (!measure.isResourceAvailable(pending)) {
                 return null;
             }
+            RouteProjection.Inputs selectionInputs =
+                    legacyProjectionInputs(inputs);
 
             CacheTokenMatch cacheMatch = calculateCacheMatch(
                     endpoint, cacheMatches, context.getRequest());
@@ -238,7 +241,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                             RouteProjection.Demand.TTFT_ONLY);
             RouteProjection.Candidate projection =
                     RouteProjection.project(
-                            withoutAdmissionBlock(inputs),
+                            selectionInputs,
                             probe,
                             predictor.evaluator(),
                             endpoint.deliveryProjection());
@@ -246,7 +249,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 return null;
             }
             OptionalLong committedWait =
-                    inputs.work().totalRemainingWorkMs();
+                    selectionInputs.work().totalRemainingWorkMs();
             if (committedWait.isEmpty()) {
                 return null;
             }
@@ -270,27 +273,38 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
     }
 
-    /**
-     * The legacy worker chooser scores Prefill load only. A delivery-time
-     * Decode blocker belongs to the admission transaction after selection;
-     * letting it remove this Prefill candidate would park the request on the
-     * wrong role and miss the later Decode capacity signal.
-     */
-    static RouteProjection.Inputs withoutAdmissionBlock(
+    /** Restore the exact inputs used by the legacy Prefill chooser. */
+    static RouteProjection.Inputs legacyProjectionInputs(
             RouteProjection.Inputs inputs) {
         QueueSnapshot queue = inputs.queue();
-        if (queue.admissionBlock() == null) {
+        WorkSnapshot work = inputs.work();
+        if (queue.admissionBlock() == null
+                && work.unknownRequestCount() == 0L) {
             return inputs;
         }
-        return new RouteProjection.Inputs(
-                new QueueSnapshot(
+        QueueSnapshot selectionQueue = queue.admissionBlock() == null
+                ? queue
+                : new QueueSnapshot(
                         queue.capturedAtMs(),
                         queue.queueScheduling(),
                         queue.ordering(),
                         queue.constraints(),
                         queue.activeItems(),
-                        null),
-                inputs.work(),
+                        null);
+        // The old policy used Engine-only work for the pending-count hard
+        // gate, but never required a duration for it. Requiring that duration
+        // here makes every endpoint temporarily unselectable after a master
+        // restart, because the new master cannot own or predict old work.
+        WorkSnapshot selectionWork = work.unknownRequestCount() == 0L
+                ? work
+                : new WorkSnapshot(
+                        work.capturedAtMs(),
+                        work.requests(),
+                        work.batches(),
+                        0L);
+        return new RouteProjection.Inputs(
+                selectionQueue,
+                selectionWork,
                 inputs.pendingRequestCount());
     }
 

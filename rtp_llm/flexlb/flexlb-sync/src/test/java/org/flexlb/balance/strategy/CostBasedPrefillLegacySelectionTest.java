@@ -10,8 +10,8 @@ import org.junit.jupiter.api.Test;
 import java.util.Comparator;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 
 /** Contracts that keep delivery admission out of legacy Prefill selection. */
 class CostBasedPrefillLegacySelectionTest {
@@ -38,13 +38,15 @@ class CostBasedPrefillLegacySelectionTest {
         RouteProjection.Inputs captured = new RouteProjection.Inputs(
                 queue,
                 new WorkSnapshot(
-                        queue.capturedAtMs(), List.of(), List.of(), 0L),
-                1L);
+                        queue.capturedAtMs(), List.of(), List.of(), 3L),
+                3L);
 
         RouteProjection.Inputs selection =
-                CostBasedPrefillStrategy.withoutAdmissionBlock(captured);
+                CostBasedPrefillStrategy.legacyProjectionInputs(captured);
 
         assertNull(selection.queue().admissionBlock());
-        assertSame(captured.work(), selection.work());
+        assertEquals(0L, selection.work().unknownRequestCount());
+        assertEquals(3L, selection.pendingRequestCount(),
+                "Engine-only work still participates in the hard pending gate");
     }
 }

@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.service.CacheAwareService;
@@ -12,10 +13,14 @@ import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
@@ -35,6 +40,34 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CostBasedPrefillSelectionMetricTest {
+
+    @Test
+    void legacySelectionKeepsEndpointWithUnownedEngineWork() {
+        try (Fixture fixture = fixture(false, false)) {
+            PrefillEndpoint endpoint = fixture.registry().getPrefill(
+                    "10.0.0.1:8080");
+            WorkerStatus status = endpoint.getStatus();
+            WorkerStatusResponse response = StrategyTestSupport.response(
+                    RoleType.PREFILL,
+                    true,
+                    1_000_000L,
+                    1_000_000L,
+                    status.appliedStatusCursor().statusVersion() + 1L);
+            TaskInfo engineOnly = new TaskInfo();
+            engineOnly.setRequestId(90_001L);
+            engineOnly.setPhase(TaskPhase.RUNNING);
+            response.setRunningTaskInfo(Map.of("90001", engineOnly));
+            response.setRunningQueryLen(1L);
+            StrategyTestSupport.apply(endpoint, response);
+
+            assertEquals(1L, endpoint.admissionPendingRequestCount());
+            EndpointSelection.Selected selected = assertInstanceOf(
+                    EndpointSelection.Selected.class,
+                    fixture.strategy().selectForQueue(
+                            fixture.context(), RoleType.PREFILL, null));
+            selected.endpoint().close();
+        }
+    }
 
     @ParameterizedTest
     @CsvSource({
