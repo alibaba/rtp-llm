@@ -1,5 +1,6 @@
 import copy
 import os
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
 
@@ -402,7 +403,7 @@ class OpenaiGenerateConfigTest(TestCase):
         model_stop_word_list: Optional[List[str]] = None,
         env_stop_word_str: Optional[str] = None,
         env_stop_word_list: Optional[str] = None,
-        req_stop: Optional[List[str]] = None,
+        req_stop: Optional[Union[str, List[str]]] = None,
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
         response_format: Optional[Union[str, Dict[str, Any]]] = None,
@@ -1018,6 +1019,11 @@ class OpenaiGenerateConfigTest(TestCase):
             env_stop_word_list="[[3160, 2936, 1140], [41963, 6105, 2936, 1140]]",
         )
 
+        # Request-level stop words are natural-language phrases: each yields
+        # two token sequences (bare + leading-space variant) because byte-level
+        # BPE merges a leading space into the first token. Model/env stop words
+        # are template special tokens resolved via the renderer and keep a
+        # single sequence; the asymmetry below is intentional.
         self.assert_config_stop_word(
             expect_stop_word_str=[
                 "<|im_end|>",
@@ -1028,8 +1034,10 @@ class OpenaiGenerateConfigTest(TestCase):
             expect_stop_word_list=[
                 [151643],
                 [151645],
-                [2958, 2936, 3409],
-                [41963, 4232, 2936, 3409],
+                [2958, 2936, 3409],  # "req stop word"
+                [4232, 2936, 3409],  # leading-space variant
+                [41963, 4232, 2936, 3409],  # "another req stop word"
+                [2441, 4232, 2936, 3409],  # leading-space variant
             ],
             req_stop=["req stop word", "another req stop word"],
         )
@@ -1044,8 +1052,10 @@ class OpenaiGenerateConfigTest(TestCase):
             expect_stop_word_list=[
                 [151643],
                 [151645],
-                [2958, 2193, 2936, 3409],
-                [41963, 2193, 4232, 2936, 3409],
+                [2958, 2193, 2936, 3409],  # "req config stop word"
+                [4232, 2193, 2936, 3409],  # leading-space variant
+                [41963, 2193, 4232, 2936, 3409],  # "another config req stop word"
+                [2441, 2193, 4232, 2936, 3409],  # leading-space variant
             ],
             req_config_stop_word_str=[
                 "req config stop word",
@@ -1098,13 +1108,24 @@ class OpenaiGenerateConfigTest(TestCase):
                 [3160, 2936, 1140],
                 [41963, 6105, 2936, 1140],  # env_stop_word_list
                 [2958, 2936, 3409],
-                [41963, 4232, 2936, 3409],  # req_stop
+                [4232, 2936, 3409],
+                [41963, 4232, 2936, 3409],
+                [2441, 4232, 2936, 3409],  # req_stop (+ leading-space variants)
                 [2958, 2193, 2936, 3409],
-                [41963, 2193, 4232, 2936, 3409],  # req_config_stop_word_str
+                [4232, 2193, 2936, 3409],
+                [41963, 2193, 4232, 2936, 3409],
+                [2441, 2193, 4232, 2936, 3409],  # req_config_stop_word_str (+ variants)
                 [2958, 2193, 2936, 1140],
-                [41963, 2193, 4232, 2936, 1140],  # req_config_stop_word_list
+                [
+                    41963,
+                    2193,
+                    4232,
+                    2936,
+                    1140,
+                ],  # req_config_stop_word_list (ids as-is)
                 [21912, 2936, 1140],
-                [21912, 2936, 3409],  # duplicate stop word
+                [21912, 2936, 3409],
+                [22737, 2936, 3409],  # duplicate stop word (+ leading-space variant)
             ],
             model_stop_word_str=[
                 "model stop word",
@@ -1130,6 +1151,62 @@ class OpenaiGenerateConfigTest(TestCase):
                 [21912, 2936, 1140],
             ],
         )
+
+    def test_request_stop_word_edge_cases(self):
+        default_stop_ids = [[151643], [151645]]
+
+        # Empty stop word must not produce any entry.
+        config = self._generate_config_with_stop_word(req_stop=[""])
+        self.assertEqual(sorted(config.stop_words_list), sorted(default_stop_ids))
+
+        # Whitespace-only stop word produces exactly one entry: the guard must
+        # not add a second (double-space) variant.
+        space_ids = self.tokenizer.encode(" ", add_special_tokens=False)
+        config = self._generate_config_with_stop_word(req_stop=[" "])
+        self.assertEqual(
+            sorted(config.stop_words_list),
+            sorted(default_stop_ids + [space_ids]),
+        )
+
+        # Already-space-prefixed stop word produces exactly one entry too.
+        word = " leading space word"
+        word_ids = self.tokenizer.encode(word, add_special_tokens=False)
+        config = self._generate_config_with_stop_word(req_stop=[word])
+        self.assertEqual(
+            sorted(config.stop_words_list),
+            sorted(default_stop_ids + [word_ids]),
+        )
+
+    def test_request_stop_str_form(self):
+        # The OpenAI contract allows request.stop to be a bare string.
+        config = self._generate_config_with_stop_word(req_stop="req stop word")
+        self.assertIn("req stop word", config.stop_words_str)
+        self.assertEqual(
+            sorted(config.stop_words_list),
+            sorted([[151643], [151645], [2958, 2936, 3409], [4232, 2936, 3409]]),
+        )
+
+    def test_request_stop_not_mutated(self):
+        # _extract_generation_config must not mutate the caller's request.stop
+        # in place when folding extra_configs.stop_words_str into it.
+        req_stop = ["req stop word"]
+        self._generate_config_with_stop_word(
+            req_stop=req_stop,
+            req_config_stop_word_str=["req config stop word"],
+        )
+        self.assertEqual(req_stop, ["req stop word"])
+
+    def test_tokenize_request_stop_words_fallback(self):
+        # Tokenizers whose encode() does not accept add_special_tokens fall
+        # back to a bare encode() call and log a warning.
+        class _LegacyTokenizer:
+            def encode(self, text):
+                return [ord(c) for c in text]
+
+        endpoint = SimpleNamespace(tokenizer=_LegacyTokenizer())
+        with self.assertLogs(level="WARNING"):
+            ids = OpenaiEndpoint._tokenize_request_stop_words(endpoint, ["ab"])
+        self.assertEqual(ids, [[97, 98], [32, 97, 98]])
 
 
 class GrammarMultiSequenceConfigTest(TestCase):

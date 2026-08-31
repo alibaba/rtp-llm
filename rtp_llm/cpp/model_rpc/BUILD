@@ -73,6 +73,7 @@ cc_library(
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/normal_engine",
+        "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
     ],
@@ -84,6 +85,9 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         ":grpcio",
+        # model_rpc_client.py top-level hard-imports rtp_llm.telemetry; do not
+        # rely on consumers' transitive closures to provide it.
+        "//rtp_llm:telemetry",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/server:request_headers",
     ],

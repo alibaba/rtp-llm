@@ -42,6 +42,7 @@ from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.codec import (
     DashScRequestControls,
     SamplingParams,
+    _lookup_ds_request_control,
     parse_ds_header_attributes,
     parse_input_ids_from_request,
     parse_request_controls,
@@ -60,6 +61,13 @@ from rtp_llm.dash_sc.status import (
 )
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
+MAX_SPAN_EXTERNAL_REQUEST_ID_LEN = 128
+
+_SPAN_EXTERNAL_REQUEST_ID_METADATA_KEYS = (
+    "x-dashscope-request-id",
+    "x-request-id",
+    "dashscope-request-id",
+)
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway. Defined
 # locally (the literal also appears in ``codec.py`` / ``request_headers.py``)
@@ -176,6 +184,48 @@ def to_optional_int(value: object) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def span_external_request_id(value: object) -> str:
+    return str(value or "")[:MAX_SPAN_EXTERNAL_REQUEST_ID_LEN]
+
+
+def extract_body_trace_headers(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for key in ("traceparent", "tracestate", "baggage"):
+        if key not in request.parameters:
+            continue
+        parameter = request.parameters[key]
+        if parameter.HasField("string_param") and parameter.string_param:
+            headers[key] = str(parameter.string_param)
+    return headers
+
+
+def extract_span_external_request_id(
+    invocation_metadata: Sequence[tuple[object, object]],
+    request: predict_v2_pb2.ModelInferRequest,
+) -> str:
+    metadata_lookup: dict[str, str] = {}
+    for entry in invocation_metadata or ():
+        try:
+            key, value = entry
+        except Exception:
+            continue
+        if key is None or value is None:
+            continue
+        metadata_lookup[str(key).lower()] = str(value)
+    for key in _SPAN_EXTERNAL_REQUEST_ID_METADATA_KEYS:
+        value = metadata_lookup.get(key)
+        if value:
+            return span_external_request_id(value)
+
+    ds_attrs = parse_ds_header_attributes(request)
+    value = _lookup_ds_request_control(ds_attrs, "x-dashscope-requestid")
+    if value:
+        return span_external_request_id(value)
+    return span_external_request_id(request.id)
 
 
 # Upstream correlation headers, by priority. Whichever header the client
@@ -523,7 +573,6 @@ class GrpcAccessRecord:
         if aux_info is None or (not overwrite and self.aux_info is not None):
             return
         self.aux_info = aux_info
-
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
 

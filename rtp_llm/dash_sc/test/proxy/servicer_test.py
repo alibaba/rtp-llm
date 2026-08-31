@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import struct
+import sys
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +19,7 @@ import grpc
 
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proxy import __main__ as proxy_main
 from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
 from rtp_llm.dash_sc.proxy.service_route_config import (
     LEGACY_FORWARD_ENV_KEY,
@@ -25,8 +27,35 @@ from rtp_llm.dash_sc.proxy.service_route_config import (
     load_service_route_config_from_env,
     parse_service_route_config,
 )
-from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
+from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer, _merge_trace_metadata
+from rtp_llm.telemetry import tracing
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
+
+
+class StandaloneProxyTelemetryLifecycleTest(unittest.TestCase):
+    def test_main_initializes_and_shutdowns_telemetry(self) -> None:
+        def close_coroutine(coroutine):
+            coroutine.close()
+
+        with patch.object(sys, "argv", ["dash-sc-proxy"]), patch.object(
+            proxy_main, "_init_trace_telemetry"
+        ) as init_trace, patch.object(
+            proxy_main, "_shutdown_trace_telemetry"
+        ) as shutdown_trace, patch.object(
+            proxy_main.asyncio, "run", side_effect=close_coroutine
+        ):
+            proxy_main.main()
+
+        init_trace.assert_called_once_with()
+        shutdown_trace.assert_called_once_with()
+
+    def test_init_failure_is_fail_open(self) -> None:
+        with patch.object(
+            proxy_main,
+            "init_telemetry",
+            side_effect=RuntimeError("otel init failed"),
+        ):
+            proxy_main._init_trace_telemetry()
 
 
 def _make_request(
@@ -312,6 +341,37 @@ class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
             "Must be async iterable",
         )
         self.assertEqual(len(responses), 2)
+
+    async def test_closing_forwarded_iterator_marks_request_done(self) -> None:
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+
+        def downstream(request_iterator, *, metadata):
+            async def response_stream():
+                await request_iterator.__anext__()
+                await request_iterator.aclose()
+                record = GrpcAccessRecord.from_context(context)
+                self.assertIsNotNone(record)
+                self.assertIsNotNone(record.request_end_ts)
+                self.assertEqual(record.request_read_status, "error")
+                yield _make_finished_response()
+
+            return response_stream()
+
+        self.mock_stub.ModelStreamInfer.side_effect = downstream
+
+        responses = await _drain(
+            self.servicer.ModelStreamInfer(
+                _request_gen(_make_request("req1"), _make_request("req2")),
+                context,
+            )
+        )
+
+        self.assertEqual(len(responses), 1)
 
 
 class ParameterValidationTest(unittest.IsolatedAsyncioTestCase):
@@ -836,6 +896,339 @@ class MetadataPropagationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out), 1)
         kwargs = self.mock_stub.ModelStreamInfer.call_args.kwargs
         self.assertEqual(tuple(kwargs["metadata"]), ())
+
+
+class TraceMetadataMergeTest(unittest.TestCase):
+    def test_replaces_only_w3c_headers_and_preserves_duplicates(self) -> None:
+        upstream = (
+            ("traceparent", "old"),
+            ("TraceState", "old-state"),
+            ("x-request-id", "one"),
+            ("x-request-id", "two"),
+            ("payload-bin", b"\x00"),
+        )
+        injected = (("traceparent", "new"), ("tracestate", "new-state"))
+
+        self.assertEqual(
+            _merge_trace_metadata(upstream, injected),
+            (
+                ("x-request-id", "one"),
+                ("x-request-id", "two"),
+                ("payload-bin", b"\x00"),
+                ("traceparent", "new"),
+                ("tracestate", "new-state"),
+            ),
+        )
+        self.assertEqual(_merge_trace_metadata(upstream, ()), upstream)
+
+    def test_without_reinjection_only_baggage_is_filtered(self) -> None:
+        upstream = (
+            ("traceparent", "old"),
+            ("tracestate", "old-state"),
+            ("baggage", "secret=one"),
+            ("x-request-id", "request"),
+        )
+        self.assertEqual(
+            _merge_trace_metadata(upstream, ()),
+            (
+                ("traceparent", "old"),
+                ("tracestate", "old-state"),
+                ("x-request-id", "request"),
+            ),
+        )
+
+
+@unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry not installed")
+class ProxyTracingTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        tracing.shutdown_telemetry()
+        with tracing._state_lock:
+            tracing._state = tracing.TelemetryState.UNINITIALIZED
+            tracing._provider = None
+        tracing.CURRENT_TRACE_STATE.set(None)
+        self.exporter = InMemorySpanExporter()
+        self.assertTrue(
+            tracing.init_telemetry_for_test(self.exporter, role="dash_sc", tp_rank=0)
+        )
+        self.channel_patcher = patch(
+            "rtp_llm.utils.grpc_host_channel_pool.aio.insecure_channel",
+            side_effect=lambda addr, **_kwargs: _FakeChannel(addr),
+        )
+        self.channel_patcher.start()
+        self.servicer = _make_servicer(["127.0.0.1:1"])
+        self.mock_stub = MagicMock()
+        _install_mock_stub(self.servicer, self.mock_stub)
+
+    async def asyncTearDown(self) -> None:
+        await self.servicer.close()
+        _stop_mock_stub(self.servicer)
+        self.channel_patcher.stop()
+        tracing.shutdown_telemetry()
+        with tracing._state_lock:
+            tracing._state = tracing.TelemetryState.UNINITIALIZED
+            tracing._provider = None
+        tracing.CURRENT_TRACE_STATE.set(None)
+
+    def _finished_spans(self):
+        self.assertTrue(tracing._provider.force_flush())
+        return self.exporter.get_finished_spans()
+
+    async def test_server_client_boundary_reinjects_client_parent(self) -> None:
+        trace_id_hex = "55555555555555555555555555555555"
+        parent_span_hex = "6666666666666666"
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            (
+                "traceparent",
+                f"00-{trace_id_hex}-{parent_span_hex}-01",
+            ),
+            ("tracestate", "upstream=one"),
+            ("x-dashscope-request-id", "dashscope-correlation"),
+            ("x-request-id", "correlation"),
+        )
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
+            [_make_finished_response()]
+        )
+
+        responses = await _drain(
+            self.servicer.ModelStreamInfer(
+                _request_gen(_make_request(id="proxy-request")), context
+            )
+        )
+
+        self.assertEqual(len(responses), 1)
+        spans = {span.name: span for span in self._finished_spans()}
+        server = spans["dash_sc.proxy.ModelStreamInfer"]
+        client = spans["dash_sc.proxy.forward"]
+        self.assertEqual(server.context.trace_id, int(trace_id_hex, 16))
+        self.assertEqual(server.parent.span_id, int(parent_span_hex, 16))
+        self.assertEqual(client.parent.span_id, server.context.span_id)
+        self.assertEqual(server.status.status_code.name, "OK")
+        self.assertEqual(client.status.status_code.name, "OK")
+        self.assertEqual(
+            server.attributes["rtp_llm.external_request_id"],
+            "dashscope-correlation",
+        )
+        self.assertNotIn("request_id", server.attributes)
+        self.assertNotIn("rtp_llm.request_id", server.attributes)
+        self.assertNotIn("rtp_llm.request_id", client.attributes)
+        # The proxy SERVER span is an RPC boundary, not a model invocation. Keep
+        # it out of the platform's model topology while preserving the trace hop.
+        self.assertEqual(server.attributes["rpc.system"], "grpc")
+        self.assertEqual(
+            server.attributes["rpc.method"],
+            "GRPCInferenceService/ModelStreamInfer",
+        )
+        for forbidden in (
+            "gen_ai.span.kind",
+            "gen_ai.operation.name",
+            "gen_ai.system",
+        ):
+            self.assertNotIn(forbidden, server.attributes)
+        # The forward CLIENT span carries neither classification family:
+        # rpc.system breaks Total tokens aggregation (measured regression
+        # documented in start_client_span), and gen_ai.* would create another
+        # model node for a transparent transport hop.
+        for forbidden in (
+            "rpc.system",
+            "rpc.method",
+            "gen_ai.span.kind",
+            "gen_ai.operation.name",
+            "gen_ai.system",
+        ):
+            self.assertNotIn(forbidden, client.attributes)
+        self.assertEqual(
+            client.attributes["rtp_llm.external_request_id"],
+            "dashscope-correlation",
+        )
+        self.assertNotIn("request_id", client.attributes)
+
+        forwarded = self.mock_stub.ModelStreamInfer.call_args.kwargs["metadata"]
+        forwarded_headers = dict(forwarded)
+        self.assertEqual(forwarded_headers["x-request-id"], "correlation")
+        self.assertNotEqual(
+            forwarded_headers["traceparent"],
+            f"00-{trace_id_hex}-{parent_span_hex}-01",
+        )
+        self.assertIn(
+            f"-{client.context.span_id:016x}-", forwarded_headers["traceparent"]
+        )
+
+    async def test_body_parent_reinjected_and_carriers_not_forwarded(self) -> None:
+        metadata_trace_id = "11111111111111111111111111111111"
+        body_trace_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        body_parent_id = "bbbbbbbbbbbbbbbb"
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            ("traceparent", f"00-{metadata_trace_id}-2222222222222222-01"),
+            ("tracestate", "metadata=old"),
+            ("baggage", "traffic.llm_sdk.scene=metadata"),
+        )
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+        request = _make_request(id="proxy-body")
+        request.parameters["traceparent"].string_param = (
+            f"00-{body_trace_id}-{body_parent_id}-01"
+        )
+        request.parameters["baggage"].string_param = "traffic.llm_sdk.scene=body"
+        captured_requests = []
+
+        def forward(request_iterator, **_kwargs):
+            async def responses():
+                async for forwarded_request in request_iterator:
+                    captured_requests.append(forwarded_request)
+                yield _make_finished_response()
+
+            return responses()
+
+        self.mock_stub.ModelStreamInfer.side_effect = forward
+        await _drain(self.servicer.ModelStreamInfer(_request_gen(request), context))
+
+        forwarded_metadata = dict(
+            self.mock_stub.ModelStreamInfer.call_args.kwargs["metadata"]
+        )
+        downstream = tracing.start_server_span("downstream", forwarded_metadata)
+        self.assertIsNotNone(downstream)
+        downstream.finish()
+        spans = {span.name: span for span in self._finished_spans()}
+        server = spans["dash_sc.proxy.ModelStreamInfer"]
+        client = spans["dash_sc.proxy.forward"]
+        child = spans["downstream"]
+        self.assertEqual(server.context.trace_id, int(body_trace_id, 16))
+        self.assertEqual(server.parent.span_id, int(body_parent_id, 16))
+        self.assertEqual(client.parent.span_id, server.context.span_id)
+        self.assertEqual(child.parent.span_id, client.context.span_id)
+        self.assertNotIn("baggage", forwarded_metadata)
+        self.assertEqual(len(captured_requests), 1)
+        self.assertNotIn("traceparent", captured_requests[0].parameters)
+        self.assertNotIn("baggage", captured_requests[0].parameters)
+
+    async def test_no_body_carrier_forwards_original_request_without_copy(self) -> None:
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+        request = _make_request(id="no-carrier")
+        captured_requests = []
+
+        def forward(request_iterator, **_kwargs):
+            async def responses():
+                async for forwarded_request in request_iterator:
+                    captured_requests.append(forwarded_request)
+                yield _make_finished_response()
+
+            return responses()
+
+        self.mock_stub.ModelStreamInfer.side_effect = forward
+        await _drain(self.servicer.ModelStreamInfer(_request_gen(request), context))
+        self.assertEqual(len(captured_requests), 1)
+        self.assertIs(captured_requests[0], request)
+
+    async def test_downstream_abort_preserves_grpc_status_on_proxy_spans(self) -> None:
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+        rpc_error = grpc.aio.AioRpcError(
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.aio.Metadata(),
+            grpc.aio.Metadata(),
+            details="downstream unavailable",
+        )
+
+        async def downstream_gen():
+            raise rpc_error
+            yield  # pragma: no cover
+
+        async def abort(code, details):
+            context.code.return_value = code
+            context.details.return_value = details
+            raise grpc.aio.AbortError()
+
+        context.abort = AsyncMock(side_effect=abort)
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+
+        with self.assertRaises(grpc.aio.AbortError):
+            await _drain(
+                self.servicer.ModelStreamInfer(
+                    _request_gen(_make_request(id="proxy-error")), context
+                )
+            )
+
+        spans = {span.name: span for span in self._finished_spans()}
+        for name in ("dash_sc.proxy.ModelStreamInfer", "dash_sc.proxy.forward"):
+            span = spans[name]
+            self.assertEqual(span.status.status_code.name, "ERROR")
+            self.assertEqual(span.attributes["error.type"], "UNAVAILABLE")
+
+    async def test_external_request_id_is_length_capped_on_spans(self) -> None:
+        """The relayed id is client input and remains bounded on proxy spans."""
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
+            [_make_finished_response()]
+        )
+        oversized = "x" * 4096
+
+        await _drain(
+            self.servicer.ModelStreamInfer(
+                _request_gen(_make_request(id=oversized)), context
+            )
+        )
+
+        spans = {span.name: span for span in self._finished_spans()}
+        for name in ("dash_sc.proxy.ModelStreamInfer", "dash_sc.proxy.forward"):
+            self.assertEqual(
+                spans[name].attributes["rtp_llm.external_request_id"], "x" * 128
+            )
+            self.assertNotIn("request_id", spans[name].attributes)
+
+    async def test_prologue_reporting_failure_still_ends_proxy_span(self) -> None:
+        """A throwing prologue reporting call must not leak the proxy SERVER span."""
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        context.code.return_value = None
+        context.is_active.return_value = True
+        context.details.return_value = ""
+        context.peer.return_value = "ipv4:127.0.0.1:9000"
+        self.mock_stub.ModelStreamInfer.return_value = _AsyncIter(
+            [_make_finished_response()]
+        )
+
+        with patch(
+            "rtp_llm.dash_sc.proxy.servicer.emit_query_log",
+            side_effect=RuntimeError("kmonitor down"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await _drain(
+                    self.servicer.ModelStreamInfer(
+                        _request_gen(_make_request(id="prologue-boom")), context
+                    )
+                )
+
+        span = self._finished_spans()[-1]
+        self.assertEqual(span.name, "dash_sc.proxy.ModelStreamInfer")
+        self.assertTrue(span.end_time)
+        self.assertEqual(span.status.status_code.name, "ERROR")
+        self.assertIsNone(tracing.CURRENT_TRACE_STATE.get())
 
 
 class ChannelLoopAffinityTest(unittest.TestCase):

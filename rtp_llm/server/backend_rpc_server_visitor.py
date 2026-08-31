@@ -23,6 +23,8 @@ from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
 )
+from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry import start_internal_span
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -359,74 +361,137 @@ class BackendRPCServerVisitor:
             )
 
     async def route_ips(self, input: GenerateInput):
-        # proactive rejection: check cached queue length before making request to master
-        if self.master_config:
-            threshold = self.master_config.master_queue_reject_threshold
-            queue_length = self.host_service.get_queue_length()
-            if queue_length > threshold:
-                route_logger.warning(
-                    f"FlexLb cached queue length {queue_length} exceeds threshold "
-                    f"{threshold}, "
-                    f"proactively rejecting request <{input.request_id}>"
-                )
-                kmonitor.report(AccMetrics.MASTER_QUEUE_REJECT_QPS_METRIC, 1)
-                raise FtRuntimeException(
-                    exception_type=ExceptionType.TRAFFIC_LIMIT_ERROR,
-                    message=f"Flexlb queue length {queue_length} exceeds threshold {threshold}",
-                )
-        with Timer() as route_timer:
-            role_addrs_specified = bool(input.generate_config.role_addrs)
-            master_addr = self.host_service.get_master_addr()
-            route_logger.debug("routing to master: %s", master_addr)
+        # PD node selection span: master routing is a real RPC round-trip that
+        # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
+        # chain as model_rpc_client.enqueue); no-op when telemetry is off.
+        # INTERNAL kind: this wraps the whole in-process routing stage, and the
+        # role_addrs / use_local paths involve no outbound call at all.
+        # Created BEFORE the proactive rejection check so throttled requests
+        # still get a route span carrying the rejection diagnostics (otherwise
+        # the rejection path would be invisible in the trace).
+        route_span = start_internal_span("rtp_llm.master_route")
+        if route_span is not None:
+            # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
+            route_span.set_attribute(trace_attrs.REQUEST_ID, str(input.request_id))
+            route_span.set_attribute(trace_attrs.RTP_LLM_REQUEST_ID, input.request_id)
+        route_source = "none"
+        route_error_type = ""
+        try:
+            # proactive rejection: check cached queue length before making request to master
+            if self.master_config:
+                threshold = self.master_config.master_queue_reject_threshold
+                queue_length = self.host_service.get_queue_length()
+                if queue_length > threshold:
+                    route_logger.warning(
+                        f"FlexLb cached queue length {queue_length} exceeds threshold "
+                        f"{threshold}, "
+                        f"proactively rejecting request <{input.request_id}>"
+                    )
+                    kmonitor.report(AccMetrics.MASTER_QUEUE_REJECT_QPS_METRIC, 1)
+                    exc = FtRuntimeException(
+                        exception_type=ExceptionType.TRAFFIC_LIMIT_ERROR,
+                        message=f"Flexlb queue length {queue_length} exceeds threshold {threshold}",
+                    )
+                    if route_span is not None:
+                        route_span.set_attribute(
+                            trace_attrs.RTP_LLM_ROUTE_QUEUE_LENGTH, queue_length
+                        )
+                        route_span.set_attribute(
+                            trace_attrs.RTP_LLM_ROUTE_QUEUE_REJECT_THRESHOLD,
+                            threshold,
+                        )
+                    route_error_type = "TrafficLimit"
+                    raise exc
+            with Timer() as route_timer:
+                role_addrs_specified = bool(input.generate_config.role_addrs)
+                if role_addrs_specified:
+                    route_source = "request"
+                master_addr = self.host_service.get_master_addr()
+                route_logger.debug("routing to master: %s", master_addr)
 
-            input_token_batched = False
-            if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
-                input_token_batched = True
+                input_token_batched = False
+                if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
+                    input_token_batched = True
 
-            master_route_result: Optional[FlexlbResponse] = None
-            if not role_addrs_specified and master_addr and not input_token_batched:
-                with Timer() as master_route_timer:
-                    master_route_result = await self.get_master_route_addrs(input)
-                kmonitor.report(
-                    GaugeMetrics.MASTER_ROUTE_RT_METRIC, master_route_timer.cost_ms()
+                master_route_result: Optional[FlexlbResponse] = None
+                master_route_succeeded = False
+                if not role_addrs_specified and master_addr and not input_token_batched:
+                    with Timer() as master_route_timer:
+                        master_route_result = await self.get_master_route_addrs(input)
+                    kmonitor.report(
+                        GaugeMetrics.MASTER_ROUTE_RT_METRIC,
+                        master_route_timer.cost_ms(),
+                    )
+                    if master_route_result is None:
+                        # get_master_route_addrs returns None on success
+                        master_route_succeeded = True
+                        route_source = "master"
+                elif not role_addrs_specified:
+                    route_logger.warning(
+                        "master address: %s or input token batched: %s is not valid, fallback to domain routing",
+                        master_addr,
+                        input_token_batched,
+                    )
+                specified_roles = {
+                    addr.role for addr in input.generate_config.role_addrs
+                }
+                need_domain_routing = not set(self.backend_role_list).issubset(
+                    specified_roles
                 )
-            elif not role_addrs_specified:
-                route_logger.warning(
-                    "master address: %s or input token batched: %s is not valid, fallback to domain routing",
-                    master_addr,
-                    input_token_batched,
+                allow_domain_fallback = master_route_result is None or (
+                    master_route_result.connection_failed
                 )
-            specified_roles = {addr.role for addr in input.generate_config.role_addrs}
-            need_domain_routing = not set(self.backend_role_list).issubset(
-                specified_roles
-            )
-            allow_domain_fallback = master_route_result is None or (
-                master_route_result.connection_failed
-            )
-            if (
-                not input.generate_config.role_addrs or need_domain_routing
-            ) and allow_domain_fallback:
-                with Timer() as domain_route_timer:
-                    await self.get_domain_route_addrs(input)
-                kmonitor.report(
-                    GaugeMetrics.DOMAIN_ROUTE_RT_METRIC, domain_route_timer.cost_ms()
-                )
-            route_logger.debug("routing to master done")
+                if (
+                    not input.generate_config.role_addrs or need_domain_routing
+                ) and allow_domain_fallback:
+                    with Timer() as domain_route_timer:
+                        await self.get_domain_route_addrs(input)
+                    kmonitor.report(
+                        GaugeMetrics.DOMAIN_ROUTE_RT_METRIC,
+                        domain_route_timer.cost_ms(),
+                    )
+                    route_source = (
+                        "request+domain_fallback"
+                        if role_addrs_specified
+                        else (
+                            "master+domain_fallback"
+                            if master_route_succeeded
+                            else "domain_fallback"
+                        )
+                    )
+                route_logger.debug("routing to master done")
 
-        kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-        if not input.generate_config.role_addrs:
-            route_error = FtRuntimeException(
-                ExceptionType.ROUTE_ERROR,
-                "request_id=%s no backend role addresses found after routing"
-                % input.request_id,
-            )
-            if (
-                master_route_result is not None
-                and not master_route_result.is_ok
-                and master_route_result.error_code is not None
-            ):
-                route_error.rtp_error_code = master_route_result.error_code
-            raise route_error
+            kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
+            if not input.generate_config.role_addrs:
+                route_error = FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR,
+                    "request_id=%s no backend role addresses found after routing"
+                    % input.request_id,
+                )
+                if (
+                    master_route_result is not None
+                    and not master_route_result.is_ok
+                    and master_route_result.error_code is not None
+                ):
+                    route_error.rtp_error_code = master_route_result.error_code
+                raise route_error
+        except BaseException as e:
+            if route_span is not None:
+                route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
+                if isinstance(e, asyncio.CancelledError):
+                    route_error_type = "Cancelled"
+                elif isinstance(e, FtRuntimeException):
+                    route_span.set_attribute(
+                        trace_attrs.RTP_LLM_ERROR_CODE,
+                        int(getattr(e, "rtp_error_code", e.exception_type)),
+                    )
+                    if not route_error_type:
+                        route_error_type = "RouteError"
+                route_span.finish(error=e, error_type=route_error_type)
+            raise
+        if route_span is not None:
+            route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
+            route_span.finish()
 
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:

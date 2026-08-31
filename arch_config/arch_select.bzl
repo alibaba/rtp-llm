@@ -185,6 +185,13 @@ def triton_deps(names):
 def internal_deps():
     return []
 
+def telemetry_test_deps():
+    # The tracing SDK is optional at runtime. SDK-specific test methods skip
+    # explicitly when it is unavailable, while Trace-off tests remain independent
+    # of interpreter-wide packages. The lock carrying the SDK supplies it through
+    # the architecture-specific dependency selector.
+    return []
+
 def jit_deps():
     return []
 
