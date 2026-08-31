@@ -24,7 +24,9 @@ class MMProcessEngine:
     def __init__(self, model, vit_config):
         self.model = model
         self.vit_config = vit_config
-        self.contains_pos: bool = self.model.model_config.mm_model_config.mm_position_ids_style != 0
+        self.contains_pos: bool = (
+            self.model.model_config.mm_model_config.mm_position_ids_style != 0
+        )
         self.run_batch: bool = self.model.model_config.mm_related_params.support_batch
         self.download_headers = self.vit_config.download_headers
 
@@ -43,7 +45,9 @@ class MMProcessEngine:
     ):
         if self.run_batch:
             with Timer() as route_timer:
-                res, pos = self.model.mm_part.mm_embedding(urls=urls, mm_types=types, tensors=tensors)
+                res, pos = self.model.mm_part.mm_embedding(
+                    urls=urls, mm_types=types, tensors=tensors
+                )
             kmonitor.report(
                 GaugeMetrics.VIT_PREPROCESS_RT_METRIC, route_timer.cost_ms()
             )
@@ -57,14 +61,25 @@ class MMProcessEngine:
         try:
             res: List[torch.Tensor] = []
             pos: Optional[List[torch.Tensor]] = [] if self.contains_pos else None
+            expanded_offset = 0
             for index in range(len(urls)):
+                config = configs[index]
+                if config.token_start >= 0:
+                    config.token_start += expanded_offset
                 embedding, pos_ids = self.model.mm_part.mm_embedding(
-                    url=urls[index], 
-                    mm_type=types[index], 
+                    url=urls[index],
+                    mm_type=types[index],
                     download_headers=self.download_headers,
-                    configs=configs[index]
+                    configs=config,
                 )
-                res.extend(self._maybe_tensor_to_list(embedding))
+                embeddings = self._maybe_tensor_to_list(embedding)
+                res.extend(embeddings)
+                if config.token_start >= 0:
+                    check_with_info(
+                        len(embeddings) == 1,
+                        "position-dependent multimodal input must return one embedding",
+                    )
+                    expanded_offset += int(embeddings[0].shape[0]) - 1
                 if self.contains_pos:
                     check_with_info(pos_ids is not None, "pos_ids should not be None")
                     pos.extend(self._maybe_tensor_to_list(pos_ids))

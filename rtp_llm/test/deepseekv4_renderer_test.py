@@ -262,6 +262,48 @@ class DeepseekV4RendererTest(TestCase):
         self.assertEqual(self.renderer.tokenizer.encode_calls[-1], (expected, {}))
         self.assertEqual(self.renderer.tokenizer.decode(rendered.input_ids), expected)
 
+    def test_image_content_returns_url_and_placeholder_token_start(self):
+        image_token = self.encoding.IMAGE_PLACEHOLDER
+
+        class ImageTokenizer(FakeTokenizer):
+            image_token_id = 999999
+
+            def encode(self, prompt: str, **kwargs):
+                self.encode_calls.append((prompt, kwargs))
+                ids = []
+                offset = 0
+                while offset < len(prompt):
+                    if prompt.startswith(image_token, offset):
+                        ids.append(self.image_token_id)
+                        offset += len(image_token)
+                    else:
+                        ids.append(ord(prompt[offset]))
+                        offset += 1
+                return ids
+
+        self.renderer.tokenizer = ImageTokenizer()
+        image_url = "data:image/png;base64,AA=="
+        request = ChatCompletionRequest(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "look"},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ]
+        )
+
+        rendered = self.renderer.render_chat(request)
+
+        self.assertEqual(len(rendered.multimodal_inputs), 1)
+        self.assertEqual(rendered.multimodal_inputs[0].url, image_url)
+        self.assertEqual(
+            rendered.multimodal_inputs[0].config.token_start,
+            rendered.input_ids.index(ImageTokenizer.image_token_id),
+        )
+
     def test_existing_think_mode_env_path_is_unchanged(self):
         self.renderer.think_mode = True
         messages = [{"role": "user", "content": "Hello"}]

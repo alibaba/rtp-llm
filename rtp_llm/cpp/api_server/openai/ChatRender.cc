@@ -186,7 +186,8 @@ RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
                                py::cast<int>(item.attr("config").attr("max_pixels")),
                                py::cast<int>(item.attr("config").attr("fps")),
                                py::cast<int>(item.attr("config").attr("min_frames")),
-                               py::cast<int>(item.attr("config").attr("max_frames")));
+                               py::cast<int>(item.attr("config").attr("max_frames")),
+                               py::cast<int>(item.attr("config").attr("token_start")));
     }
     auto rendered_prompt = py::cast<std::string>(rendered_input.attr("rendered_prompt"));
 

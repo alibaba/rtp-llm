@@ -10,27 +10,30 @@
 namespace rtp_llm {
 
 struct MMPreprocessConfig {
-    int32_t width      = -1;
-    int32_t height     = -1;
-    int32_t min_pixels = -1;
-    int32_t max_pixels = -1;
-    int32_t fps        = -1;
-    int32_t min_frames = -1;
-    int32_t max_frames = -1;
-    MMPreprocessConfig(int32_t width      = -1,
-                       int32_t height     = -1,
-                       int32_t min_pixels = -1,
-                       int32_t max_pixels = -1,
-                       int32_t fps        = -1,
-                       int32_t min_frames = -1,
-                       int32_t max_frames = -1):
+    int32_t width       = -1;
+    int32_t height      = -1;
+    int32_t min_pixels  = -1;
+    int32_t max_pixels  = -1;
+    int32_t fps         = -1;
+    int32_t min_frames  = -1;
+    int32_t max_frames  = -1;
+    int32_t token_start = -1;
+    MMPreprocessConfig(int32_t width       = -1,
+                       int32_t height      = -1,
+                       int32_t min_pixels  = -1,
+                       int32_t max_pixels  = -1,
+                       int32_t fps         = -1,
+                       int32_t min_frames  = -1,
+                       int32_t max_frames  = -1,
+                       int32_t token_start = -1):
         width(width),
         height(height),
         min_pixels(min_pixels),
         max_pixels(max_pixels),
         fps(fps),
         min_frames(min_frames),
-        max_frames(max_frames) {}
+        max_frames(max_frames),
+        token_start(token_start) {}
 };
 
 struct MultimodalInput {
@@ -41,18 +44,20 @@ struct MultimodalInput {
     MMPreprocessConfig mm_preprocess_config = MMPreprocessConfig();
     MultimodalInput(std::string   url,
                     torch::Tensor t,
-                    int32_t       mm_type    = 0,
-                    int32_t       width      = -1,
-                    int32_t       height     = -1,
-                    int32_t       min_pixels = -1,
-                    int32_t       max_pixels = -1,
-                    int32_t       fps        = -1,
-                    int32_t       min_frames = -1,
-                    int32_t       max_frames = -1):
+                    int32_t       mm_type     = 0,
+                    int32_t       width       = -1,
+                    int32_t       height      = -1,
+                    int32_t       min_pixels  = -1,
+                    int32_t       max_pixels  = -1,
+                    int32_t       fps         = -1,
+                    int32_t       min_frames  = -1,
+                    int32_t       max_frames  = -1,
+                    int32_t       token_start = -1):
         url(url),
         tensor(t),
         mm_type(mm_type),
-        mm_preprocess_config(MMPreprocessConfig(width, height, min_pixels, max_pixels, fps, min_frames, max_frames)) {}
+        mm_preprocess_config(
+            MMPreprocessConfig(width, height, min_pixels, max_pixels, fps, min_frames, max_frames, token_start)) {}
     MultimodalInput(std::string url): url(url), tensor(torch::empty(0)) {}
 };
 

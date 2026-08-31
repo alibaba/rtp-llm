@@ -397,6 +397,13 @@ def forward_layers(
             h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
         else:
             h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
+    image_token_mask = getattr(v4, "_image_token_mask", None)
+    if image_token_mask is not None:
+        input_ids = torch.where(
+            image_token_mask,
+            torch.full_like(input_ids, int(v4.args.vocab_size)),
+            input_ids,
+        )
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 

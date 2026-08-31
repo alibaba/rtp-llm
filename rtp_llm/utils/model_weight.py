@@ -1411,6 +1411,7 @@ class W:
     v4_ffn_norm = "v4.ffn_norm.weight"
     v4_router_w = "v4.router.weight"
     v4_router_bias = "v4.router.bias"
+    v4_router_bias_vl = "v4.router.bias_vl"
     v4_router_tid2eid = "v4.router.tid2eid"
     v4_shared_w1_w = "v4.shared.w1.weight"
     v4_shared_w1_s = "v4.shared.w1.scale"
@@ -1609,6 +1610,7 @@ class W:
         v4_ffn_norm: sp_id,
         v4_router_w: sp_id,
         v4_router_bias: sp_id,
+        v4_router_bias_vl: sp_id,
         v4_router_tid2eid: sp_id,
         v4_shared_w1_w: sp_id,
         v4_shared_w1_s: sp_id,

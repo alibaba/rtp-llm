@@ -26,7 +26,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -51,7 +51,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -209,7 +209,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
                                    mm_preprocess_config->max_pixels(),
                                    mm_preprocess_config->fps(),
                                    mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames());
+                                   mm_preprocess_config->max_frames(),
+                                   mm_preprocess_config->token_start());
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }
@@ -246,7 +247,10 @@ std::vector<MultimodalInput> QueryConverter::transMMInput(const MultimodalInputs
                                 mm_preprocess_config->height(),
                                 mm_preprocess_config->min_pixels(),
                                 mm_preprocess_config->max_pixels(),
-                                mm_preprocess_config->fps());
+                                mm_preprocess_config->fps(),
+                                mm_preprocess_config->min_frames(),
+                                mm_preprocess_config->max_frames(),
+                                mm_preprocess_config->token_start());
     }
     return inputs_vec;
 }
@@ -269,6 +273,9 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
     config_pb->set_min_pixels(config.min_pixels);
     config_pb->set_max_pixels(config.max_pixels);
     config_pb->set_fps(config.fps);
+    config_pb->set_min_frames(config.min_frames);
+    config_pb->set_max_frames(config.max_frames);
+    config_pb->set_token_start(config.token_start);
 }
 
 MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputsPB* outputs_pb) {

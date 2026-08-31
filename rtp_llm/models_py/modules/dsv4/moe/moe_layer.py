@@ -264,9 +264,11 @@ class MoE(nn.Module):
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
         self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = os.environ.get(
-            "MOEDBG", "0"
-        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
+        self._gate_pack_static = (
+            os.environ.get("MOEDBG", "0") == "0"
+            and self.gate.bias_vl is None
+            and self._strategy.can_use_gate_pack_static(self.gate)
+        )
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)

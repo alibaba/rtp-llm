@@ -346,6 +346,8 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         attn._kv_cache = prev_kv
         attn._block_tables_by_type = prev_bt
         attn._cp_ctx = prev_cp
+
+
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -628,6 +630,95 @@ def _get_window_topk_idxs_varlen(
     ).contiguous()
 
 
+def _get_window_topk_idxs_visible(
+    window_size: int,
+    seq_len: int,
+    query_positions: torch.Tensor,
+    image_spans: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """B=1 image-aware SWA indices matching the reference implementation."""
+    query_positions = _flat_1d(query_positions).to(torch.long)
+    image_spans = image_spans.reshape(-1, 2).to(
+        device=query_positions.device, dtype=torch.long
+    )
+    start = (query_positions - window_size + 1).clamp_min(0)
+    end = query_positions.clone()
+    for image_start, image_end in image_spans.unbind(0):
+        inside = (query_positions >= image_start) & (query_positions <= image_end)
+        start = torch.where(inside, torch.minimum(start, image_start), start)
+        end = torch.where(inside, torch.maximum(end, image_end), end)
+    width = min(int(seq_len), int(window_size) + 384)
+    offsets = torch.arange(width, device=query_positions.device, dtype=torch.long)
+    indices = start.unsqueeze(1) + offsets
+    valid = (indices <= end.unsqueeze(1)) & (indices < int(seq_len))
+    indices = torch.where(valid, indices, torch.full_like(indices, -1))
+    lengths = valid.sum(dim=1, dtype=torch.int32)
+    return indices.to(torch.int32).contiguous(), lengths.contiguous()
+
+
+def _append_image_visible_workspace_indices(
+    combined_indices: torch.Tensor,
+    combined_lens: torch.Tensor,
+    query_positions: torch.Tensor,
+    image_spans: torch.Tensor,
+    *,
+    window_size: int,
+    swa_offset: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Append image-left overflow and future-image SWA rows to packed indices."""
+    query_positions = _flat_1d(query_positions).to(torch.long)
+    image_spans = image_spans.reshape(-1, 2).to(
+        device=query_positions.device, dtype=torch.long
+    )
+    span_start = torch.zeros_like(query_positions)
+    span_end = torch.full_like(query_positions, -1)
+    for image_start, image_end in image_spans.unbind(0):
+        inside = (query_positions >= image_start) & (query_positions <= image_end)
+        span_start = torch.where(inside, image_start, span_start)
+        span_end = torch.where(inside, image_end, span_end)
+    inside = span_end >= span_start
+    causal_start = (query_positions - window_size + 1).clamp_min(0)
+    left_count = torch.where(inside, (causal_start - span_start).clamp_min(0), 0)
+    right_count = torch.where(inside, span_end - query_positions, 0)
+    extra_count = left_count + right_count
+    actual_max_extra = int(extra_count.max().item())
+    if actual_max_extra == 0:
+        return combined_indices, combined_lens
+    max_extra = 384
+
+    offsets = torch.arange(
+        max_extra, device=query_positions.device, dtype=torch.long
+    ).unsqueeze(0)
+    left = offsets < left_count.unsqueeze(1)
+    token_positions = torch.where(
+        left,
+        span_start.unsqueeze(1) + offsets,
+        query_positions.unsqueeze(1) + 1 + offsets - left_count.unsqueeze(1),
+    )
+    valid = offsets < extra_count.unsqueeze(1)
+    extras = torch.where(
+        valid,
+        token_positions + int(swa_offset),
+        torch.full_like(token_positions, -1),
+    ).to(combined_indices.dtype)
+
+    old_width = combined_indices.size(1)
+    out = torch.full(
+        (combined_indices.size(0), old_width + max_extra),
+        -1,
+        dtype=combined_indices.dtype,
+        device=combined_indices.device,
+    )
+    out[:, :old_width] = combined_indices
+    columns = combined_lens.to(torch.long).unsqueeze(1) + offsets
+    rows = torch.arange(out.size(0), device=out.device).unsqueeze(1).expand_as(columns)
+    out[rows[valid], columns[valid]] = extras[valid]
+    return (
+        out.contiguous(),
+        (combined_lens + extra_count.to(combined_lens.dtype)).contiguous(),
+    )
+
+
 class SwaPrefillMeta(NamedTuple):
     """FP8 prefill metadata bundle — built once per ``_prefill_common_setup``
     call for **all FP8 KV-cache layers** (compress_ratio 0/4/128 alike).
@@ -840,6 +931,7 @@ class PrefillMeta(NamedTuple):
     # by ``build_and_propagate_prefill_meta_fp8`` from the forward's local
     # ``PrefillWorkspace``; non-None for every production prefill call.
     workspace: Optional[PrefillWorkspace] = None
+    image_spans: Optional[torch.Tensor] = None
     # Identity of the ungathered per-layer RoPE table that produced
     # ``freqs_cis``. ratio0 uses base RoPE while ratio4/128 use compressed
     # RoPE, so cross-ratio frequency reuse is valid only when this id matches.
@@ -3178,7 +3270,7 @@ class AttentionFP8(nn.Module):
         )
         D = self.head_dim
 
-        if wm.use_cp_raw_q_merge:
+        if wm.use_cp_raw_q_merge and common.image_spans is None:
             with record_function_range("dsv4.fp8.attn.workspace.cp_raw_q_merge"):
                 o = self._attn_via_workspace_cp_raw_q_merge(
                     qkv=qkv,
@@ -3402,6 +3494,24 @@ class AttentionFP8(nn.Module):
                         N=wm.N,
                         flash_mla_indices=True,
                     )
+
+            if common.image_spans is not None:
+                assert common.position_ids is not None
+                query_positions = (
+                    _flat_1d(common.cp_ctx.global_positions)
+                    if common.cp_on
+                    else _flat_1d(common.position_ids)
+                )
+                combined_indices, combined_lens = (
+                    _append_image_visible_workspace_indices(
+                        combined_indices,
+                        combined_lens,
+                        query_positions,
+                        common.image_spans,
+                        window_size=self.window_size,
+                        swa_offset=wm.N,
+                    )
+                )
 
             post_gather_stream = None
             if cmp_pending is not None or swa_prefix_pending is not None:
@@ -3905,7 +4015,7 @@ class AttentionFP8(nn.Module):
         assert common.sp_int == sp_int
         assert common.batch_size == int(cu_seqlens.numel() - 1)
         assert common.swa_meta is not None
-        assert common.topk_idxs.shape[-1] == win
+        assert common.topk_idxs.shape[-1] >= win
         assert common.row_seqlens_full.shape == (1,)
         assert common.row_seqlens_full.dtype == torch.long
         assert common.row_seqlens_full.device == device
@@ -3928,9 +4038,9 @@ class AttentionFP8(nn.Module):
             ("position_ids", position_ids, common.position_ids),
             ("req_id_per_token", req_id_per_token, common.req_id_per_token),
         ):
-            assert _same_storage_view(current, cached), (
-                f"cannot reuse prefill common metadata: {name} storage/view changed"
-            )
+            assert _same_storage_view(
+                current, cached
+            ), f"cannot reuse prefill common metadata: {name} storage/view changed"
 
     def _build_shared_prefill_meta(
         self,
@@ -3944,6 +4054,7 @@ class AttentionFP8(nn.Module):
         position_ids: Optional[torch.Tensor] = None,
         req_id_per_token: Optional[torch.Tensor] = None,
         max_seqlen_q: int = 0,
+        image_spans: Optional[torch.Tensor] = None,
         reuse_common_meta: Optional["PrefillMeta"] = None,
         reuse_freqs_meta: Optional["PrefillMeta"] = None,
     ) -> "PrefillMeta":
@@ -4019,6 +4130,12 @@ class AttentionFP8(nn.Module):
         position_ids = _flat_1d(position_ids)
         req_id_per_token = _flat_1d(req_id_per_token)
         sp_per_req = _flat_1d(sp_per_req)
+        if image_spans is not None:
+            image_spans = image_spans.reshape(-1, 2).to(device=device, dtype=torch.long)
+            if batch_size != 1 or bool((prefix_lengths != 0).any().item()):
+                raise RuntimeError(
+                    "DeepSeek-V4 image attention requires one cold-prefill request"
+                )
         assert (
             position_ids.numel() == seqlen
         ), f"position_ids must be flat [T_total={seqlen}], got {position_ids.shape}"
@@ -4058,9 +4175,7 @@ class AttentionFP8(nn.Module):
                 assert position_ids_eff is not None
                 freqs_cis = self.freqs_cis.index_select(
                     0,
-                    position_ids_eff.to(
-                        device=self.freqs_cis.device, dtype=torch.long
-                    ),
+                    position_ids_eff.to(device=self.freqs_cis.device, dtype=torch.long),
                 )
                 from rtp_llm.models_py.modules.dsv4.fp8 import (
                     _swa_ops_triton as _swa_ops,
@@ -4084,6 +4199,14 @@ class AttentionFP8(nn.Module):
                         req_id_per_token,
                     )
                 )
+                if image_spans is not None:
+                    seq_len_for_images = int(cu_seqlens_for_k[-1].item())
+                    topk_idxs, topk_length_kv_full = _get_window_topk_idxs_visible(
+                        win,
+                        seq_len_for_images,
+                        position_ids_eff,
+                        image_spans,
+                    )
                 any_cont = bool((prefix_lengths > 0).any().item())
 
             with record_function_range("dsv4.fp8.meta.swa_varlen"):
@@ -4103,9 +4226,9 @@ class AttentionFP8(nn.Module):
                 [seqlen_full], device=device, dtype=torch.long
             )
         else:
-            assert self.compress_ratio != 0, (
-                "SWA-only metadata must be the common source, not a reuse target"
-            )
+            assert (
+                self.compress_ratio != 0
+            ), "SWA-only metadata must be the common source, not a reuse target"
             self._validate_reusable_prefill_common(
                 reuse_common_meta,
                 seqlen=seqlen,
@@ -4135,6 +4258,7 @@ class AttentionFP8(nn.Module):
                         ),
                     )
             topk_idxs = reuse_common_meta.topk_idxs
+            image_spans = reuse_common_meta.image_spans
             any_cont = reuse_common_meta.any_cont
             row_seqlens_full = reuse_common_meta.row_seqlens_full
             source_swa = reuse_common_meta.swa_meta
@@ -4225,6 +4349,7 @@ class AttentionFP8(nn.Module):
             swa_meta=swa_meta,
             csa_meta=csa_meta,
             hca_meta=hca_meta,
+            image_spans=image_spans,
             freqs_cis_source_id=id(self.freqs_cis),
         )
 
@@ -4631,16 +4756,12 @@ class AttentionFP8(nn.Module):
             ):
                 seq_total_host = [
                     int(prefix) + int(length)
-                    for prefix, length in zip(
-                        host_prefix_lengths, host_input_lengths
-                    )
+                    for prefix, length in zip(host_prefix_lengths, host_input_lengths)
                 ]
                 n_per_req_host = [total // ratio for total in seq_total_host]
                 gather_per_req_host = [
                     int(length) + min(int(prefix), win - 1)
-                    for prefix, length in zip(
-                        host_prefix_lengths, host_input_lengths
-                    )
+                    for prefix, length in zip(host_prefix_lengths, host_input_lengths)
                 ]
                 N_max = max(n_per_req_host, default=0)
                 gather_len_max = max(gather_per_req_host, default=0)

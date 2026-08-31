@@ -124,6 +124,7 @@ message MMPreprocessConfigPB {
     int32 fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
+    int32 token_start = 8;
 }
 
 message MultimodalInputPB {

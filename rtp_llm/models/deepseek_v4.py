@@ -43,6 +43,10 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3Mtp,
     DeepSeekV3MtpWeight,
 )
+from rtp_llm.models.multimodal.multimodal_mixin import (
+    BaseMultiModalWeightInfo,
+    MultiModalMixin,
+)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -59,7 +63,7 @@ SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 
 
-class DeepSeekV4Weight(DeepSeekV2Weight):
+class DeepSeekV4Weight(DeepSeekV2Weight, BaseMultiModalWeightInfo):
     """DeepSeek-V4 weight info.
 
     Declares the per-layer + global ``WeightModule`` graph the framework's
@@ -79,6 +83,10 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         noaux_tc (``layer_id >= num_hash_layers``).
     """
 
+    def __init__(self, vit_weights=None, **kwargs):
+        DeepSeekV2Weight.__init__(self, **kwargs)
+        BaseMultiModalWeightInfo.__init__(self, vit_weights=vit_weights)
+
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
         # V4 has no LoRA q-projection split (we use ``wq_a`` / ``wq_b`` directly)
         # and no e_score_correction_bias (uses noaux_tc gate.bias on layers ≥ num_hash_layers).
@@ -97,6 +105,9 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         else:
             self._compress_ratios = self._compress_ratios[: self._num_layers]
         self._num_hash_layers = int(self.model_config.num_hash_layers)
+        self._has_vision_router_bias = any(
+            key.endswith(".ffn.gate.bias_vl") for key in weight_keys
+        )
 
     def _compress_ratio(self, layer_id: int) -> int:
         if layer_id < 0 or layer_id >= len(self._compress_ratios):
@@ -281,6 +292,15 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 AtomicWeight(
                     W.v4_router_bias,
                     [CkptWeightInfo(self._key("ffn.gate.bias"), identity)],
+                    identity,
+                    data_type=torch.float32,
+                )
+            )
+        if self._has_vision_router_bias:
+            out.append(
+                AtomicWeight(
+                    W.v4_router_bias_vl,
+                    [CkptWeightInfo(self._key("ffn.gate.bias_vl"), identity)],
                     identity,
                     data_type=torch.float32,
                 )
@@ -480,10 +500,12 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 data_type=torch.float32,
             ),
         ]
-        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+        return self._get_vit_info(
+            ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+        )
 
 
-class DeepSeekV4(DeepSeekV2):
+class DeepSeekV4(DeepSeekV2, MultiModalMixin):
     """DeepSeek-V4 entry point.
 
     M0: parse HF config and register. Engine instantiation will fail at
@@ -518,6 +540,31 @@ class DeepSeekV4(DeepSeekV2):
             fmha_config=self.fmha_config,
             py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
+        )
+
+    def _as_multimodal_model(self):
+        if self.model_config.mm_related_params.config.get("vision_n_layers", 0) > 0:
+            return self
+        return None
+
+    def _init_multimodal(self, mm_model_config, vit_config):
+        from rtp_llm.models.deepseek_v4_vision import (
+            DeepSeekV4VisionEmbedding,
+            DeepSeekV4VisionWeights,
+        )
+
+        self.mm_part = DeepSeekV4VisionEmbedding(
+            self.model_config.mm_related_params, self.model_config
+        )
+        self.model_config.mm_related_params.vit_weights = DeepSeekV4VisionWeights(
+            {
+                "vision": self.mm_part.vision,
+                "aligner": self.mm_part.aligner,
+                "image_start": self.mm_part.image_start,
+                "image_end": self.mm_part.image_end,
+                "image_newline": self.mm_part.image_newline,
+                "image_pad": self.mm_part.image_pad,
+            }
         )
 
     @staticmethod
@@ -659,6 +706,47 @@ class DeepSeekV4(DeepSeekV2):
         # need fp32 logits accumulation, but doubles RAM (1 GiB → 2 GiB).
         # V4 sampling runs on bf16 logits like V3.
         config.enable_fp32_lm_head = False
+
+        vision_n_layers = int(config_json.get("vision_n_layers", 0))
+        if vision_n_layers > 0:
+            vision_keys = (
+                "vision_n_layers",
+                "vision_dim",
+                "vision_n_heads",
+                "vision_inter_dim",
+                "vision_patch_size",
+                "vision_rope_theta",
+                "vision_downsample_ratio",
+                "vision_max_n_token",
+                "vision_min_pixels",
+                "vision_max_wh_ratio",
+            )
+            config.mm_related_params.config = {
+                "hidden_size": config.hidden_size,
+                **{key: config_json[key] for key in vision_keys},
+            }
+            tokenizer_path = os.path.join(ckpt_path, "tokenizer.json")
+            with open(tokenizer_path) as reader:
+                tokenizer_json = json.load(reader)
+            image_token_id = next(
+                (
+                    int(token["id"])
+                    for token in tokenizer_json.get("added_tokens", [])
+                    if token.get("content") == "<｜deepseek_image｜>"
+                ),
+                None,
+            )
+            if image_token_id is None:
+                raise ValueError(
+                    "DeepSeek-V4 tokenizer has no <｜deepseek_image｜> token"
+                )
+            config.mm_related_params.special_token_ids = {
+                "image_token_id": image_token_id
+            }
+            config.mm_related_params.special_tokens = {
+                "default_mm_token": "<｜deepseek_image｜>"
+            }
+            config.mm_model_config.mm_sep_tokens = [[image_token_id]]
 
         logging.info(
             "DeepSeek-V4 config loaded: layers=%d hidden=%d head_num=%d head_dim=%d "
@@ -802,6 +890,9 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
 
+    def _as_multimodal_model(self):
+        return None
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
@@ -889,6 +980,9 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
 
 class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
+
+    def _as_multimodal_model(self):
+        return None
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):
