@@ -880,7 +880,18 @@ proto_lang_toolchain(
     command_line = "--cpp_out=$(OUT)",
     runtime = ":protobuf",
     visibility = ["//visibility:public"],
-    blacklisted_protos = [":_internal_wkt_protos_genrule"],
+    # blacklisted_protos entries must carry ProtoInfo since bazel 6, but the
+    # vendored 3.8-era value named the internal_copied_filegroup genrule, which
+    # has none. Name the well-known-type proto_library targets generated above
+    # instead: those .proto are already linked into :protobuf, so protoc must not
+    # emit a second copy of their C++ code. compiler/plugin.pb.cc is linked into
+    # :protoc_lib, not :protobuf, so runtime consumers must still be allowed to
+    # generate it.
+    blacklisted_protos = [
+        proto[0] + "_proto"
+        for proto in WELL_KNOWN_PROTO_MAP.items()
+        if proto[0] != "compiler_plugin"
+    ],
 )
 
 proto_lang_toolchain(

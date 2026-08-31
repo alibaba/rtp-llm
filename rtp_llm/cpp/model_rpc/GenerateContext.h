@@ -1,11 +1,14 @@
 #pragma once
 
+#include <memory>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
 
 namespace rtp_llm {
 
@@ -54,6 +57,11 @@ public:
     grpc::ServerContext*                  server_context;
     kmonitor::MetricsReporterPtr          metrics_reporter;
     std::shared_ptr<RpcServerRuntimeMeta> meta;
+
+    // OTel SERVER span finish guard. Declared after `error_status` so it destructs
+    // before it and can still read the final status; nullptr when telemetry is
+    // disabled. Ends the span on every exit path (RAII).
+    std::unique_ptr<telemetry::GrpcStatusSpanGuard> trace_span_guard;
 
 protected:
     std::shared_ptr<GenerateStream> stream_;

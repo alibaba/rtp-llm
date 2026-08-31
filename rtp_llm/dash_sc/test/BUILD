@@ -1,3 +1,5 @@
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+
 py_test(
     name = "codec_test",
     srcs = ["codec_test.py"],
@@ -28,7 +30,10 @@ py_test(
     name = "inference_servicer_test",
     srcs = ["inference/servicer_test.py"],
     main = "inference/servicer_test.py",
-    deps = ["//rtp_llm:testlib"],
+    # telemetry_test_deps() declares the opentelemetry runtime for the locks that
+    # carry it, so DashScInferenceTracingTest (guarded by skipUnless(OTEL_AVAILABLE))
+    # cannot silently vanish when this target is run on its own.
+    deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
     imports = [],
     exec_properties = {"gpu": "A10"},
 )
@@ -47,7 +52,9 @@ py_test(
     name = "proxy_servicer_test",
     srcs = ["proxy/servicer_test.py"],
     main = "proxy/servicer_test.py",
-    deps = ["//rtp_llm:testlib"],
+    # Same reason as inference_servicer_test: keep ProxyTracingTest unskippable
+    # on the locks that carry opentelemetry.
+    deps = ["//rtp_llm:testlib"] + telemetry_test_deps(),
     imports = [],
     exec_properties = {"gpu": "A10"},
 )

@@ -20,11 +20,27 @@ public:
 
     void updateOutput(const StreamUpdateInfo&) override {}
 
+    void setWaitTimeUsForTest(int64_t wait_time_us) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        wait_time_us_ = wait_time_us;
+    }
+
 private:
     static ModelConfig modelConfig() {
         ModelConfig config;
         config.max_seq_len = 4096;
         return config;
+    }
+};
+
+class TestableRpcServerRuntimeMeta: public RpcServerRuntimeMeta {
+public:
+    void replaceBeforeCommittingDequeueSnapshot(int64_t                  request_id,
+                                                const GenerateStreamPtr& stale_stream,
+                                                const GenerateStreamPtr& replacement_stream) {
+        const auto stream_snapshot = captureStreamRuntimeSnapshot(stale_stream);
+        enqueue(request_id, replacement_stream);
+        commitDequeueSnapshot(request_id, stale_stream, stream_snapshot);
     }
 };
 
@@ -45,6 +61,23 @@ TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
     ASSERT_EQ(info.running_task_info_list.size(), 1);
     EXPECT_EQ(info.running_task_info_list[0].request_id, 101);
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
+}
+
+TEST(RpcServerRuntimeMetaTest, EnqueueConvertsWaitTimeFromMicrosecondsToMilliseconds) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 103;
+    input->group_id            = 78;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+    stream->setWaitTimeUsForTest(123'456);
+
+    meta.enqueue(input->request_id, stream);
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].waiting_time_ms, 123);
 }
 
 TEST(RpcServerRuntimeMetaTest, EnqueueKeepsEnvelopeBatchIdOnStreamMismatch) {
@@ -91,6 +124,8 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
     input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
     auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
     meta.enqueue(TaskIdentity{input->request_id, input->group_id}, stream);
+    stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1'000'000);
+    stream->setWaitTimeUsForTest(456'789);
 
     // The running record and Cancel overlay are constructed from the same
     // request identity, so decoration cannot change its batch id.
@@ -100,14 +135,14 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
     ASSERT_EQ(info.running_task_info_list.size(), 1);
     EXPECT_EQ(info.running_task_info_list[0].request_id, input->request_id);
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
-    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
-        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
     auto canceled = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
     EXPECT_EQ(canceled.finished_task_info_list[0].batch_id, 77);
+    EXPECT_EQ(canceled.finished_task_info_list[0].waiting_time_ms, 456);
 }
 
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOverlay) {
@@ -119,19 +154,17 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOv
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, -1);
 
     EXPECT_TRUE(meta.markPriorityPreemptionCanceled(
-        /*request_id=*/405, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+        /*request_id=*/405, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", nullptr));
     EXPECT_FALSE(meta.markPriorityPreemptionCanceled(
-        /*request_id=*/405, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "duplicate"));
+        /*request_id=*/405, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "duplicate", nullptr));
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     EXPECT_TRUE(info.running_task_info_list.empty());
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     EXPECT_EQ(info.finished_task_info_list[0].request_id, 405);
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, -1);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
-    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
 }
 
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleTypedFinishedRecord) {
@@ -153,17 +186,15 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleType
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 88);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
-        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     EXPECT_TRUE(info.running_task_info_list.empty());
     ASSERT_EQ(info.finished_task_info_list.size(), 1);
     EXPECT_EQ(info.finished_task_info_list[0].request_id, input->request_id);
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, 88);
-    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(info.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdentity) {
@@ -182,7 +213,7 @@ TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdenti
         const TaskIdentity identity{input->request_id, input->group_id};
         std::atomic<int>   ready{0};
         std::atomic<bool>  start{false};
-        const auto await_start = [&]() {
+        const auto         await_start = [&]() {
             ready.fetch_add(1, std::memory_order_release);
             while (!start.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
@@ -212,7 +243,7 @@ TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdenti
             << "attempt=" << attempt;
 
         ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
-            identity.request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+            identity.request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
         auto canceled = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
         ASSERT_EQ(canceled.finished_task_info_list.size(), 1) << "attempt=" << attempt;
         EXPECT_EQ(canceled.finished_task_info_list[0].batch_id, identity.batch_id) << "attempt=" << attempt;
@@ -246,19 +277,75 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_TRUE(canceling.finished_task_info_list.empty());
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 89);
-    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELING);
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
     ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
-        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted"));
+        input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
     auto canceled = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     EXPECT_TRUE(canceled.running_task_info_list.empty());
     ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
     EXPECT_EQ(canceled.finished_task_info_list[0].batch_id, 89);
-    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress,
-              PriorityPreemptionProgress::CANCELED);
-    EXPECT_EQ(canceled.finished_task_info_list[0].error_code,
-              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(canceled.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+}
+
+TEST(RpcServerRuntimeMetaTest, SnapshotCommitDoesNotRemoveReplacementStream) {
+    TestableRpcServerRuntimeMeta meta;
+    auto                         stale_input = std::make_shared<GenerateInput>();
+    stale_input->request_id                  = 409;
+    stale_input->group_id                    = 91;
+    stale_input->generate_config             = std::make_shared<GenerateConfig>();
+    stale_input->input_ids                   = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stale_stream                        = std::make_shared<RuntimeMetaTestStream>(stale_input);
+
+    auto replacement_input             = std::make_shared<GenerateInput>();
+    replacement_input->request_id      = stale_input->request_id;
+    replacement_input->group_id        = 92;
+    replacement_input->generate_config = std::make_shared<GenerateConfig>();
+    replacement_input->input_ids       = torch::tensor({4, 5, 6}, torch::kInt32);
+    auto replacement_stream            = std::make_shared<RuntimeMetaTestStream>(replacement_input);
+
+    meta.enqueue(stale_input->request_id, stale_stream);
+    meta.replaceBeforeCommittingDequeueSnapshot(stale_input->request_id, stale_stream, replacement_stream);
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(info.finished_task_info_list.empty());
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].batch_id, replacement_input->group_id);
+}
+
+TEST(RpcServerRuntimeMetaTest, StalePriorityFinalizerDoesNotRemoveReplacementStream) {
+    RpcServerRuntimeMeta meta;
+    auto                 stale_input = std::make_shared<GenerateInput>();
+    stale_input->request_id          = 410;
+    stale_input->group_id            = 93;
+    stale_input->generate_config     = std::make_shared<GenerateConfig>();
+    stale_input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stale_stream                = std::make_shared<RuntimeMetaTestStream>(stale_input);
+
+    auto replacement_input             = std::make_shared<GenerateInput>();
+    replacement_input->request_id      = stale_input->request_id;
+    replacement_input->group_id        = 94;
+    replacement_input->generate_config = std::make_shared<GenerateConfig>();
+    replacement_input->input_ids       = torch::tensor({4, 5, 6}, torch::kInt32);
+    auto replacement_stream            = std::make_shared<RuntimeMetaTestStream>(replacement_input);
+
+    meta.enqueue(stale_input->request_id, stale_stream);
+    meta.markPriorityPreemptionCanceling(TaskIdentity{stale_input->request_id, stale_input->group_id});
+    meta.enqueue(replacement_input->request_id, replacement_stream);
+
+    EXPECT_TRUE(meta.markPriorityPreemptionCanceled(stale_input->request_id,
+                                                    static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
+                                                    "stale priority preemption",
+                                                    stale_stream));
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].batch_id, stale_input->group_id);
+    EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].batch_id, replacement_input->group_id);
+    EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::NONE);
 }
 
 // Engine execution time is the turnaround (finish - begin) minus the queue wait.

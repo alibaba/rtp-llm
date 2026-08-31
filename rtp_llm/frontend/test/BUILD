@@ -1,3 +1,5 @@
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
+
 py_test(
     name = "incremental_decode_test",
     srcs = [
@@ -24,7 +26,7 @@ py_test(
     ],
     deps = [
         "//rtp_llm:testlib",
-    ],
+    ] + telemetry_test_deps(),
     exec_properties = {'gpu':'H20'},
 )
 
