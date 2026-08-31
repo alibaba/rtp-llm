@@ -206,6 +206,35 @@ JavaMockEngineCluster
 └── MockLruBlockCache        — LRU KV cache with prefix matching
 ```
 
+## Incompatible changes vs main
+
+Migration notes for performance JSONs and expectations authored against
+`origin/main`'s mock engine:
+
+1. **Decode admission contract flip.** On main, decode-side queue pressure
+   was an opt-in soft counter with REJECT backpressure —
+   `decode.max_pending_requests` (exercised by `DecodePendingCapOptInTest`)
+   rejected requests past the configured cap so the master could observe an
+   engine error path. This branch replaces it with the unconditional
+   hard-admission gate plus unbounded pending queue
+   (`DecodePendingQueueHardGateTest`): overflow parks in `decodePendingQueue`
+   and drains one-for-one as completions free slots. The decode side no
+   longer simulates a rejection path, so error-code fidelity for that
+   scenario is correspondingly lower.
+
+2. **Performance JSON schema changes.**
+   - `prefill.fixed_ms`: the key's main-side role as a fallback *behind* the
+     configured formula, and main's silent 300 ms fixed-prefill default when
+     no formula and no `fixed_ms` were configured, are both gone. When the
+     key is absent, prefill duration now follows the configured expression
+     (built-in DSv4 production fit by default); an explicit `fixed_ms`
+     declaration still wins over the formula.
+   - `decode.max_pending_requests`: the key no longer exists and is
+     silently ignored (see contract flip above).
+
+   Old user-supplied JSONs carrying these keys keep loading, but their
+decode-admission behavior changes as described above.
+
 ## Current-branch extensions (auto-tpm / priority)
 
 The sections above describe the shared `feat/flexlb_mock_engine_v2` baseline.

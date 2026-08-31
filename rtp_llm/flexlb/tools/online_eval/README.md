@@ -72,6 +72,25 @@ If the default jar is not built, the script runs `./mvnw -pl flexlb-api -am pack
 The script auto-selects Java 21 from system alternatives when available; otherwise set `JAVA21_HOME` or `JAVA_HOME`.
 It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `internal_source` directory does not accidentally activate internal-only dependencies.
 
+## Changed defaults (vs main)
+
+This toolchain diverges from `origin/main`'s `run_online_eval.sh` defaults.
+If you replay old runbooks or compare results across the two lines, pin
+these variables explicitly:
+
+| Variable | main default | This branch default | Note |
+| --- | --- | --- | --- |
+| `N_PREFILL` | 2 | 20 | Mock prefill engine count. |
+| `N_DECODE` | 4 | 60 | Mock decode engine count. |
+| `FORCE_PRIORITY` | (not set — each request replays its trace-record priority) | 50 | Every replayed request is pinned to one Auto-TPM QoS level. Multi-priority replays must set `FORCE_PRIORITY=0` explicitly to restore trace-record priorities. |
+| `FLEXLB_MONITOR_MODE` | `critical-only` | `all` | Full master business metric surface; set `critical-only` to restore the trimmed set. |
+| `JAVA_MOCK_STATS_INTERVAL_MS` | 5000 | 1000 | 1s mock stats cadence for fine-grained timelines. |
+
+Implementation removal: the Python load client and the Python mock engine
+are gone (Java-only toolchain). Setting `LOAD_CLIENT_IMPL=python` or
+`MOCK_ENGINE_IMPL=python` now aborts with an explicit error instead of
+silently falling back to a Python implementation.
+
 ## Data layout
 
 - `data/online_logs/trace_30min.jsonl`: sanitized replay shape derived from online logs.

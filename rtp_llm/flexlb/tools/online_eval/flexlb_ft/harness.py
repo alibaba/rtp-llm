@@ -991,8 +991,9 @@ class EnvManager:
         if spec.discovery == "discovery_file":
             # Dynamic file discovery: the mock maintains the domain→hosts
             # mapping (kept in sync by /add_engine + /remove_engine) and the
-            # master re-reads it via FLEXLB_DISCOVERY_FILE → FileServiceDiscovery
-            # (mirrors run_online_eval.sh FLEXLB_DISCOVERY_FILE=auto wiring).
+            # master re-reads it — FLEXLB_DISCOVERY_FILE env (relaxed-bound to
+            # the flexlb.discovery.file property) makes
+            # ServiceDiscoveryConfiguration assemble FileServiceDiscovery.
             argv += ["--discovery-file", str(env.discovery_file)]
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
