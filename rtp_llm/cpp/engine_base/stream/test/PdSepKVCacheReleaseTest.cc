@@ -546,6 +546,45 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     stream2->releaseResource();
 }
 
+TEST_F(PdSepKVCacheReleaseTest, testFailedPDSepLoadDoesNotPopulateDeviceCache) {
+    const std::vector<int> tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    prepareStream(tokens);
+    allocateAndFinish();
+
+    auto& resource = stream_->streamCacheResource();
+    resource.holdKVCacheForPDSep();
+    stream_->releaseResource();
+    resource.releaseKVCacheForPDSep(false);
+
+    ResourceContext resource_context2;
+    resource_context2.cache_manager       = cache_manager_;
+    resource_context2.reuse_cache         = true;
+    resource_context2.enable_device_cache = true;
+    resource_context2.role_type           = RoleType::PREFILL;
+
+    auto generate_input2                   = std::make_shared<GenerateInput>();
+    auto generate_config2                  = std::make_shared<GenerateConfig>();
+    generate_config2->num_return_sequences = 1;
+    generate_config2->reuse_cache          = true;
+    generate_config2->enable_device_cache  = true;
+    generate_input2->input_ids       = torch::tensor(std::vector<int32_t>(tokens.begin(), tokens.end()), torch::kInt32);
+    generate_input2->generate_config = generate_config2;
+
+    ModelConfig model_config;
+    model_config.attn_config.tokens_per_block = 8;
+    model_config.max_seq_len                  = 2048;
+    RuntimeConfig runtime_config;
+
+    auto stream2 = std::make_shared<NormalGenerateStream>(
+        generate_input2, model_config, runtime_config, resource_context2, nullptr);
+    stream2->generate_status_->status = StreamState::RUNNING;
+
+    ASSERT_TRUE(stream2->streamCacheResource().initKVBlock().ok());
+    EXPECT_EQ(stream2->reuseLength(), 0)
+        << "A failed PD cache load must not leave a device-cache entry for the retry";
+    stream2->releaseResource();
+}
+
 // =============================================================================
 // Test 6: Race condition simulation
 // Engine thread calls releaseResource concurrently with

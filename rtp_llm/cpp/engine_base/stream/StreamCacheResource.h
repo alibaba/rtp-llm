@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
@@ -33,7 +34,7 @@ public:
     // seq_len_override (-1 = unset) is forwarded to MallocInfo::incr_seq_len_override.
     absl::Status         incrKVBlock(int seq_len_override = -1);
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
+    int                  tryReleaseKVBlock(size_t nums, bool store_cache = true);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
     bool                 asyncLoadCache();
@@ -110,7 +111,7 @@ public:
     bool enableTieredMemoryCache() const;
 
     void holdKVCacheForPDSep();
-    void releaseKVCacheForPDSep();
+    void releaseKVCacheForPDSep(bool cache_load_succeeded = true);
 
     std::string debugString() const {
         std::stringstream debug_string;
@@ -132,6 +133,7 @@ private:
                                                   bool                                         enable_remote_cache);
     void                          evictDeviceCacheToMemory();
     void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
+    void                          storeCompletedCache(const std::shared_ptr<BatchKVCacheResource>& batch_resource);
 
 private:
     GenerateStream*                stream_;
@@ -148,7 +150,11 @@ private:
     int                           load_cache_retry_count_ = 0;
 
     // Connector reference counting for PD separation (RAII auto-release)
+    enum class PDSepCacheState { NONE, PENDING, COMMITTED, DISCARDED };
+    std::mutex                       pd_kvcache_mutex_;
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
+    BatchKVCacheResourcePtr          pd_pending_cache_resource_;
+    PDSepCacheState                   pd_cache_state_ = PDSepCacheState::NONE;
     /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
     /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
     /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.

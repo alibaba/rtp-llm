@@ -430,7 +430,7 @@ public:
     }
 
     void holdKVCacheForPDSep();
-    void releaseKVCacheForPDSep();
+    void releaseKVCacheForPDSep(bool cache_load_succeeded = true);
 
     std::vector<int> getLatestTokens(size_t token_num);
 

@@ -1486,8 +1486,8 @@ void GenerateStream::holdKVCacheForPDSep() {
     stream_cache_resource_->holdKVCacheForPDSep();
 }
 
-void GenerateStream::releaseKVCacheForPDSep() {
-    stream_cache_resource_->releaseKVCacheForPDSep();
+void GenerateStream::releaseKVCacheForPDSep(bool cache_load_succeeded) {
+    stream_cache_resource_->releaseKVCacheForPDSep(cache_load_succeeded);
 }
 
 std::pair<std::string, uint32_t> GenerateStream::prefillAddr() const {

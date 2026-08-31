@@ -488,17 +488,24 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
 void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     GenerateOutputsPB load_response;
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    const auto release_pd_cache = [&](bool cache_load_succeeded) {
+        if (prefill_context.generate_input->generate_config->pd_separation) {
+            prefill_context.getStream()->releaseKVCacheForPDSep(cache_load_succeeded);
+        }
+    };
+    if (!prefill_context.client_stream->Read(&load_response)) {
+        release_pd_cache(false);
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    }
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
 
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
-    if (prefill_context.generate_input->generate_config->pd_separation) {
-        prefill_context.getStream()->releaseKVCacheForPDSep();
+    if (error_code != ErrorCode::NONE_ERROR) {
+        release_pd_cache(false);
+        CLIENT_GRPC_RET_IF_ERROR(prefill_context, false, error_code);
     }
-
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
+    release_pd_cache(true);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
     prefill_context.dequeueStreamFromRuntimeMeta();
