@@ -18,8 +18,6 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kTransferQueueSize = 10000;
-
 ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     switch (status) {
         case TransferStatus::OK:
@@ -54,7 +52,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockTransferEngine");
+        std::make_unique<BlockTreeTaskPool>(
+            transfer_worker_count, BlockTreeTaskPool::kDefaultQueueSize, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
 
     const bool any_disk_pool = std::any_of(group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group_set) {
