@@ -785,6 +785,18 @@ StreamState GenerateStream::moveToNext() {
     return state;
 }
 
+void GenerateStream::setPPInflight() {
+    pp_inflight_.store(true, std::memory_order_release);
+}
+
+void GenerateStream::clearPPInflight() {
+    pp_inflight_.store(false, std::memory_order_release);
+}
+
+bool GenerateStream::isPPInflight() const {
+    return pp_inflight_.load(std::memory_order_acquire);
+}
+
 bool GenerateStream::hasError() const {
     std::lock_guard<std::mutex> lock(*mutex_);
     return hasErrorWithoutLock();
@@ -1003,7 +1015,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (update_info.draft_token >= 0) {
         RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
                                 "speculative token buffer must contain target and draft slots");
-        spec_tokens[1]  = update_info.draft_token;
+        spec_tokens[1] = update_info.draft_token;
         propose_token_ = {target_last_token, update_info.draft_token};
     } else {
         // Commit-only speculative steps (DSpARK prefill/decode tail) publish
@@ -1282,8 +1294,8 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
             collector.effective_context_length =
                 std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();

@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PPScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -106,6 +107,9 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.world_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (parallelism_config.pp_size > 1) {
+        const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        RTP_LLM_CHECK_WITH_INFO(stream_async == nullptr || std::strcmp(stream_async, "1") != 0,
+                                "pipeline parallelism does not support async runner (RTP_LLM_STREAM_ASYNC)");
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
                                 "pipeline parallelism does not support speculative decoding");
         RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb(), "pipeline parallelism does not support EPLB");
@@ -125,8 +129,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.world_size
                                     == parallelism_config.pp_size * parallelism_config.tp_size,
                                 "pipeline parallelism requires world_size == pp_size * tp_size");
-        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PDFUSION,
-                                "pipeline parallelism currently requires the PDFUSION role");
+        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PDFUSION
+                                    || pd_sep_config.role_type == RoleType::PREFILL
+                                    || pd_sep_config.role_type == RoleType::DECODE,
+                                "pipeline parallelism requires the PDFUSION, PREFILL, or DECODE role");
         RTP_LLM_CHECK_WITH_INFO(!runtime_config.use_batch_decode_scheduler,
                                 "pipeline parallelism does not support BatchDecodeScheduler");
         RTP_LLM_CHECK_WITH_INFO(kv_cache_config.multi_task_prompt.empty()
@@ -248,7 +254,16 @@ void NormalEngine::initScheduler() {
         RTP_LLM_LOG_WARNING("unknown pdfusion_scheduler_mode [%s], expected '' or 'ratio'; mode will be ignored",
                             runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.c_str());
     }
-    if (runtime_config.use_batch_decode_scheduler) {
+    if (parallelism_config.pp_size > 1) {
+        scheduler_.reset(new PPScheduler(runtime_config,
+                                         model_config_,
+                                         pd_sep_config,
+                                         parallelism_config,
+                                         model_specific_config,
+                                         resource_context_.cache_manager,
+                                         metrics_reporter_));
+        RTP_LLM_LOG_INFO("create pipeline parallel scheduler done");
+    } else if (runtime_config.use_batch_decode_scheduler) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");

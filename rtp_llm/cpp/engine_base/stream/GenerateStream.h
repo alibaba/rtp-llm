@@ -310,6 +310,12 @@ public:
     }
     StreamState moveToNext();
 
+    /** A PP stream stays inflight until its sampled result has been committed by update().
+     * The release/acquire pair publishes that update before the stream can be rescheduled. */
+    void setPPInflight();
+    void clearPPInflight();
+    bool isPPInflight() const;
+
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
     bool                isActive() const;    // Returns true if stream is active (no error and not finished)
@@ -775,6 +781,7 @@ protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
+    std::atomic<bool>                     pp_inflight_{false};
     std::vector<StreamState>              sub_generate_status_;
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
