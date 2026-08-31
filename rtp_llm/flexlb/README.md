@@ -49,6 +49,13 @@ See [AGENTS.md](AGENTS.md) for the full, authoritative list of build and test co
 dispatch, routing, worker-state synchronization, and observability. It is JSON carried
 directly in the environment variable; a file-path form is not supported.
 
+`schemaVersion` is numeric: `0` identifies the historical combined document and `1`
+identifies the current standard document. A document without `schemaVersion` defaults
+to `0`. `FLEXLB_CONFIG_SCHEMA_VERSION` supplies the fallback version when the document
+does not declare one; an explicit version in Nacos or another source takes precedence,
+so a standard document with `"schemaVersion": 1` can replace an environment-selected
+compatibility configuration without changing the environment variable first.
+
 The parser is strict: duplicate keys, unknown fields, fields from inactive tagged
 variants, `null`, scalar coercion, numeric enum values, and trailing JSON are rejected at
 startup. Optional fields must be omitted rather than set to `null`. If the environment

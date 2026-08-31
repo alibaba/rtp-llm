@@ -15,9 +15,9 @@ import org.flexlb.config.RoutingConfig.RandomWithinToleranceConfig;
 import org.flexlb.config.RoutingConfig.RatioCandidatePoolConfig;
 
 /** Cross-field validation for the public configuration contract. */
-final class FlexlbConfigValidator {
+public final class FlexlbConfigValidator {
 
-    static void validate(FlexlbConfig config) {
+    public static void validate(FlexlbConfig config) {
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");

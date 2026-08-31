@@ -20,7 +20,7 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Setter
 public final class FlexlbConfig {
 
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = ConfigSchemaVersion.STANDARD;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new QueueSchedulerConfig();

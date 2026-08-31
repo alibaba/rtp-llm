@@ -23,7 +23,7 @@ class ModelServiceConfigurationTest {
     @Test
     void failsWhenModelServiceConfigIsMissing() {
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadModelServiceConfig()).thenReturn(null);
+        when(configService.modelServiceConfig()).thenReturn(null);
 
         contextRunner
                 .withBean(ConfigService.class, () -> configService)
@@ -172,7 +172,7 @@ class ModelServiceConfigurationTest {
     private ApplicationContextRunner withModelConfig(String configJson) {
         ServiceRoute serviceRoute = JsonUtils.toObject(configJson, ServiceRoute.class);
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadModelServiceConfig()).thenReturn(serviceRoute);
+        when(configService.modelServiceConfig()).thenReturn(serviceRoute);
         return contextRunner.withBean(ConfigService.class, () -> configService);
     }
 

@@ -94,4 +94,25 @@ class HttpLoadBalanceServerTest {
 
         verify(flexlbLogManager).setLogLevel(LogLevel.WARN);
     }
+
+    @Test
+    void removedTrafficPolicyEndpointReturnsNotFound() {
+        HttpLoadBalanceServer server = new HttpLoadBalanceServer(
+                mock(LBStatusConsistencyService.class),
+                mock(ConfigService.class),
+                mock(PriorityScheduler.class),
+                mock(EndpointRegistry.class),
+                null,
+                new ServerScheduleLatencyRecorder(),
+                mock(FlexlbInstanceAddressService.class),
+                mock(FlexlbLogManager.class));
+        WebTestClient client = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
+
+        client.post()
+                .uri("/rtp_llm/update_traffic_policy")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{}")
+                .exchange()
+                .expectStatus().isNotFound();
+    }
 }

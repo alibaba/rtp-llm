@@ -22,7 +22,7 @@ public class ModelServiceConfiguration {
 
     @Bean
     public ModelMetaConfig modelMetaConfig(ConfigService configService, RoutingServiceDiscovery serviceDiscovery) {
-        ServiceRoute serviceRoute = configService.loadModelServiceConfig();
+        ServiceRoute serviceRoute = configService.modelServiceConfig();
         if (serviceRoute == null) {
             throw new IllegalStateException(MODEL_SERVICE_CONFIG + " must not be blank");
         }

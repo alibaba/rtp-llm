@@ -18,6 +18,9 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Tag;
@@ -162,7 +165,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
                         """);
 
         for (String document : invalidDocuments) {
-            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(document));
+            assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults(document));
         }
     }
 
@@ -170,7 +173,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
     @Timeout(15)
     void sharedExpirationTimerExpiresPendingRequestsAndEagerlyRemovesCompletedOnes()
             throws Exception {
-        FlexlbConfig priorityConfig = ConfigService.parse("""
+        FlexlbConfig priorityConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler": {
                     "type": "QUEUE",
@@ -272,7 +275,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
     }
 
     private static void assertMode(ModeCase mode) {
-        FlexlbConfig config = ConfigService.parse(mode.document());
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults(mode.document());
 
         assertEquals(mode.direct(), config.isDirect());
         assertEquals(!mode.direct(), config.isQueue());
@@ -348,6 +351,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
         private final FlexlbConfig config;
 
         private StaticConfigService(FlexlbConfig config) {
+            super(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
             this.config = config;
         }
 

@@ -18,6 +18,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -573,7 +574,7 @@ class FlexlbServiceImplTest {
 
     @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
-        FlexlbConfig queueConfig = ConfigService.parse("""
+        FlexlbConfig queueConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
                     "ordering":{"type":"FIFO"}},
@@ -601,7 +602,7 @@ class FlexlbServiceImplTest {
 
     @Test
     void directModeHasNoSchedulingTimeout() {
-        FlexlbConfig directConfig = ConfigService.parse("""
+        FlexlbConfig directConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH"}

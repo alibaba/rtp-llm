@@ -1,6 +1,7 @@
 package org.flexlb.config;
 
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
@@ -111,7 +112,7 @@ class TrafficPolicyConfigTest {
 
     private static TrafficPolicyConfig parseGroupSelector(String json) {
         String document = "{\"router\":{\"groupSelector\":" + json + "}}";
-        return ConfigService.parse(document).getRouter().getGroupSelector();
+        return FlexlbConfigMerger.mergeWithDefaults(document).getRouter().getGroupSelector();
     }
 
     private static Request request(long id, String apiKey, long inputTokens) {

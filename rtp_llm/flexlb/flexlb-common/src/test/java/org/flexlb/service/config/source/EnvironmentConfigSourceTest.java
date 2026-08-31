@@ -1,12 +1,15 @@
-package org.flexlb.service.config;
+package org.flexlb.service.config.source;
 
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.enums.BlockHashStrategyType;
 import org.flexlb.enums.LogLevel;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.Test;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,6 +22,7 @@ class EnvironmentConfigSourceTest {
                 "FLEXLB_CONFIG",
                 """
                         {
+                          "schemaVersion":1,
                           "scheduler":{"type":"DIRECT"},
                           "dispatcher":{"type":"NON_BATCH"},
                           "observability":{"logging":{
@@ -41,7 +45,7 @@ class EnvironmentConfigSourceTest {
             assertThat(source.name()).isEqualTo("environment");
             assertThat(source.priority()).isEqualTo(1);
             assertThat(source.load()).isNotBlank();
-            return new ConfigService();
+            return new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         });
 
         FlexlbConfig config = configService.loadBalanceConfig();
@@ -52,7 +56,7 @@ class EnvironmentConfigSourceTest {
                 .isEqualTo(LogLevel.DEBUG);
         assertThat(config.getObservability().getLogging().isStdoutEnabled()).isTrue();
         assertThat(config.isEnableFallback()).isTrue();
-        assertThat(configService.loadModelServiceConfig().getServiceId())
+        assertThat(configService.modelServiceConfig().getServiceId())
                 .isEqualTo("test-service");
         configService.close();
     }

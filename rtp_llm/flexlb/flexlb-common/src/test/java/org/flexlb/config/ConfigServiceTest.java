@@ -3,9 +3,19 @@ package org.flexlb.config;
 import org.flexlb.config.RoutingConfig.EstimatedTtftSelectorConfig;
 import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
 import org.flexlb.config.RoutingConfig.RandomWithinToleranceConfig;
+import org.flexlb.service.config.ConfigSource;
+import org.flexlb.service.config.NormalizedConfig;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
+import org.flexlb.service.config.parser.ModelServiceConfigParser;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
+import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -16,36 +26,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
 
+    private static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";
+    private static final String MODEL_SERVICE_CONFIG_ENV = "MODEL_SERVICE_CONFIG";
+
+    private ConfigService configService;
+
+    @AfterEach
+    void tearDown() {
+        if (configService != null) {
+            configService.close();
+        }
+    }
+
     @Test
     void empty_environment_uses_valid_defaults() {
-        ConfigService configService = new ConfigService(Map.of());
+        ConfigService configService = createConfigService(Map.of());
         FlexlbConfig config = configService.loadBalanceConfig();
 
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isBatchDispatch());
         assertFalse(config.isEnableFallback());
-        assertEquals(1, config.getSchemaVersion());
-        assertNull(configService.loadModelServiceConfig());
+        assertEquals(ConfigSchemaVersion.STANDARD, config.getSchemaVersion());
+        assertNull(configService.modelServiceConfig());
     }
 
     @Test
     void parses_explicit_fallback_switch() {
-        FlexlbConfig config = ConfigService.parse("{\"enableFallback\":true}");
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("{\"enableFallback\":true}");
 
         assertTrue(config.isEnableFallback());
     }
 
     @Test
     void loads_model_topology_independently_from_scheduling_config() {
-        ConfigService configService = new ConfigService(Map.of(
-                ConfigService.FLEXLB_CONFIG_ENV, """
+        ConfigService configService = createConfigService(Map.of(
+                FLEXLB_CONFIG_ENV, """
                         {
+                          "schemaVersion":1,
                           "scheduler":{"type":"DIRECT"},
                           "dispatcher":{"type":"NON_BATCH"}
                         }
                         """,
-                ConfigService.MODEL_SERVICE_CONFIG_ENV, """
+                MODEL_SERVICE_CONFIG_ENV, """
                         {
                           "service_id":"test-service",
                           "role_endpoints":[]
@@ -53,15 +76,15 @@ class ConfigServiceTest {
                         """));
 
         assertTrue(configService.loadBalanceConfig().isDirect());
-        assertEquals("test-service", configService.loadModelServiceConfig().getServiceId());
-        assertTrue(configService.loadModelServiceConfig().getRoleEndpoints().isEmpty());
+        assertEquals("test-service", configService.modelServiceConfig().getServiceId());
+        assertTrue(configService.modelServiceConfig().getRoleEndpoints().isEmpty());
     }
 
     @Test
     void rejects_invalid_model_service_config_document() {
         ConfigValidationException error = assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of(
-                        ConfigService.MODEL_SERVICE_CONFIG_ENV, "not-json")));
+                () -> createConfigService(Map.of(
+                        MODEL_SERVICE_CONFIG_ENV, "not-json")));
 
         assertTrue(error.getMessage().contains("'MODEL_SERVICE_CONFIG'"));
     }
@@ -69,7 +92,7 @@ class ConfigServiceTest {
     @Test
     void rejects_flexlb_behavior_inside_model_service_config() {
         ConfigValidationException kvcmError = assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parseModelServiceConfig("""
+                () -> ModelServiceConfigParser.parse("""
                         {
                           "service_id":"test-service",
                           "role_endpoints":[],
@@ -80,7 +103,7 @@ class ConfigServiceTest {
         assertTrue(kvcmError.getMessage().contains("$.kvcm.enabled"));
 
         ConfigValidationException legacyError = assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parseModelServiceConfig("""
+                () -> ModelServiceConfigParser.parse("""
                         {
                           "service_id":"test-service",
                           "load_balance":true,
@@ -93,21 +116,21 @@ class ConfigServiceTest {
 
     @Test
     void blank_model_service_config_is_treated_as_missing() {
-        ConfigService configService = new ConfigService(Map.of(
-                ConfigService.MODEL_SERVICE_CONFIG_ENV, "   "));
+        ConfigService configService = createConfigService(Map.of(
+                MODEL_SERVICE_CONFIG_ENV, "   "));
 
-        assertNull(configService.loadModelServiceConfig());
+        assertNull(configService.modelServiceConfig());
     }
 
     @Test
     void configured_document_must_not_be_blank() {
-        assertThrows(ConfigValidationException.class,
-                () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, "   ")));
+        assertThrows(IllegalStateException.class,
+                () -> createConfigService(Map.of(FLEXLB_CONFIG_ENV, "   ")));
     }
 
     @Test
     void parses_complete_responsibility_oriented_document() {
-        FlexlbConfig config = ConfigService.parse("""
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "schemaVersion": 1,
                   "scheduler": {
@@ -299,22 +322,22 @@ class ConfigServiceTest {
     @Test
     void rejects_unknown_removed_and_inactive_fields() {
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"autoTpmEnabled\":true}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"autoTpmEnabled\":true}"));
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"autoTpmSloLengthBuckets\":\"*:100\"}"));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"autoTpmSloLengthBuckets\":\"*:100\"}"));
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT","ordering":{"type":"FIFO"}},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH","maxRequests":8}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "router":{"roles":{"prefill":{"selector":{
                     "type":"ESTIMATED_TTFT",
@@ -328,7 +351,7 @@ class ConfigServiceTest {
                   }}}}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "router":{"roles":{"prefill":{
                     "selector":{"type":"RANDOM"},
@@ -343,34 +366,36 @@ class ConfigServiceTest {
     @Test
     void rejects_duplicate_keys_nulls_and_scalar_coercion() {
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"schemaVersion\":1,\"schemaVersion\":1}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"schemaVersion\":1,\"schemaVersion\":1}"));
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{} {}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{} {}"));
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"router\":null}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"router\":null}"));
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"schemaVersion\":\"1\"}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"schemaVersion\":\"1\"}"));
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"schemaVersion\":1.5}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"schemaVersion\":0}"));
         assertThrows(ConfigValidationException.class,
-                () -> ConfigService.parse("{\"internalRuntime\":{}}"));
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"schemaVersion\":1.5}"));
+        assertThrows(ConfigValidationException.class,
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"internalRuntime\":{}}"));
     }
 
     @Test
     void validates_cross_component_semantics() {
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":101}},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{
                     "type":"QUEUE",
@@ -379,14 +404,14 @@ class ConfigServiceTest {
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY",
                     "preemption":{"allowedVictimStages":["DECODE_ENGINE_OWNED"]}}},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY",
                     "preemption":{
@@ -396,7 +421,7 @@ class ConfigServiceTest {
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{
                     "type":"QUEUE","ordering":{"type":"PRIORITY"},
@@ -405,7 +430,7 @@ class ConfigServiceTest {
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "workerRegistry": {
                     "health": {
@@ -417,7 +442,7 @@ class ConfigServiceTest {
                   }
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "router":{"roles":{"prefill":{"executionTimeEstimator":{
                     "type":"FORMULA","expression":"sum(unknownTokens)"
@@ -428,7 +453,7 @@ class ConfigServiceTest {
 
     @Test
     void omission_is_the_only_unbounded_representation() {
-        FlexlbConfig config = ConfigService.parse("""
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"}},
                   "dispatcher":{"type":"NON_BATCH"},
@@ -439,5 +464,52 @@ class ConfigServiceTest {
         assertNull(config.nonBatchDispatcher().getMaxInflightRequestsPerPrefillWorker());
         assertNull(config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
+    }
+
+    private ConfigService createConfigService(Map<String, String> environment) {
+        try {
+            return new EnvironmentVariables(environment).execute(() -> {
+                ConfigService.register(new ConfigSource() {
+                    @Override
+                    public String name() {
+                        return "environment";
+                    }
+
+                    @Override
+                    public int priority() {
+                        return 1;
+                    }
+
+                    @Override
+                    public void setUpdateListener(Consumer<String> listener) {}
+
+                    @Override
+                    public String load() {
+                        String content = environment.get(FLEXLB_CONFIG_ENV);
+                        if (content != null && content.isBlank()) {
+                            throw new IllegalArgumentException(FLEXLB_CONFIG_ENV + " must not be blank when configured");
+                        }
+                        return content;
+                    }
+
+                    @Override
+                    public String loadModelServiceConfig() {
+                        return environment.get(MODEL_SERVICE_CONFIG_ENV);
+                    }
+
+                    @Override
+                    public NormalizedConfig loadConfig() {
+                        String rawFlexlbConfig = load();
+                        return rawFlexlbConfig == null ? new NormalizedConfig(null, loadModelServiceConfig()) : normalize(rawFlexlbConfig);
+                    }
+                });
+                configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+                return configService;
+            });
+        } catch (RuntimeException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new IllegalStateException("Failed to construct ConfigService for test", error);
+        }
     }
 }

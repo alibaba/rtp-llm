@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
@@ -94,8 +93,6 @@ public class HttpLoadBalanceServer {
                         this::notifyParticipant)
                 .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
-                .POST("/rtp_llm/update_traffic_policy", accept(MediaType.APPLICATION_JSON),
-                        this::updateTrafficPolicy)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
                 .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
@@ -115,21 +112,6 @@ public class HttpLoadBalanceServer {
                                     + logLevelUpdateRequest.getLogLevel()), String.class);
                 }).onErrorResume(e -> {
                     Logger.error("update logLevel error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
-    }
-
-    private Mono<ServerResponse> updateTrafficPolicy(ServerRequest serverRequest) {
-        return serverRequest.bodyToMono(TrafficPolicyConfig.class)
-                .flatMap(trafficPolicyConfig -> {
-                    configService.updateTrafficPolicy(trafficPolicyConfig);
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(trafficPolicyConfig), TrafficPolicyConfig.class);
-                }).onErrorResume(e -> {
-                    Logger.error("update traffic policy error", e);
                     return ServerResponse.status(500)
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(e.getMessage()), String.class);
