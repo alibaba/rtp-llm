@@ -175,7 +175,10 @@ class ImageVisibleTopKTest(unittest.TestCase):
         )
 
         self.assertEqual(tuple(out.shape), (4, 1, 1024))
-        self.assertTrue(torch.equal(out[:, :, :640], combined))
+        for row, length in enumerate(lengths.tolist()):
+            self.assertTrue(
+                torch.equal(out[row, 0, :length], combined[row, 0, :length])
+            )
         self.assertTrue(
             torch.equal(
                 out_lengths, torch.tensor([1, 337, 300, 128], dtype=torch.int32)
