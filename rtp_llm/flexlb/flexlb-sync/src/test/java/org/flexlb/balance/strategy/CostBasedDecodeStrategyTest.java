@@ -7,8 +7,6 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DirectSchedulerConfig;
-import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -95,11 +93,11 @@ class CostBasedDecodeStrategyTest {
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
-        WorkerDirectory engineWorkerStatus = new WorkerDirectory(emptyRegistry);
+        WorkerDirectory workerDirectory = new WorkerDirectory(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
-        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(workerDirectory, resourceMeasureFactory);
 
         BalanceContext balanceContext = context(1_000, 1_000L);
 
@@ -243,22 +241,20 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
-    void queueRejectsSequenceBeyondEveryKnownPhysicalCapacity() {
+    void should_return_unavailable_when_sequence_exceeds_every_worker_capacity() {
         registerWorker("127.0.0.1", 128L, 128L);
         registerWorker("127.0.0.2", 256L, 256L);
         CostBasedDecodeStrategy strategy = availableStrategy(decodeRegistry());
         BalanceContext context = context(257L, 3_050L);
 
-        StaticCapacityExceededException failure = Assertions.assertThrows(
-                StaticCapacityExceededException.class,
-                () -> strategy.select(context, RoleType.DECODE, null));
+        ServerStatus selected = selectStatus(
+                strategy, context, RoleType.DECODE, null);
 
-        Assertions.assertTrue(failure.getMessage().contains("257"));
-        Assertions.assertTrue(failure.getMessage().contains("256"));
+        Assertions.assertNull(selected);
     }
 
     @Test
-    void nonPreemptiveQueueCanPlaceBehindTransientKvPressure_whilePreemptionKeepsAdmissionGate() {
+    void should_not_select_transiently_full_decode_worker() {
         registerWorker("127.0.0.1", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
@@ -274,36 +270,21 @@ class CostBasedDecodeStrategyTest {
                 new WorkerDirectory(registry), factory);
 
         BalanceContext context = context(100, 3L);
-        Request request = context.getRequest();
+        ServerStatus selected = selectStatus(
+                strategy, context, RoleType.DECODE, null);
 
-        SelectedRole fifoSelection = strategy.select(
-                context, RoleType.DECODE, null);
-        ServerStatus fifoResult = fifoSelection.serverStatus();
-        Assertions.assertTrue(fifoResult.isSuccess());
-        Assertions.assertEquals(1_000L, fifoSelection.decodeTotalKv());
+        Assertions.assertNull(selected);
         Assertions.assertFalse(endpoint.layeredAdmissionView().queued().contains(3L),
                 "selection must not mutate Decode reservation ownership");
-        fifoSelection.close();
-
-        PriorityOrderingConfig preemptiveOrdering =
-                new PriorityOrderingConfig();
-        preemptiveOrdering.setPreemption(new PreemptionConfig());
-        configService.loadBalanceConfig().queueScheduler()
-                .setOrdering(preemptiveOrdering);
-        request.setRequestId(4L);
-        ServerStatus priorityResult = selectStatus(
-                strategy, context, RoleType.DECODE, null);
-        Assertions.assertNull(priorityResult,
-                "preemption must preserve the inclusive admission gate for victim planning");
     }
 
     @Test
-    void nonPreemptiveQueueProjectsCurrentRequestBeforeOwnershipTier() {
+    void should_apply_request_kv_filter_before_weighted_selection() {
         registerWorker("127.0.0.1", 1_000, 200);
         registerWorker("127.0.0.2", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
-        // Bias the old least-ownership tier toward the endpoint which cannot
-        // fit this request. Request-aware capacity must win that disagreement.
+        // Existing reservations must not make an endpoint that cannot hold
+        // this prompt eligible for the weighted-random choice.
         reserveQueued(
                 registry.getDecode("127.0.0.2:8080"),
                 91L, 0L, 0L, 50);
@@ -315,51 +296,7 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertNotNull(selected);
         Assertions.assertEquals("127.0.0.2", selected.getServerIp(),
-                "routing must project this request through the exact Decode gate");
-    }
-
-    @Test
-    void softQueuePlacementBalancesTwentyThousandProjectedOwners() {
-        registerWorker("127.0.0.1", 1_000, 1_000);
-        registerWorker("127.0.0.2", 1_000, 1_000);
-        EndpointRegistry registry = decodeRegistry();
-        DecodeEndpoint hotspot = registry.getDecode("127.0.0.1:8080");
-        for (long requestId = 1L; requestId <= 64L; requestId++) {
-            reserveQueued(hotspot, requestId, 0L, 0L, 50);
-        }
-        Assertions.assertEquals(64, hotspot.routingView().totalLoad());
-        Assertions.assertEquals(
-                0, registry.getDecode("127.0.0.2:8080")
-                        .routingView().totalLoad());
-
-        CostBasedDecodeStrategy strategy = availableStrategy(registry);
-        BalanceContext context = context(0L, 10_000L);
-        Request request = context.getRequest();
-
-        DecodeEndpoint peer = registry.getDecode("127.0.0.2:8080");
-        for (int index = 0; index < 20_000; index++) {
-            long requestId = 10_000L + index;
-            int hotspotBefore = hotspot.routingView().totalLoad();
-            int peerBefore = peer.routingView().totalLoad();
-            request.setRequestId(requestId);
-            ServerStatus selected = selectStatus(
-                    strategy, context, RoleType.DECODE, null);
-            Assertions.assertNotNull(selected);
-            if (hotspotBefore != peerBefore) {
-                String leastOwned = hotspotBefore < peerBefore
-                        ? "127.0.0.1" : "127.0.0.2";
-                Assertions.assertEquals(
-                        leastOwned, selected.getServerIp(),
-                        "soft placement must not add another immutable route to the projected hotspot");
-            }
-            DecodeEndpoint selectedEndpoint = registry.getDecode(
-                    selected.getServerIp() + ":8080");
-            reserveQueued(selectedEndpoint, requestId, 0L, 0L, 50);
-        }
-
-        Assertions.assertEquals(
-                hotspot.routingView().totalLoad(), peer.routingView().totalLoad(),
-                "projected ownership should remain balanced under the incident backlog size");
+                "prompt KV capacity is a hard filter in the legacy policy");
     }
 
     private static void setKv(

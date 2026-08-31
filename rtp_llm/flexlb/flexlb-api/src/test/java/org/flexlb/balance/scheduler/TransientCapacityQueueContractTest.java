@@ -455,7 +455,7 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void nonPreemptiveLongContextBacklogQueuesBeforeDecodeCapacityReturns()
+    void nonPreemptiveLongContextBacklogWaitsForDecodeCapacity()
             throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new FifoOrderingConfig());
@@ -474,17 +474,19 @@ class TransientCapacityQueueContractTest {
                     .toList();
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
-            assertEquals(32,
+            assertEquals(0,
                     fixture.decodeEndpoint.layeredAdmissionView().queued().size(),
-                    "transient Decode pressure must not strand long contexts"
-                            + " in the global placement coordinator");
+                    "legacy selection must not pin requests to a full Decode");
+            assertEquals(32,
+                    fixture.runtime.scheduler().getQueuedRequestCount(),
+                    "unplaced requests must remain in the placement coordinator");
             assertEquals(List.of(), fixture.submission.requestIds());
         }
     }
 
     @Test
     @Timeout(20)
-    void incidentBacklogNeverPinsToFullDecodeWhileAnotherCanDispatch()
+    void incidentBacklogPinsOnlyUntilDecodeResourceBoundary()
             throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new FifoOrderingConfig());
@@ -534,9 +536,12 @@ class TransientCapacityQueueContractTest {
             assertEquals(0,
                     fixture.decodeEndpoint.layeredAdmissionView().reserved().size(),
                     "the incident's full Decode must not own a Prefill queue head");
-            assertEquals(64,
+            assertEquals(7,
                     spareEndpoint.layeredAdmissionView().reserved().size(),
-                    "all production-bound waiting requests should pin the dispatchable tier");
+                    "legacy selection must stop once queued KV reaches the resource boundary");
+            assertTrue(spareEndpoint.routingView().realKvAvailable()
+                            < 128_000L,
+                    "the next long prompt must fail the legacy hard KV-fit filter");
         }
     }
 

@@ -61,6 +61,10 @@ class CostBasedPrefillSelectionMetricTest {
                         Mockito.eq(deliveryMode),
                         ttft.capture(),
                         execution.capture());
+                verify(fixture.reporter()).reportRoutingSelectedCacheMatchMetrics(
+                        RoleType.PREFILL, 0L, 1_000L);
+                verify(fixture.reporter()).reportRoutingCandidateMaxCacheMatchMetrics(
+                        RoleType.PREFILL, 0L);
                 assertEquals(role.serverStatus().getPrefillTime(), ttft.getValue());
                 assertEquals(role.prefillWorkMs(), execution.getValue());
             }

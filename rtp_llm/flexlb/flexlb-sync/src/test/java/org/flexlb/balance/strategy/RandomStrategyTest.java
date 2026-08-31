@@ -377,43 +377,13 @@ class RandomStrategyTest {
     }
 
     @Test
-    void softQueuePrefersDispatchableDecodeBeforeFullFallback() {
-        WorkerStatus full = createWorkerStatus(
-                "127.0.0.1", RoleType.DECODE, null, true, 1_000L, 1_000L);
-        WorkerStatus dispatchable = createWorkerStatus(
-                "127.0.0.2", RoleType.DECODE, null, true, 2_000L, 2_000L);
-        workerDirectory.statusMap(RoleType.DECODE)
-                .put("127.0.0.1:8080", full);
-        workerDirectory.statusMap(RoleType.DECODE)
-                .put("127.0.0.2:8080", dispatchable);
-        registerDecode("127.0.0.1:8080", full);
-        registerDecode("127.0.0.2:8080", dispatchable);
-        Mockito.when(resourceMeasure.isEngineDispatchAvailable(Mockito.any()))
-                .thenAnswer(invocation -> {
-                    DecodeEndpoint.DecodeRoutingView view = invocation.getArgument(0);
-                    return view.totalKv() == 2_000L;
-                });
-
-        Request request = new Request();
-        request.setRequestId(12_345L);
-        request.setSeqLen(100L);
-        BalanceContext context = new BalanceContext();
-        context.setRequest(request);
-
-        ServerStatus selected = selectStatus(context, RoleType.DECODE, null);
-
-        assertNotNull(selected);
-        assertEquals("127.0.0.2", selected.getServerIp());
-    }
-
-    @Test
-    void softQueueFallsBackWhenEveryDecodeIsTransientlyFull() {
+    void should_return_unavailable_when_every_decode_is_transiently_full() {
         WorkerStatus full = createWorkerStatus(
                 "127.0.0.3", RoleType.DECODE, null, true, 1_000L, 1_000L);
         workerDirectory.statusMap(RoleType.DECODE)
                 .put("127.0.0.3:8080", full);
         registerDecode("127.0.0.3:8080", full);
-        Mockito.when(resourceMeasure.isEngineDispatchAvailable(Mockito.any()))
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any()))
                 .thenReturn(false);
 
         Request request = new Request();
@@ -424,9 +394,7 @@ class RandomStrategyTest {
 
         ServerStatus selected = selectStatus(context, RoleType.DECODE, null);
 
-        assertNotNull(selected,
-                "all-full fallback must retain non-preemptive queue liveness");
-        assertEquals("127.0.0.3", selected.getServerIp());
+        assertNull(selected);
     }
 
     @Test
