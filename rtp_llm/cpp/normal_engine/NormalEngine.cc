@@ -550,11 +550,6 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    // DecodeRpcServer calls makeStream() before enqueue() so it can allocate the
-    // destination KV table before P/D cache handoff.  Install engine-owned stream
-    // invariants here as well; otherwise that first allocation is planned without
-    // the speculative-round headroom.
-    stream->setReserveStep(reserve_step_);
     return stream;
 }
 
