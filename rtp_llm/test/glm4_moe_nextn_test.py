@@ -303,6 +303,83 @@ class Glm4MoeNextNDtypeTest(unittest.TestCase):
         self.assertEqual(config.config_dtype, "bfloat16")
 
 
+class CompressedInt8RecognitionTest(unittest.TestCase):
+    """W8A8 INT8 must be recognised from the checkpoint, and only from there.
+
+    The scheme is deliberately absent from preset_quant_config, so it cannot be
+    asked for with --quantization; it is inferred from the checkpoint's own
+    quantization_config block. Both halves of that arrangement matter. If the
+    checkpoint inference regresses, the run reaches the MoE factory unquantised
+    and dies with "no registered MOE compute backend can consume them" only
+    after every weight is loaded. If someone "helpfully" adds the scheme to the
+    preset table, it becomes selectable by hand and can then disagree with what
+    the checkpoint actually contains.
+    """
+
+    # The quantization_config block as GLM-4.7-W8A8-INT8 actually ships it.
+    QUANT_BLOCK = {
+        "quant_method": "compressed-tensors",
+        "format": "int-quantized",
+        "quantization_status": "compressed",
+        "ignore": ["lm_head"],
+        "config_groups": {
+            "group_0": {
+                "targets": ["Linear"],
+                "weights": {
+                    "num_bits": 8,
+                    "strategy": "channel",
+                    "symmetric": True,
+                    "type": "int",
+                    "dynamic": False,
+                },
+                "input_activations": {
+                    "num_bits": 8,
+                    "strategy": "token",
+                    "symmetric": True,
+                    "type": "int",
+                    "dynamic": True,
+                },
+                "output_activations": None,
+            }
+        },
+    }
+
+    def _load(self, quant_block):
+        from rtp_llm.config.quant_config import QuantizationConfig
+
+        cfg = _glm47_config_json()
+        if quant_block is not None:
+            cfg["quantization_config"] = quant_block
+        with tempfile.TemporaryDirectory() as ckpt:
+            with open(os.path.join(ckpt, "config.json"), "w") as f:
+                json.dump(cfg, f)
+            return QuantizationConfig.load_from_ckpt(ckpt)
+
+    def test_recognised_from_the_checkpoint(self):
+        quant = self._load(self.QUANT_BLOCK)
+        self.assertIsNotNone(quant, "the checkpoint's quantization_config was ignored")
+        self.assertEqual(quant.get_method(), "W8A8_INT8_PER_CHANNEL_COMPRESSED")
+
+    def test_the_ignore_list_survives(self):
+        # lm_head is not quantised in this checkpoint; losing that would quantise
+        # the output projection and change every logit.
+        quant = self._load(self.QUANT_BLOCK)
+        self.assertIn("lm_head", set(quant.exclude_modules))
+
+    def test_a_plain_checkpoint_stays_unquantised(self):
+        self.assertIsNone(self._load(None))
+
+    def test_not_selectable_through_the_preset_table(self):
+        from rtp_llm.config.quant_config import preset_quant_config
+
+        self.assertNotIn(
+            "W8A8_INT8_PER_CHANNEL_COMPRESSED",
+            preset_quant_config,
+            "the scheme is meant to be inferred from the checkpoint only; adding it "
+            "here makes it hand-selectable and able to contradict the checkpoint",
+        )
+
+
 class RouterLogitsFp32Test(unittest.TestCase):
     """GLM must route on fp32 logits.
 
