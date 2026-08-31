@@ -140,8 +140,10 @@ class BackendAvailabilityGuardTest(unittest.TestCase):
 
     @classmethod
     def _moe_config(cls):
+        quant_config = cls._quant_config()
         return SimpleNamespace(
-            model_config=SimpleNamespace(quant_config=cls._quant_config()),
+            model_config=SimpleNamespace(quant_config=quant_config),
+            quant_config=quant_config,
             ep_size=1,
             world_size=1,
             tp_size=1,
