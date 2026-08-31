@@ -349,6 +349,7 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
 
 
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
+_FLASH_MLA_SPARSE_TOPK_ALIGNMENT = 128
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
 # validate the environment once at module import instead of parsing it in the
@@ -647,7 +648,12 @@ def _get_window_topk_idxs_visible(
         inside = (query_positions >= image_start) & (query_positions <= image_end)
         start = torch.where(inside, torch.minimum(start, image_start), start)
         end = torch.where(inside, torch.maximum(end, image_end), end)
-    width = min(int(seq_len), int(window_size) + 384)
+    visible_width = min(int(seq_len), int(window_size) + 384)
+    width = (
+        (visible_width + _FLASH_MLA_SPARSE_TOPK_ALIGNMENT - 1)
+        // _FLASH_MLA_SPARSE_TOPK_ALIGNMENT
+        * _FLASH_MLA_SPARSE_TOPK_ALIGNMENT
+    )
     offsets = torch.arange(width, device=query_positions.device, dtype=torch.long)
     indices = start.unsqueeze(1) + offsets
     valid = (indices <= end.unsqueeze(1)) & (indices < int(seq_len))

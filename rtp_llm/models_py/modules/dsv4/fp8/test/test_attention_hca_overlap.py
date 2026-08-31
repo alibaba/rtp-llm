@@ -44,6 +44,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     PrefillQKV,
     SwaPrefillMeta,
     WorkspaceMeta,
+    _get_window_topk_idxs_visible,
     _prefill_cp_overlap_enabled,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
@@ -132,6 +133,30 @@ def _make_qkv(device: torch.device) -> PrefillQKV:
         q=torch.zeros(2, 4, dtype=torch.bfloat16, device=device),
         kv_full=torch.zeros(2, 4, dtype=torch.bfloat16, device=device),
     )
+
+
+class ImageVisibleTopKTest(unittest.TestCase):
+    def test_indices_are_flash_mla_aligned_without_changing_visibility(self) -> None:
+        positions = torch.arange(323, dtype=torch.long)
+        indices, lengths = _get_window_topk_idxs_visible(
+            128,
+            323,
+            positions,
+            torch.tensor([[10, 309]], dtype=torch.long),
+        )
+
+        self.assertEqual(tuple(indices.shape), (323, 384))
+        self.assertEqual(indices.shape[1] % 128, 0)
+        for row, expected in {
+            0: torch.arange(0, 1),
+            10: torch.arange(0, 310),
+            200: torch.arange(10, 310),
+            309: torch.arange(10, 310),
+            310: torch.arange(183, 311),
+        }.items():
+            visible = indices[row, : lengths[row]].to(torch.long)
+            self.assertTrue(torch.equal(visible, expected), row)
+            self.assertTrue(bool((indices[row, lengths[row] :] == -1).all()), row)
 
 
 class HCAOverlapGateTest(unittest.TestCase):
