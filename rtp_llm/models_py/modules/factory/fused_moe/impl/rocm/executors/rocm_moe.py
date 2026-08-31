@@ -25,6 +25,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm._utils import (
     get_rocm_fp8_dtype,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
+    try_deterministic_fp8_moe,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
@@ -260,6 +263,13 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             )
         )
 
+        # ROCmDevice.shuffle_moe_weight always converts MoE weights to the
+        # layout consumed by AITER's preshuffle_on kernels.  Tensor attributes
+        # can be dropped while the loaded tensors are registered on the model,
+        # so restore the layout marker at the executor boundary.
+        self.w1.is_shuffled = True
+        self.w2.is_shuffled = True
+
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
@@ -326,18 +336,31 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
             hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
             topk_weights = torch.ones_like(topk_weights, dtype=torch.float32)
 
-        output = fused_moe(
-            hidden_states,
-            self.w1,
-            self.w2,
-            topk_weights,
-            topk_ids,
-            quant_type=aiter.QuantType.per_Token,
+        activation_type = _moe_activation_type(activation)
+        output = try_deterministic_fp8_moe(
+            hidden_states=hidden_states,
+            w1=self.w1,
+            w2=self.w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             activation=activation_type,
             expert_mask=effective_expert_mask,
         )
+        if output is None:
+            output = fused_moe(
+                hidden_states,
+                self.w1,
+                self.w2,
+                topk_weights,
+                topk_ids,
+                quant_type=aiter.QuantType.per_Token,
+                w1_scale=self.w1_scale,
+                w2_scale=self.w2_scale,
+                activation=activation_type,
+                expert_mask=effective_expert_mask,
+            )
 
         return CombineForwardPayload(fused_expert_output=output)
 
