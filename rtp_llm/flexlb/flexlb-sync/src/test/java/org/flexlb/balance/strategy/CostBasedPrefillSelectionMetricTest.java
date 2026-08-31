@@ -15,7 +15,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
@@ -126,10 +126,10 @@ class CostBasedPrefillSelectionMetricTest {
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         CostBasedPrefillStrategy strategy = shortestTtft
                 ? new ShortestTTFTStrategy(
-                        new EngineWorkerStatus(registry), cache,
+                        new WorkerDirectory(registry), cache,
                         measureFactory, reporter)
                 : new CostBasedPrefillStrategy(
-                        new EngineWorkerStatus(registry), cache,
+                        new WorkerDirectory(registry), cache,
                         measureFactory, reporter);
 
         Request request = new Request();

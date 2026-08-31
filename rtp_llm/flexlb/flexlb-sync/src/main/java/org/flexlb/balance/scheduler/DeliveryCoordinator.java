@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -27,7 +27,7 @@ final class DeliveryCoordinator {
 
     BatcherCycleResult deliver(
             BatcherContext queue,
-            List<BatchItem> candidates,
+            List<ScheduledRequest> candidates,
             DeliveryMetadata proposedMetadata,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
@@ -59,7 +59,7 @@ final class DeliveryCoordinator {
     }
 
     double projectGroupDurationMs(
-            List<BatchItem> items,
+            List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator) {
         return mode.projectGroupDurationMs(deliveryItems(items), evaluator);
     }
@@ -96,9 +96,9 @@ final class DeliveryCoordinator {
         }
     }
 
-    /** BatchItem is the sole production DeliveryItem implementation here. */
+    /** ScheduledRequest is the sole production ScheduledRequest implementation here. */
     @SuppressWarnings("unchecked")
-    private static List<DeliveryItem> deliveryItems(List<BatchItem> items) {
-        return (List<DeliveryItem>) (List<?>) items;
+    private static List<ScheduledRequest> deliveryItems(List<ScheduledRequest> items) {
+        return (List<ScheduledRequest>) (List<?>) items;
     }
 }

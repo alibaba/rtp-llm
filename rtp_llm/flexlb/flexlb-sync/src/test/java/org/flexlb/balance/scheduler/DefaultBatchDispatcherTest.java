@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.BatchSubmissionPort;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -71,7 +71,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchSendsItemsToGrpcAndReceivesAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -87,7 +87,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesGrpcError() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
@@ -104,7 +104,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcResponse() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(null));
@@ -118,7 +118,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
                 .thenReturn(null);
 
@@ -132,7 +132,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(8L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(8L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(87L)
@@ -192,16 +192,16 @@ class DefaultBatchDispatcherTest {
     @Test
     void unexpectedPreSendFailureIsDefiniteAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem first = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem second = createBatchItem(2L, 500, 200, prefillEp);
+        ScheduledRequest first = createScheduledRequest(1L, 500, 200, prefillEp);
+        ScheduledRequest second = createScheduledRequest(2L, 500, 200, prefillEp);
         when(configService.loadBalanceConfig())
                 .thenThrow(new IllegalStateException("config unavailable before send"));
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> throwingCallback =
+        BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> throwingCallback =
                 (exactItem, completion) -> {
-                BatchItem item = assertInstanceOf(BatchItem.class, exactItem);
+                ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
                 if (completion instanceof SlotDeliveryPort.Completion.Failed) {
                     failures.incrementAndGet();
                     attempted.countDown();
@@ -225,16 +225,16 @@ class DefaultBatchDispatcherTest {
     @Test
     void synchronousRpcInvocationFailureIsUncertainAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem first = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem second = createBatchItem(2L, 500, 200, prefillEp);
+        ScheduledRequest first = createScheduledRequest(1L, 500, 200, prefillEp);
+        ScheduledRequest second = createScheduledRequest(2L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> throwingCallback =
+        BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> throwingCallback =
                 (exactItem, completion) -> {
-                BatchItem item = assertInstanceOf(BatchItem.class, exactItem);
+                ScheduledRequest item = assertInstanceOf(ScheduledRequest.class, exactItem);
                 if (completion instanceof SlotDeliveryPort.Completion.Failed) {
                     failures.incrementAndGet();
                 } else if (completion instanceof SlotDeliveryPort.Completion.Uncertain) {
@@ -259,7 +259,7 @@ class DefaultBatchDispatcherTest {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
@@ -295,7 +295,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -323,7 +323,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesMissingAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -342,8 +342,8 @@ class DefaultBatchDispatcherTest {
     void responseCallbackFailureIsIsolatedAndNeverReclassifiesOtherItemsAsUncertain()
             throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem succeeded = createBatchItem(11L, 500, 200, prefillEp);
-        BatchItem rejected = createBatchItem(12L, 500, 200, prefillEp);
+        ScheduledRequest succeeded = createScheduledRequest(11L, 500, 200, prefillEp);
+        ScheduledRequest rejected = createScheduledRequest(12L, 500, 200, prefillEp);
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(91L)
@@ -364,7 +364,7 @@ class DefaultBatchDispatcherTest {
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> throwingCallback =
+        BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> throwingCallback =
                 (exactItem, completion) -> {
                 if (completion == SlotDeliveryPort.Completion.Delivered.INSTANCE) {
                     successes.incrementAndGet();
@@ -399,7 +399,7 @@ class DefaultBatchDispatcherTest {
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         BatchSubmissionPort.PreparedSubmission permit = reservePermit();
 
         dispatcher.shutdown();
@@ -472,8 +472,8 @@ class DefaultBatchDispatcherTest {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        BatchItem firstItem = createBatchItem(1L, 500, 200, endpoint);
-        BatchItem secondItem = createBatchItem(2L, 500, 200, endpoint);
+        ScheduledRequest firstItem = createScheduledRequest(1L, 500, 200, endpoint);
+        ScheduledRequest secondItem = createScheduledRequest(2L, 500, 200, endpoint);
         BatchSubmissionPort.PreparedSubmission running = reservePermit();
         BatchSubmissionPort.PreparedSubmission queued = reservePermit();
         assertInstanceOf(CapacityBoundary.Unavailable.class,
@@ -493,7 +493,7 @@ class DefaultBatchDispatcherTest {
         dispatcher.shutdown();
         dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, endpoint);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, endpoint);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
@@ -545,7 +545,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchForwardsCarriedPriorityIntoGenerateInput() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         item.ctx().getRequest().setPriority(60);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -564,7 +564,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchLeavesPriorityUnsetForNoPriorityRequests() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         // default Request priority is the no-priority sentinel (0)
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -583,7 +583,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchDualWritesCompatibleRoleAddress() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
@@ -624,22 +624,22 @@ class DefaultBatchDispatcherTest {
                 CapacityBoundary.Unavailable.class, rejected.boundary());
     }
 
-    private void submit(List<BatchItem> items,
+    private void submit(List<ScheduledRequest> items,
                         long batchId,
                         long predictedMs,
                         String reason,
-                        BiConsumer<DeliveryItem,
+                        BiConsumer<ScheduledRequest,
                                 SlotDeliveryPort.Completion> observer) {
         reservePermit().submitBatch(
                 command(items, batchId, predictedMs, reason), observer);
     }
 
     private static BatchSubmissionPort.Command command(
-            List<BatchItem> items,
+            List<ScheduledRequest> items,
             long batchId,
             long predictedMs,
             String reason) {
-        List<DeliveryItem> exactItems = new java.util.ArrayList<>(items);
+        List<ScheduledRequest> exactItems = new java.util.ArrayList<>(items);
         return new BatchSubmissionPort.Command(
                 exactItems,
                 batchId,
@@ -670,7 +670,7 @@ class DefaultBatchDispatcherTest {
         return endpoint;
     }
 
-    private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+    private ScheduledRequest createScheduledRequest(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -696,7 +696,7 @@ class DefaultBatchDispatcherTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null,
+        return new ScheduledRequest(ctx, new CompletableFuture<>(), null, prefill, null,
                 prefillEp, null, null, System.currentTimeMillis());
     }
 
@@ -714,7 +714,7 @@ class DefaultBatchDispatcherTest {
     // ---- Test callback ----
 
     private static class TestCallback
-            implements BiConsumer<DeliveryItem,
+            implements BiConsumer<ScheduledRequest,
                     SlotDeliveryPort.Completion> {
         final AtomicInteger successCount = new AtomicInteger(0);
         final AtomicInteger failureCount = new AtomicInteger(0);
@@ -726,7 +726,7 @@ class DefaultBatchDispatcherTest {
 
         @Override
         public void accept(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 SlotDeliveryPort.Completion completion) {
             if (completion == SlotDeliveryPort.Completion.Delivered.INSTANCE) {
                 successCount.incrementAndGet();

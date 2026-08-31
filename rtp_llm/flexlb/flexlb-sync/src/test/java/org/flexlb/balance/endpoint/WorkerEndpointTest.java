@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
@@ -72,8 +72,8 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_decreasesCommittedWork() {
-        BatchItem first = item(100L, 1000);
-        BatchItem second = item(101L, 500);
+        ScheduledRequest first = item(100L, 1000);
+        ScheduledRequest second = item(101L, 500);
         registerBatch(1L, 500, first);
         registerBatch(2L, 300, second);
 
@@ -83,16 +83,16 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_unknownBatchId_noEffect() {
-        BatchItem committed = item(100L, 1000);
+        ScheduledRequest committed = item(100L, 1000);
         registerBatch(1L, 500, committed);
-        BatchItem unknown = item(999L, 1000);
+        ScheduledRequest unknown = item(999L, 1000);
         assertTrue(!endpoint.releaseCommittedItem(unknown));
         assertCommittedWorkNear(500);
     }
 
     @Test
     void releaseBatch_neverGoesNegative() {
-        BatchItem item = item(100L, 1000);
+        ScheduledRequest item = item(100L, 1000);
         registerBatch(1L, 100, item);
         assertTrue(endpoint.releaseCommittedItem(item));
         assertTrue(!endpoint.releaseCommittedItem(item));
@@ -168,9 +168,9 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_removesFailedRequests() {
-        BatchItem first = item(100L, 1000);
-        BatchItem failed = item(101L, 2000);
-        BatchItem third = item(102L, 3000);
+        ScheduledRequest first = item(100L, 1000);
+        ScheduledRequest failed = item(101L, 2000);
+        ScheduledRequest third = item(102L, 3000);
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.releaseCommittedItem(failed));
 
@@ -179,7 +179,7 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_allFailed_removesBatch() {
-        BatchItem item = item(100L, 1000);
+        ScheduledRequest item = item(100L, 1000);
         registerBatch(5L, 500, item);
         assertTrue(endpoint.releaseCommittedItem(item));
 
@@ -341,14 +341,14 @@ class WorkerEndpointTest {
     private void registerBatch(
             long batchId,
             long predictedMs,
-            BatchItem... items) {
-        for (BatchItem item : items) {
+            ScheduledRequest... items) {
+        for (ScheduledRequest item : items) {
             if (!EndpointTestSupport.offer(endpoint, item)) {
                 throw new IllegalStateException(
                         "test item could not be offered to endpoint queue");
             }
         }
-        try (PrefillWorkLedger.CommittedHandoff ignored =
+        try (PrefillState.CommittedHandoff ignored =
                      EndpointTestSupport.commitBatch(
                              endpoint, batchId, predictedMs, List.of(items))) {
             // Closing transfers only the generation handoff. The ledger keeps
@@ -356,8 +356,8 @@ class WorkerEndpointTest {
         }
     }
 
-    private BatchItem item(long requestId, long seqLen) {
-        return new BatchItem(
+    private ScheduledRequest item(long requestId, long seqLen) {
+        return new ScheduledRequest(
                 ctx(requestId, seqLen),
                 null,
                 null,

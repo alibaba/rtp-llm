@@ -14,8 +14,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,15 +29,12 @@ import static org.mockito.ArgumentMatchers.any;
 class CostBasedDecodeStrategyTest {
 
     private ConfigService configService;
+    private Map<String, WorkerStatus> decodeStatuses;
 
     @BeforeEach
     void setUp() {
         configService = new ConfigService();
-    }
-
-    @org.junit.jupiter.api.AfterEach
-    void tearDown() {
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        decodeStatuses = new HashMap<>();
     }
 
     WorkerStatus createWorkerStatus(String ip) {
@@ -70,15 +66,12 @@ class CostBasedDecodeStrategyTest {
     private WorkerStatus registerWorker(String ip, long totalKv, long availableKv) {
         WorkerStatus worker = createWorkerStatus(ip);
         setKv(worker, totalKv, availableKv);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
-                .getDecodeStatusMap()
-                .put(ip + ":8080", worker);
+        decodeStatuses.put(ip + ":8080", worker);
         return worker;
     }
 
     private EndpointRegistry decodeRegistry() {
-        return createDecodeRegistry(
-                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap());
+        return createDecodeRegistry(decodeStatuses);
     }
 
     private CostBasedDecodeStrategy availableStrategy(EndpointRegistry registry) {
@@ -86,7 +79,7 @@ class CostBasedDecodeStrategyTest {
         allowDecodeSelection(measure);
         ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
         Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
-        return new CostBasedDecodeStrategy(new EngineWorkerStatus(registry), factory);
+        return new CostBasedDecodeStrategy(new WorkerDirectory(registry), factory);
     }
 
     private BalanceContext context(long sequenceLength, long requestId) {
@@ -102,7 +95,7 @@ class CostBasedDecodeStrategyTest {
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
         EndpointRegistry emptyRegistry = StrategyTestSupport.endpointRegistry(configService);
-        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
+        WorkerDirectory engineWorkerStatus = new WorkerDirectory(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
@@ -148,11 +141,9 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_handle_group_selection_when_group_parameter_provided() {
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1", "group-a");
 
-        modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
+        decodeStatuses.put("127.0.0.1:8080", worker1);
 
         CostBasedDecodeStrategy costBasedDecodeStrategy = availableStrategy(decodeRegistry());
         BalanceContext balanceContext = context(1_000, 1_000L);
@@ -280,7 +271,7 @@ class CostBasedDecodeStrategyTest {
         ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
         Mockito.when(factory.getMeasure(Mockito.any())).thenReturn(measure);
         CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
-                new EngineWorkerStatus(registry), factory);
+                new WorkerDirectory(registry), factory);
 
         BalanceContext context = context(100, 3L);
         Request request = context.getRequest();

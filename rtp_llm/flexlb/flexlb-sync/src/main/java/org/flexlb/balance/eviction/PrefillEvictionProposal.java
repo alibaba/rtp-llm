@@ -1,6 +1,6 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.Comparator;
 import java.util.List;
@@ -17,7 +17,7 @@ import java.util.List;
  */
 public record PrefillEvictionProposal(
         String endpointId,
-        List<DeliveryItem> victims,
+        List<ScheduledRequest> victims,
         long rawCost,
         PlanCost cost) {
 

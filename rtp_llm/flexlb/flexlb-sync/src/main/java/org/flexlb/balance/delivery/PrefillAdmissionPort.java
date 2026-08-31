@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import java.util.List;
 import java.util.OptionalLong;
 
@@ -13,7 +15,7 @@ public interface PrefillAdmissionPort {
 
     /** Begin an empty admission transaction scoped by the first candidate. */
     CapacityBoundary.Attempt<PreparedAdmission> tryBegin(
-            DeliveryItem firstCandidate);
+            ScheduledRequest firstCandidate);
 
     /** Atomic admission transaction for one exact ordered prefix. */
     interface PreparedAdmission extends AutoCloseable {
@@ -25,8 +27,8 @@ public interface PrefillAdmissionPort {
         OptionalLong correlationId();
 
         /** Prepare the next exact member; acceptance returns that same object. */
-        CapacityBoundary.Attempt<DeliveryItem> tryAppend(
-                DeliveryItem exactNextItem,
+        CapacityBoundary.Attempt<ScheduledRequest> tryAppend(
+                ScheduledRequest exactNextItem,
                 long predictedMs);
 
         /**
@@ -36,7 +38,7 @@ public interface PrefillAdmissionPort {
          * Repeated commit or append after commit must throw.
          */
         CommittedAdmission commitPreparedUnderLock(
-                List<DeliveryItem> exactItems,
+                List<ScheduledRequest> exactItems,
                 long predictedMs);
 
         /**
@@ -62,7 +64,7 @@ public interface PrefillAdmissionPort {
      */
     interface CommittedAdmission extends AutoCloseable {
 
-        boolean transferToEndpoint(DeliveryItem exactItem);
+        boolean transferToEndpoint(ScheduledRequest exactItem);
 
         @Override
         void close();

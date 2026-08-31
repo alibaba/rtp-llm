@@ -4,10 +4,10 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.CapacityBoundary.Attempt;
 import org.flexlb.balance.delivery.CapacityBoundary.Attempt.Accepted;
 import org.flexlb.balance.delivery.CapacityBoundary.Attempt.Rejected;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.PrefillAdmissionPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources.CommittedAdmissionOwner;
 import org.flexlb.balance.scheduler.PrefillAdmissionResources.Member;
@@ -56,11 +56,11 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
 
     @Override
     public Attempt<PreparedAdmission> tryBegin(
-            DeliveryItem firstCandidate) {
-        final BatchItem exact;
+            ScheduledRequest firstCandidate) {
+        final ScheduledRequest exact;
         final long batchId;
         try {
-            exact = (BatchItem) firstCandidate;
+            exact = firstCandidate;
             batchId = batchIds.getAsLong();
             if (batchId <= 0L) {
                 throw new IllegalStateException(
@@ -85,7 +85,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
             implements PreparedAdmission {
         private final long batchId;
         private final PrefillEndpoint prefill;
-        private PrefillWorkLedger.BatchReservation reservation;
+        private PrefillState.BatchReservation reservation;
         private ArrayList<Member> members;
         private Member pendingMember;
         private boolean ownershipResolved;
@@ -104,29 +104,29 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
         }
 
         @Override
-        public synchronized Attempt<DeliveryItem> tryAppend(
-                DeliveryItem exactNextItem,
+        public synchronized Attempt<ScheduledRequest> tryAppend(
+                ScheduledRequest exactNextItem,
                 long predictedMs) {
             requirePrepared("append");
-            final BatchItem exact;
+            final ScheduledRequest exact;
             try {
-                exact = (BatchItem) exactNextItem;
+                exact = exactNextItem;
             } catch (RuntimeException | Error failure) {
                 return failed(failure);
             }
 
             try {
-                Attempt<DeliveryItem> acceptedItem = accepted(exact);
+                Attempt<ScheduledRequest> acceptedItem = accepted(exact);
                 members.ensureCapacity(Math.addExact(members.size(), 1));
                 boolean first = members.isEmpty();
                 if (first) {
-                    PrefillWorkLedger.BatchReservationResult result =
+                    PrefillState.BatchReservationResult result =
                             prefill.reserveBatch(
                                     exact,
                                     batchId,
                                     exact.maxInflightDeliveriesPerPrefillWorker());
                     if (result.status()
-                            != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+                            != PrefillState.CapacityStatus.ACQUIRED) {
                         return rejectedPrefill(
                                 exact,
                                 result.status(),
@@ -137,9 +137,9 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
                     }
                     reservation = result.reservation();
                 }
-                Attempt<DeliveryItem> result =
+                Attempt<ScheduledRequest> result =
                         prepareAndAddMember(exact, acceptedItem);
-                if (first && result instanceof Rejected<DeliveryItem> rejected) {
+                if (first && result instanceof Rejected<ScheduledRequest> rejected) {
                     return abort(rejected.boundary());
                 }
                 return result;
@@ -155,7 +155,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
 
         /** Capture before the no-allocation list bind. */
         private <T> Attempt<T> prepareAndAddMember(
-                BatchItem item,
+                ScheduledRequest item,
                 Attempt<T> acceptedResult) {
             return switch (prepareMember(item)) {
                 case Accepted<Member>(var member) -> {
@@ -183,7 +183,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
 
         @Override
         public synchronized CommittedAdmission commitPreparedUnderLock(
-                List<DeliveryItem> exactItems,
+                List<ScheduledRequest> exactItems,
                 long predictedMs) {
             requirePrepared("commit");
             if (!sameIdentitySequence(members, exactItems)) {
@@ -196,8 +196,8 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
             }
             CommittedAdmissionOwner committedOwner =
                     createCommittedOwner(members, 1);
-            PrefillWorkLedger.CommittedHandoff handoff =
-                    reservation.commitUnderLock(exactItems, predictedMs);
+            PrefillState.CommittedHandoff handoff =
+                    reservation.commit(exactItems, predictedMs);
             committedOwner.bindBatchHandoff(handoff);
             ownershipResolved = true;
             reservation = null;
@@ -215,7 +215,7 @@ public final class BatchPrefillAdmission implements PrefillAdmissionPort {
 
         /** Detach once, then attempt every rollback leaf. */
         private Throwable rollbackAll(Throwable priorFailure) {
-            PrefillWorkLedger.Reservation exactReservation;
+            PrefillState.Reservation exactReservation;
             ArrayList<Member> exactMembers;
             Member exactPending;
             synchronized (this) {

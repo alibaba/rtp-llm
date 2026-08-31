@@ -37,7 +37,7 @@ import static org.mockito.Mockito.when;
  * <p>Key mechanism:
  * <ul>
  *   <li>The base class starts one prefill worker (worker A) and registers it in
- *       {@code EndpointRegistry} and {@code EngineWorkerStatus}</li>
+ *       {@code EndpointRegistry} and {@code WorkerDirectory}</li>
  *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
  *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
  *   <li>The mock {@code Router} is reset and reconfigured to return routing

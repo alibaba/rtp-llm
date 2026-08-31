@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
+import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
@@ -23,12 +23,12 @@ import java.util.function.BooleanSupplier;
  * <p>The object is thread-confined to the routing/scheduling call.  It owns
  * both endpoint-generation pins. Exact Decode capacity is acquired only in
  * the short publication transaction. A successful commit moves ownership to
- * the canonical RequestSlot / BatchItem; closing rolls back local ownership.</p>
+ * the canonical RequestSlot / ScheduledRequest; closing rolls back local ownership.</p>
  */
 public final class QueueRouteAdmission implements AutoCloseable {
 
     public sealed interface PublishResult {
-        record Published(BatchItem item) implements PublishResult {
+        record Published(ScheduledRequest item) implements PublishResult {
         }
 
         record Blocked(PlacementKey blocker) implements PublishResult {
@@ -48,7 +48,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
 
     private final long requestId;
     private final Response response;
-    private final BatchItem.DecodeReselection decodeReselection;
+    private final ScheduledRequest.DecodeReselection decodeReselection;
     private final PlacementAvailability placementAvailability;
     private OwnedRoute ownedRoute;
 
@@ -56,7 +56,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             long requestId,
             Response response,
             OwnedRoute ownedRoute,
-            BatchItem.DecodeReselection decodeReselection,
+            ScheduledRequest.DecodeReselection decodeReselection,
             PlacementAvailability placementAvailability) {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
@@ -76,7 +76,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             BalanceContext context,
             List<SelectedRole> selectedRoles,
             Response response,
-            BatchItem.DecodeReselection decodeReselection,
+            ScheduledRequest.DecodeReselection decodeReselection,
             PlacementAvailability placementAvailability) {
         long requestId = context.getRequestId();
 
@@ -240,7 +240,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         return status == null ? null : placementKey(status);
     }
 
-    public BatchItem buildItem(
+    public ScheduledRequest buildItem(
             BalanceContext context,
             CompletableFuture<Response> future,
             long enqueuedAtMs) {
@@ -249,7 +249,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     "queue admission cannot build another request");
         }
         OwnedRoute route = requireOwned();
-        return new BatchItem(
+        return new ScheduledRequest(
                 context,
                 future,
                 response,
@@ -277,7 +277,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     placementKey(route.decodeStatus()));
         }
         route = requireOwned();
-        BatchItem item = buildItem(
+        ScheduledRequest item = buildItem(
                 context, future, System.currentTimeMillis());
         context.setRouteSubmittedNanos(System.nanoTime());
         OwnedRoute exact = route;
@@ -360,7 +360,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
      */
     public boolean commitTo(
             RequestLifecycleCoordinator lifecycle,
-            BatchItem item,
+            ScheduledRequest item,
             boolean priorityAdmission) {
         OwnedRoute route = requireOwned();
         return commitPublication(
@@ -376,7 +376,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
     private RequestLifecycleCoordinator.RouteCommitResult commitPublication(
             OwnedRoute route,
             RequestLifecycleCoordinator lifecycle,
-            BatchItem item,
+            ScheduledRequest item,
             boolean priorityAdmission,
             BooleanSupplier activePublication) {
         if (requireOwned() != route) {
@@ -402,32 +402,32 @@ public final class QueueRouteAdmission implements AutoCloseable {
     /** Commit one exact queue replacement; missing victims never degrade to a plain offer. */
     public ReplacementCommit commitReplacingQueuedVictims(
             RequestLifecycleCoordinator lifecycle,
-            BatchItem item,
+            ScheduledRequest item,
             boolean priorityAdmission,
-            List<DeliveryItem> exactVictims) {
+            List<ScheduledRequest> exactVictims) {
         OwnedRoute route = requireOwned();
         PreparedReplacement prepared = PreparedReplacement.prepare(exactVictims);
-        PrefillGenerationRuntime.QueueReplacement[] replacement =
-                new PrefillGenerationRuntime.QueueReplacement[1];
+        WorkerBatcher.QueueReplacement[] replacement =
+                new WorkerBatcher.QueueReplacement[1];
         boolean committed = commitPublication(
                 route,
                 lifecycle,
                 item,
                 priorityAdmission,
                 () -> {
-                    PrefillGenerationRuntime.QueueReplacement result =
+                    WorkerBatcher.QueueReplacement result =
                             route.prefillEndpoint().replaceQueued(
                                     route.prefillPin(),
                                     prepared.deliveryItems(),
                                     item);
                     replacement[0] = result;
                     return result.status()
-                            == PrefillGenerationRuntime.QueueReplacementStatus.SUCCESS;
+                            == WorkerBatcher.QueueReplacementStatus.SUCCESS;
                 }) == RequestLifecycleCoordinator.RouteCommitResult.PUBLISHED;
         return prepared.resolve(committed, replacement[0]);
     }
 
-    private static boolean tryOfferPinned(OwnedRoute route, BatchItem item) {
+    private static boolean tryOfferPinned(OwnedRoute route, ScheduledRequest item) {
         return route.prefillEndpoint().offerPinned(
                 route.prefillPin(), item);
     }
@@ -448,14 +448,14 @@ public final class QueueRouteAdmission implements AutoCloseable {
      * before the endpoint can atomically replace queue ownership.
      */
     private record PreparedReplacement(
-            List<DeliveryItem> deliveryItems,
+            List<ScheduledRequest> deliveryItems,
             ReplacementCommit success,
             ReplacementCommit conflict,
             ReplacementCommit declined,
             ReplacementCommit notAttempted) {
 
         private static PreparedReplacement prepare(
-                List<DeliveryItem> exactVictims) {
+                List<ScheduledRequest> exactVictims) {
             return new PreparedReplacement(
                     exactVictims,
                     new ReplacementCommit(ReplacementStatus.SUCCESS),
@@ -466,7 +466,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
 
         private ReplacementCommit resolve(
                 boolean committed,
-                PrefillGenerationRuntime.QueueReplacement replacement) {
+                WorkerBatcher.QueueReplacement replacement) {
             if (replacement == null) {
                 if (committed) {
                     throw new IllegalStateException(
@@ -505,7 +505,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             throw new IllegalStateException(
                     "queue route admission ownership changed during commit");
         }
-        // RequestSlot/BatchItem now owns the exact Decode reservation. Clear
+        // RequestSlot/ScheduledRequest now owns the exact Decode reservation. Clear
         // the admission owner before exact no-fail pin release.
         ownedRoute = null;
         expected.prefillPin().close();

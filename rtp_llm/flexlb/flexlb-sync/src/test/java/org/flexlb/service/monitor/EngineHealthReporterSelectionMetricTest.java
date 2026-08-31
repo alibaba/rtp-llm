@@ -8,6 +8,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,6 +38,8 @@ class EngineHealthReporterSelectionMetricTest {
     private EventLoopGroup serverSelector;
     @Mock
     private EventLoopGroup grpcEventLoop;
+    @Mock
+    private WorkerDirectory workerDirectory;
 
     private EngineHealthReporter reporter;
 
@@ -46,7 +49,8 @@ class EngineHealthReporterSelectionMetricTest {
         when(loopResources.onServerSelect(true)).thenReturn(serverSelector);
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
         reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, engineGrpcClient, loopResources);
+                monitor, cacheMetricsReporter, engineGrpcClient, loopResources,
+                workerDirectory);
     }
 
     @Test

@@ -2,10 +2,10 @@ package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.admission.AdmissionFailure;
 import org.flexlb.balance.admission.AdmissionMutation;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
+import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
 import org.flexlb.balance.eviction.EvictionPlacementPort.DecodePlacement;
 import org.flexlb.balance.eviction.EvictionPlacementPort.PrefillEvictionAdmission;
 import org.flexlb.balance.eviction.EvictionPlacementPort.PrefillEvictionCommit;
@@ -211,7 +211,7 @@ public class EvictionManager {
             return replacement;
         }
 
-        for (DeliveryItem victim : replacement.removed()) {
+        for (ScheduledRequest victim : replacement.removed()) {
             settlePrefillVictim(envelope, victim, proposal.endpointId());
         }
 
@@ -240,7 +240,7 @@ public class EvictionManager {
      * chain or publishing past incomplete cleanup.
      */
     private void settlePrefillVictim(PriorityRequestEnvelope incoming,
-                                     DeliveryItem victim,
+                                     ScheduledRequest victim,
                                      String endpointId) {
         String detail = "yielded to higher-priority request " + incoming.requestId();
         lifecycle.finishYielded(victim, detail);

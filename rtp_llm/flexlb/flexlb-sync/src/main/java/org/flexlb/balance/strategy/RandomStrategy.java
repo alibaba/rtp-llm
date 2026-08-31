@@ -15,7 +15,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -27,12 +27,12 @@ import java.util.concurrent.ThreadLocalRandom;
 public class RandomStrategy implements LoadBalanceStrategy {
     private static final org.slf4j.Logger logger = LoggerFactory.getLogger(RandomStrategy.class);
 
-    private final EngineWorkerStatus engineWorkerStatus;
+    private final WorkerDirectory workerDirectory;
     private final ResourceMeasureFactory resourceMeasureFactory;
 
-    public RandomStrategy(EngineWorkerStatus engineWorkerStatus,
+    public RandomStrategy(WorkerDirectory workerDirectory,
                           ResourceMeasureFactory resourceMeasureFactory) {
-        this.engineWorkerStatus = engineWorkerStatus;
+        this.workerDirectory = workerDirectory;
         this.resourceMeasureFactory = resourceMeasureFactory;
     }
 
@@ -58,7 +58,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
         FlexlbConfig config = balanceContext.getConfig();
 
         List<String> candidateAddresses =
-                engineWorkerStatus.modelWorkerAddressSnapshot(roleType);
+                workerDirectory.endpointAddressSnapshot(roleType);
         if (candidateAddresses.isEmpty()) {
             logger.warn("No worker status map found");
             return null;
@@ -82,7 +82,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
             for (int offset = 0; offset < size; offset++) {
                 String address = candidateAddresses.get((startIndex + offset) % size);
                 WorkerEndpoint.GenerationPin pin =
-                        engineWorkerStatus.captureModelWorkerEndpoint(roleType, address);
+                        workerDirectory.captureEndpoint(roleType, address);
                 if (pin == null) {
                     if (physicalCapacity != null) {
                         physicalCapacity.markUnknown();

@@ -2,8 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.admission.AdmissionFailure;
 import org.flexlb.balance.admission.AdmissionMutation;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -60,8 +60,7 @@ import java.util.function.Supplier;
  * it never owns dispatcher permits, batch ids, or route handoff resources.
  */
 @Component
-final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
-        SlotDeliveryPort,
+final class RequestLifecycleCoordinator implements SlotDeliveryPort,
         EvictionLifecyclePort,
         PreemptionLifecyclePort {
 
@@ -302,7 +301,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
      * Mirrors the duplicate-request check in {@link #submit}.
      */
     boolean commitItemForPublication(
-            BatchItem item,
+            ScheduledRequest item,
             boolean priorityAdmission,
             BooleanSupplier publication) {
         Objects.requireNonNull(publication, "publication");
@@ -347,7 +346,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     }
 
     RouteCommitResult commitRoute(
-            BatchItem item,
+            ScheduledRequest item,
             boolean priorityAdmission,
             int acceptanceLimit,
             long acceptanceTimeoutMs,
@@ -426,7 +425,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     }
 
     private RequestSlot.AdmissionCleanup rollbackAdmissionPublication(
-            RequestSlot slot, BatchItem item) {
+            RequestSlot slot, ScheduledRequest item) {
         synchronized (slot) {
             return slot.rollbackAdmissionPublication(item);
         }
@@ -652,7 +651,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
             }
             String detail = cancelDetail(firstCause);
             RequestLifecycleSnapshot current = entry.snapshot();
-            BatchItem item = entry.activeItem();
+            ScheduledRequest item = entry.activeItem();
             if (item == null) {
                 localCompletion = beginTerminalLocked(
                         entry,
@@ -716,7 +715,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
         }
     }
 
-    private void fenceAfterDeliveryTimeout(BatchItem item, String detail) {
+    private void fenceAfterDeliveryTimeout(ScheduledRequest item, String detail) {
         RequestSlot entry = entryFor(item);
         if (entry == null) {
             return;
@@ -738,9 +737,9 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
      * same exact-once release/tombstone chain as other local victim terminals.
      */
     @Override
-    public void finishYielded(DeliveryItem victim, String detail) {
+    public void finishYielded(ScheduledRequest victim, String detail) {
         finishVictim(
-                (BatchItem) victim,
+                victim,
                 StrategyErrorType.NO_AVAILABLE_WORKER,
                 detail);
     }
@@ -752,7 +751,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
             throw new IllegalArgumentException("reservationToken must be positive");
         }
         RequestSlot entry = requestSlots.get(requestId);
-        BatchItem victim = null;
+        ScheduledRequest victim = null;
         if (entry != null) {
             synchronized (entry) {
                 victim = entry.activeItemForReservation(reservationToken);
@@ -777,7 +776,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
      * completion with the caller's terminal error type, tombstone. Each step
      * applies at most once regardless of repeats or terminal-path races.
      */
-    private void finishVictim(BatchItem victim, StrategyErrorType errorType, String detail) {
+    private void finishVictim(ScheduledRequest victim, StrategyErrorType errorType, String detail) {
         RequestSlot entry = entryFor(victim);
         if (entry != null) {
             PreemptionWork work;
@@ -1034,7 +1033,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
             if (entry.deferCancellationDuringAdmission(reason, detail)) {
                 return entry.snapshot();
             }
-            BatchItem item = entry.activeItem();
+            ScheduledRequest item = entry.activeItem();
             if (item == null) {
                 entry.rememberCancellation(reason, detail);
                 localCompletion = beginTerminalLocked(
@@ -1087,7 +1086,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     }
 
     private static CancelTarget cancelTarget(
-            BatchItem item) {
+            ScheduledRequest item) {
         ServerStatus prefill = item == null ? null : item.prefill();
         return prefill == null ? null
                 : new CancelTarget(
@@ -1150,7 +1149,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
             throw new IllegalStateException(
                     "Engine fence terminal settlement requires slot lock");
         }
-        BatchItem item = entry.activeItem();
+        ScheduledRequest item = entry.activeItem();
         DecodeEndpoint endpoint = item == null ? null : item.decodeEp();
         PreemptionRegistration transferred = proof.transferred();
         Throwable failure = null;
@@ -1187,7 +1186,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
                     settleFenceEndpointTerminalLocked(entry, proof);
             transferred = settlement.transferred();
             isolatedFailure = settlement.failure();
-            BatchItem item = entry.activeItem();
+            ScheduledRequest item = entry.activeItem();
             String proofDetail = proof.detail()
                     + "; engine reported TOMBSTONED";
             action = entry.hasCancellationFirstCause()
@@ -1278,7 +1277,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     private PreemptionWork reduceDeferredTerminalFactLocked(
             RequestSlot entry,
             DeferredTerminal terminal) {
-        BatchItem item = entry.activeItem();
+        ScheduledRequest item = entry.activeItem();
         if (item == null) {
             return PreemptionWork.STALE;
         }
@@ -1410,7 +1409,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
         Response response;
         if (observation.successful()) {
             transition = owner -> owner.complete("decode completed");
-            BatchItem item = entry.activeItem();
+            ScheduledRequest item = entry.activeItem();
             response = buildSuccessResponse(
                     item, entry.snapshot().deliveryClaimKind());
         } else {
@@ -1520,11 +1519,10 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
                 || work != null && work.publication() != null;
     }
 
-    // ==================== DeliveryLifecyclePort callbacks ====================
+    // ==================== Queue lifecycle callbacks ====================
 
-    @Override
-    public void onQueuedItemExpired(DeliveryItem exactItem) {
-        BatchItem head = (BatchItem) exactItem;
+    public void onQueuedItemExpired(ScheduledRequest exactItem) {
+        ScheduledRequest head = exactItem;
         if (entryFor(head) != null) {
             // The batcher and the request timer may observe the same absolute
             // expiration concurrently. Both must enter the cancellation
@@ -1536,11 +1534,10 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
         }
     }
 
-    @Override
     public void onQueueOfferFailure(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             Throwable error) {
-        BatchItem item = (BatchItem) exactItem;
+        ScheduledRequest item = exactItem;
         String failureDetail = error == null ? "queue full" : error.getMessage();
         RequestSlot entry = entryFor(item);
         if (entry != null) {
@@ -1556,9 +1553,8 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
         }
     }
 
-    @Override
     public void onPreparedDeliveryFailure(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             Throwable error) {
         failPrepared(exactItem, error);
     }
@@ -1566,7 +1562,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     // ==================== Delivery pipeline ====================
 
     /** Caller holds the exact RequestSlot. */
-    private boolean ownsPreparedDelivery(RequestSlot entry, BatchItem item) {
+    private boolean ownsPreparedDelivery(RequestSlot entry, ScheduledRequest item) {
         RequestLifecycleSnapshot snapshot = entry.snapshot();
         return entry.ownsActiveItem(item)
                 && entry.isOpen()
@@ -1577,9 +1573,9 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
 
     @Override
     public <T> Optional<T> prepareIfOwned(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             Supplier<T> preparation) {
-        BatchItem item = (BatchItem) exactItem;
+        ScheduledRequest item = exactItem;
         RequestSlot entry = entryFor(item);
         if (entry == null) {
             return Optional.empty();
@@ -1594,10 +1590,10 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
 
     @Override
     public SlotDeliveryPort.Claim tryClaimForDelivery(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             SlotDeliveryPort.Identity identity,
             BooleanSupplier endpointHandoff) {
-        BatchItem item = (BatchItem) exactItem;
+        ScheduledRequest item = exactItem;
         RequestSlot entry = entryFor(item);
         if (entry == null) {
             return null;
@@ -1647,14 +1643,14 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
             implements SlotDeliveryPort.Claim {
         private final RequestLifecycleCoordinator owner;
         private final RequestSlot slot;
-        private final BatchItem item;
+        private final ScheduledRequest item;
         private final SlotDeliveryPort.Identity identity;
         private boolean completed;
 
         private SlotDeliveryClaim(
                 RequestLifecycleCoordinator owner,
                 RequestSlot slot,
-                BatchItem item,
+                ScheduledRequest item,
                 SlotDeliveryPort.Identity identity) {
             this.owner = owner;
             this.slot = slot;
@@ -1663,7 +1659,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
         }
 
         @Override
-        public BatchItem item() {
+        public ScheduledRequest item() {
             return item;
         }
     }
@@ -1714,7 +1710,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
 
     private record DeliveryPublication(
             RequestSlot slot,
-            BatchItem item,
+            ScheduledRequest item,
             Response response,
             RequestSlot.DeliveryConfirmation confirmation,
             DeliveryClaimKind deliveryKind,
@@ -1724,7 +1720,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     /** Called with {@code entry} locked. */
     private PreemptionWork confirmRouteDecisionLocked(
             RequestSlot entry,
-            BatchItem item) {
+            ScheduledRequest item) {
         if (!entry.ownsDeliveryClaim(
                 item, DeliveryClaimKind.ROUTE_DECISION, 0L)) {
             return PreemptionWork.STALE;
@@ -1824,7 +1820,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     /** Called with {@code entry} locked. */
     private PreemptionWork confirmBatchEnqueueLocked(
             RequestSlot entry,
-            BatchItem item) {
+            ScheduledRequest item) {
         RequestLifecycleSnapshot current = entry.snapshot();
         long batchId = current.batchId();
         if (!entry.ownsDeliveryClaim(
@@ -1847,7 +1843,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
      */
     private PublicationWork deliveryPublication(
             RequestSlot entry,
-            BatchItem item,
+            ScheduledRequest item,
             RequestSlot.DeliveryConfirmation confirmation,
             DeliveryClaimKind deliveryKind,
             long batchId) {
@@ -1905,7 +1901,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     private RequestSlot.PublicationPermit finishTerminal(
             TerminalAction action) {
         RequestSlot entry = action.slot();
-        BatchItem item = action.item();
+        ScheduledRequest item = action.item();
         Throwable cleanupFailure = null;
         cleanupFailure = runTerminalLeaf(
                 cleanupFailure,
@@ -2058,7 +2054,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     }
 
     private Response buildSuccessResponse(
-            BatchItem item,
+            ScheduledRequest item,
             DeliveryClaimKind deliveryKind) {
         Response success = copyResponse(item.routeResponse());
         replaceDecodeStatus(success, item.decode());
@@ -2091,8 +2087,8 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     }
 
     @Override
-    public void failPrepared(DeliveryItem exactItem, Throwable cause) {
-        BatchItem item = (BatchItem) exactItem;
+    public void failPrepared(ScheduledRequest exactItem, Throwable cause) {
+        ScheduledRequest item = exactItem;
         RequestSlot entry = entryFor(item);
         if (entry == null) {
             return;
@@ -2133,7 +2129,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     // ==================== Internal: resource rollback ====================
 
     /** Rollback using endpoint references already held by the item (no registry lookup). */
-    private void rollback(BatchItem item) {
+    private void rollback(ScheduledRequest item) {
         DecodeEndpoint decodeEp = item.decodeEp();
         DecodeEndpoint.ReservationHandle reservation =
                 item.decodeReservation();
@@ -2150,7 +2146,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
     private static Runnable workerStatusCounterpartCleanup(
             RequestSlot entry,
             WorkerTerminalSource source) {
-        BatchItem item = entry.activeItem();
+        ScheduledRequest item = entry.activeItem();
         if (item == null) {
             return null;
         }
@@ -2169,7 +2165,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
         return exactPrefillCounterpartCleanup(item);
     }
 
-    private static Runnable exactPrefillCounterpartCleanup(BatchItem item) {
+    private static Runnable exactPrefillCounterpartCleanup(ScheduledRequest item) {
         PrefillEndpoint prefill = item.prefillEp();
         return prefill == null
                 ? null : () -> prefill.releaseCommittedItem(item);
@@ -2177,7 +2173,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
 
     // ==================== Internal: requestSlots queries ====================
 
-    private RequestSlot entryFor(BatchItem item) {
+    private RequestSlot entryFor(ScheduledRequest item) {
         RequestSlot entry = requestSlots.get(item.requestId());
         if (entry == null) {
             return null;
@@ -2195,7 +2191,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
      * a batch member. Consulting RequestLifecycle here creates a commit window
      * in which Registry is committed but lifecycle delivery has not started.
      */
-    private void releasePrefillAccounting(BatchItem item) {
+    private void releasePrefillAccounting(ScheduledRequest item) {
         PrefillEndpoint prefillEp = item.prefillEp();
         if (prefillEp == null) {
             return;
@@ -2416,7 +2412,7 @@ final class RequestLifecycleCoordinator implements DeliveryLifecyclePort,
                         || !entry.canClaimLocalTerminal()) {
                     continue;
                 }
-                BatchItem item = entry.activeItem();
+                ScheduledRequest item = entry.activeItem();
                 TerminalAction publication = beginTerminalLocked(
                         entry, item != null, item != null,
                         owner -> owner.fail(detail),

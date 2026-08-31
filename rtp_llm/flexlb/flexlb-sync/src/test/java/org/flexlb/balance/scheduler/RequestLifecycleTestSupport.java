@@ -90,7 +90,7 @@ final class RequestLifecycleTestSupport {
     }
 
     record Registered(
-            BatchItem item,
+            ScheduledRequest item,
             CompletableFuture<Response> future) {
     }
 }

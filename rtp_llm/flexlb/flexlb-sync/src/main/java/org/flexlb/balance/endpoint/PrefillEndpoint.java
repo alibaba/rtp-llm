@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.prediction.LearningPredictor;
@@ -11,6 +11,8 @@ import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.WorkerBatcher;
+import org.flexlb.balance.scheduler.WorkerBatcherFactory;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -28,8 +30,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final PrefillTimePredictor predictor;
-    private final PrefillGenerationRuntime runtime;
-    private final PrefillWorkLedger workLedger;
+    private final WorkerBatcher runtime;
+    private final PrefillState prefillState;
     private final EndpointEventSink endpointEventSink;
     private final BatchSchedulerReporter reporter;
     private final PlacementAvailability placementAvailability;
@@ -43,7 +45,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public record StatusReduction(
             PrefillEndpoint source,
             StatusSemantics semantics,
-            List<PrefillWorkLedger.WorkerStatusFact> facts,
+            List<PrefillState.WorkerStatusFact> facts,
             Throwable publicationFailure)
             implements EndpointStatusReduction {
         public StatusReduction {
@@ -56,9 +58,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     PrefillEndpoint(WorkerStatus status,
                     FlexlbConfig config,
                     DeliveryStrategy deliveryStrategy,
-                    PrefillGenerationRuntime.Factory runtimeFactory,
+                    WorkerBatcherFactory runtimeFactory,
                     EndpointEventSink endpointEventSink,
-                    DeliveryLifecyclePort deliveryLifecycle,
+                    EndpointEventSink deliveryLifecycle,
                     BatchSchedulerReporter reporter) {
         this(status, config, deliveryStrategy, runtimeFactory,
                 endpointEventSink, deliveryLifecycle, reporter,
@@ -68,9 +70,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     PrefillEndpoint(WorkerStatus status,
                     FlexlbConfig config,
                     DeliveryStrategy deliveryStrategy,
-                    PrefillGenerationRuntime.Factory runtimeFactory,
+                    WorkerBatcherFactory runtimeFactory,
                     EndpointEventSink endpointEventSink,
-                    DeliveryLifecyclePort deliveryLifecycle,
+                    EndpointEventSink deliveryLifecycle,
                     BatchSchedulerReporter reporter,
                     PlacementAvailability placementAvailability) {
         super(status);
@@ -83,15 +85,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // Factory construction is deliberately contained: it may retain this
         // exact endpoint but cannot dereference it, start a thread, publish a
         // callback, or otherwise expose it before these final fields are set.
-        PrefillGenerationRuntime.Generation generation =
-                runtimeFactory.create(
-                                status.getIpPort(),
-                                this,
-                                config,
-                                deliveryStrategy,
-                                deliveryLifecycle);
-        this.runtime = generation.runtime();
-        this.workLedger = generation.ledger();
+        this.runtime = runtimeFactory.create(
+                status.getIpPort(), this, config,
+                deliveryStrategy, deliveryLifecycle);
+        this.prefillState = runtime.ownedState();
     }
 
     /** Start the attached generation exactly once before routing publication. */
@@ -112,7 +109,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Publish one exact route after validating its generation pin. */
     public boolean offerPinned(
             GenerationPin exactPin,
-            DeliveryItem exactItem) {
+            ScheduledRequest exactItem) {
         requirePinnedGeneration(exactPin);
         return runtime.offer(exactItem);
     }
@@ -120,7 +117,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Exact queue-capacity commit for a fresh placement attempt. */
     public boolean offerPinnedForPlacement(
             GenerationPin exactPin,
-            DeliveryItem exactItem) {
+            ScheduledRequest exactItem) {
         requirePinnedGeneration(exactPin);
         return runtime.offerForPlacement(exactItem);
     }
@@ -135,21 +132,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Remove only the supplied canonical ACTIVE queue identity. */
     public boolean removeQueued(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             String reason) {
         return runtime.removeQueued(exactItem, reason);
     }
 
     /** Capture immutable queue facts for timeout and eviction planning. */
-    public PrefillGenerationRuntime.QueueSnapshot captureQueueSnapshot() {
+    public WorkerBatcher.QueueSnapshot captureQueueSnapshot() {
         return runtime.captureQueueSnapshot();
     }
 
     /** Replace exact queued victims after validating this generation's pin. */
-    public PrefillGenerationRuntime.QueueReplacement replaceQueued(
+    public WorkerBatcher.QueueReplacement replaceQueued(
             GenerationPin exactPin,
-            List<DeliveryItem> exactVictims,
-            DeliveryItem incoming) {
+            List<ScheduledRequest> exactVictims,
+            ScheduledRequest incoming) {
         requirePinnedGeneration(exactPin);
         return runtime.replaceQueued(exactVictims, incoming);
     }
@@ -166,8 +163,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // the exact worker has exited, and are aggregated below.
         Throwable retirementFailure = runtime.stopAndAwait();
         try {
-            PrefillWorkLedger.Retirement retirement =
-                    workLedger.retireGenerationOwnership();
+            PrefillState.Retirement retirement =
+                    prefillState.retireGenerationOwnership();
             if (!retirement.ownedItems().isEmpty()) {
                 try {
                     endpointEventSink.onPrefillGenerationRetired(
@@ -179,10 +176,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
             retirementFailure = appendRetirementFailure(
                     retirementFailure, retirement.invariantFailure());
-            List<PrefillWorkLedger.BatchCompletion> completions =
+            List<PrefillState.BatchCompletion> completions =
                     retirement.batchCompletions();
             for (int index = 0; index < completions.size(); index++) {
-                PrefillWorkLedger.BatchCompletion completion =
+                PrefillState.BatchCompletion completion =
                         completions.get(index);
                 try {
                     reportBatchCompletion(completion);
@@ -236,19 +233,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return new FormulaPredictor(formula.getExpression());
     }
 
-    public PrefillWorkLedger.BatchReservationResult reserveBatch(
-            DeliveryItem exactHead,
+    public PrefillState.BatchReservationResult reserveBatch(
+            ScheduledRequest exactHead,
             long batchId,
             int maximumInflightBatches) {
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
-            return new PrefillWorkLedger.BatchReservationResult(
-                    PrefillWorkLedger.CapacityStatus.ENDPOINT_RETIRED, null);
+            return new PrefillState.BatchReservationResult(
+                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
         }
-        PrefillWorkLedger.BatchReservationResult result;
+        PrefillState.BatchReservationResult result;
         try {
-            result = workLedger.reserveBatch(
+            result = prefillState.reserveBatch(
                     exactHead,
                     batchId,
                     maximumInflightBatches,
@@ -263,19 +260,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    public PrefillWorkLedger.RouteReservationResult reserveRoute(
-            DeliveryItem exactItem,
+    public PrefillState.RouteReservationResult reserveRoute(
+            ScheduledRequest exactItem,
             long predictedMs,
             int maximumRequests) {
         EndpointGenerationLifecycle.HandoffPermit handoffPermit =
                 tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
-            return new PrefillWorkLedger.RouteReservationResult(
-                    PrefillWorkLedger.CapacityStatus.ENDPOINT_RETIRED, null);
+            return new PrefillState.RouteReservationResult(
+                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
         }
-        PrefillWorkLedger.RouteReservationResult result;
+        PrefillState.RouteReservationResult result;
         try {
-            result = workLedger.reserveRoute(
+            result = prefillState.reserveRoute(
                     exactItem,
                     predictedMs,
                     maximumRequests,
@@ -293,13 +290,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Exact wake source for this generation's batch admission capacity. */
     public CapacityBoundary.Availability batchAdmissionAvailability(
             int maximumInflightBatches) {
-        return workLedger.batchAvailability(maximumInflightBatches);
+        return prefillState.batchAvailability(maximumInflightBatches);
     }
 
     /** Exact wake source for this generation's route admission capacity. */
     public CapacityBoundary.Availability routeAdmissionAvailability(
             int maximumRequests) {
-        return workLedger.routeAvailability(maximumRequests);
+        return prefillState.routeAvailability(maximumRequests);
     }
 
     /**
@@ -307,13 +304,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * rollback capability. The caller commits it only after every DIRECT role
      * has registered successfully.
      */
-    public PrefillWorkLedger.DirectRegistration registerDirectRequest(
+    public PrefillState.DirectRegistration registerDirectRequest(
             GenerationPin pin,
             long requestId,
             long predictedMs) {
         requirePinnedGeneration(pin);
-        PrefillWorkLedger.DirectRegistration registration =
-                workLedger.tryRegisterDirect(requestId, predictedMs);
+        PrefillState.DirectRegistration registration =
+                prefillState.tryRegisterDirect(requestId, predictedMs);
         if (registration == null) {
             throw new IllegalStateException(
                     "DIRECT request already has a live Prefill owner request_id="
@@ -323,8 +320,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Exact counterpart cleanup; stale item generations are a no-op. */
-    public boolean releaseCommittedItem(DeliveryItem exactItem) {
-        return workLedger.terminalizeCommittedItem(exactItem);
+    public boolean releaseCommittedItem(ScheduledRequest exactItem) {
+        return prefillState.terminalizeCommittedItem(exactItem);
     }
 
     /**
@@ -339,26 +336,26 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @return an opaque guard bound to the exact committed item, or {@code null}
      *         when that exact generation is no longer protectable
      */
-    public PrefillWorkLedger.Protection acquireEngineFenceProtection(
-            DeliveryItem exactItem) {
-        return workLedger.tryAcquireProtection(exactItem);
+    public PrefillState.Protection acquireEngineFenceProtection(
+            ScheduledRequest exactItem) {
+        return prefillState.tryAcquireProtection(exactItem);
     }
 
     /**
      * Acquire an exact batch-member guard. A stale batch id cannot protect a
      * newer generation which reused the same request id.
      */
-    public PrefillWorkLedger.Protection acquireBatchMemberProtection(
+    public PrefillState.Protection acquireBatchMemberProtection(
             long batchId,
-            DeliveryItem exactItem) {
-        return workLedger.tryAcquireBatchProtection(batchId, exactItem);
+            ScheduledRequest exactItem) {
+        return prefillState.tryAcquireBatchProtection(batchId, exactItem);
     }
 
     /** Release one exact Engine-fence guard and apply any deferred terminal. */
     public void releaseEngineFenceProtection(
-            PrefillWorkLedger.Protection protection) {
-        List<PrefillWorkLedger.BatchCompletion> completions =
-                workLedger.releaseProtection(
+            PrefillState.Protection protection) {
+        List<PrefillState.BatchCompletion> completions =
+                prefillState.releaseProtection(
                         protection,
                         this::predictRepackedBatchMs);
         try {
@@ -374,13 +371,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * plus individually tracked DIRECT and QUEUE_ROUTE requests.
      */
     public int getLocallyOwnedRequestCount() {
-        PrefillWorkLedger.Stats stats = workLedger.stats();
+        PrefillState.Stats stats = prefillState.stats();
         return stats.locallyOwnedRequests();
     }
 
     /** Individually-accounted DIRECT and QUEUE_ROUTE requests. */
     public int getIndividuallyTrackedRequestCount() {
-        PrefillWorkLedger.Stats stats = workLedger.stats();
+        PrefillState.Stats stats = prefillState.stats();
         return stats.individuallyOwnedRequests();
     }
 
@@ -390,9 +387,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
         WorkerStatus.StatusObservation observation = prepared.observation();
-        long pendingBefore = workLedger.pendingRequestCount();
-        PrefillWorkLedger.StatusReconciliation reconciliation =
-                workLedger.reconcileWorkerStatus(
+        long pendingBefore = prefillState.pendingRequestCount();
+        PrefillState.StatusReconciliation reconciliation =
+                prefillState.reconcileWorkerStatus(
                         observation,
                         this::predictRepackedBatchMs,
                         () -> {
@@ -404,7 +401,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         },
                         this::beginRetirement);
         reportBatchCompletionsNoFail(reconciliation.batchCompletions());
-        if (workLedger.pendingRequestCount() < pendingBefore) {
+        if (prefillState.pendingRequestCount() < pendingBefore) {
             signalPlacementCapacityChanged();
         }
         return new StatusReduction(
@@ -419,8 +416,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             WorkerStatus ws,
             WorkerStatus.StatusObservation observation) {
         requireStatusGeneration(ws);
-        PrefillWorkLedger.StatusReconciliation reconciliation =
-                workLedger.reconcileWorkerStatus(
+        PrefillState.StatusReconciliation reconciliation =
+                prefillState.reconcileWorkerStatus(
                         observation,
                         this::predictRepackedBatchMs,
                         runtime::signalSchedulingInputsChanged,
@@ -449,7 +446,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return new StatusReduction(
                 this,
                 statusSemantics(observation.role()),
-                workLedger.heartbeatFacts(observation),
+                prefillState.heartbeatFacts(observation),
                 null);
     }
 
@@ -463,7 +460,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private void reportBatchCompletionsNoFail(
-            List<PrefillWorkLedger.BatchCompletion> completions) {
+            List<PrefillState.BatchCompletion> completions) {
         try {
             reportBatchCompletions(completions);
         } catch (Throwable reportingFailure) {
@@ -482,7 +479,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * its remaining-work estimate becomes explicitly unavailable.
      */
     private OptionalLong predictRepackedBatchMs(
-            List<DeliveryItem> survivingRequests) {
+            List<ScheduledRequest> survivingRequests) {
         try {
             PrefillTimePredictor.Evaluator evaluator = predictor.evaluator();
             return OptionalLong.of(
@@ -490,8 +487,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             evaluator,
                             PrefillBatchFeatures.from(
                                     survivingRequests,
-                                    DeliveryItem::seqLen,
-                                    DeliveryItem::hitCache)));
+                                    ScheduledRequest::seqLen,
+                                    ScheduledRequest::hitCache)));
         } catch (Throwable predictionFailure) {
             try {
                 logger.error("Prefill batch repack prediction failed; marking work unavailable "
@@ -508,11 +505,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Canonical pending ownership used by the hard admission threshold. */
     public long admissionPendingRequestCount() {
-        return workLedger.pendingRequestCount();
+        return prefillState.pendingRequestCount();
     }
 
     public int getInflightBatchCount() {
-        PrefillWorkLedger.Stats stats = workLedger.stats();
+        PrefillState.Stats stats = prefillState.stats();
         return stats.batchCount();
     }
 
@@ -529,7 +526,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Evict only batches with no request generation still owned by the scheduler. */
     public int evictExpiredBatches(long ttlMs,
                                    LongPredicate schedulerOwnsRequest) {
-        return workLedger.evictExpiredBatches(
+        return prefillState.evictExpiredBatches(
                 ttlMs, schedulerOwnsRequest);
     }
 
@@ -544,7 +541,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Evict route-request entries which have no live scheduler generation. */
     public int evictExpiredRequests(long ttlMs,
                                     LongPredicate schedulerOwnsRequest) {
-        return workLedger.evictExpiredIndividuals(
+        return prefillState.evictExpiredIndividuals(
                 ttlMs, schedulerOwnsRequest);
     }
 
@@ -557,7 +554,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     @Override
     public OptionalLong getLoadMetric() {
-        return workLedger.committedSnapshot()
+        return prefillState.committedSnapshot()
                 .totalRemainingWorkMs();
     }
 
@@ -589,7 +586,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportInflightMaxAgeMs(
                 RoleType.PREFILL.name(),
                 getIp(),
-                workLedger.stats().maxObservedAgeMs());
+                prefillState.stats().maxObservedAgeMs());
     }
 
     /**
@@ -598,12 +595,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * then log and emit prediction-accuracy metrics.
      */
     private void reportBatchCompletions(
-            List<PrefillWorkLedger.BatchCompletion> completions) {
+            List<PrefillState.BatchCompletion> completions) {
         completions.forEach(this::reportBatchCompletion);
     }
 
     private void reportBatchCompletion(
-            PrefillWorkLedger.BatchCompletion completion) {
+            PrefillState.BatchCompletion completion) {
         long batchId = completion.batchId();
         long actualMs = completion.actualWorkMs();
         if (!completion.successfulCompletion() || actualMs <= 0) {

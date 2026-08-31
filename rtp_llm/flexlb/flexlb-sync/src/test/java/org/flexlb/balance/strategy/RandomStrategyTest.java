@@ -16,7 +16,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,6 +43,7 @@ class RandomStrategyTest {
     private RandomStrategy randomStrategy;
     private DecodeResourceMeasure resourceMeasure;
     private EndpointRegistry endpointRegistry;
+    private WorkerDirectory workerDirectory;
     private ConfigService configService;
     private FlexlbConfig config;
 
@@ -59,18 +60,18 @@ class RandomStrategyTest {
                 Mockito.any(DecodeEndpoint.DecodeRoutingView.class))).thenReturn(true);
         Mockito.when(resourceMeasure.isEngineDispatchAvailable(
                 Mockito.any(DecodeEndpoint.DecodeRoutingView.class))).thenReturn(true);
-        randomStrategy = new RandomStrategy(
-                new EngineWorkerStatus(endpointRegistry),
+        workerDirectory = new WorkerDirectory(endpointRegistry);
+        randomStrategy = new RandomStrategy(workerDirectory,
                 resourceMeasureFactory);
     }
 
     @AfterEach
     void tearDown() {
         endpointRegistry.close();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+        workerDirectory.statusMap(RoleType.PREFILL).clear();
+        workerDirectory.statusMap(RoleType.DECODE).clear();
+        workerDirectory.statusMap(RoleType.PDFUSION).clear();
+        workerDirectory.statusMap(RoleType.VIT).clear();
     }
 
     private org.flexlb.balance.endpoint.WorkerEndpoint registerPrefill(
@@ -99,7 +100,7 @@ class RandomStrategyTest {
 
     @Test
     void should_return_error_when_worker_map_is_empty() {
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
+        workerDirectory.statusMap(RoleType.PREFILL).clear();
 
         Request req = new Request();
 
@@ -113,7 +114,7 @@ class RandomStrategyTest {
 
     @Test
     void should_return_success_when_workers_available() {
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = workerDirectory.statusMap(RoleType.PREFILL);
 
         WorkerStatus workerStatus = createWorkerStatus("127.0.0.1");
         prefillStatusMap.put("127.0.0.1:8080", workerStatus);
@@ -132,7 +133,7 @@ class RandomStrategyTest {
 
     @Test
     void should_select_randomly_from_available_workers() {
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = workerDirectory.statusMap(RoleType.PREFILL);
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
@@ -162,12 +163,12 @@ class RandomStrategyTest {
     @Test
     void should_work_with_different_role_types() {
         WorkerStatus prefillWorker = createWorkerStatus("127.0.0.1");
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", prefillWorker);
+        workerDirectory.statusMap(RoleType.PREFILL).put("127.0.0.1:8080", prefillWorker);
         registerPrefill("127.0.0.1:8080", prefillWorker);
 
         WorkerStatus decodeWorker = createWorkerStatus(
                 "127.0.0.2", RoleType.DECODE, null, true, 1_000L, 1_000L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.2:8080", decodeWorker);
+        workerDirectory.statusMap(RoleType.DECODE).put("127.0.0.2:8080", decodeWorker);
         registerDecode("127.0.0.2:8080", decodeWorker);
 
         Request req = new Request();
@@ -186,7 +187,7 @@ class RandomStrategyTest {
     void should_select_vit_from_role_specific_registry() {
         WorkerStatus vitWorker = createWorkerStatus(
                 "127.0.0.3", RoleType.VIT, null, true, 0L, 0L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap()
+        workerDirectory.statusMap(RoleType.VIT)
                 .put("127.0.0.3:8080", vitWorker);
         endpointRegistry.registerPreinitializedEndpoint(RoleType.VIT, "127.0.0.3:8080", vitWorker);
 
@@ -200,7 +201,7 @@ class RandomStrategyTest {
     void should_work_with_group_parameter() {
         WorkerStatus worker = createWorkerStatus(
                 "127.0.0.1", RoleType.PREFILL, "group-a", true, 0L, 0L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
+        workerDirectory.statusMap(RoleType.PREFILL).put("127.0.0.1:8080", worker);
         registerPrefill("127.0.0.1:8080", worker);
 
         Request req = new Request();
@@ -217,7 +218,7 @@ class RandomStrategyTest {
     void should_return_error_when_no_workers_in_specified_group() {
         WorkerStatus worker = createWorkerStatus(
                 "127.0.0.1", RoleType.PREFILL, "group-a", true, 0L, 0L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
+        workerDirectory.statusMap(RoleType.PREFILL).put("127.0.0.1:8080", worker);
         registerPrefill("127.0.0.1:8080", worker);
 
         Request req = new Request();
@@ -255,7 +256,7 @@ class RandomStrategyTest {
 
     @Test
     void should_distribute_requests_uniformly_across_workers() {
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = workerDirectory.statusMap(RoleType.PREFILL);
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
@@ -299,7 +300,7 @@ class RandomStrategyTest {
 
     @Test
     void should_skip_dead_workers() {
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = workerDirectory.statusMap(RoleType.PREFILL);
 
         // A worker becomes non-serviceable only when a not-alive status
         // observation is applied to its endpoint, which closes the admission
@@ -345,7 +346,7 @@ class RandomStrategyTest {
     void should_skip_workers_rejected_by_resource_measure() {
         config.setScheduler(new DirectSchedulerConfig());
         config.setDispatcher(new NonBatchDispatcherConfig());
-        Map<String, WorkerStatus> decodeStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+        Map<String, WorkerStatus> decodeStatusMap = workerDirectory.statusMap(RoleType.DECODE);
 
         WorkerStatus unavailableWorker = createWorkerStatus(
                 "127.0.0.1", RoleType.DECODE, null, true, 1_000L, 1_000L);
@@ -381,9 +382,9 @@ class RandomStrategyTest {
                 "127.0.0.1", RoleType.DECODE, null, true, 1_000L, 1_000L);
         WorkerStatus dispatchable = createWorkerStatus(
                 "127.0.0.2", RoleType.DECODE, null, true, 2_000L, 2_000L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+        workerDirectory.statusMap(RoleType.DECODE)
                 .put("127.0.0.1:8080", full);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+        workerDirectory.statusMap(RoleType.DECODE)
                 .put("127.0.0.2:8080", dispatchable);
         registerDecode("127.0.0.1:8080", full);
         registerDecode("127.0.0.2:8080", dispatchable);
@@ -409,7 +410,7 @@ class RandomStrategyTest {
     void softQueueFallsBackWhenEveryDecodeIsTransientlyFull() {
         WorkerStatus full = createWorkerStatus(
                 "127.0.0.3", RoleType.DECODE, null, true, 1_000L, 1_000L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+        workerDirectory.statusMap(RoleType.DECODE)
                 .put("127.0.0.3:8080", full);
         registerDecode("127.0.0.3:8080", full);
         Mockito.when(resourceMeasure.isEngineDispatchAvailable(Mockito.any()))
@@ -432,7 +433,7 @@ class RandomStrategyTest {
     void decode_random_should_return_exact_capacity_in_direct_and_queue_modes() {
         WorkerStatus worker = createWorkerStatus(
                 "127.0.0.4", RoleType.DECODE, null, true, 1_000L, 1_000L);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+        workerDirectory.statusMap(RoleType.DECODE)
                 .put("127.0.0.4:8080", worker);
         registerDecode("127.0.0.4:8080", worker);
         DecodeEndpoint endpoint = endpointRegistry.getDecode("127.0.0.4:8080");
@@ -447,7 +448,7 @@ class RandomStrategyTest {
 
     @Test
     void should_properly_set_server_status_fields() {
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = workerDirectory.statusMap(RoleType.PREFILL);
 
         WorkerStatus worker = createWorkerStatus(
                 "127.0.0.1", RoleType.PREFILL, "group-x", true, 0L, 0L);
@@ -471,7 +472,7 @@ class RandomStrategyTest {
 
     @Test
     void should_handle_null_request_id() {
-        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        Map<String, WorkerStatus> prefillStatusMap = workerDirectory.statusMap(RoleType.PREFILL);
         prefillStatusMap.clear();
 
         WorkerStatus worker = createWorkerStatus("127.0.0.1");

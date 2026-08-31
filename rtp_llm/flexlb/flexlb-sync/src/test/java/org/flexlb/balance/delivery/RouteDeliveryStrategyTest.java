@@ -2,7 +2,7 @@ package org.flexlb.balance.delivery;
 
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestAdmissionPort;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestContext;
-import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestSlotPort;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestTelemetry;
 import org.junit.jupiter.api.Test;
@@ -24,8 +24,8 @@ class RouteDeliveryStrategyTest {
     @Test
     void commitsAndDeliversEveryExactRouteInOrder() {
         Fixture fixture = new Fixture();
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         DeliveryMetadata metadata = new DeliveryMetadata("route", 7);
 
         String result = fixture.context.deliver(
@@ -65,7 +65,7 @@ class RouteDeliveryStrategyTest {
     @Test
     void unavailableHeadReturnsExactBoundaryWithoutPublishing() {
         Fixture fixture = new Fixture();
-        TestItem head = item(1L);
+        ScheduledRequest head = item(1L);
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.prepareBoundary(unavailable);
 
@@ -84,7 +84,7 @@ class RouteDeliveryStrategyTest {
     @Test
     void lostHeadOwnershipMaterializesOwnershipBoundary() {
         Fixture fixture = new Fixture();
-        TestItem head = item(1L);
+        ScheduledRequest head = item(1L);
         fixture.slots.preparationLostFor(head);
 
         String result = fixture.context.deliver(
@@ -101,8 +101,8 @@ class RouteDeliveryStrategyTest {
     @Test
     void unavailableSuffixCommitsOnlyLargestOrderedPrefix() {
         Fixture fixture = new Fixture();
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.rejectAppendAt(1, unavailable);
 
@@ -123,9 +123,9 @@ class RouteDeliveryStrategyTest {
     @Test
     void slotCommitFailureTerminalizesExactItemAndContinuesLaterRoutes() {
         Fixture fixture = new Fixture();
-        TestItem first = item(1L);
-        TestItem second = item(2L);
-        TestItem third = item(3L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
+        ScheduledRequest third = item(3L);
         fixture.slots.throwCommitFor(first);
 
         String result = fixture.context.deliver(
@@ -145,8 +145,8 @@ class RouteDeliveryStrategyTest {
     @Test
     void completionFailureIsAggregatedOnlyAfterLaterRoutesComplete() {
         Fixture fixture = new Fixture();
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         fixture.slots.throwCompletionFor(first);
 
         IllegalStateException failure = assertThrows(
@@ -167,7 +167,7 @@ class RouteDeliveryStrategyTest {
     void failedQueueCommitReleasesPreparedAdmissionWithoutPublishing() {
         Fixture fixture = new Fixture();
         fixture.context.commit(false);
-        TestItem head = item(1L);
+        ScheduledRequest head = item(1L);
 
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(head),

@@ -54,7 +54,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.registry = new EndpointRegistry(
                 configService,
                 endpointEvents,
-                lifecycle,
                 batchReporter,
                 new BatchDeliveryStrategy(
                         batchSubmission,

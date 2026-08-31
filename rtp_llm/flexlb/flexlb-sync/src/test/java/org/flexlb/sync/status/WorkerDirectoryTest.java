@@ -7,38 +7,33 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class EngineWorkerStatusTest {
+class WorkerDirectoryTest {
 
-    private EngineWorkerStatus engineWorkerStatus;
+    private WorkerDirectory workerDirectory;
     private EndpointRegistry registry;
 
     @BeforeEach
     void setUp() {
-        clearStatusMaps();
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig())
                 .thenReturn(new FlexlbConfig());
         registry = RunnerTestSupport.endpointRegistry(configService);
-        engineWorkerStatus = new EngineWorkerStatus(registry);
-    }
-
-    @AfterEach
-    void tearDown() {
-        registry.close();
-        clearStatusMaps();
+        workerDirectory = new WorkerDirectory(registry);
     }
 
     @Test
@@ -51,7 +46,7 @@ class EngineWorkerStatusTest {
                 RoleType.DECODE, filtered.getIpPort(), filtered);
 
         List<WorkerEndpoint.GenerationPin> result =
-                engineWorkerStatus.captureModelWorkerEndpoints(
+                workerDirectory.captureEndpoints(
                         RoleType.DECODE, "group1");
         try {
             assertEquals(1, result.size());
@@ -73,7 +68,7 @@ class EngineWorkerStatusTest {
                 RoleType.PREFILL, second.getIpPort(), second);
 
         List<WorkerEndpoint.GenerationPin> result =
-                engineWorkerStatus.captureModelWorkerEndpoints(
+                workerDirectory.captureEndpoints(
                         RoleType.PREFILL, null);
         try {
             assertEquals(2, result.size());
@@ -89,7 +84,7 @@ class EngineWorkerStatusTest {
     @Test
     void should_return_empty_capture_when_role_registry_is_empty() {
         List<WorkerEndpoint.GenerationPin> result =
-                engineWorkerStatus.captureModelWorkerEndpoints(
+                workerDirectory.captureEndpoints(
                         RoleType.PDFUSION, null);
 
         assertNotNull(result);
@@ -103,12 +98,12 @@ class EngineWorkerStatusTest {
                 RoleType.VIT, status.getIpPort(), status);
 
         List<WorkerEndpoint.GenerationPin> result =
-                engineWorkerStatus.captureModelWorkerEndpoints(
+                workerDirectory.captureEndpoints(
                         RoleType.VIT, "nonExistentGroup");
 
         assertTrue(result.isEmpty());
         assertEquals(List.of(status.getIpPort()),
-                engineWorkerStatus.modelWorkerAddresses(
+                workerDirectory.endpointAddresses(
                         RoleType.VIT, null));
     }
 
@@ -121,7 +116,7 @@ class EngineWorkerStatusTest {
         registry.registerPreinitializedEndpoint(
                 RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
 
-        List<String> result = engineWorkerStatus.modelWorkerAddresses(
+        List<String> result = workerDirectory.endpointAddresses(
                 RoleType.DECODE, "groupA");
 
         assertEquals(List.of(matching.getIpPort()), result);
@@ -137,7 +132,7 @@ class EngineWorkerStatusTest {
         registry.registerPreinitializedEndpoint(
                 RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
 
-        List<String> result = engineWorkerStatus.modelWorkerAddresses(
+        List<String> result = workerDirectory.endpointAddresses(
                 RoleType.DECODE, null);
 
         assertEquals(2, result.size());
@@ -146,11 +141,10 @@ class EngineWorkerStatusTest {
     }
 
     @Test
-    void monitoring_addresses_are_non_owning_and_capacity_uses_larger_owner() {
+    void routing_capacity_comes_only_from_published_endpoints() {
         WorkerStatus matching = status(RoleType.DECODE, "group1", 8080);
         WorkerStatus filtered = status(RoleType.DECODE, "group2", 8081);
-        var statusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
-                .getDecodeStatusMap();
+        var statusMap = workerDirectory.statusMap(RoleType.DECODE);
         statusMap.put(matching.getIpPort(), matching);
         statusMap.put(filtered.getIpPort(), filtered);
         registry.registerPreinitializedEndpoint(
@@ -159,11 +153,11 @@ class EngineWorkerStatusTest {
                 RoleType.DECODE, filtered.getIpPort(), filtered);
 
         assertEquals(List.of(matching.getIpPort()),
-                engineWorkerStatus.modelWorkerAddresses(
+                workerDirectory.endpointAddresses(
                         RoleType.DECODE, "group1"));
         statusMap.remove(filtered.getIpPort());
         assertEquals(2,
-                engineWorkerStatus.getModelWorkerCapacity(RoleType.DECODE));
+                workerDirectory.routingCapacity(RoleType.DECODE));
     }
 
     @Test
@@ -178,7 +172,7 @@ class EngineWorkerStatusTest {
                 role, status.getIpPort(), status);
 
         List<WorkerEndpoint.GenerationPin> selected =
-                engineWorkerStatus.captureModelWorkerEndpoints(role, null);
+                workerDirectory.captureEndpoints(role, null);
         try {
             assertEquals(1, selected.size());
             assertSame(registered, selected.getFirst().endpoint());
@@ -200,10 +194,32 @@ class EngineWorkerStatusTest {
         }
     }
 
-    private static void clearStatusMaps() {
-        for (RoleType role : RoleType.values()) {
-            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
-                    .getRoleStatusMap(role).clear();
-        }
+    @Test
+    void role_status_maps_are_independent_and_counted_once() {
+        WorkerStatus prefill = status(RoleType.PREFILL, "group1", 8201);
+        WorkerStatus decode = status(RoleType.DECODE, "group2", 8202);
+        workerDirectory.statusMap(RoleType.PREFILL)
+                .put(prefill.getIpPort(), prefill);
+        workerDirectory.statusMap(RoleType.DECODE)
+                .put(decode.getIpPort(), decode);
+
+        assertSame(prefill, workerDirectory.statusMap(RoleType.PREFILL)
+                .get(prefill.getIpPort()));
+        assertSame(decode, workerDirectory.statusMap(RoleType.DECODE)
+                .get(decode.getIpPort()));
+        assertNotSame(workerDirectory.statusMap(RoleType.PREFILL),
+                workerDirectory.statusMap(RoleType.DECODE));
+        assertEquals(2, workerDirectory.discoveredCount());
+        assertEquals(1, workerDirectory.discoveredCount(RoleType.PREFILL));
+    }
+
+    @Test
+    void null_role_has_no_mutable_status_owner() {
+        Map<String, WorkerStatus> result = workerDirectory.statusMap(null);
+
+        assertTrue(result.isEmpty());
+        assertThrows(UnsupportedOperationException.class,
+                () -> result.put("127.0.0.1:8080",
+                        status(RoleType.VIT, "group", 8080)));
     }
 }

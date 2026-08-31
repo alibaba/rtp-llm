@@ -260,7 +260,7 @@ public final class RequestScheduler {
     }
 
     private void reportRouteSubmitted(
-            BalanceContext context, BatchItem item) {
+            BalanceContext context, ScheduledRequest item) {
         try {
             reporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),

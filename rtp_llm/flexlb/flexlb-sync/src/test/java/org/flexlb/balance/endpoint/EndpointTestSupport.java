@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTelemetry;
@@ -10,11 +10,11 @@ import org.flexlb.balance.delivery.PrefillAdmissionPort;
 import org.flexlb.balance.delivery.RouteDeliveryStrategy;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.WorkerBatcherFactory;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 
-import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -38,17 +38,8 @@ final class EndpointTestSupport {
         return org.mockito.Mockito.mock(EndpointEventSink.class);
     }
 
-    static PrefillGenerationRuntime.Factory realRuntimeFactory() {
-        try {
-            Class<?> type = Class.forName(
-                    "org.flexlb.balance.scheduler.WorkerBatcherFactory");
-            Constructor<?> constructor = type.getDeclaredConstructor();
-            constructor.setAccessible(true);
-            return (PrefillGenerationRuntime.Factory) constructor.newInstance();
-        } catch (ReflectiveOperationException failure) {
-            throw new AssertionError(
-                    "Unable to construct the production Prefill runtime", failure);
-        }
+    static WorkerBatcherFactory realRuntimeFactory() {
+        return new WorkerBatcherFactory();
     }
 
     static WorkerStatus workerStatus(
@@ -143,7 +134,7 @@ final class EndpointTestSupport {
         return new RouteDeliveryStrategy(admission, runtime, NOOP_TELEMETRY);
     }
 
-    static boolean offer(PrefillEndpoint endpoint, DeliveryItem item) {
+    static boolean offer(PrefillEndpoint endpoint, ScheduledRequest item) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 return false;
@@ -152,7 +143,7 @@ final class EndpointTestSupport {
         }
     }
 
-    static PrefillWorkLedger.DirectRegistration registerDirect(
+    static PrefillState.DirectRegistration registerDirect(
             PrefillEndpoint endpoint,
             long requestId,
             long predictedMs) {
@@ -164,65 +155,52 @@ final class EndpointTestSupport {
         }
     }
 
-    static PrefillWorkLedger.CommittedHandoff commitBatch(
+    static PrefillState.CommittedHandoff commitBatch(
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
-            List<? extends DeliveryItem> exactItems) {
+            List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("batch requires at least one item");
         }
-        List<DeliveryItem> items = List.copyOf(exactItems);
-        PrefillWorkLedger.BatchReservationResult result = endpoint.reserveBatch(
+        List<ScheduledRequest> items = List.copyOf(exactItems);
+        PrefillState.BatchReservationResult result = endpoint.reserveBatch(
                 items.get(0), batchId, Integer.MAX_VALUE);
-        if (result.status() != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
-        java.util.concurrent.locks.ReentrantLock queueLock = extractQueueLock(endpoint);
-        try (PrefillWorkLedger.BatchReservation reservation =
+        try (PrefillState.BatchReservation reservation =
                      result.reservation()) {
-            queueLock.lock();
-            try {
-                return reservation.commitUnderLock(items, predictedMs);
-            } finally {
-                queueLock.unlock();
-            }
+            return reservation.commit(items, predictedMs);
         }
     }
 
-    static List<PrefillWorkLedger.CommittedHandoff> commitRoutes(
+    static List<PrefillState.CommittedHandoff> commitRoutes(
             PrefillEndpoint endpoint,
             long predictedMs,
-            List<? extends DeliveryItem> exactItems) {
+            List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("route group requires an item");
         }
-        List<DeliveryItem> items = List.copyOf(exactItems);
-        List<PrefillWorkLedger.RouteReservation> reservations =
+        List<ScheduledRequest> items = List.copyOf(exactItems);
+        List<PrefillState.RouteReservation> reservations =
                 new ArrayList<>(items.size());
         boolean committed = false;
         try {
-            for (DeliveryItem item : items) {
-                PrefillWorkLedger.RouteReservationResult result =
+            for (ScheduledRequest item : items) {
+                PrefillState.RouteReservationResult result =
                         endpoint.reserveRoute(
                                 item, predictedMs, Integer.MAX_VALUE);
                 if (result.status()
-                        != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+                        != PrefillState.CapacityStatus.ACQUIRED) {
                     throw new IllegalStateException(
                             "route reservation rejected: " + result.status());
                 }
                 reservations.add(result.reservation());
             }
-            List<PrefillWorkLedger.CommittedHandoff> handoffs;
-            java.util.concurrent.locks.ReentrantLock queueLock = extractQueueLock(endpoint);
-            queueLock.lock();
-            try {
-                handoffs = reservations.get(0).commitGroupUnderLock(
-                        items, reservations);
-            } finally {
-                queueLock.unlock();
-            }
+            List<PrefillState.CommittedHandoff> handoffs;
+            handoffs = reservations.get(0).commitGroup(items, reservations);
             committed = true;
             return handoffs;
         } finally {
@@ -239,25 +217,25 @@ final class EndpointTestSupport {
         @Override
         public void routesDelivered(
                 DeliveryMetadata metadata,
-                List<DeliveryItem> exactItems) {
+                List<ScheduledRequest> exactItems) {
         }
 
         @Override
         public void batchDispatched(
                 long batchId,
                 DeliveryMetadata metadata,
-                List<DeliveryItem> dispatched,
+                List<ScheduledRequest> dispatched,
                 long predictedMs) {
         }
     };
 
-    static class TestRequestRuntime implements DeliveryLifecyclePort,
-            SlotDeliveryPort, EndpointEventSink {
+    static class TestRequestRuntime implements EndpointEventSink,
+            SlotDeliveryPort {
         private final List<PrefillRetirement> prefillRetirements =
                 new CopyOnWriteArrayList<>();
-        private final List<DeliveryItem> offerFailures =
+        private final List<ScheduledRequest> offerFailures =
                 new CopyOnWriteArrayList<>();
-        private final List<DeliveryItem> deliveryFailures =
+        private final List<ScheduledRequest> deliveryFailures =
                 new CopyOnWriteArrayList<>();
         private final AtomicInteger completedClaims = new AtomicInteger();
 
@@ -265,11 +243,11 @@ final class EndpointTestSupport {
             return List.copyOf(prefillRetirements);
         }
 
-        List<DeliveryItem> offerFailures() {
+        List<ScheduledRequest> offerFailures() {
             return List.copyOf(offerFailures);
         }
 
-        List<DeliveryItem> deliveryFailures() {
+        List<ScheduledRequest> deliveryFailures() {
             return List.copyOf(deliveryFailures);
         }
 
@@ -279,14 +257,14 @@ final class EndpointTestSupport {
 
         @Override
         public <T> Optional<T> prepareIfOwned(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Supplier<T> preparation) {
             return Optional.ofNullable(preparation.get());
         }
 
         @Override
         public Claim tryClaimForDelivery(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Identity identity,
                 BooleanSupplier endpointHandoff) {
             TestClaim claim = new TestClaim(exactItem);
@@ -299,24 +277,24 @@ final class EndpointTestSupport {
         }
 
         @Override
-        public void failPrepared(DeliveryItem exactItem, Throwable cause) {
+        public void failPrepared(ScheduledRequest exactItem, Throwable cause) {
             deliveryFailures.add(exactItem);
         }
 
         @Override
-        public void onQueuedItemExpired(DeliveryItem exactItem) {
+        public void onQueuedItemExpired(ScheduledRequest exactItem) {
         }
 
         @Override
         public void onQueueOfferFailure(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Throwable cause) {
             offerFailures.add(exactItem);
         }
 
         @Override
         public void onPreparedDeliveryFailure(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Throwable cause) {
             deliveryFailures.add(exactItem);
         }
@@ -328,7 +306,7 @@ final class EndpointTestSupport {
         @Override
         public void onPrefillGenerationRetired(
                 PrefillEndpoint endpoint,
-                List<DeliveryItem> ownedItems) {
+                List<ScheduledRequest> ownedItems) {
             prefillRetirements.add(
                     new PrefillRetirement(endpoint, ownedItems));
         }
@@ -342,13 +320,13 @@ final class EndpointTestSupport {
 
     record PrefillRetirement(
             PrefillEndpoint endpoint,
-            List<DeliveryItem> ownedItems) {
+            List<ScheduledRequest> ownedItems) {
         PrefillRetirement {
             ownedItems = List.copyOf(ownedItems);
         }
     }
 
-    private record TestClaim(DeliveryItem item)
+    private record TestClaim(ScheduledRequest item)
             implements SlotDeliveryPort.Claim {
     }
 
@@ -366,7 +344,7 @@ final class EndpointTestSupport {
 
         @Override
         public CapacityBoundary.Attempt<PreparedAdmission> tryBegin(
-                DeliveryItem firstCandidate) {
+                ScheduledRequest firstCandidate) {
             return new CapacityBoundary.Attempt.Accepted<>(
                     new Prepared());
         }
@@ -383,7 +361,7 @@ final class EndpointTestSupport {
         }
 
         private final class Prepared implements PreparedAdmission {
-            private final List<DeliveryItem> items = new ArrayList<>();
+            private final List<ScheduledRequest> items = new ArrayList<>();
             private boolean moved;
             private boolean closed;
 
@@ -393,8 +371,8 @@ final class EndpointTestSupport {
             }
 
             @Override
-            public CapacityBoundary.Attempt<DeliveryItem> tryAppend(
-                    DeliveryItem exactNextItem,
+            public CapacityBoundary.Attempt<ScheduledRequest> tryAppend(
+                    ScheduledRequest exactNextItem,
                     long predictedMs) {
                 requireOpen();
                 if (!availability.isAvailable()) {
@@ -406,7 +384,7 @@ final class EndpointTestSupport {
 
             @Override
             public CommittedAdmission commitPreparedUnderLock(
-                    List<DeliveryItem> exactItems,
+                    List<ScheduledRequest> exactItems,
                     long predictedMs) {
                 requireOpen();
                 requireExactOrder(items, exactItems);
@@ -428,12 +406,12 @@ final class EndpointTestSupport {
         }
 
         private static final class Committed implements CommittedAdmission {
-            private final Map<DeliveryItem, Boolean> untransferred =
+            private final Map<ScheduledRequest, Boolean> untransferred =
                     new IdentityHashMap<>();
             private boolean closed;
 
-            Committed(List<DeliveryItem> exactItems) {
-                for (DeliveryItem item : exactItems) {
+            Committed(List<ScheduledRequest> exactItems) {
+                for (ScheduledRequest item : exactItems) {
                     if (untransferred.put(item, Boolean.TRUE) != null) {
                         throw new IllegalArgumentException(
                                 "duplicate delivery identity");
@@ -443,7 +421,7 @@ final class EndpointTestSupport {
 
             @Override
             public boolean transferToEndpoint(
-                    DeliveryItem exactItem) {
+                    ScheduledRequest exactItem) {
                 if (closed || untransferred.remove(exactItem) == null) {
                     throw new IllegalStateException(
                             "unknown or already-transferred item");
@@ -491,8 +469,8 @@ final class EndpointTestSupport {
     }
 
     private static void requireExactOrder(
-            List<DeliveryItem> expected,
-            List<DeliveryItem> actual) {
+            List<ScheduledRequest> expected,
+            List<ScheduledRequest> actual) {
         if (expected.size() != actual.size()) {
             throw new IllegalArgumentException("delivery item count changed");
         }
@@ -504,26 +482,4 @@ final class EndpointTestSupport {
         }
     }
 
-    /**
-     * Extract the package-private queueLock from the WorkerBatcher runtime
-     * backing this endpoint. Tests use this to satisfy the "commitUnderLock"
-     * contract without starting the full batcher thread.
-     */
-    static java.util.concurrent.locks.ReentrantLock extractQueueLock(
-            PrefillEndpoint endpoint) {
-        try {
-            java.lang.reflect.Field runtimeField =
-                    PrefillEndpoint.class.getDeclaredField("runtime");
-            runtimeField.setAccessible(true);
-            Object batcher = runtimeField.get(endpoint);
-            java.lang.reflect.Field lockField =
-                    batcher.getClass().getDeclaredField("queueLock");
-            lockField.setAccessible(true);
-            return (java.util.concurrent.locks.ReentrantLock) lockField.get(batcher);
-        } catch (ReflectiveOperationException failure) {
-            throw new AssertionError(
-                    "unable to extract queueLock from PrefillEndpoint runtime",
-                    failure);
-        }
-    }
 }

@@ -8,7 +8,7 @@ import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -24,11 +24,11 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class ShortestTTFTStrategy extends CostBasedPrefillStrategy {
 
-    public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
+    public ShortestTTFTStrategy(WorkerDirectory workerDirectory,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory,
                                 EngineHealthReporter engineHealthReporter) {
-        super(engineWorkerStatus,
+        super(workerDirectory,
                 cacheAwareService,
                 resourceMeasureFactory,
                 engineHealthReporter);

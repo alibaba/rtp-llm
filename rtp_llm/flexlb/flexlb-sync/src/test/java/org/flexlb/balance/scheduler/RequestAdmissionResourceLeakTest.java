@@ -307,7 +307,7 @@ class RequestAdmissionResourceLeakTest {
         return releases;
     }
 
-    private BatchItem activeItem(long requestId) {
+    private ScheduledRequest activeItem(long requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         assertNotNull(slot);
         synchronized (slot) {
@@ -353,7 +353,7 @@ class RequestAdmissionResourceLeakTest {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation =
                 new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
-        BatchItem item = new BatchItem(
+        ScheduledRequest item = new ScheduledRequest(
                 context,
                 future,
                 new Response(),

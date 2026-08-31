@@ -1,6 +1,6 @@
 package org.flexlb.balance.admission;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.util.PriorityNormalizer;
@@ -51,12 +51,12 @@ public record AdmissionFailure(StrategyErrorType errorType,
     /** Classify one timed-out priority request from the exact queue prefix ahead of it. */
     public static AdmissionFailure classifyQueuedTimeout(
             int incomingPriority,
-            List<DeliveryItem> itemsAhead) {
+            List<ScheduledRequest> itemsAhead) {
         boolean higher = false;
         boolean same = false;
         boolean hasUnattributedOccupant = false;
         if (itemsAhead != null) {
-            for (DeliveryItem occupant : itemsAhead) {
+            for (ScheduledRequest occupant : itemsAhead) {
                 if (!PriorityNormalizer.hasPriority(occupant.priority())) {
                     hasUnattributedOccupant = true;
                 } else if (occupant.priority() > incomingPriority) {

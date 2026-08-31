@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 
@@ -15,7 +17,7 @@ public interface DeliveryStrategy {
 
     /** Reserve the largest feasible prefix without mutating queue ownership. */
     Transaction prepare(
-            List<DeliveryItem> candidates,
+            List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs);
 
@@ -24,7 +26,7 @@ public interface DeliveryStrategy {
      * fractional milliseconds so GroupPlanner can compare exact boundaries.
      */
     double projectGroupDurationMs(
-            List<DeliveryItem> items,
+            List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator);
 
     /** Pure projection behavior paired with this live delivery strategy. */
@@ -33,10 +35,10 @@ public interface DeliveryStrategy {
     /** One delivery transaction across prepare, queue commit, and handoff. */
     interface Transaction extends AutoCloseable {
 
-        List<DeliveryItem> items();
+        List<ScheduledRequest> items();
 
         /** First candidate not covered by this transaction, if any. */
-        DeliveryItem blockedItem();
+        ScheduledRequest blockedItem();
 
         CapacityBoundary blockedResult();
 

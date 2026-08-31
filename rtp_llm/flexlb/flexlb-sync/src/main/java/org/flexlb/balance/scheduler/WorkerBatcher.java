@@ -1,12 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
 import org.flexlb.balance.projection.RouteProjection;
@@ -30,7 +29,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * delegating grouping decisions to a {@link GroupPolicy}.
  *
  * <p>One instance per Prefill worker. Exact requests enter through the neutral
- * {@link PrefillGenerationRuntime} boundary and are grouped by the configured
+ * this concrete runtime and are grouped by the configured
  * decision policy. A
  * group may independently be delivered through
  * EnqueueBatch or as individual route decisions.
@@ -43,7 +42,36 @@ import java.util.concurrent.locks.ReentrantLock;
  * lock-holding methods here). A monotonic mutation generation lets snapshots
  * and diagnostics identify queue-state changes.
  */
-final class WorkerBatcher implements PrefillGenerationRuntime {
+public final class WorkerBatcher {
+
+    /** Immutable queue state materialized under this runtime's queue lock. */
+    public record QueueSnapshot(
+            String endpointId,
+            long queueVersion,
+            int queueCapacity,
+            List<ScheduledRequest> items) {
+        public QueueSnapshot {
+            if (queueVersion < 0L) {
+                throw new IllegalArgumentException(
+                        "queueVersion must be non-negative");
+            }
+            if (queueCapacity < 0) {
+                throw new IllegalArgumentException(
+                        "queueCapacity must be non-negative");
+            }
+            items = List.copyOf(items);
+        }
+    }
+
+    public enum QueueReplacementStatus {
+        SUCCESS,
+        CONFLICT,
+        DECLINED
+    }
+
+    /** Result of one atomic exact-victim replacement. */
+    public record QueueReplacement(QueueReplacementStatus status) {
+    }
 
     private enum RuntimeState {
         NEW,
@@ -61,14 +89,14 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
      *
      * <p>{@link #FIFO_QUEUE_ORDER} preserves enqueue order.
      */
-    public static final Comparator<BatchItem> PRIORITY_QUEUE_ORDER =
+    public static final Comparator<ScheduledRequest> PRIORITY_QUEUE_ORDER =
             (left, right) -> PriorityOrdering.compareWithRequestId(
                     left.priority(), left.enqueueSeq(), left.requestId(),
                     right.priority(), right.enqueueSeq(), right.requestId());
 
     /** FIFO order: unique monotonic enqueue sequence. */
-    public static final Comparator<BatchItem> FIFO_QUEUE_ORDER =
-            Comparator.comparingLong(BatchItem::enqueueSeq);
+    public static final Comparator<ScheduledRequest> FIFO_QUEUE_ORDER =
+            Comparator.comparingLong(ScheduledRequest::enqueueSeq);
 
     private static final Comparator<GroupPlanner.Item> PRIORITY_PROJECTION_ORDER =
             (left, right) -> PriorityOrdering.compareWithRequestId(
@@ -80,8 +108,8 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
-    private final DeliveryLifecyclePort deliveryLifecycle;
-    private final PriorityBlockingQueue<BatchItem> queue;
+    private final EndpointEventSink deliveryLifecycle;
+    private final PriorityBlockingQueue<ScheduledRequest> queue;
     private final long maximumPendingRequests;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
@@ -96,7 +124,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
      */
     private final ReentrantLock queueLock = new ReentrantLock();
     /** Canonical request ownership guarded exclusively by {@link #queueLock}. */
-    private final PrefillWorkRegistry workRegistry;
+    private final PrefillState prefillState;
     /**
      * One per-worker condition for new queue work and endpoint-capacity release.
      * Every predicate transition and signal is serialized by queueLock, so a
@@ -129,7 +157,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
             PrefillEndpoint prefillEp,
             FlexlbConfig config,
             DeliveryStrategy deliveryStrategy,
-            DeliveryLifecyclePort deliveryLifecycle) {
+            EndpointEventSink deliveryLifecycle) {
         this.key = key;
         this.prefillEndpoint = prefillEp;
         boolean queueScheduling = config.isQueue();
@@ -137,13 +165,13 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         this.deliveryLifecycle = deliveryLifecycle;
         this.maximumPendingRequests = config.getRouter().getRoles()
                 .getPrefill().getAvailability().getMaxPendingRequests();
-        Comparator<BatchItem> queueOrder = priorityOrdering
+        Comparator<ScheduledRequest> queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         Comparator<GroupPlanner.Item> projectionOrder =
                 priorityOrdering
                         ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
         this.queue = new PriorityBlockingQueue<>(11, queueOrder);
-        this.workRegistry = new PrefillWorkRegistry(
+        this.prefillState = new PrefillState(
                 queueLock, queue, capacityAvailableSignal);
         this.groupPolicy = config.isSingleDecision()
                 ? new SingleRequestGroupPolicy()
@@ -152,7 +180,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                 key, prefillEp, config, deliveryLifecycle,
                 queue, queueVersion, queueLock, queueOrder,
                 projectionOrder, queueScheduling, deliveryStrategy,
-                workRegistry);
+                prefillState);
         this.normalStopFailure = new CancellationException(
                 "FlexLB worker scheduling queue stopped: " + key);
         this.stopAcknowledgementFailure = new IllegalStateException(
@@ -164,7 +192,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                 Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, e));
     }
 
-    @Override
     public synchronized void start() {
         if (runtimeState != RuntimeState.NEW) {
             throw new IllegalStateException(
@@ -186,9 +213,8 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         }
     }
 
-    @Override
-    public boolean offer(DeliveryItem exactItem) {
-        BatchItem item = (BatchItem) exactItem;
+    public boolean offer(ScheduledRequest exactItem) {
+        ScheduledRequest item = exactItem;
         assert item.prefillEp() == prefillEndpoint
                 : "incoming item belongs to another Prefill generation";
         if (runtimeState != RuntimeState.RUNNING || stopped) {
@@ -197,9 +223,8 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         return enqueue(item, ctx.maxQueueCapacity()) == OfferResult.OFFERED;
     }
 
-    @Override
-    public boolean offerForPlacement(DeliveryItem exactItem) {
-        BatchItem item = (BatchItem) exactItem;
+    public boolean offerForPlacement(ScheduledRequest exactItem) {
+        ScheduledRequest item = exactItem;
         assert item.prefillEp() == prefillEndpoint
                 : "incoming item belongs to another Prefill generation";
         if (runtimeState != RuntimeState.RUNNING || stopped) {
@@ -208,7 +233,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         queueLock.lock();
         try {
             if (maximumPendingRequests > 0L
-                    && workRegistry.pendingRequestCount()
+                    && prefillState.pendingRequestCount()
                             >= maximumPendingRequests) {
                 return false;
             }
@@ -225,7 +250,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         STOPPED
     }
 
-    private OfferResult enqueue(BatchItem item, int maximumQueueSize) {
+    private OfferResult enqueue(ScheduledRequest item, int maximumQueueSize) {
         queueLock.lock();
         try {
             return enqueueUnderLock(item, maximumQueueSize);
@@ -236,7 +261,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
 
     /** Caller holds {@link #queueLock}. */
     private OfferResult enqueueUnderLock(
-            BatchItem item, int maximumQueueSize) {
+            ScheduledRequest item, int maximumQueueSize) {
         if (stopped) {
             return OfferResult.STOPPED;
         }
@@ -250,7 +275,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         return OfferResult.OFFERED;
     }
 
-    @Override
     public int queueSize() {
         return queue.size();
     }
@@ -260,10 +284,9 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
      * scheduling priority. Only priorities present in the queue appear in the
      * result, matching the tagged queue-depth metric behavior.
      */
-    @Override
     public Map<Integer, Integer> queueSizeByPriority() {
         Map<Integer, Integer> sizeByPriority = new HashMap<>();
-        for (BatchItem item : queue) {
+        for (ScheduledRequest item : queue) {
             sizeByPriority.merge(item.priority(), 1, Integer::sum);
         }
         return sizeByPriority;
@@ -279,17 +302,15 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         return ctx.schedulingInputVersionValue();
     }
 
-    PrefillWorkLedger ownedLedger() {
-        return workRegistry;
+    public PrefillState ownedState() {
+        return prefillState;
     }
 
-    @Override
     public RouteProjection.Inputs captureRouteProjectionInputs() {
         return ctx.captureRouteProjectionInputs(this::admissionBlockUnderLock);
     }
 
     /** Immutable delivery semantics used by a pure route projection. */
-    @Override
     public RouteProjection.DeliveryProjection deliveryProjection() {
         return ctx.deliveryProjection();
     }
@@ -317,7 +338,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                 blocked.unavailable().projectionSemantics());
     }
 
-    @Override
     public Throwable stopAndAwait() {
         if (Thread.currentThread() == workerThread) {
             throw new IllegalStateException(
@@ -436,7 +456,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
             }
 
             while (true) {
-                BatchItem item;
+                ScheduledRequest item;
                 try {
                     item = detachNextStoppedItem();
                 } catch (Throwable claimFailure) {
@@ -496,10 +516,10 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
      * retaining its canonical entry. The callback result decides whether that
      * entry is acknowledged or carried into generation retirement.
      */
-    private BatchItem detachNextStoppedItem() {
+    private ScheduledRequest detachNextStoppedItem() {
         queueLock.lock();
         try {
-            BatchItem item = ctx.detachNextStopTerminalUnderLock();
+            ScheduledRequest item = ctx.detachNextStopTerminalUnderLock();
             stateChanged.signalAll();
             return item;
         } finally {
@@ -508,7 +528,7 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     }
 
     /** Acknowledge only the retained owner whose terminal callback returned. */
-    private boolean acknowledgeStoppedItem(BatchItem item) {
+    private boolean acknowledgeStoppedItem(ScheduledRequest item) {
         queueLock.lock();
         try {
             return ctx.acknowledgeStopTerminalUnderLock(item);
@@ -543,11 +563,10 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
 
     // ==================== priority scheduling queue operations ====================
 
-    @Override
     public boolean removeQueued(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             String reason) {
-        BatchItem item = (BatchItem) exactItem;
+        ScheduledRequest item = exactItem;
         assert item.prefillEp() == prefillEndpoint
                 : "queued item belongs to another Prefill generation";
         boolean removed;
@@ -575,14 +594,9 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         return removed;
     }
 
-    @Override
-    @SuppressWarnings("unchecked")
     public QueueReplacement replaceQueued(
-            List<DeliveryItem> exactVictims,
-            DeliveryItem incoming) {
-        List<BatchItem> victims =
-                (List<BatchItem>) (List<?>) exactVictims;
-        BatchItem incomingItem = (BatchItem) incoming;
+            List<ScheduledRequest> exactVictims,
+            ScheduledRequest incoming) {
         QueueReplacement committed = new QueueReplacement(
                 QueueReplacementStatus.SUCCESS);
         queueLock.lock();
@@ -596,21 +610,21 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
                     ? 0
                     : Math.max(0, queue.size() + 1 - maximumQueueSize);
             if (victimsRequiredNow == 0
-                    || victims.size() != victimsRequiredNow) {
+                    || exactVictims.size() != victimsRequiredNow) {
                 return new QueueReplacement(
                         QueueReplacementStatus.DECLINED);
             }
-            int postSwapSize = queue.size() - victims.size() + 1;
+            int postSwapSize = queue.size() - exactVictims.size() + 1;
             if (postSwapSize < 0
                     || (maximumQueueSize > 0
                     && postSwapSize > maximumQueueSize)) {
                 return new QueueReplacement(
                         QueueReplacementStatus.DECLINED);
             }
-            PrefillWorkRegistry.ActiveReplaceStatus replacement =
-                    workRegistry.replaceActiveExact(victims, incomingItem);
+            PrefillState.ActiveReplaceStatus replacement =
+                    prefillState.replaceActiveExact(exactVictims, incoming);
             if (replacement
-                    == PrefillWorkRegistry.ActiveReplaceStatus.CONFLICT) {
+                    == PrefillState.ActiveReplaceStatus.CONFLICT) {
                 return new QueueReplacement(
                         QueueReplacementStatus.CONFLICT);
             }
@@ -622,19 +636,14 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
         }
     }
 
-    @Override
-    @SuppressWarnings("unchecked")
     public QueueSnapshot captureQueueSnapshot() {
         queueLock.lock();
         try {
-            List<BatchItem> queued = ctx.activeItemsInSchedulingOrder();
-            List<DeliveryItem> items =
-                    (List<DeliveryItem>) (List<?>) queued;
             return new QueueSnapshot(
                     key,
                     queueVersion.get(),
                     ctx.maxQueueCapacity(),
-                    items);
+                    ctx.activeItemsInSchedulingOrder());
         } finally {
             queueLock.unlock();
         }
@@ -817,7 +826,6 @@ final class WorkerBatcher implements PrefillGenerationRuntime {
     }
 
     /** Wake decisions whose advisory worker-status or predictor input changed. */
-    @Override
     public void signalSchedulingInputsChanged() {
         queueLock.lock();
         try {

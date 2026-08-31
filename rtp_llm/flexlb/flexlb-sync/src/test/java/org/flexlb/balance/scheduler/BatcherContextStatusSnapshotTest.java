@@ -1,7 +1,9 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillState;
+
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.config.FlexlbConfig;
@@ -92,16 +94,16 @@ class BatcherContextStatusSnapshotTest {
     }
 
     private static BatcherContext context(PrefillEndpoint endpoint) {
-        PriorityBlockingQueue<BatchItem> queue =
+        PriorityBlockingQueue<ScheduledRequest> queue =
                 new PriorityBlockingQueue<>(11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
         ReentrantLock queueLock = new ReentrantLock();
-        PrefillWorkRegistry workRegistry =
-                new PrefillWorkRegistry(queueLock, queue, () -> { });
+        PrefillState workRegistry =
+                new PrefillState(queueLock, queue, () -> { });
         return new BatcherContext(
                 "snapshot-test",
                 endpoint,
                 new FlexlbConfig(),
-                mock(DeliveryLifecyclePort.class),
+                mock(EndpointEventSink.class),
                 queue,
                 new AtomicLong(),
                 queueLock,

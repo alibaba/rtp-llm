@@ -5,7 +5,7 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
@@ -205,7 +205,7 @@ public class DefaultRouter implements Router {
                             throw new IllegalStateException(
                                     "Prefill selection has another endpoint type");
                         }
-                        PrefillWorkLedger.DirectRegistration registration =
+                        PrefillState.DirectRegistration registration =
                                 prefill.registerDirectRequest(
                                         pin, context.getRequestId(), selected.prefillWorkMs());
                         try {
@@ -331,7 +331,7 @@ public class DefaultRouter implements Router {
     }
 
     private static Throwable closeDirectRegistration(
-            PrefillWorkLedger.DirectRegistration registration,
+            PrefillState.DirectRegistration registration,
             Throwable primaryFailure) {
         try {
             registration.close();
@@ -454,7 +454,7 @@ public class DefaultRouter implements Router {
 
     private record DirectPrefillOwner(
             WorkerEndpoint.GenerationPin pin,
-            PrefillWorkLedger.DirectRegistration registration)
+            PrefillState.DirectRegistration registration)
             implements DirectOwner {
         @Override
         public void commit() {

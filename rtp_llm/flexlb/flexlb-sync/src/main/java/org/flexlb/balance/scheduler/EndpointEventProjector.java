@@ -1,11 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.endpoint.EndpointStatusReduction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -41,7 +40,7 @@ final class EndpointEventProjector implements EndpointEventSink {
     @Override
     public void onPrefillGenerationRetired(
             PrefillEndpoint endpoint,
-            List<DeliveryItem> ownedItems) {
+            List<ScheduledRequest> ownedItems) {
         if (endpoint == null || ownedItems == null) {
             return;
         }
@@ -66,6 +65,23 @@ final class EndpointEventProjector implements EndpointEventSink {
         }
     }
 
+    @Override
+    public void onQueuedItemExpired(ScheduledRequest exactItem) {
+        scheduler.onQueuedItemExpired(exactItem);
+    }
+
+    @Override
+    public void onQueueOfferFailure(
+            ScheduledRequest exactItem, Throwable cause) {
+        scheduler.onQueueOfferFailure(exactItem, cause);
+    }
+
+    @Override
+    public void onPreparedDeliveryFailure(
+            ScheduledRequest exactItem, Throwable cause) {
+        scheduler.onPreparedDeliveryFailure(exactItem, cause);
+    }
+
     private void projectStatusReduction(EndpointStatusReduction reduction) {
         long observedAtMs = System.currentTimeMillis();
         switch (reduction) {
@@ -80,13 +96,13 @@ final class EndpointEventProjector implements EndpointEventSink {
     private void projectPrefillStatus(
             PrefillEndpoint.StatusReduction reduction,
             long observedAtMs) {
-        for (PrefillWorkLedger.WorkerStatusFact fact : reduction.facts()) {
+        for (PrefillState.WorkerStatusFact fact : reduction.facts()) {
             try {
                 switch (fact) {
-                    case PrefillWorkLedger.ActiveWorkerStatusFact active ->
+                    case PrefillState.ActiveWorkerStatusFact active ->
                             projectPrefillActive(
                                     reduction.source(), active, observedAtMs);
-                    case PrefillWorkLedger.TerminalWorkerStatusFact terminal ->
+                    case PrefillState.TerminalWorkerStatusFact terminal ->
                             projectPrefillTerminal(reduction, terminal);
                 }
             } catch (Throwable failure) {
@@ -100,9 +116,9 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectPrefillActive(
             PrefillEndpoint source,
-            PrefillWorkLedger.ActiveWorkerStatusFact fact,
+            PrefillState.ActiveWorkerStatusFact fact,
             long observedAtMs) {
-        BatchItem item = (BatchItem) fact.item();
+        ScheduledRequest item = fact.item();
         RequestSlot slot = scheduler.requestSlot(item.requestId());
         if (slot == null) {
             return;
@@ -125,8 +141,8 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectPrefillTerminal(
             PrefillEndpoint.StatusReduction reduction,
-            PrefillWorkLedger.TerminalWorkerStatusFact fact) {
-        if (fact.kind() == PrefillWorkLedger.TerminalFactKind.COMPLETED
+            PrefillState.TerminalWorkerStatusFact fact) {
+        if (fact.kind() == PrefillState.TerminalFactKind.COMPLETED
                 && reduction.semantics()
                     != PrefillEndpoint.StatusSemantics.FUSION_TERMINAL) {
             logWarnNoFail(
@@ -135,7 +151,7 @@ final class EndpointEventProjector implements EndpointEventSink {
             return;
         }
 
-        BatchItem item = (BatchItem) fact.item();
+        ScheduledRequest item = fact.item();
         RequestSlot slot = scheduler.requestSlot(item.requestId());
         if (slot == null) {
             return;
@@ -150,11 +166,11 @@ final class EndpointEventProjector implements EndpointEventSink {
                     new WorkerTerminalObservation(
                             WorkerTerminalSource.PREFILL_BACKED,
                             fact.kind()
-                                == PrefillWorkLedger.TerminalFactKind.COMPLETED,
+                                == PrefillState.TerminalFactKind.COMPLETED,
                             fact.errorCode());
             DeferredTerminal terminal = new DeferredTerminal.Worker(observation);
             if (fact.kind()
-                    == PrefillWorkLedger.TerminalFactKind.PRIORITY_CANCELED) {
+                    == PrefillState.TerminalFactKind.PRIORITY_CANCELED) {
                 work = scheduler.reducePreemptionFactLocked(
                         slot,
                         new RequestSlot.PreemptionFact.PriorityCanceled(
@@ -296,9 +312,9 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectPrefillRetirementFacts(
             PrefillEndpoint retiredEndpoint,
-            List<DeliveryItem> ownedItems) {
+            List<ScheduledRequest> ownedItems) {
         for (int index = 0; index < ownedItems.size(); index++) {
-            DeliveryItem exactItem = ownedItems.get(index);
+            ScheduledRequest exactItem = ownedItems.get(index);
             try {
                 projectPrefillRetirementItem(
                         retiredEndpoint, exactItem);
@@ -313,14 +329,14 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectPrefillRetirementItem(
             PrefillEndpoint retiredEndpoint,
-            DeliveryItem exactItem) {
-        if (!(exactItem instanceof BatchItem item)
-                || item.prefillEp() != retiredEndpoint) {
+            ScheduledRequest exactItem) {
+        if (exactItem == null || exactItem.prefillEp() != retiredEndpoint) {
             logErrorNoFail(
                     "Ignoring Prefill retirement item from another generation: request_id={}",
                     exactItem == null ? -1 : exactItem.requestId());
             return;
         }
+        ScheduledRequest item = exactItem;
         RequestSlot slot = scheduler.requestSlot(item.requestId());
         if (slot == null) {
             return;

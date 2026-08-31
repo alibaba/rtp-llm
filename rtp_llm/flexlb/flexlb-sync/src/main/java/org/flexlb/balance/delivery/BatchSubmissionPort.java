@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import java.util.List;
 import java.util.function.BiConsumer;
 
@@ -21,7 +23,7 @@ public interface BatchSubmissionPort {
 
         void submitBatch(
                 Command command,
-                BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer);
+                BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer);
 
         /** Resolve an unused preparation without changing business outcome. */
         @Override
@@ -30,7 +32,7 @@ public interface BatchSubmissionPort {
 
     /** Exact canonical batch submitted at the transport boundary. */
     record Command(
-            List<DeliveryItem> exactItems,
+            List<ScheduledRequest> exactItems,
             long batchId,
             long predictedMs,
             DeliveryMetadata metadata) {

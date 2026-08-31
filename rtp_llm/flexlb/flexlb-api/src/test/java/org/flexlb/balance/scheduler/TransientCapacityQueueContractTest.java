@@ -4,7 +4,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import org.flexlb.balance.delivery.BatchSubmissionPort;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -38,7 +38,7 @@ import org.flexlb.enums.TaskPhase;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
@@ -730,8 +730,8 @@ class TransientCapacityQueueContractTest {
                         statusResponse(RoleType.DECODE, 2L, true));
             }
 
-            EngineWorkerStatus workers =
-                    new EngineWorkerStatus(runtime.endpointRegistry());
+            WorkerDirectory workers =
+                    new WorkerDirectory(runtime.endpointRegistry());
             CountingPrefillResourceMeasure prefillMeasure =
                     new CountingPrefillResourceMeasure(
                             configService, metrics);
@@ -1255,7 +1255,7 @@ class TransientCapacityQueueContractTest {
                         @Override
                         public void submitBatch(
                                 Command command,
-                                BiConsumer<DeliveryItem,
+                                BiConsumer<ScheduledRequest,
                                         SlotDeliveryPort.Completion> observer) {
                             if (submitted) {
                                 throw new IllegalStateException(
@@ -1265,7 +1265,7 @@ class TransientCapacityQueueContractTest {
                             commands.add(command);
                             commandSignals.release();
                             if (!holdCompletions.get()) {
-                                for (DeliveryItem item : command.exactItems()) {
+                                for (ScheduledRequest item : command.exactItems()) {
                                     observer.accept(
                                             item,
                                             SlotDeliveryPort.Completion
@@ -1283,14 +1283,14 @@ class TransientCapacityQueueContractTest {
         private List<Long> requestIds() {
             return commands.stream()
                     .flatMap(command -> command.exactItems().stream())
-                    .map(DeliveryItem::requestId)
+                    .map(ScheduledRequest::requestId)
                     .toList();
         }
 
         private List<String> decodeAddresses() {
             return commands.stream()
                     .flatMap(command -> command.exactItems().stream())
-                    .map(BatchItem.class::cast)
+                    .map(ScheduledRequest.class::cast)
                     .map(item -> item.decode().getServerIp() + ":"
                             + item.decode().getHttpPort())
                     .toList();

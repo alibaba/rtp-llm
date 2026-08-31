@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.PrefillAdmissionPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.dao.route.RoleType;
 
@@ -47,10 +47,10 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
 
     @Override
     public CapacityBoundary.Attempt<PreparedAdmission> tryBegin(
-            DeliveryItem firstCandidate) {
-        final BatchItem exact;
+            ScheduledRequest firstCandidate) {
+        final ScheduledRequest exact;
         try {
-            exact = (BatchItem) firstCandidate;
+            exact = firstCandidate;
         } catch (RuntimeException | Error failure) {
             return failed(failure);
         }
@@ -67,7 +67,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
 
     private static CapacityBoundary.Unavailable routeCapacityFull(
             PrefillEndpoint prefill,
-            BatchItem item) {
+            ScheduledRequest item) {
         return new CapacityBoundary.Unavailable(
                 prefill.routeAdmissionAvailability(
                         item.maxInflightDeliveriesPerPrefillWorker()),
@@ -77,7 +77,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
     private static final class PreparedTransaction
             implements PreparedAdmission {
         private final PrefillEndpoint prefill;
-        private List<PrefillWorkLedger.RouteReservation> reservations;
+        private List<PrefillState.RouteReservation> reservations;
         private List<PrefillAdmissionResources.Member> members;
         private boolean ownershipResolved;
 
@@ -94,20 +94,20 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
         }
 
         @Override
-        public synchronized CapacityBoundary.Attempt<DeliveryItem> tryAppend(
-                DeliveryItem exactNextItem,
+        public synchronized CapacityBoundary.Attempt<ScheduledRequest> tryAppend(
+                ScheduledRequest exactNextItem,
                 long predictedMs) {
             requirePrepared("append");
-            final BatchItem exact;
+            final ScheduledRequest exact;
             try {
-                exact = (BatchItem) exactNextItem;
+                exact = exactNextItem;
             } catch (RuntimeException | Error failure) {
                 return failed(failure);
             }
 
             final int originalReservationCount = reservations.size();
             final int originalMemberCount = members.size();
-            final CapacityBoundary.Attempt<DeliveryItem> acceptedItem;
+            final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
             try {
                 acceptedItem = accepted(exact);
                 reservations.add(null);
@@ -120,7 +120,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
                 return failed(aggregate);
             }
 
-            PrefillWorkLedger.RouteReservationResult reservationResult;
+            PrefillState.RouteReservationResult reservationResult;
             try {
                 reservationResult = prefill.reserveRoute(
                         exact,
@@ -134,7 +134,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
                 return failed(aggregate);
             }
             if (reservationResult.status()
-                    != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+                    != PrefillState.CapacityStatus.ACQUIRED) {
                 Throwable rollbackFailure = restorePreparedTail(
                         members, originalMemberCount, null);
                 rollbackFailure = restorePreparedTail(
@@ -149,7 +149,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
                         reservationResult.status(),
                         routeCapacityFull(prefill, exact));
             }
-            PrefillWorkLedger.RouteReservation reservation =
+            PrefillState.RouteReservation reservation =
                     reservationResult.reservation();
             final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
                     memberAttempt;
@@ -202,7 +202,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
 
         @Override
         public synchronized CommittedAdmission commitPreparedUnderLock(
-                List<DeliveryItem> exactItems,
+                List<ScheduledRequest> exactItems,
                 long predictedMs) {
             requirePrepared("commit");
             if (!sameIdentitySequence(members, exactItems)) {
@@ -213,12 +213,12 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
                     : "route admission has no head reservation";
             assert reservations.size() == members.size()
                     : "route admission reservation/member count diverged";
-            PrefillWorkLedger.RouteReservation headReservation =
+            PrefillState.RouteReservation headReservation =
                     reservations.get(0);
             PrefillAdmissionResources.CommittedAdmissionOwner committedOwner =
                     createCommittedOwner(members, members.size());
-            List<PrefillWorkLedger.CommittedHandoff> handoffs =
-                    headReservation.commitGroupUnderLock(
+            List<PrefillState.CommittedHandoff> handoffs =
+                    headReservation.commitGroup(
                             exactItems, reservations);
             committedOwner.bindRouteHandoffs(handoffs);
             ownershipResolved = true;
@@ -229,7 +229,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
 
         @Override
         public void close() {
-            List<PrefillWorkLedger.RouteReservation> exactReservations;
+            List<PrefillState.RouteReservation> exactReservations;
             List<PrefillAdmissionResources.Member> exactMembers;
             synchronized (this) {
                 if (ownershipResolved) {
@@ -246,7 +246,7 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
                 rollbackFailure = rollbackMember(
                         member, rollbackFailure);
             }
-            for (PrefillWorkLedger.RouteReservation reservation
+            for (PrefillState.RouteReservation reservation
                     : exactReservations) {
                 rollbackFailure = rollbackReservation(
                         reservation, rollbackFailure);

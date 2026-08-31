@@ -30,7 +30,7 @@ import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.slf4j.Logger;
@@ -87,7 +87,7 @@ public abstract class FlexLBMockTestBase {
     protected EngineGrpcClient grpcClient;
     protected DefaultBatchDispatcher dispatcher;
     protected BatchSchedulerReporter reporter;
-    protected EngineWorkerStatus engineWorkerStatus;
+    protected WorkerDirectory engineWorkerStatus;
     private RequestSchedulerTestRuntime schedulerRuntime;
 
     private NioEventLoopGroup eventLoopGroup;
@@ -182,7 +182,7 @@ public abstract class FlexLBMockTestBase {
         scheduler = schedulerRuntime.scheduler();
 
         // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed view.
-        engineWorkerStatus = createEngineWorkerStatus();
+        engineWorkerStatus = createWorkerDirectory();
 
         // 8. Build WorkerStatus for prefill and decode mock workers
         WorkerStatus prefillWs = discoveredWorkerStatus(
@@ -213,11 +213,11 @@ public abstract class FlexLBMockTestBase {
         router = createRouter();
         schedulerRuntime.bindRouter(router);
 
-        // 12. Register in EngineWorkerStatus static map for completeness
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(prefillIpPort, prefillWs);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(decodeIpPort, decodeWs);
+        // 12. Publish discovered status in the fixture's directory.
+        engineWorkerStatus.statusMap(RoleType.PREFILL).clear();
+        engineWorkerStatus.statusMap(RoleType.DECODE).clear();
+        engineWorkerStatus.statusMap(RoleType.PREFILL).put(prefillIpPort, prefillWs);
+        engineWorkerStatus.statusMap(RoleType.DECODE).put(decodeIpPort, decodeWs);
     }
 
     @AfterEach
@@ -236,11 +236,11 @@ public abstract class FlexLBMockTestBase {
         }
         additionalPrefillWorkers.clear();
         for (String ipPort : additionalPrefillIpPorts) {
-            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().remove(ipPort);
+            engineWorkerStatus.statusMap(RoleType.PREFILL).remove(ipPort);
         }
         additionalPrefillIpPorts.clear();
         for (String ipPort : additionalDecodeIpPorts) {
-            EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().remove(ipPort);
+            engineWorkerStatus.statusMap(RoleType.DECODE).remove(ipPort);
         }
         additionalDecodeIpPorts.clear();
 
@@ -265,8 +265,8 @@ public abstract class FlexLBMockTestBase {
             eventLoopGroup.shutdownGracefully(0, 2, TimeUnit.SECONDS)
                     .syncUninterruptibly();
         }
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
+        engineWorkerStatus.statusMap(RoleType.PREFILL).clear();
+        engineWorkerStatus.statusMap(RoleType.DECODE).clear();
     }
 
     // ==================== Override points ====================
@@ -291,8 +291,8 @@ public abstract class FlexLBMockTestBase {
         return MockWorkerBehavior.builder().build();
     }
 
-    protected EngineWorkerStatus createEngineWorkerStatus() {
-        return mock(EngineWorkerStatus.class);
+    protected WorkerDirectory createWorkerDirectory() {
+        return new WorkerDirectory(endpointRegistry);
     }
 
     protected Router createRouter() {
@@ -402,7 +402,7 @@ public abstract class FlexLBMockTestBase {
                 2_000_000L);
 
         endpointRegistry.registerPreinitializedEndpoint(RoleType.PREFILL, ipPort, ws);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ipPort, ws);
+        engineWorkerStatus.statusMap(RoleType.PREFILL).put(ipPort, ws);
 
         additionalPrefillWorkers.add(worker);
         additionalPrefillIpPorts.add(ipPort);
@@ -454,8 +454,8 @@ public abstract class FlexLBMockTestBase {
 
         PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry
                 .registerPreinitializedEndpoint(RoleType.PREFILL, ipPort, ws);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
-                .getPrefillStatusMap().put(ipPort, ws);
+        engineWorkerStatus
+                .statusMap(RoleType.PREFILL).put(ipPort, ws);
         additionalPrefillIpPorts.add(ipPort);
         return endpoint;
     }
@@ -486,7 +486,7 @@ public abstract class FlexLBMockTestBase {
                 2_000_000_000L);
 
         DecodeEndpoint endpoint = (DecodeEndpoint) endpointRegistry.registerPreinitializedEndpoint(RoleType.DECODE, ipPort, ws);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put(ipPort, ws);
+        engineWorkerStatus.statusMap(RoleType.DECODE).put(ipPort, ws);
         additionalDecodeIpPorts.add(ipPort);
         return endpoint;
     }

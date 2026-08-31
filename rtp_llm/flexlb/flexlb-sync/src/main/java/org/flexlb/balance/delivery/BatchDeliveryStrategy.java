@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
@@ -40,7 +42,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
     @Override
     public Transaction prepare(
-            List<DeliveryItem> candidates,
+            List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
         if (candidates.isEmpty()) {
@@ -51,10 +53,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     private BatchTransaction admit(
-            List<DeliveryItem> candidates,
+            List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
-        DeliveryItem head = candidates.get(0);
+        ScheduledRequest head = candidates.get(0);
 
         CapacityBoundary.Attempt<BatchTransaction> groupAttempt =
                 slotPort.prepareIfOwned(head, () -> prepareAdmission(head))
@@ -72,25 +74,25 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         BatchTransaction transaction =
                 ((CapacityBoundary.Attempt.Accepted<BatchTransaction>)
                         groupAttempt).value();
-        List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
-        DeliveryItem blockedItem = null;
+        List<ScheduledRequest> admitted = new ArrayList<>(candidates.size());
+        ScheduledRequest blockedItem = null;
         CapacityBoundary blockedResult = null;
         try {
             for (int index = 0; index < candidates.size(); index++) {
-                DeliveryItem item = candidates.get(index);
-                CapacityBoundary.Attempt<DeliveryItem> attempt =
+                ScheduledRequest item = candidates.get(index);
+                CapacityBoundary.Attempt<ScheduledRequest> attempt =
                         slotPort.prepareIfOwned(
                                 item, () -> transaction.append(item))
                                 .orElseGet(() -> BatchDeliveryStrategy
-                                        .<DeliveryItem>ownershipLost());
+                                        .<ScheduledRequest>ownershipLost());
                 if (attempt
                         instanceof CapacityBoundary.Attempt.Accepted<
-                                DeliveryItem>) {
+                                ScheduledRequest>) {
                     admitted.add(item);
                 } else {
                     blockedItem = item;
                     blockedResult =
-                            ((CapacityBoundary.Attempt.Rejected<DeliveryItem>)
+                            ((CapacityBoundary.Attempt.Rejected<ScheduledRequest>)
                                     attempt).boundary();
                     break;
                 }
@@ -107,8 +109,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                             evaluator,
                             PrefillBatchFeatures.from(
                                     admitted,
-                                    DeliveryItem::seqLen,
-                                    DeliveryItem::hitCache));
+                                    ScheduledRequest::seqLen,
+                                    ScheduledRequest::hitCache));
             transaction.select(
                     admitted,
                     predictedMs,
@@ -126,7 +128,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     private CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(
-            DeliveryItem head) {
+            ScheduledRequest head) {
         try {
             CapacityBoundary.Attempt<
                     BatchSubmissionPort.PreparedSubmission> submissionAttempt =
@@ -194,14 +196,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
     @Override
     public double projectGroupDurationMs(
-            List<DeliveryItem> items,
+            List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator) {
         return PrefillPredictionBoundary.predictDecisionGroupMs(
                 evaluator,
                 PrefillBatchFeatures.from(
                         items,
-                        DeliveryItem::seqLen,
-                        DeliveryItem::hitCache));
+                        ScheduledRequest::seqLen,
+                        ScheduledRequest::hitCache));
     }
 
     @Override
@@ -212,14 +214,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     private void deliverCommitted(
             BatchTransaction batch,
             DeliveryMetadata metadata) {
-        List<DeliveryItem> original = batch.items();
+        List<ScheduledRequest> original = batch.items();
         List<ClaimedMember> claimed = new ArrayList<>(original.size());
         DispatchGate gate = null;
         Throwable handoffFailure = null;
         long deliveredPredictionMs = batch.predictedMs();
         try {
             for (int index = 0; index < original.size(); index++) {
-                DeliveryItem item = original.get(index);
+                ScheduledRequest item = original.get(index);
                 try {
                     SlotDeliveryPort.Claim claim =
                             slotPort.tryClaimForDelivery(
@@ -238,7 +240,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
 
             if (!claimed.isEmpty()) {
-                List<DeliveryItem> submitted = claimed.stream()
+                List<ScheduledRequest> submitted = claimed.stream()
                         .map(ClaimedMember::item)
                         .toList();
                 if (submitted.size() != original.size()) {
@@ -247,8 +249,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                                     batch.evaluator(),
                                     PrefillBatchFeatures.from(
                                             submitted,
-                                            DeliveryItem::seqLen,
-                                            DeliveryItem::hitCache));
+                                            ScheduledRequest::seqLen,
+                                            ScheduledRequest::hitCache));
                 }
                 gate = new DispatchGate(
                         claimed, slotPort);
@@ -321,7 +323,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         } catch (Throwable failure) {
             cleanup = append(cleanup, failure);
         }
-        for (DeliveryItem item : batch.items()) {
+        for (ScheduledRequest item : batch.items()) {
             try {
                 slotPort.failPrepared(item, cause);
             } catch (Throwable failure) {
@@ -337,8 +339,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     private static boolean sameIdentitySequence(
-            List<DeliveryItem> left,
-            List<DeliveryItem> right) {
+            List<ScheduledRequest> left,
+            List<ScheduledRequest> right) {
         if (left.size() != right.size()) {
             return false;
         }
@@ -413,10 +415,10 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         private BatchSubmissionPort.PreparedSubmission submission;
         private PrefillAdmissionPort.PreparedAdmission preparedAdmission;
         private PrefillAdmissionPort.CommittedAdmission committedAdmission;
-        private List<DeliveryItem> items = List.of();
+        private List<ScheduledRequest> items = List.of();
         private long predictedMs;
         private PrefillTimePredictor.Evaluator evaluator;
-        private DeliveryItem blockedItem;
+        private ScheduledRequest blockedItem;
         private CapacityBoundary blockedResult;
         private Phase phase;
 
@@ -434,7 +436,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         private static BatchTransaction blocked(
                 BatchDeliveryStrategy owner,
-                DeliveryItem blockedItem,
+                ScheduledRequest blockedItem,
                 CapacityBoundary blockedResult) {
             BatchTransaction transaction = new BatchTransaction(
                     owner, 0L, null, null);
@@ -444,17 +446,17 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return transaction;
         }
 
-        private synchronized CapacityBoundary.Attempt<DeliveryItem> append(
-                DeliveryItem exactItem) {
+        private synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+                ScheduledRequest exactItem) {
             requirePrepared("append");
             return preparedAdmission.tryAppend(exactItem, 0L);
         }
 
         private synchronized void select(
-                List<DeliveryItem> exactItems,
+                List<ScheduledRequest> exactItems,
                 long exactPredictionMs,
                 PrefillTimePredictor.Evaluator exactEvaluator,
-                DeliveryItem exactBlockedItem,
+                ScheduledRequest exactBlockedItem,
                 CapacityBoundary exactBlockedResult) {
             requirePrepared("select");
             items = List.copyOf(exactItems);
@@ -465,12 +467,12 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public List<DeliveryItem> items() {
+        public List<ScheduledRequest> items() {
             return items;
         }
 
         @Override
-        public DeliveryItem blockedItem() {
+        public ScheduledRequest blockedItem() {
             return blockedItem;
         }
 
@@ -553,14 +555,14 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             return evaluator;
         }
 
-        private boolean transferToEndpoint(DeliveryItem exactItem) {
+        private boolean transferToEndpoint(ScheduledRequest exactItem) {
             requirePhase(Phase.COMMITTED, "transfer admission");
             return committedAdmission.transferToEndpoint(exactItem);
         }
 
         private void submit(
                 BatchSubmissionPort.Command command,
-                BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer) {
+                BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer) {
             requirePhase(Phase.COMMITTED, "submit");
             submission.submitBatch(command, observer);
         }
@@ -632,13 +634,13 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     }
 
     private record ClaimedMember(
-            DeliveryItem item,
+            ScheduledRequest item,
             SlotDeliveryPort.Claim claim) {
     }
 
     private static final class DispatchGate
-            implements BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> {
-        private final Map<DeliveryItem, SlotDeliveryPort.Claim> claimsByItem;
+            implements BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> {
+        private final Map<ScheduledRequest, SlotDeliveryPort.Claim> claimsByItem;
         private final SlotDeliveryPort slotPort;
         private boolean deferred = true;
         private List<Event> events;
@@ -682,7 +684,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
         @Override
         public void accept(
-                DeliveryItem item,
+                ScheduledRequest item,
                 SlotDeliveryPort.Completion completion) {
             publish(new Event(item, completion));
         }
@@ -709,13 +711,13 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             slotPort.complete(claim, event.completion());
         }
 
-        private SlotDeliveryPort.Claim claimFor(DeliveryItem item) {
+        private SlotDeliveryPort.Claim claimFor(ScheduledRequest item) {
             return claimsByItem.get(item);
         }
     }
 
     private record Event(
-            DeliveryItem item,
+            ScheduledRequest item,
             SlotDeliveryPort.Completion completion) {
     }
 

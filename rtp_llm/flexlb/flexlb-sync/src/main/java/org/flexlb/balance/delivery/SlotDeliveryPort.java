@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.function.BooleanSupplier;
@@ -10,7 +12,7 @@ public interface SlotDeliveryPort {
 
     /** Execute preparation only while the exact item is still queue-owned. */
     <T> Optional<T> prepareIfOwned(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             Supplier<T> preparation);
 
     /**
@@ -27,7 +29,7 @@ public interface SlotDeliveryPort {
      *         owns this request generation
      */
     Claim tryClaimForDelivery(
-            DeliveryItem exactItem,
+            ScheduledRequest exactItem,
             Identity identity,
             BooleanSupplier endpointHandoff);
 
@@ -39,12 +41,12 @@ public interface SlotDeliveryPort {
     void complete(Claim exactClaim, Completion completion);
 
     /** Terminally reduce an exact prepared item which acquired no claim. */
-    void failPrepared(DeliveryItem exactItem, Throwable cause);
+    void failPrepared(ScheduledRequest exactItem, Throwable cause);
 
     /** Opaque proof of the exact slot point-of-no-return. */
     interface Claim {
 
-        DeliveryItem item();
+        ScheduledRequest item();
     }
 
     /** Canonical delivery identity installed at the point-of-no-return. */

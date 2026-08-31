@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.EndpointSelection;
@@ -29,7 +28,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * {@code EndpointRegistry} lookups by ip+port.
  *
  */
-public final class BatchItem implements DeliveryItem, Prioritized {
+public final class ScheduledRequest implements Prioritized {
 
     private static final AtomicLong ENQUEUE_SEQUENCE = new AtomicLong();
 
@@ -52,7 +51,7 @@ public final class BatchItem implements DeliveryItem, Prioritized {
     private final long maxDecodeKvUsagePercent;
     private final int maxInflightDeliveriesPerPrefillWorker;
 
-    public BatchItem(BalanceContext ctx,
+    public ScheduledRequest(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
                      ServerStatus prefill,
@@ -74,7 +73,7 @@ public final class BatchItem implements DeliveryItem, Prioritized {
                 null);
     }
 
-    BatchItem(BalanceContext ctx,
+    ScheduledRequest(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
                      ServerStatus prefill,
@@ -155,7 +154,6 @@ public final class BatchItem implements DeliveryItem, Prioritized {
     PlacementAvailability decodePlacementAvailability() {
         return placementAvailability;
     }
-    @Override
     public long enqueuedAtMs() { return enqueuedAtMs; }
     public long expiresAtMs() { return expiresAtMs; }
     public boolean requestExpired(long nowMs) {
@@ -189,19 +187,16 @@ public final class BatchItem implements DeliveryItem, Prioritized {
 
     // -- derived accessors --
 
-    @Override
     public long requestId() {
         return requestId;
     }
 
     /** Total sequence length of this request. */
-    @Override
     public long seqLen() {
         return seqLen;
     }
 
     /** Cache-hit tokens on the assigned prefill endpoint. */
-    @Override
     public long hitCache() {
         return hitCache;
     }

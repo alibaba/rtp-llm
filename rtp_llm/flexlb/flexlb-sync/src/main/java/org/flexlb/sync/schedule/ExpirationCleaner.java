@@ -6,8 +6,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.lifecycle.WorkerGenerationRetirement;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,13 +41,15 @@ public class ExpirationCleaner {
     private final long workerTimeoutUs;
     private final EndpointRegistry endpointRegistry;
     private final CacheAwareService cacheAwareService;
+    private final WorkerDirectory workerDirectory;
 
     @Autowired
     public ExpirationCleaner(
             EndpointRegistry endpointRegistry,
             ConfigService configService,
-            CacheAwareService cacheAwareService) {
-        this(endpointRegistry, cacheAwareService,
+            CacheAwareService cacheAwareService,
+            WorkerDirectory workerDirectory) {
+        this(endpointRegistry, cacheAwareService, workerDirectory,
                 resolveWorkerTimeoutUs(configService));
     }
 
@@ -70,19 +71,29 @@ public class ExpirationCleaner {
             EndpointRegistry endpointRegistry,
             CacheAwareService cacheAwareService,
             long workerTimeoutUs) {
+        this(endpointRegistry, cacheAwareService,
+                new WorkerDirectory(endpointRegistry), workerTimeoutUs);
+    }
+
+    ExpirationCleaner(
+            EndpointRegistry endpointRegistry,
+            CacheAwareService cacheAwareService,
+            WorkerDirectory workerDirectory,
+            long workerTimeoutUs) {
         this.endpointRegistry = endpointRegistry;
         this.cacheAwareService = Objects.requireNonNull(
                 cacheAwareService, "cacheAwareService");
+        this.workerDirectory = Objects.requireNonNull(
+                workerDirectory, "workerDirectory");
         this.workerTimeoutUs = workerTimeoutUs;
     }
 
     @Scheduled(fixedRateString = "${WORKER_CLEAN_INTERVAL_MS:3000}")
     public void cleanExpiredWorkers() {
-        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<PendingRetirement> retirements = new ArrayList<>();
         for (RoleType role : RoleType.values()) {
             retirements.addAll(beginExpiredRetirements(
-                    modelWorkerStatus.getRoleStatusMap(role), role));
+                    workerDirectory.statusMap(role), role));
         }
         completeRetirements(retirements);
     }

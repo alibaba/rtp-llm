@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.admission.AdmissionFailure;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
+import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
 import org.flexlb.balance.eviction.EvictionPlacementPort;
 import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.flexlb.balance.strategy.ConfiguredLoadBalanceSelector;
@@ -108,7 +108,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
         }
 
         try (admission) {
-            BatchItem item = admission.buildItem(
+            ScheduledRequest item = admission.buildItem(
                     context, future, System.currentTimeMillis());
             context.setRouteSubmittedNanos(System.nanoTime());
             if (!admission.commitTo(lifecycle, item, true)) {
@@ -133,7 +133,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
         }
         QueueRouteAdmission admission = admitted.admission();
         try {
-            BatchItem item = admission.buildItem(
+            ScheduledRequest item = admission.buildItem(
                     context, future, System.currentTimeMillis());
             DecodeEndpoint decodeEndpoint = item.decodeEp();
             long seqLen = context.getRequest().getSeqLen();
@@ -162,7 +162,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
     private final class PreparedPrefillEviction
             implements PrefillEvictionAdmission {
         private final BalanceContext context;
-        private final BatchItem item;
+        private final ScheduledRequest item;
         private final PriorityRequestEnvelope envelope;
         private final QueueSnapshot queueSnapshot;
         private QueueRouteAdmission admission;
@@ -171,7 +171,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
         private PreparedPrefillEviction(
                 BalanceContext context,
                 QueueRouteAdmission admission,
-                BatchItem item,
+                ScheduledRequest item,
                 PriorityRequestEnvelope envelope,
                 QueueSnapshot queueSnapshot) {
             this.context = context;
@@ -193,7 +193,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
 
         @Override
         public PrefillEvictionCommit commit(
-                List<DeliveryItem> exactVictims) {
+                List<ScheduledRequest> exactVictims) {
             if (attempted || admission == null) {
                 throw new IllegalStateException(
                         "Prefill eviction admission was already consumed");
@@ -229,7 +229,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
             PrefillEvictionCommit declined) {
 
         private static PreparedEvictionCommits forVictims(
-                List<DeliveryItem> exactVictims) {
+                List<ScheduledRequest> exactVictims) {
             return new PreparedEvictionCommits(
                     new PrefillEvictionCommit(
                             PrefillEvictionStatus.COMMITTED, exactVictims),
@@ -252,7 +252,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
     /** Optional route metadata cannot hide an already committed replacement. */
     private void publishCommittedPlacementMetadata(
             BalanceContext context,
-            BatchItem item) {
+            ScheduledRequest item) {
         try {
             context.setRouteSubmittedNanos(System.nanoTime());
             ServerStatus prefill = item.prefill();
@@ -273,7 +273,7 @@ final class EvictionPlacementAdapter implements EvictionPlacementPort {
 
     private void reportPlacement(
             BalanceContext context,
-            BatchItem item,
+            ScheduledRequest item,
             String kind) {
         try {
             reporter.reportRouteSubmitTimeMs(

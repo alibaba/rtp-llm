@@ -8,7 +8,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.BatchSubmissionPort;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.SlotDeliveryPort;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
@@ -267,7 +267,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         @Override
         public void submitBatch(
                 BatchSubmissionPort.Command command,
-                BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer) {
+                BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer) {
             DispatchTask submittedTask = dispatchTask(command, observer);
             if (!phase.compareAndSet(
                     PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
@@ -308,9 +308,9 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
     @SuppressWarnings("unchecked")
     private static DispatchTask dispatchTask(
             BatchSubmissionPort.Command command,
-            BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer) {
-        List<BatchItem> items =
-                (List<BatchItem>) (List<?>) command.exactItems();
+            BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer) {
+        List<ScheduledRequest> items =
+                (List<ScheduledRequest>) (List<?>) command.exactItems();
         return new DispatchTask(
                 items,
                 items.get(0).prefillEp(),
@@ -320,12 +320,12 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                 observer);
     }
 
-    private record DispatchTask(List<BatchItem> items,
+    private record DispatchTask(List<ScheduledRequest> items,
                                 PrefillEndpoint prefillEndpoint,
                                 long batchId,
                                 long predictedMs,
                                 String reason,
-                                BiConsumer<DeliveryItem,
+                                BiConsumer<ScheduledRequest,
                                         SlotDeliveryPort.Completion> observer) {
     }
 
@@ -352,10 +352,10 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     private void doDispatchInternal(DispatchTask task,
                                     DispatchAttempt attempt) {
-        List<BatchItem> items = task.items();
+        List<ScheduledRequest> items = task.items();
         PrefillEndpoint prefillEp = task.prefillEndpoint();
         long batchId = task.batchId();
-        BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer =
+        BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer =
                 task.observer();
 
         // 1. Build gRPC request
@@ -391,7 +391,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
         try {
             long dispatchedNanos = System.nanoTime();
-            for (BatchItem item : items) {
+            for (ScheduledRequest item : items) {
                 item.ctx().setBatchDispatchedNanos(dispatchedNanos);
             }
             attempt.rpcInvocationStarted = true;
@@ -472,11 +472,11 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                 "batch submission requires BATCH dispatcher configuration");
     }
 
-    private static void markUncertain(List<BatchItem> items, long batchId,
+    private static void markUncertain(List<ScheduledRequest> items, long batchId,
                                       Throwable error,
-                                      BiConsumer<DeliveryItem,
+                                      BiConsumer<ScheduledRequest,
                                               SlotDeliveryPort.Completion> observer) {
-        for (BatchItem item : items) {
+        for (ScheduledRequest item : items) {
             try {
                 observer.accept(
                         item, new SlotDeliveryPort.Completion.Uncertain(error));
@@ -487,18 +487,18 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         }
     }
 
-    private void failItems(List<BatchItem> items,
+    private void failItems(List<ScheduledRequest> items,
                            long batchId, String message,
-                           BiConsumer<DeliveryItem,
+                           BiConsumer<ScheduledRequest,
                                    SlotDeliveryPort.Completion> observer) {
         failItems(items, batchId, new RuntimeException(message), observer);
     }
 
-    private void failItems(List<BatchItem> items,
+    private void failItems(List<ScheduledRequest> items,
                            long batchId, Throwable error,
-                           BiConsumer<DeliveryItem,
+                           BiConsumer<ScheduledRequest,
                                    SlotDeliveryPort.Completion> observer) {
-        for (BatchItem item : items) {
+        for (ScheduledRequest item : items) {
             try {
                 observer.accept(
                         item, new SlotDeliveryPort.Completion.Failed(error));
@@ -511,9 +511,9 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     // ==================== Response parsing ====================
 
-    private void handleResponse(long batchId, List<BatchItem> items,
+    private void handleResponse(long batchId, List<ScheduledRequest> items,
                                 EngineRpcService.EnqueueBatchResponsePB response,
-                                BiConsumer<DeliveryItem,
+                                BiConsumer<ScheduledRequest,
                                         SlotDeliveryPort.Completion> observer) {
         if (response.getBatchId() != batchId) {
             RuntimeException mismatch = new RuntimeException(
@@ -524,7 +524,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         }
         Set<Long> expectedIds = new HashSet<>();
         List<String> protocolViolations = new ArrayList<>();
-        for (BatchItem item : items) {
+        for (ScheduledRequest item : items) {
             expectedIds.add(item.requestId());
         }
 
@@ -578,7 +578,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
             return;
         }
 
-        for (BatchItem item : items) {
+        for (ScheduledRequest item : items) {
             try {
                 if (successIds.contains(item.requestId())) {
                     observer.accept(
@@ -634,7 +634,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     // ==================== gRPC request building ====================
 
-    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<BatchItem> items)
+    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<ScheduledRequest> items)
             throws InvalidProtocolBufferException {
         EngineRpcService.EnqueueBatchRequestPB.Builder builder =
                 EngineRpcService.EnqueueBatchRequestPB.newBuilder().setBatchId(batchId);
@@ -654,8 +654,8 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
             }
         }
 
-        Map<Long, List<BatchItem>> byDpRank = new HashMap<>();
-        for (BatchItem item : items) {
+        Map<Long, List<ScheduledRequest>> byDpRank = new HashMap<>();
+        for (ScheduledRequest item : items) {
             byDpRank.computeIfAbsent(item.prefill().getDpRank(), ignored -> new ArrayList<>()).add(item);
         }
         try {
@@ -677,13 +677,13 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     private EngineRpcService.EnqueueBatchDpSlotPB buildDpSlot(
             long dpRank,
-            List<BatchItem> items,
+            List<ScheduledRequest> items,
             BatchRoleAddressCache roleAddresses)
             throws InvalidProtocolBufferException {
         EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
                 EngineRpcService.EnqueueBatchDpSlotPB.newBuilder()
                         .setDpRank((int) dpRank);
-        for (BatchItem item : items) {
+        for (ScheduledRequest item : items) {
             slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
                     .setInput(buildInput(item, roleAddresses))
                     .build());
@@ -692,7 +692,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
     }
 
     private EngineRpcService.GenerateInputPB buildInput(
-            BatchItem item,
+            ScheduledRequest item,
             BatchRoleAddressCache roleAddresses)
             throws InvalidProtocolBufferException {
         ByteString generateInput = item.ctx().getGenerateInputPb();
@@ -778,7 +778,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
 
     // ==================== Logging ====================
 
-    private void logDispatch(long batchId, List<BatchItem> items,
+    private void logDispatch(long batchId, List<ScheduledRequest> items,
                              PrefillEndpoint prefillEp, long predMs, String reason) {
         if (!Logger.isDebugEnabled()) {
             return;
@@ -787,7 +787,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
         long totalHit = 0;
         StringBuilder itemDetail = new StringBuilder();
         for (int i = 0; i < items.size(); i++) {
-            BatchItem item = items.get(i);
+            ScheduledRequest item = items.get(i);
             long seqLen = item.seqLen();
             long hitCache = item.hitCache();
             totalTokens += seqLen;
@@ -800,7 +800,7 @@ public class DefaultBatchDispatcher implements BatchSubmissionPort {
                     .append(" hit_cache=").append(hitCache).append('}');
         }
 
-        BatchItem head = items.get(0);
+        ScheduledRequest head = items.get(0);
         long now = System.currentTimeMillis();
         long waitMs = now - head.enqueuedAtMs();
         long remainingMs = head.expiresAtMs() - now;

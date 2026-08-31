@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
@@ -107,8 +107,8 @@ final class GroupPolicyTestSupport {
         private final AtomicLong nowMs = new AtomicLong(NOW_MS);
         private final AtomicLong queueVersion = new AtomicLong();
         private final ReentrantLock queueLock = new ReentrantLock();
-        private final PriorityBlockingQueue<BatchItem> queue;
-        private final PrefillWorkRegistry registry;
+        private final PriorityBlockingQueue<ScheduledRequest> queue;
+        private final PrefillState registry;
         private final PrefillEndpoint endpoint;
         private final WorkerStatus status;
         private final AtomicReference<List<WorkerStatus.EngineObservation>>
@@ -123,7 +123,7 @@ final class GroupPolicyTestSupport {
 
         private Fixture(FlexlbConfig config) {
             this.config = config;
-            Comparator<BatchItem> itemOrder = config.isPriorityOrdering()
+            Comparator<ScheduledRequest> itemOrder = config.isPriorityOrdering()
                     ? WorkerBatcher.PRIORITY_QUEUE_ORDER
                     : WorkerBatcher.FIFO_QUEUE_ORDER;
             Comparator<GroupPlanner.Item> projectionOrder =
@@ -140,7 +140,7 @@ final class GroupPolicyTestSupport {
                                     .thenComparingLong(
                                             GroupPlanner.Item::requestId);
             queue = new PriorityBlockingQueue<>(11, itemOrder);
-            registry = new PrefillWorkRegistry(
+            registry = new PrefillState(
                     queueLock, queue, nowMs::get, () -> { });
             status = mock(WorkerStatus.class);
             when(status.committedEngineObservation()).thenAnswer(ignored -> {
@@ -225,7 +225,7 @@ final class GroupPolicyTestSupport {
             evaluator.set(replacement);
         }
 
-        BatchItem item(
+        ScheduledRequest item(
                 long requestId,
                 int priority,
                 long sequenceLength,
@@ -240,7 +240,7 @@ final class GroupPolicyTestSupport {
             balanceContext.setConfig(config);
             balanceContext.setSchedulingMetadata(
                     SchedulingMetadata.explicit(priority, expiresAtMs));
-            return new BatchItem(
+            return new ScheduledRequest(
                     balanceContext,
                     new CompletableFuture<Response>(),
                     null,
@@ -252,20 +252,20 @@ final class GroupPolicyTestSupport {
                     enqueuedAtMs);
         }
 
-        BatchItem add(
+        ScheduledRequest add(
                 long requestId,
                 int priority,
                 long sequenceLength,
                 long enqueuedAtMs,
                 long expiresAtMs) {
-            BatchItem item = item(
+            ScheduledRequest item = item(
                     requestId, priority, sequenceLength,
                     enqueuedAtMs, expiresAtMs);
             add(item);
             return item;
         }
 
-        void add(BatchItem item) {
+        void add(ScheduledRequest item) {
             queueLock.lock();
             try {
                 assertTrue(registry.enqueueActiveUnderLock(item),
@@ -276,7 +276,7 @@ final class GroupPolicyTestSupport {
             }
         }
 
-        boolean remove(BatchItem item) {
+        boolean remove(ScheduledRequest item) {
             queueLock.lock();
             try {
                 return context.removeUnderLock(item);
@@ -294,7 +294,7 @@ final class GroupPolicyTestSupport {
             }
         }
 
-        List<BatchItem> activeItems() {
+        List<ScheduledRequest> activeItems() {
             return context.activeItemsInSchedulingOrder();
         }
 
@@ -315,22 +315,40 @@ final class GroupPolicyTestSupport {
         }
     }
 
-    static final class RecordingLifecycle implements DeliveryLifecyclePort {
+    static final class RecordingLifecycle implements EndpointEventSink {
 
-        private final List<DeliveryItem> expired = new ArrayList<>();
-        private final List<DeliveryItem> offerFailureItems = new ArrayList<>();
+        private final List<ScheduledRequest> expired = new ArrayList<>();
+        private final List<ScheduledRequest> offerFailureItems = new ArrayList<>();
         private final List<Throwable> offerFailures = new ArrayList<>();
-        private final List<DeliveryItem> deliveryFailureItems = new ArrayList<>();
+        private final List<ScheduledRequest> deliveryFailureItems = new ArrayList<>();
         private final List<Throwable> deliveryFailures = new ArrayList<>();
 
         @Override
-        public void onQueuedItemExpired(DeliveryItem exactItem) {
+        public void onStatusReduced(
+                org.flexlb.balance.endpoint.EndpointStatusReduction reduction) {
+        }
+
+        @Override
+        public void onPrefillGenerationRetired(
+                org.flexlb.balance.endpoint.PrefillEndpoint endpoint,
+                List<ScheduledRequest> ownedItems) {
+        }
+
+        @Override
+        public void onDecodeGenerationRetired(
+                org.flexlb.balance.endpoint.DecodeEndpoint endpoint,
+                List<org.flexlb.balance.endpoint.DecodeEndpoint.ReservationHandle>
+                        ownedReservations) {
+        }
+
+        @Override
+        public void onQueuedItemExpired(ScheduledRequest exactItem) {
             expired.add(exactItem);
         }
 
         @Override
         public void onQueueOfferFailure(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Throwable cause) {
             offerFailureItems.add(exactItem);
             offerFailures.add(cause);
@@ -338,17 +356,17 @@ final class GroupPolicyTestSupport {
 
         @Override
         public void onPreparedDeliveryFailure(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Throwable cause) {
             deliveryFailureItems.add(exactItem);
             deliveryFailures.add(cause);
         }
 
-        List<DeliveryItem> expired() {
+        List<ScheduledRequest> expired() {
             return List.copyOf(expired);
         }
 
-        List<DeliveryItem> offerFailureItems() {
+        List<ScheduledRequest> offerFailureItems() {
             return List.copyOf(offerFailureItems);
         }
 
@@ -356,7 +374,7 @@ final class GroupPolicyTestSupport {
             return List.copyOf(offerFailures);
         }
 
-        List<DeliveryItem> deliveryFailureItems() {
+        List<ScheduledRequest> deliveryFailureItems() {
             return List.copyOf(deliveryFailureItems);
         }
 
@@ -368,8 +386,8 @@ final class GroupPolicyTestSupport {
 
     static final class RecordingDeliveryStrategy implements DeliveryStrategy {
 
-        private final PrefillWorkRegistry registry;
-        private final List<List<DeliveryItem>> attempts = new ArrayList<>();
+        private final PrefillState registry;
+        private final List<List<ScheduledRequest>> attempts = new ArrayList<>();
         private final List<PrefillTimePredictor.Evaluator> evaluators =
                 new ArrayList<>();
         private final List<OptionalLong> plannedPredictions = new ArrayList<>();
@@ -379,8 +397,8 @@ final class GroupPolicyTestSupport {
                 new ArrayList<>();
         private final AtomicBoolean blocked = new AtomicBoolean();
         private int maximumPreparedItems = Integer.MAX_VALUE;
-        private ToDoubleFunction<List<DeliveryItem>> groupProjection =
-                items -> items.stream().mapToLong(DeliveryItem::seqLen).sum();
+        private ToDoubleFunction<List<ScheduledRequest>> groupProjection =
+                items -> items.stream().mapToLong(ScheduledRequest::seqLen).sum();
         private final RouteProjection.AdmissionBlockSemantics blockSemantics =
                 new RouteProjection.AdmissionBlockSemantics(
                         "TEST_CAPACITY",
@@ -403,16 +421,16 @@ final class GroupPolicyTestSupport {
                     }
                 };
 
-        private RecordingDeliveryStrategy(PrefillWorkRegistry registry) {
+        private RecordingDeliveryStrategy(PrefillState registry) {
             this.registry = registry;
         }
 
         @Override
         public Transaction prepare(
-                List<DeliveryItem> candidates,
+                List<ScheduledRequest> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
-            List<DeliveryItem> exactCandidates = List.copyOf(candidates);
+            List<ScheduledRequest> exactCandidates = List.copyOf(candidates);
             attempts.add(exactCandidates);
             evaluators.add(evaluator);
             plannedPredictions.add(plannedPrediction);
@@ -431,22 +449,22 @@ final class GroupPolicyTestSupport {
                         new CapacityBoundary.Unavailable(
                                 availability, blockSemantics));
             }
-            List<DeliveryItem> preparedCandidates = List.copyOf(
+            List<ScheduledRequest> preparedCandidates = List.copyOf(
                     exactCandidates.subList(0, preparedCount));
-            DeliveryItem blockedItem = preparedCount < exactCandidates.size()
+            ScheduledRequest blockedItem = preparedCount < exactCandidates.size()
                     ? exactCandidates.get(preparedCount) : null;
             CapacityBoundary blockedResult = blockedItem == null
                     ? null : new CapacityBoundary.Unavailable(
                             availability, blockSemantics);
 
-            List<PrefillWorkLedger.RouteReservation> reservations =
+            List<PrefillState.RouteReservation> reservations =
                     new ArrayList<>(preparedCandidates.size());
-            for (DeliveryItem item : preparedCandidates) {
-                PrefillWorkLedger.RouteReservationResult result =
+            for (ScheduledRequest item : preparedCandidates) {
+                PrefillState.RouteReservationResult result =
                         registry.reserveRoute(
                                 item, 0L, Integer.MAX_VALUE, () -> { });
                 if (result.status()
-                        != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+                        != PrefillState.CapacityStatus.ACQUIRED) {
                     closeReservations(reservations);
                     return boundaryOnly(
                             exactCandidates.getFirst(),
@@ -466,11 +484,11 @@ final class GroupPolicyTestSupport {
 
         @Override
         public double projectGroupDurationMs(
-                List<DeliveryItem> items,
+                List<ScheduledRequest> items,
                 PrefillTimePredictor.Evaluator evaluator) {
-            List<DeliveryItem> exact = List.copyOf(items);
+            List<ScheduledRequest> exact = List.copyOf(items);
             projectedGroups.add(exact.stream()
-                    .map(DeliveryItem::requestId)
+                    .map(ScheduledRequest::requestId)
                     .toList());
             return PrefillPredictionBoundary.requireValidDecisionGroupMs(
                     groupProjection.applyAsDouble(exact));
@@ -489,14 +507,14 @@ final class GroupPolicyTestSupport {
             maximumPreparedItems = maximumItems;
         }
 
-        void projection(ToDoubleFunction<List<DeliveryItem>> replacement) {
+        void projection(ToDoubleFunction<List<ScheduledRequest>> replacement) {
             groupProjection = replacement;
         }
 
         List<List<Long>> attempts() {
             return attempts.stream()
                     .map(group -> group.stream()
-                            .map(DeliveryItem::requestId)
+                            .map(ScheduledRequest::requestId)
                             .toList())
                     .toList();
         }
@@ -522,7 +540,7 @@ final class GroupPolicyTestSupport {
         }
 
         private static void closeReservations(
-                List<PrefillWorkLedger.RouteReservation> reservations) {
+                List<PrefillState.RouteReservation> reservations) {
             for (int index = reservations.size() - 1; index >= 0; index--) {
                 reservations.get(index).close();
             }
@@ -533,24 +551,24 @@ final class GroupPolicyTestSupport {
     private static final class RecordingTransaction
             implements DeliveryStrategy.Transaction {
 
-        private final List<DeliveryItem> items;
-        private final List<PrefillWorkLedger.RouteReservation> reservations;
-        private final PrefillWorkRegistry registry;
+        private final List<ScheduledRequest> items;
+        private final List<PrefillState.RouteReservation> reservations;
+        private final PrefillState registry;
         private final List<List<Long>> committedGroups;
         private final List<DeliveryMetadata> committedMetadata;
-        private final DeliveryItem blockedItem;
+        private final ScheduledRequest blockedItem;
         private final CapacityBoundary blockedResult;
         private final AtomicBoolean resolved = new AtomicBoolean();
-        private List<PrefillWorkLedger.CommittedHandoff> handoffs = List.of();
+        private List<PrefillState.CommittedHandoff> handoffs = List.of();
         private boolean committed;
 
         private RecordingTransaction(
-                List<DeliveryItem> items,
-                List<PrefillWorkLedger.RouteReservation> reservations,
-                PrefillWorkRegistry registry,
+                List<ScheduledRequest> items,
+                List<PrefillState.RouteReservation> reservations,
+                PrefillState registry,
                 List<List<Long>> committedGroups,
                 List<DeliveryMetadata> committedMetadata,
-                DeliveryItem blockedItem,
+                ScheduledRequest blockedItem,
                 CapacityBoundary blockedResult) {
             this.items = List.copyOf(items);
             this.reservations = List.copyOf(reservations);
@@ -562,12 +580,12 @@ final class GroupPolicyTestSupport {
         }
 
         @Override
-        public List<DeliveryItem> items() {
+        public List<ScheduledRequest> items() {
             return items;
         }
 
         @Override
-        public DeliveryItem blockedItem() {
+        public ScheduledRequest blockedItem() {
             return blockedItem;
         }
 
@@ -578,7 +596,7 @@ final class GroupPolicyTestSupport {
 
         @Override
         public void commitUnderLock() {
-            handoffs = reservations.getFirst().commitGroupUnderLock(
+            handoffs = reservations.getFirst().commitGroup(
                     items, reservations);
             committed = true;
         }
@@ -586,7 +604,7 @@ final class GroupPolicyTestSupport {
         @Override
         public void handoff(DeliveryMetadata metadata) {
             committedGroups.add(items.stream()
-                    .map(DeliveryItem::requestId)
+                    .map(ScheduledRequest::requestId)
                     .toList());
             committedMetadata.add(metadata);
             settle();
@@ -608,30 +626,30 @@ final class GroupPolicyTestSupport {
             if (!resolved.compareAndSet(false, true)) {
                 return;
             }
-            for (DeliveryItem item : items) {
+            for (ScheduledRequest item : items) {
                 if (!registry.terminalizeCommittedItem(item)) {
                     throw new IllegalStateException(
                             "test owner lost committed request_id="
                                     + item.requestId());
                 }
             }
-            for (PrefillWorkLedger.CommittedHandoff handoff : handoffs) {
+            for (PrefillState.CommittedHandoff handoff : handoffs) {
                 handoff.close();
             }
         }
     }
 
     static DeliveryStrategy.Transaction boundaryOnly(
-            DeliveryItem item,
+            ScheduledRequest item,
             CapacityBoundary boundary) {
         return new DeliveryStrategy.Transaction() {
             @Override
-            public List<DeliveryItem> items() {
+            public List<ScheduledRequest> items() {
                 return List.of();
             }
 
             @Override
-            public DeliveryItem blockedItem() {
+            public ScheduledRequest blockedItem() {
                 return item;
             }
 

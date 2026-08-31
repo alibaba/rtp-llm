@@ -12,8 +12,7 @@ import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -42,7 +41,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
                                     EngineHealthReporter engineHealthReporter,
-                                    EngineWorkerStatus engineWorkerStatus,
+                                    WorkerDirectory workerDirectory,
                                     EngineGrpcService engineGrpcService,
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService cacheAwareService,
@@ -51,7 +50,8 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     EndpointRegistry endpointRegistry,
                                     ConfigService configService) {
 
-        super(workerAddressService, engineHealthReporter, engineWorkerStatus, modelMetaConfig, configService);
+        super(workerAddressService, engineHealthReporter, workerDirectory,
+                modelMetaConfig, configService);
 
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
@@ -82,11 +82,9 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         logger.debug("sync engine status start, times:{}, modelName:{}",
                 syncCount.longValue(), modelName);
         try {
-            ModelWorkerStatus modelWorkerStatus =
-                    EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
             for (RoleType roleType : requiredRoles) {
                 engineSyncExecutor.submit(new EngineSyncRunner(
-                        modelName, modelWorkerStatus.getRoleStatusMap(roleType),
+                        modelName, workerDirectory.statusMap(roleType),
                         workerAddressService, statusCheckExecutor, engineHealthReporter,
                         engineGrpcService, roleType, cacheAwareService,
                         cacheIntervalService,

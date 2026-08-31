@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.WorkerBatcherFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -147,10 +147,9 @@ public class EndpointRegistry {
             new DecodeDirectoryState(Long.MAX_VALUE, true, List.of());
     private final ConfigService configService;
     private final EndpointEventSink endpointEventSink;
-    private final DeliveryLifecyclePort deliveryLifecycle;
     private final BatchSchedulerReporter reporter;
     private final DeliveryStrategy deliveryStrategy;
-    private final PrefillGenerationRuntime.Factory runtimeFactory;
+    private final WorkerBatcherFactory runtimeFactory;
     private final PlacementAvailability placementAvailability;
     private final Object lifecycleGate = new Object();
     private RegistryPhase registryPhase = RegistryPhase.OPEN;
@@ -216,11 +215,10 @@ public class EndpointRegistry {
 
     public EndpointRegistry(ConfigService configService,
                             EndpointEventSink endpointEventSink,
-                            DeliveryLifecyclePort deliveryLifecycle,
                             BatchSchedulerReporter reporter,
                             DeliveryStrategy deliveryStrategy,
-                            PrefillGenerationRuntime.Factory runtimeFactory) {
-        this(configService, endpointEventSink, deliveryLifecycle, reporter,
+                            WorkerBatcherFactory runtimeFactory) {
+        this(configService, endpointEventSink, reporter,
                 deliveryStrategy,
                 runtimeFactory, new PlacementAvailability());
     }
@@ -228,17 +226,14 @@ public class EndpointRegistry {
     @Autowired
     public EndpointRegistry(ConfigService configService,
                             EndpointEventSink endpointEventSink,
-                            DeliveryLifecyclePort deliveryLifecycle,
                             BatchSchedulerReporter reporter,
                             DeliveryStrategy deliveryStrategy,
-                            PrefillGenerationRuntime.Factory runtimeFactory,
+                            WorkerBatcherFactory runtimeFactory,
                             PlacementAvailability placementAvailability) {
         this.configService = java.util.Objects.requireNonNull(
                 configService, "configService");
         this.endpointEventSink = java.util.Objects.requireNonNull(
                 endpointEventSink, "endpointEventSink");
-        this.deliveryLifecycle = java.util.Objects.requireNonNull(
-                deliveryLifecycle, "deliveryLifecycle");
         this.reporter = java.util.Objects.requireNonNull(reporter, "reporter");
         this.deliveryStrategy = java.util.Objects.requireNonNull(
                 deliveryStrategy, "deliveryStrategy");
@@ -1152,7 +1147,7 @@ public class EndpointRegistry {
                 deliveryStrategy,
                 runtimeFactory,
                 endpointEventSink,
-                deliveryLifecycle,
+                endpointEventSink,
                 reporter,
                 placementAvailability);
     }

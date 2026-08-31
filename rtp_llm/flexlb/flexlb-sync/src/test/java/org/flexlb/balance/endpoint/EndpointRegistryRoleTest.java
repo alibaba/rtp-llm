@@ -37,7 +37,6 @@ class EndpointRegistryRoleTest {
         registry = new EndpointRegistry(
                 configService,
                 requestRuntime,
-                requestRuntime,
                 Mockito.mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 EndpointTestSupport.realRuntimeFactory());

@@ -1,8 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryTelemetry;
@@ -14,8 +13,8 @@ import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointStatusReduction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.scheduler.WorkerBatcherFactory;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.ConfigService;
@@ -26,7 +25,6 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.mockito.Mockito;
 
-import java.lang.reflect.Constructor;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -45,7 +43,6 @@ final class StrategyTestSupport {
                 new ParkedAdmission(), runtime, NoopTelemetry.INSTANCE);
         return new EndpointRegistry(
                 configService,
-                runtime,
                 runtime,
                 Mockito.mock(BatchSchedulerReporter.class),
                 delivery,
@@ -126,33 +123,33 @@ final class StrategyTestSupport {
     }
 
     static boolean offer(
-            PrefillEndpoint endpoint, DeliveryItem exactItem) {
+            PrefillEndpoint endpoint, ScheduledRequest exactItem) {
         try (WorkerEndpoint.GenerationPin pin =
                      endpoint.tryPinGeneration()) {
             return pin != null && endpoint.offerPinned(pin, exactItem);
         }
     }
 
-    static PrefillWorkLedger.CommittedHandoff commitBatch(
+    static PrefillState.CommittedHandoff commitBatch(
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
-            List<? extends DeliveryItem> exactItems) {
+            List<? extends ScheduledRequest> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException(
                     "committed batch requires at least one item");
         }
-        List<DeliveryItem> items = List.copyOf(exactItems);
-        PrefillWorkLedger.BatchReservationResult result =
+        List<ScheduledRequest> items = List.copyOf(exactItems);
+        PrefillState.BatchReservationResult result =
                 endpoint.reserveBatch(
                         items.getFirst(), batchId, Integer.MAX_VALUE);
-        if (result.status() != PrefillWorkLedger.CapacityStatus.ACQUIRED) {
+        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
-        try (PrefillWorkLedger.BatchReservation reservation =
+        try (PrefillState.BatchReservation reservation =
                      result.reservation()) {
-            return reservation.commitUnderLock(items, predictedMs);
+            return reservation.commit(items, predictedMs);
         }
     }
 
@@ -172,32 +169,22 @@ final class StrategyTestSupport {
         publish(status, response);
     }
 
-    private static PrefillGenerationRuntime.Factory realRuntimeFactory() {
-        try {
-            Class<?> type = Class.forName(
-                    "org.flexlb.balance.scheduler.WorkerBatcherFactory");
-            Constructor<?> constructor = type.getDeclaredConstructor();
-            constructor.setAccessible(true);
-            return (PrefillGenerationRuntime.Factory) constructor.newInstance();
-        } catch (ReflectiveOperationException failure) {
-            throw new AssertionError(
-                    "Unable to construct production Prefill runtime", failure);
-        }
+    private static WorkerBatcherFactory realRuntimeFactory() {
+        return new WorkerBatcherFactory();
     }
 
     private static final class TestRequestRuntime
-            implements DeliveryLifecyclePort, SlotDeliveryPort,
-            EndpointEventSink {
+            implements EndpointEventSink, SlotDeliveryPort {
 
         @Override
         public <T> Optional<T> prepareIfOwned(
-                DeliveryItem exactItem, Supplier<T> preparation) {
+                ScheduledRequest exactItem, Supplier<T> preparation) {
             return Optional.ofNullable(preparation.get());
         }
 
         @Override
         public Claim tryClaimForDelivery(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Identity identity,
                 BooleanSupplier endpointHandoff) {
             return null;
@@ -208,22 +195,22 @@ final class StrategyTestSupport {
         }
 
         @Override
-        public void failPrepared(DeliveryItem exactItem, Throwable cause) {
+        public void failPrepared(ScheduledRequest exactItem, Throwable cause) {
         }
 
         @Override
-        public void onQueuedItemExpired(DeliveryItem exactItem) {
+        public void onQueuedItemExpired(ScheduledRequest exactItem) {
         }
 
         @Override
         public void onQueueOfferFailure(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Throwable cause) {
         }
 
         @Override
         public void onPreparedDeliveryFailure(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Throwable cause) {
         }
 
@@ -234,7 +221,7 @@ final class StrategyTestSupport {
         @Override
         public void onPrefillGenerationRetired(
                 PrefillEndpoint endpoint,
-                List<DeliveryItem> ownedItems) {
+                List<ScheduledRequest> ownedItems) {
         }
 
         @Override
@@ -265,7 +252,7 @@ final class StrategyTestSupport {
 
         @Override
         public CapacityBoundary.Attempt<PreparedAdmission> tryBegin(
-                DeliveryItem firstCandidate) {
+                ScheduledRequest firstCandidate) {
             return new CapacityBoundary.Attempt.Accepted<>(
                     new PreparedAdmission() {
                         @Override
@@ -274,8 +261,8 @@ final class StrategyTestSupport {
                         }
 
                         @Override
-                        public CapacityBoundary.Attempt<DeliveryItem> tryAppend(
-                                DeliveryItem exactNextItem,
+                        public CapacityBoundary.Attempt<ScheduledRequest> tryAppend(
+                                ScheduledRequest exactNextItem,
                                 long predictedMs) {
                             return new CapacityBoundary.Attempt.Rejected<>(
                                     new CapacityBoundary.Unavailable(
@@ -289,7 +276,7 @@ final class StrategyTestSupport {
 
                         @Override
                         public CommittedAdmission commitPreparedUnderLock(
-                                List<DeliveryItem> exactItems,
+                                List<ScheduledRequest> exactItems,
                                 long predictedMs) {
                             throw new IllegalStateException(
                                     "parked admission cannot commit");
@@ -308,14 +295,14 @@ final class StrategyTestSupport {
         @Override
         public void routesDelivered(
                 DeliveryMetadata metadata,
-                List<DeliveryItem> exactItems) {
+                List<ScheduledRequest> exactItems) {
         }
 
         @Override
         public void batchDispatched(
                 long batchId,
                 DeliveryMetadata metadata,
-                List<DeliveryItem> dispatched,
+                List<ScheduledRequest> dispatched,
                 long predictedMs) {
         }
     }

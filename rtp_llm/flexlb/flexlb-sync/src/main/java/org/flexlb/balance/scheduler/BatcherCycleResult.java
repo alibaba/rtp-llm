@@ -17,7 +17,7 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
     }
 
     /** The exact ordered prefix which reserved capacity and entered delivery. */
-    record Admitted(List<BatchItem> items, DeliveryMetadata metadata)
+    record Admitted(List<ScheduledRequest> items, DeliveryMetadata metadata)
             implements BatcherCycleResult {
         public Admitted {
             items = List.copyOf(items);
@@ -30,7 +30,7 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
 
     /** The ordered head remains active because this exact resource is full. */
     record CapacityBlocked(
-            BatchItem item,
+            ScheduledRequest item,
             CapacityBoundary.Unavailable unavailable)
             implements BatcherCycleResult {
         public CapacityBlocked {
@@ -50,7 +50,7 @@ sealed interface BatcherCycleResult permits BatcherCycleResult.Outcome,
      * generations close every signal-before-await race.
      */
     record AwaitingSchedulingChange(
-            BatchItem head,
+            ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion,
             long wakeAtMs,

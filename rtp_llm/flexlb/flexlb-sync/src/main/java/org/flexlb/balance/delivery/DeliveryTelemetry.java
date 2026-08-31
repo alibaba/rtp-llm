@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import java.util.List;
 
 /**
@@ -13,11 +15,11 @@ public interface DeliveryTelemetry {
 
     void routesDelivered(
             DeliveryMetadata metadata,
-            List<DeliveryItem> exactItems);
+            List<ScheduledRequest> exactItems);
 
     void batchDispatched(
             long batchId,
             DeliveryMetadata metadata,
-            List<DeliveryItem> dispatched,
+            List<ScheduledRequest> dispatched,
             long predictedMs);
 }

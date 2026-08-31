@@ -455,7 +455,7 @@ class RequestLifecycleDeliveryLockContractTest {
             DecodeEndpoint decodeEndpoint) {
         BalanceContext context = context(requestId);
         CompletableFuture<Response> future = lifecycle.register(context, 8);
-        BatchItem item = new BatchItem(
+        ScheduledRequest item = new ScheduledRequest(
                 context,
                 future,
                 new Response(),

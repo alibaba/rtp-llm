@@ -54,15 +54,15 @@ import java.util.OptionalLong;
  */
 final class FixedWindowGroupPolicy implements GroupPolicy {
 
-    private static final GroupPlanner.ItemAccess<BatchItem> PLANNER_ITEM_ACCESS =
+    private static final GroupPlanner.ItemAccess<ScheduledRequest> PLANNER_ITEM_ACCESS =
             new GroupPlanner.ItemAccess<>() {
                 @Override
-                public long enqueuedAtMs(BatchItem item) {
+                public long enqueuedAtMs(ScheduledRequest item) {
                     return item.enqueuedAtMs();
                 }
 
                 @Override
-                public long seqLen(BatchItem item) {
+                public long seqLen(ScheduledRequest item) {
                     return item.seqLen();
                 }
             };
@@ -77,7 +77,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
         // worker cannot dispatch. They are advisory only: the authoritative
         // gates below run again against one stable ordered snapshot.
         BatcherContext.ActiveQueueState observedState = ctx.activeQueueState();
-        BatchItem observedHead = observedState.head();
+        ScheduledRequest observedHead = observedState.head();
         if (observedHead == null) {
             return BatcherCycleResult.Outcome.NO_ACTION;
         }
@@ -130,7 +130,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
         // while removal of a member that would enter the admitted prefix makes
         // capacity admission reject that prefix. Prediction runs unlocked.
         BatcherContext.ActiveQueueSnapshot snapshot = ctx.snapshotActiveQueue();
-        BatchItem head = snapshot.head();
+        ScheduledRequest head = snapshot.head();
         if (head == null) {
             return BatcherCycleResult.Outcome.NO_ACTION;
         }
@@ -151,7 +151,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
             ctx.dropHead(head);
             return BatcherCycleResult.Outcome.QUEUE_CHANGED;
         }
-        BatchItem expiredMember = firstExpiredMember(
+        ScheduledRequest expiredMember = firstExpiredMember(
                 snapshot.items(), batchMaxCount, nowMs);
         if (expiredMember != null) {
             Logger.debug("flexlb_batch_drop request_id={} reason=request_expired "
@@ -191,7 +191,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
                             exactBatchMaxCount, exactBatchMaxTokens,
                             exactBatchKvTokens, exactPredictThresholdMs,
                             exactFixedWaitMs);
-            GroupPlanner.Selection<BatchItem> selection =
+            GroupPlanner.Selection<ScheduledRequest> selection =
                     GroupPlanner.select(
                             snapshot.items(), PLANNER_ITEM_ACCESS,
                             plannerConstraints,
@@ -203,7 +203,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
             // a window that elapsed during prediction releases in this pass.
             long predictionCompletedAtMs = ctx.now();
 
-            GroupPlanner.Plan<BatchItem> plan =
+            GroupPlanner.Plan<ScheduledRequest> plan =
                     GroupPlanner.evaluateReadiness(
                             selection, plannerConstraints,
                             predictionCompletedAtMs);
@@ -223,7 +223,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
 
     private static BatcherCycleResult awaitCollectionWindow(
             BatcherContext ctx,
-            BatchItem head,
+            ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion,
             long windowOpenedAtMs,
@@ -239,7 +239,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
 
     private static BatcherCycleResult awaitPrefillKvCapacity(
             BatcherContext ctx,
-            BatchItem head,
+            ScheduledRequest head,
             long queueVersion,
             long schedulingInputVersion) {
         return ctx.awaitingSchedulingChange(
@@ -250,12 +250,12 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
 
     // ==================== Internal helpers ====================
 
-    private static BatchItem firstExpiredMember(List<BatchItem> orderedItems,
+    private static ScheduledRequest firstExpiredMember(List<ScheduledRequest> orderedItems,
                                                 int maxCount,
                                                 long nowMs) {
         int inspected = Math.min(Math.max(1, maxCount), orderedItems.size());
         for (int index = 0; index < inspected; index++) {
-            BatchItem item = orderedItems.get(index);
+            ScheduledRequest item = orderedItems.get(index);
             if (item.requestExpired(nowMs)) {
                 return item;
             }
@@ -265,7 +265,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
 
     private static BatcherCycleResult admitDecisionGroup(
             BatcherContext ctx,
-            List<BatchItem> picked,
+            List<ScheduledRequest> picked,
             GroupPlanner.Shape shape,
             String reason,
             PrefillTimePredictor.Evaluator evaluator,
@@ -296,7 +296,7 @@ final class FixedWindowGroupPolicy implements GroupPolicy {
     }
 
     private static OptionalLong committedPrediction(
-            GroupPlanner.Plan<BatchItem> plan) {
+            GroupPlanner.Plan<ScheduledRequest> plan) {
         if (plan.selectedPredictionMs().isEmpty()) {
             return OptionalLong.empty();
         }

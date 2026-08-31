@@ -1,9 +1,12 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.dao.route.RoleType;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -34,19 +37,26 @@ final class DeliveryStrategyTestSupport {
     private DeliveryStrategyTestSupport() {
     }
 
-    static TestItem item(long requestId) {
-        return new TestItem(requestId, 50, requestId, 100L, 10L);
+    static ScheduledRequest item(long requestId) {
+        return item(requestId, 50, requestId, 100L, 10L);
     }
 
-    record TestItem(
+    static ScheduledRequest item(
             long requestId,
             int priority,
             long enqueuedAtMs,
             long seqLen,
-            long hitCache) implements DeliveryItem {
+            long hitCache) {
+        ScheduledRequest item = Mockito.mock(ScheduledRequest.class);
+        Mockito.when(item.requestId()).thenReturn(requestId);
+        Mockito.when(item.priority()).thenReturn(priority);
+        Mockito.when(item.enqueuedAtMs()).thenReturn(enqueuedAtMs);
+        Mockito.when(item.seqLen()).thenReturn(seqLen);
+        Mockito.when(item.hitCache()).thenReturn(hitCache);
+        return item;
     }
 
-    record TestBoundary(DeliveryItem item, CapacityBoundary result) {
+    record TestBoundary(ScheduledRequest item, CapacityBoundary result) {
     }
 
     static final class TestContext {
@@ -60,7 +70,7 @@ final class DeliveryStrategyTestSupport {
 
         String deliver(
                 DeliveryStrategy strategy,
-                List<DeliveryItem> candidates,
+                List<ScheduledRequest> candidates,
                 DeliveryMetadata metadata,
                 OptionalLong plannedPredictionMs) {
             if (candidates.isEmpty() || !owned) {
@@ -121,18 +131,18 @@ final class DeliveryStrategyTestSupport {
         private CapacityBoundary prepareBoundary;
         private int rejectAppendAt = -1;
         private CapacityBoundary appendBoundary;
-        private final List<DeliveryItem> preparedItems = new ArrayList<>();
+        private final List<ScheduledRequest> preparedItems = new ArrayList<>();
         private final List<Long> preparedPredictions = new ArrayList<>();
-        private List<DeliveryItem> committedItems = List.of();
+        private List<ScheduledRequest> committedItems = List.of();
         private long committedPrediction;
-        private final List<DeliveryItem> transferred = new ArrayList<>();
+        private final List<ScheduledRequest> transferred = new ArrayList<>();
         private final List<String> events = new ArrayList<>();
         private int preparedCloseCount;
         private int committedCloseCount;
 
         @Override
         public CapacityBoundary.Attempt<PreparedAdmission> tryBegin(
-                DeliveryItem firstCandidate) {
+                ScheduledRequest firstCandidate) {
             if (prepareBoundary != null) {
                 return new CapacityBoundary.Attempt.Rejected<>(prepareBoundary);
             }
@@ -145,8 +155,8 @@ final class DeliveryStrategyTestSupport {
                 }
 
                 @Override
-                public CapacityBoundary.Attempt<DeliveryItem> tryAppend(
-                        DeliveryItem exactNextItem,
+                public CapacityBoundary.Attempt<ScheduledRequest> tryAppend(
+                        ScheduledRequest exactNextItem,
                         long predictedMs) {
                     if (preparedItems.size() == rejectAppendAt) {
                         return new CapacityBoundary.Attempt.Rejected<>(
@@ -160,7 +170,7 @@ final class DeliveryStrategyTestSupport {
 
                 @Override
                 public CommittedAdmission commitPreparedUnderLock(
-                        List<DeliveryItem> exactItems,
+                        List<ScheduledRequest> exactItems,
                         long predictedMs) {
                     moved = true;
                     committedItems = List.copyOf(exactItems);
@@ -172,7 +182,7 @@ final class DeliveryStrategyTestSupport {
 
                         @Override
                         public boolean transferToEndpoint(
-                                DeliveryItem exactItem) {
+                                ScheduledRequest exactItem) {
                             transferred.add(exactItem);
                             events.add("admission-transfer-"
                                     + exactItem.requestId());
@@ -212,7 +222,7 @@ final class DeliveryStrategyTestSupport {
             appendBoundary = boundary;
         }
 
-        List<DeliveryItem> preparedItems() {
+        List<ScheduledRequest> preparedItems() {
             return List.copyOf(preparedItems);
         }
 
@@ -220,7 +230,7 @@ final class DeliveryStrategyTestSupport {
             return List.copyOf(preparedPredictions);
         }
 
-        List<DeliveryItem> committedItems() {
+        List<ScheduledRequest> committedItems() {
             return committedItems;
         }
 
@@ -228,7 +238,7 @@ final class DeliveryStrategyTestSupport {
             return committedPrediction;
         }
 
-        List<DeliveryItem> transferred() {
+        List<ScheduledRequest> transferred() {
             return List.copyOf(transferred);
         }
 
@@ -247,22 +257,22 @@ final class DeliveryStrategyTestSupport {
 
     static final class TestSlotPort implements SlotDeliveryPort {
 
-        private final List<DeliveryItem> prepared = new ArrayList<>();
-        private final List<DeliveryItem> committed = new ArrayList<>();
+        private final List<ScheduledRequest> prepared = new ArrayList<>();
+        private final List<ScheduledRequest> committed = new ArrayList<>();
         private final List<Identity> identities = new ArrayList<>();
         private final List<CompletionEvent> completions = new ArrayList<>();
-        private final List<DeliveryItem> failedPrepared = new ArrayList<>();
+        private final List<ScheduledRequest> failedPrepared = new ArrayList<>();
         private final List<Throwable> preparedFailures = new ArrayList<>();
         private final List<String> events = new ArrayList<>();
-        private DeliveryItem preparationLostFor;
-        private DeliveryItem commitLostFor;
-        private DeliveryItem throwCommitFor;
-        private DeliveryItem throwCompletionFor;
+        private ScheduledRequest preparationLostFor;
+        private ScheduledRequest commitLostFor;
+        private ScheduledRequest throwCommitFor;
+        private ScheduledRequest throwCompletionFor;
         private Runnable beforeCompletion = () -> { };
 
         @Override
         public <T> Optional<T> prepareIfOwned(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 java.util.function.Supplier<T> preparation) {
             if (exactItem == preparationLostFor) {
                 return Optional.empty();
@@ -273,7 +283,7 @@ final class DeliveryStrategyTestSupport {
 
         @Override
         public Claim tryClaimForDelivery(
-                DeliveryItem exactItem,
+                ScheduledRequest exactItem,
                 Identity identity,
                 BooleanSupplier endpointHandoff) {
             committed.add(exactItem);
@@ -306,24 +316,24 @@ final class DeliveryStrategyTestSupport {
         }
 
         @Override
-        public void failPrepared(DeliveryItem exactItem, Throwable cause) {
+        public void failPrepared(ScheduledRequest exactItem, Throwable cause) {
             failedPrepared.add(exactItem);
             preparedFailures.add(cause);
         }
 
-        void preparationLostFor(DeliveryItem item) {
+        void preparationLostFor(ScheduledRequest item) {
             preparationLostFor = item;
         }
 
-        void commitLostFor(DeliveryItem item) {
+        void commitLostFor(ScheduledRequest item) {
             commitLostFor = item;
         }
 
-        void throwCommitFor(DeliveryItem item) {
+        void throwCommitFor(ScheduledRequest item) {
             throwCommitFor = item;
         }
 
-        void throwCompletionFor(DeliveryItem item) {
+        void throwCompletionFor(ScheduledRequest item) {
             throwCompletionFor = item;
         }
 
@@ -331,11 +341,11 @@ final class DeliveryStrategyTestSupport {
             beforeCompletion = check;
         }
 
-        List<DeliveryItem> prepared() {
+        List<ScheduledRequest> prepared() {
             return List.copyOf(prepared);
         }
 
-        List<DeliveryItem> committed() {
+        List<ScheduledRequest> committed() {
             return List.copyOf(committed);
         }
 
@@ -347,7 +357,7 @@ final class DeliveryStrategyTestSupport {
             return List.copyOf(completions);
         }
 
-        List<DeliveryItem> failedPrepared() {
+        List<ScheduledRequest> failedPrepared() {
             return List.copyOf(failedPrepared);
         }
 
@@ -360,11 +370,11 @@ final class DeliveryStrategyTestSupport {
         }
     }
 
-    record TestClaim(DeliveryItem item) implements SlotDeliveryPort.Claim {
+    record TestClaim(ScheduledRequest item) implements SlotDeliveryPort.Claim {
     }
 
     record CompletionEvent(
-            DeliveryItem item,
+            ScheduledRequest item,
             SlotDeliveryPort.Completion completion) {
     }
 
@@ -375,7 +385,7 @@ final class DeliveryStrategyTestSupport {
         private int closeCount;
         private int totalCloseCount;
         private Command command;
-        private BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer;
+        private BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer;
         private final List<CompletionEvent> synchronousCompletions =
                 new ArrayList<>();
         private final List<String> events = new ArrayList<>();
@@ -394,7 +404,7 @@ final class DeliveryStrategyTestSupport {
                         @Override
                         public void submitBatch(
                                 Command exactCommand,
-                                BiConsumer<DeliveryItem,
+                                BiConsumer<ScheduledRequest,
                                         SlotDeliveryPort.Completion> exactObserver) {
                             submitted = true;
                             command = exactCommand;
@@ -424,13 +434,13 @@ final class DeliveryStrategyTestSupport {
         }
 
         void completeSynchronously(
-                DeliveryItem item,
+                ScheduledRequest item,
                 SlotDeliveryPort.Completion completion) {
             synchronousCompletions.add(new CompletionEvent(item, completion));
         }
 
         void complete(
-                DeliveryItem item,
+                ScheduledRequest item,
                 SlotDeliveryPort.Completion completion) {
             observer.accept(item, completion);
         }
@@ -451,7 +461,7 @@ final class DeliveryStrategyTestSupport {
             return command;
         }
 
-        BiConsumer<DeliveryItem, SlotDeliveryPort.Completion> observer() {
+        BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer() {
             return observer;
         }
 
@@ -462,13 +472,13 @@ final class DeliveryStrategyTestSupport {
 
     static final class TestTelemetry implements DeliveryTelemetry {
 
-        private final List<List<DeliveryItem>> routes = new ArrayList<>();
+        private final List<List<ScheduledRequest>> routes = new ArrayList<>();
         private final List<BatchTelemetry> batches = new ArrayList<>();
 
         @Override
         public void routesDelivered(
                 DeliveryMetadata metadata,
-                List<DeliveryItem> exactItems) {
+                List<ScheduledRequest> exactItems) {
             routes.add(List.copyOf(exactItems));
         }
 
@@ -476,13 +486,13 @@ final class DeliveryStrategyTestSupport {
         public void batchDispatched(
                 long batchId,
                 DeliveryMetadata metadata,
-                List<DeliveryItem> dispatched,
+                List<ScheduledRequest> dispatched,
                 long predictedMs) {
             batches.add(new BatchTelemetry(
                     batchId, metadata, dispatched, predictedMs));
         }
 
-        List<List<DeliveryItem>> routes() {
+        List<List<ScheduledRequest>> routes() {
             return List.copyOf(routes);
         }
 
@@ -494,7 +504,7 @@ final class DeliveryStrategyTestSupport {
     record BatchTelemetry(
             long batchId,
             DeliveryMetadata metadata,
-            List<DeliveryItem> dispatched,
+            List<ScheduledRequest> dispatched,
             long predictedMs) {
         BatchTelemetry {
             dispatched = List.copyOf(dispatched);

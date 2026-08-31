@@ -5,6 +5,7 @@ import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -32,6 +33,7 @@ class HttpLoadBalanceServerTest {
                 configService,
                 scheduler,
                 endpointRegistry,
+                mock(WorkerDirectory.class),
                 synchronizer,
                 new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient
@@ -67,6 +69,7 @@ class HttpLoadBalanceServerTest {
                 mock(ConfigService.class),
                 mock(RequestScheduler.class),
                 mock(EndpointRegistry.class),
+                mock(WorkerDirectory.class),
                 mock(MasterEngineSynchronizer.class),
                 new ServerScheduleLatencyRecorder());
         WebTestClient client = WebTestClient

@@ -17,7 +17,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -32,16 +32,16 @@ import java.util.concurrent.ThreadLocalRandom;
 @Component
 public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
-    private final EngineWorkerStatus engineWorkerStatus;
+    private final WorkerDirectory workerDirectory;
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
 
-    public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
+    public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
                                     EngineHealthReporter engineHealthReporter) {
-        this.engineWorkerStatus = engineWorkerStatus;
+        this.workerDirectory = workerDirectory;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
@@ -868,7 +868,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private EndpointDiscovery discoverAliveEndpoints(
             RoleType roleType, String group, String excludedIpPort) {
         List<WorkerEndpoint.GenerationPin> captured =
-                engineWorkerStatus.captureModelWorkerEndpoints(roleType, group);
+                workerDirectory.captureEndpoints(roleType, group);
         CandidateSet result = new CandidateSet(captured.size());
         Map<String, Integer> rejections = new java.util.HashMap<>();
         WorkerEndpoint.GenerationPin excludedPin = null;
@@ -1019,7 +1019,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             OptionalLong projectedTtftMs,
             long selectedPrefillMs,
             long bestCacheHit) {
-        // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
+        // Populate DebugInfo so ScheduledRequest.hitCache() can read hitCacheLen for batch metrics
         DebugInfo debugInfo = new DebugInfo();
         debugInfo.setHitCacheLen(bestCacheHit);
 

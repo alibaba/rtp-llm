@@ -1,9 +1,9 @@
 package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.admission.AdmissionFailure;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
+import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
 import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -37,7 +37,7 @@ public interface EvictionPlacementPort {
 
         QueueSnapshot queueSnapshot();
 
-        PrefillEvictionCommit commit(List<DeliveryItem> exactVictims);
+        PrefillEvictionCommit commit(List<ScheduledRequest> exactVictims);
 
         @Override
         void close();
@@ -51,7 +51,7 @@ public interface EvictionPlacementPort {
 
     record PrefillEvictionCommit(
             PrefillEvictionStatus status,
-            List<DeliveryItem> removed) {
+            List<ScheduledRequest> removed) {
         public PrefillEvictionCommit {
             assert status != null : "missing Prefill eviction status";
             removed = List.copyOf(removed);

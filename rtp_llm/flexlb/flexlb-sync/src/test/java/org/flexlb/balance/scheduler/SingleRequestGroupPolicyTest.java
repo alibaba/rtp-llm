@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.junit.jupiter.api.Test;
 
@@ -33,7 +33,7 @@ class SingleRequestGroupPolicyTest {
     @Test
     void priorityQueueAdmitsExactlyOneStrictHeadPerPass() {
         GroupPolicyTestSupport.Fixture fixture = single(true);
-        BatchItem low = fixture.add(
+        ScheduledRequest low = fixture.add(
                 1L, 10, 10L, NOW_MS, Long.MAX_VALUE);
         fixture.add(2L, 100, 10L, NOW_MS + 1L, Long.MAX_VALUE);
 
@@ -64,7 +64,7 @@ class SingleRequestGroupPolicyTest {
         WorkerStatus.EngineObservation strictEqualityRejects =
                 capacity(100L, 0L, 0L, 0L);
         fixture.statusSequence(initiallyFits, strictEqualityRejects);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 100L, NOW_MS, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -83,7 +83,7 @@ class SingleRequestGroupPolicyTest {
         fixture.statusSequence(
                 capacity(1_000L, 0L, 1_000L, 200L),
                 capacity(1_000L, 0L, 1_000L, 50L));
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 100L, NOW_MS, NOW_MS + 10_000L);
 
         BatcherCycleResult.AwaitingSchedulingChange waiting =
@@ -108,7 +108,7 @@ class SingleRequestGroupPolicyTest {
         fixture.status(capacity(1_000L, 0L, 1_000L, 99L));
         fixture.bumpSchedulingInputVersion();
         fixture.bumpSchedulingInputVersion();
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 100L, NOW_MS - 1_000L,
                 NOW_MS + 10_000L);
 
@@ -133,7 +133,7 @@ class SingleRequestGroupPolicyTest {
     void deliveryCapacityBlockKeepsExactRequestActive() {
         GroupPolicyTestSupport.Fixture fixture = single(false);
         fixture.delivery().block();
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 100L, NOW_MS, Long.MAX_VALUE);
 
         BatcherCycleResult.CapacityBlocked blocked = assertInstanceOf(
@@ -150,7 +150,7 @@ class SingleRequestGroupPolicyTest {
     void longStandaloneRequestIgnoresBatchTokenCapacity() {
         GroupPolicyTestSupport.Fixture fixture = single(false);
         fixture.status(capacity(409_600L, 1_048_576L, 0L, 0L));
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 910_537L, NOW_MS, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -165,7 +165,7 @@ class SingleRequestGroupPolicyTest {
     @Test
     void expiredHeadIsTerminalizedBeforeCapacityRead() {
         GroupPolicyTestSupport.Fixture fixture = single(false);
-        BatchItem expired = fixture.add(
+        ScheduledRequest expired = fixture.add(
                 1L, 50, 100L, NOW_MS - 10L, NOW_MS);
 
         BatcherCycleResult result = policy.processQueue(fixture.context());
@@ -177,7 +177,7 @@ class SingleRequestGroupPolicyTest {
         assertTrue(fixture.activeItems().isEmpty());
     }
 
-    private static List<Long> ids(List<? extends DeliveryItem> items) {
-        return items.stream().map(DeliveryItem::requestId).toList();
+    private static List<Long> ids(List<? extends ScheduledRequest> items) {
+        return items.stream().map(ScheduledRequest::requestId).toList();
     }
 }

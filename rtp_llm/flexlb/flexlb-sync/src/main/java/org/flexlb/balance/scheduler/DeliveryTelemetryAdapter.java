@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryTelemetry;
 import org.flexlb.dao.route.RoleType;
@@ -24,19 +24,19 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
     @Override
     public void routesDelivered(
             DeliveryMetadata metadata,
-            List<DeliveryItem> exactItems) {
+            List<ScheduledRequest> exactItems) {
         try {
             if (exactItems.isEmpty()) {
                 return;
             }
-            BatchItem head = (BatchItem) exactItems.get(0);
+            ScheduledRequest head = exactItems.get(0);
             String engineIp = prefillIp(head);
             reporter.reportBatcherQueueSize(
                     PREFILL_ROLE, engineIp,
                     metadata.remainingQueueDepth());
             long nowMs = System.currentTimeMillis();
-            for (DeliveryItem item : exactItems) {
-                BatchItem exact = (BatchItem) item;
+            for (ScheduledRequest item : exactItems) {
+                ScheduledRequest exact = item;
                 reporter.reportBatchWaitTimeMs(
                         PREFILL_ROLE,
                         engineIp,
@@ -52,14 +52,14 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
     public void batchDispatched(
             long batchId,
             DeliveryMetadata metadata,
-            List<DeliveryItem> dispatched,
+            List<ScheduledRequest> dispatched,
             long predictedMs) {
         try {
             if (dispatched.isEmpty()) {
                 return;
             }
             String reason = metadata.decisionReason();
-            BatchItem head = (BatchItem) dispatched.get(0);
+            ScheduledRequest head = dispatched.get(0);
             String engineIp = prefillIp(head);
             reporter.reportDispatchReason(
                     PREFILL_ROLE, engineIp, reason);
@@ -69,8 +69,8 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
             long nowMs = System.currentTimeMillis();
             long hitTokens = 0L;
             long totalTokens = 0L;
-            for (DeliveryItem item : dispatched) {
-                BatchItem exact = (BatchItem) item;
+            for (ScheduledRequest item : dispatched) {
+                ScheduledRequest exact = item;
                 reporter.reportBatchWaitTimeMs(
                         PREFILL_ROLE,
                         engineIp,
@@ -93,7 +93,7 @@ public final class DeliveryTelemetryAdapter implements DeliveryTelemetry {
         }
     }
 
-    private static String prefillIp(BatchItem item) {
+    private static String prefillIp(ScheduledRequest item) {
         return item.prefillEp().getIp();
     }
 

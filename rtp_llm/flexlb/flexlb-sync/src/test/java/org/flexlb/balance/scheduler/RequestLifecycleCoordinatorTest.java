@@ -268,7 +268,7 @@ class RequestLifecycleCoordinatorTest {
         DecodeEndpoint.ReservationHandle reservation =
                 new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
         return new Registered(
-                new BatchItem(
+                new ScheduledRequest(
                         context,
                         future,
                         new Response(),

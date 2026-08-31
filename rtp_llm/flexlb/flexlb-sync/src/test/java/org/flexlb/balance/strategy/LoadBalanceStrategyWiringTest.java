@@ -5,7 +5,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -15,7 +15,7 @@ import static org.mockito.Mockito.mock;
 class LoadBalanceStrategyWiringTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
-            .withBean(EngineWorkerStatus.class, () -> mock(EngineWorkerStatus.class))
+            .withBean(WorkerDirectory.class, () -> mock(WorkerDirectory.class))
             .withBean(CacheAwareService.class, () -> mock(CacheAwareService.class))
             .withBean(ResourceMeasureFactory.class, () -> mock(ResourceMeasureFactory.class))
             .withBean(EngineHealthReporter.class, () -> mock(EngineHealthReporter.class))

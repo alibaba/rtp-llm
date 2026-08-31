@@ -3,7 +3,7 @@ package org.flexlb.balance.delivery;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestAdmissionPort;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestBatchSubmissionPort;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestContext;
-import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestSlotPort;
 import org.flexlb.balance.delivery.DeliveryStrategyTestSupport.TestTelemetry;
 import org.junit.jupiter.api.Test;
@@ -25,8 +25,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void preparedPredictionAndExactBatchReachTransportOnce() {
         Fixture fixture = new Fixture(701L);
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         DeliveryMetadata metadata = new DeliveryMetadata("fixed_window", 3);
 
         String result = fixture.context.deliver(
@@ -62,8 +62,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void missingPlannedPredictionUsesFrozenEvaluatorForCommittedBatch() {
         Fixture fixture = new Fixture(702L);
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
 
         fixture.context.deliver(
                 fixture.strategy, List.of(first, second),
@@ -81,7 +81,7 @@ class BatchDeliveryStrategyTest {
                 OptionalLong.empty(), OptionalLong.of(0L),
                 OptionalLong.of(-1L))) {
             Fixture fixture = new Fixture(invalid);
-            TestItem item = item(1L);
+            ScheduledRequest item = item(1L);
 
             String result = fixture.context.deliver(
                     fixture.strategy, List.of(item),
@@ -104,7 +104,7 @@ class BatchDeliveryStrategyTest {
     @Test
     void unavailableSubmissionReturnsExactHeadBoundaryBeforeAdmission() {
         Fixture fixture = new Fixture(701L);
-        TestItem head = item(1L);
+        ScheduledRequest head = item(1L);
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.submission.prepareBoundary(unavailable);
 
@@ -123,7 +123,7 @@ class BatchDeliveryStrategyTest {
     @Test
     void unavailableAdmissionClosesPreparedSubmissionAndReturnsBoundary() {
         Fixture fixture = new Fixture(701L);
-        TestItem head = item(1L);
+        ScheduledRequest head = item(1L);
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.prepareBoundary(unavailable);
 
@@ -142,8 +142,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void unavailableSuffixSubmitsLargestAdmittedPrefixAndRepredictsIt() {
         Fixture fixture = new Fixture(701L);
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         CapacityBoundary.Unavailable unavailable = unavailable();
         fixture.admission.rejectAppendAt(1, unavailable);
 
@@ -164,8 +164,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void synchronousTransportCompletionWaitsForCapabilityHandoffClose() {
         Fixture fixture = new Fixture(701L);
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         fixture.submission.completeSynchronously(
                 first, SlotDeliveryPort.Completion.Delivered.INSTANCE);
         fixture.submission.completeSynchronously(
@@ -194,8 +194,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void callbackForUnsubmittedIdentityFailsClosed() {
         Fixture fixture = new Fixture(701L);
-        TestItem canonical = item(1L);
-        TestItem lookalike = new TestItem(
+        ScheduledRequest canonical = item(1L);
+        ScheduledRequest lookalike = item(
                 canonical.requestId(), canonical.priority(),
                 canonical.enqueuedAtMs(), canonical.seqLen(),
                 canonical.hitCache());
@@ -217,8 +217,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void timeoutAndUncertainTransportOutcomesReachExactClaims() {
         Fixture fixture = new Fixture(701L);
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         fixture.context.deliver(
                 fixture.strategy, List.of(first, second),
                 new DeliveryMetadata("outcomes", 0), OptionalLong.empty());
@@ -244,8 +244,8 @@ class BatchDeliveryStrategyTest {
     @Test
     void lostClaimExcludesOnlyThatMemberFromSubmittedBatch() {
         Fixture fixture = new Fixture(701L);
-        TestItem first = item(1L);
-        TestItem second = item(2L);
+        ScheduledRequest first = item(1L);
+        ScheduledRequest second = item(2L);
         fixture.slots.commitLostFor(first);
 
         fixture.context.deliver(

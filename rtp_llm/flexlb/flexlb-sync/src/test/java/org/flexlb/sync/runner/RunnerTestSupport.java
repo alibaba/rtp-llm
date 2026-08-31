@@ -1,10 +1,9 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
+import org.flexlb.balance.scheduler.WorkerBatcherFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -13,7 +12,6 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.mockito.Mockito;
 
-import java.lang.reflect.Constructor;
 import java.util.Map;
 
 /** Package-local fixtures for the frozen status/endpoint composition boundary. */
@@ -34,7 +32,6 @@ public final class RunnerTestSupport {
         return new EndpointRegistry(
                 configService,
                 NOOP_EVENT_SINK,
-                Mockito.mock(DeliveryLifecyclePort.class),
                 Mockito.mock(BatchSchedulerReporter.class),
                 delivery,
                 realRuntimeFactory());
@@ -104,16 +101,7 @@ public final class RunnerTestSupport {
         }
     }
 
-    private static PrefillGenerationRuntime.Factory realRuntimeFactory() {
-        try {
-            Class<?> type = Class.forName(
-                    "org.flexlb.balance.scheduler.WorkerBatcherFactory");
-            Constructor<?> constructor = type.getDeclaredConstructor();
-            constructor.setAccessible(true);
-            return (PrefillGenerationRuntime.Factory) constructor.newInstance();
-        } catch (ReflectiveOperationException failure) {
-            throw new AssertionError(
-                    "Unable to construct production Prefill runtime", failure);
-        }
+    private static WorkerBatcherFactory realRuntimeFactory() {
+        return new WorkerBatcherFactory();
     }
 }

@@ -1,8 +1,10 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillState;
+
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -63,29 +65,29 @@ class BatcherContext {
     private final PrefillEndpoint prefillEp;
     private final FlexlbConfig config;
     private final FixedWindowDecisionConfig fixedWindowDecision;
-    private final DeliveryLifecyclePort deliveryLifecycle;
-    private final PriorityBlockingQueue<BatchItem> queue;
+    private final EndpointEventSink deliveryLifecycle;
+    private final PriorityBlockingQueue<ScheduledRequest> queue;
     private final AtomicLong queueVersion;
     private final AtomicLong schedulingInputVersion = new AtomicLong();
     private final ReentrantLock queueLock;
-    private final Comparator<BatchItem> queueOrder;
+    private final Comparator<ScheduledRequest> queueOrder;
     private final Comparator<GroupPlanner.Item> projectionOrder;
     private final boolean queueScheduling;
     private final DeliveryCoordinator delivery;
-    private final PrefillWorkRegistry workRegistry;
+    private final PrefillState prefillState;
 
     private boolean stopped;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig config,
-                   DeliveryLifecyclePort deliveryLifecycle,
-                   PriorityBlockingQueue<BatchItem> queue,
+                   EndpointEventSink deliveryLifecycle,
+                   PriorityBlockingQueue<ScheduledRequest> queue,
                    AtomicLong queueVersion,
                    ReentrantLock queueLock,
-                   Comparator<BatchItem> queueOrder,
+                   Comparator<ScheduledRequest> queueOrder,
                    Comparator<GroupPlanner.Item> projectionOrder,
                    boolean queueScheduling,
                    DeliveryStrategy deliveryStrategy,
-                   PrefillWorkRegistry workRegistry) {
+                   PrefillState prefillState) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.config = config;
@@ -103,7 +105,7 @@ class BatcherContext {
                 projectionOrder, "projectionOrder");
         this.queueScheduling = queueScheduling;
         this.delivery = new DeliveryCoordinator(key, deliveryStrategy);
-        this.workRegistry = Objects.requireNonNull(workRegistry, "workRegistry");
+        this.prefillState = Objects.requireNonNull(prefillState, "prefillState");
     }
 
     // ---- accessors ----
@@ -172,7 +174,7 @@ class BatcherContext {
 
     // ---- queue inspection ----
 
-    BatchItem peek() {
+    ScheduledRequest peek() {
         return queue.peek();
     }
 
@@ -196,8 +198,8 @@ class BatcherContext {
     // ---- queue mutation ----
 
     /** Caller owns one previously reserved queue-depth unit and holds queueLock. */
-    boolean publishActiveIndexUnderLock(BatchItem item) {
-        boolean published = workRegistry.enqueueActiveUnderLock(item);
+    boolean publishActiveIndexUnderLock(ScheduledRequest item) {
+        boolean published = prefillState.enqueueActiveUnderLock(item);
         if (published) {
             queueVersion.incrementAndGet();
         }
@@ -205,8 +207,8 @@ class BatcherContext {
     }
 
     /** Claim one ACTIVE request for a terminal reducer. */
-    private boolean removeTerminalActiveUnderLock(BatchItem item) {
-        return workRegistry.terminalizeActiveUnderLock(item);
+    private boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
+        return prefillState.terminalizeActiveUnderLock(item);
     }
 
     /**
@@ -220,8 +222,8 @@ class BatcherContext {
     }
 
     /** Detach one exact queue head while retaining its stop-terminal owner. */
-    BatchItem detachNextStopTerminalUnderLock() {
-        BatchItem item = workRegistry.detachNextActiveForStopUnderLock();
+    ScheduledRequest detachNextStopTerminalUnderLock() {
+        ScheduledRequest item = prefillState.detachNextActiveForStopUnderLock();
         if (item != null) {
             queueVersion.incrementAndGet();
         }
@@ -229,12 +231,12 @@ class BatcherContext {
     }
 
     /** Acknowledge only the exact retained owner whose callback completed. */
-    boolean acknowledgeStopTerminalUnderLock(BatchItem item) {
-        return workRegistry.acknowledgeStopTerminalUnderLock(item);
+    boolean acknowledgeStopTerminalUnderLock(ScheduledRequest item) {
+        return prefillState.acknowledgeStopTerminalUnderLock(item);
     }
 
     /** Caller holds queueLock. */
-    boolean removeUnderLock(BatchItem item) {
+    boolean removeUnderLock(ScheduledRequest item) {
         boolean removed = removeTerminalActiveUnderLock(item);
         if (removed) {
             queueVersion.incrementAndGet();
@@ -243,13 +245,13 @@ class BatcherContext {
     }
 
     /**
-     * Items in active queue order (FIFO: {@link BatchItem#enqueueSeq()};
+     * Items in active queue order (FIFO: {@link ScheduledRequest#enqueueSeq()};
      * PRIORITY: {@link WorkerBatcher#PRIORITY_QUEUE_ORDER}, which delegates
      * to {@link PriorityOrdering#STRICT}), suitable for greedy-fill iteration
      * in grouping algorithms.
      */
-    List<BatchItem> activeItemsInSchedulingOrder() {
-        List<BatchItem> candidates = new ArrayList<>(queue);
+    List<ScheduledRequest> activeItemsInSchedulingOrder() {
+        List<ScheduledRequest> candidates = new ArrayList<>(queue);
         candidates.sort(queueOrder);
         return candidates;
     }
@@ -264,7 +266,7 @@ class BatcherContext {
         try {
             long version = queueVersion.get();
             long inputVersion = schedulingInputVersion.get();
-            BatchItem head = queue.peek();
+            ScheduledRequest head = queue.peek();
             return new ActiveQueueSnapshot(
                     version, inputVersion,
                     head == null ? List.of() : List.of(head));
@@ -281,7 +283,7 @@ class BatcherContext {
     ActiveQueueSnapshot snapshotActiveQueue() {
         long version;
         long inputVersion;
-        List<BatchItem> items;
+        List<ScheduledRequest> items;
         queueLock.lock();
         try {
             version = queueVersion.get();
@@ -302,8 +304,8 @@ class BatcherContext {
 
     record ActiveQueueSnapshot(long queueVersion,
                                long schedulingInputVersion,
-                               List<BatchItem> items) {
-        BatchItem head() {
+                               List<ScheduledRequest> items) {
+        ScheduledRequest head() {
             return items.isEmpty() ? null : items.get(0);
         }
     }
@@ -314,8 +316,8 @@ class BatcherContext {
         queueLock.lock();
         try {
             BatchCapacitySnapshot capacity = batchCapacitySnapshot();
-            PrefillWorkRegistry.Snapshot ownership =
-                    workRegistry.snapshotUnderLock(queueOrder);
+            PrefillState.Snapshot ownership =
+                    prefillState.snapshotUnderLock(queueOrder);
             List<GroupPlanner.Item> items =
                     ownership.activeItems().stream()
                             .map(BatcherContext::projectionItem)
@@ -341,7 +343,7 @@ class BatcherContext {
         }
     }
 
-    private static GroupPlanner.Item projectionItem(BatchItem item) {
+    private static GroupPlanner.Item projectionItem(ScheduledRequest item) {
         return new GroupPlanner.Item(
                 item.requestId(),
                 item.priority(),
@@ -356,9 +358,9 @@ class BatcherContext {
     ActiveQueueState activeQueueState() {
         queueLock.lock();
         try {
-            BatchItem head = queue.peek();
+            ScheduledRequest head = queue.peek();
             long oldestEnqueuedAtMs = Long.MAX_VALUE;
-            for (BatchItem item : queue) {
+            for (ScheduledRequest item : queue) {
                 oldestEnqueuedAtMs = Math.min(
                         oldestEnqueuedAtMs, item.enqueuedAtMs());
             }
@@ -372,13 +374,13 @@ class BatcherContext {
 
     record ActiveQueueState(long queueVersion,
                             long schedulingInputVersion,
-                            BatchItem head,
+                            ScheduledRequest head,
                             int activeSize,
                             long oldestEnqueuedAtMs) {
     }
 
     BatcherCycleResult awaitingSchedulingChange(
-            BatchItem head,
+            ScheduledRequest head,
             long observedQueueVersion,
             long observedSchedulingInputVersion,
             long wakeAtMs,
@@ -449,7 +451,7 @@ class BatcherContext {
      * replacement concurrently.
      */
     BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(
-            List<BatchItem> candidates,
+            List<ScheduledRequest> candidates,
             DeliveryMetadata metadata,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedCommittedPredictionMs) {
@@ -462,7 +464,7 @@ class BatcherContext {
     }
 
     double projectGroupDurationMs(
-            List<BatchItem> items,
+            List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator) {
         return delivery.projectGroupDurationMs(items, evaluator);
     }
@@ -478,7 +480,7 @@ class BatcherContext {
      * failure path and drain unrelated requests.
      */
     BatcherCycleResult runPredictionBound(
-            BatchItem exactHead,
+            ScheduledRequest exactHead,
             Supplier<BatcherCycleResult> operation) {
         try {
             return operation.get();
@@ -488,14 +490,14 @@ class BatcherContext {
         }
     }
 
-    boolean selectionStillOwned(List<BatchItem> candidates) {
+    boolean selectionStillOwned(List<ScheduledRequest> candidates) {
         return candidateSelectionStillOwned(candidates);
     }
 
     BatcherCycleResult.Admitted commitPreparedSelection(
             DeliveryStrategy.Transaction transaction,
             String decisionReason) {
-        List<BatchItem> items = batchItems(transaction.items());
+        List<ScheduledRequest> items = batchItems(transaction.items());
         assert !items.isEmpty()
                 : "prepared selection commit requires a non-empty selection";
         BatcherCycleResult.Admitted admittedResult = null;
@@ -508,7 +510,7 @@ class BatcherContext {
                 return null;
             }
             long nowMs = now();
-            for (BatchItem item : items) {
+            for (ScheduledRequest item : items) {
                 if (!containsIdentity(item) || item.requestExpired(nowMs)) {
                     return null;
                 }
@@ -576,7 +578,7 @@ class BatcherContext {
     }
 
     BatcherCycleResult commitBoundary(
-            DeliveryItem blockedItem,
+            ScheduledRequest blockedItem,
             CapacityBoundary blockedResult) {
         BatcherCycleResult result = BatcherCycleResult.Outcome.NO_ACTION;
         RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
@@ -589,7 +591,7 @@ class BatcherContext {
             if (blockedResult
                     instanceof CapacityBoundary.Unavailable unavailable) {
                 result = resolveEmptyCapacityUnderLock(
-                        (BatchItem) blockedItem, unavailable, nowMs);
+                        blockedItem, unavailable, nowMs);
             } else {
                 removedBoundary = removeSelectionBoundaryUnderLock(
                         blockedItem, blockedResult, nowMs);
@@ -607,7 +609,7 @@ class BatcherContext {
 
     /** Caller holds queueLock. */
     private BatcherCycleResult resolveEmptyCapacityUnderLock(
-            BatchItem item,
+            ScheduledRequest item,
             CapacityBoundary.Unavailable unavailable,
             long nowMs) {
         if (queue.peek() != item
@@ -620,7 +622,7 @@ class BatcherContext {
 
     /** Caller holds queueLock. */
     private RemovedTerminalBoundary removeSelectionBoundaryUnderLock(
-            DeliveryItem blockedItem,
+            ScheduledRequest blockedItem,
             CapacityBoundary blockedResult,
             long nowMs) {
         // OwnershipLost is not a terminal fact. In particular, the request's
@@ -632,7 +634,7 @@ class BatcherContext {
                 || blockedResult == CapacityBoundary.OwnershipLost.INSTANCE) {
             return RemovedTerminalBoundary.NONE;
         }
-        BatchItem item = (BatchItem) blockedItem;
+        ScheduledRequest item = blockedItem;
         if (!containsIdentity(item)
                 || item.requestExpired(nowMs)
                 || !removeTerminalActiveUnderLock(item)) {
@@ -653,7 +655,7 @@ class BatcherContext {
         }
     }
 
-    private record RemovedTerminalBoundary(BatchItem item, Throwable failure) {
+    private record RemovedTerminalBoundary(ScheduledRequest item, Throwable failure) {
         private static final RemovedTerminalBoundary NONE =
                 new RemovedTerminalBoundary(null, null);
 
@@ -662,20 +664,20 @@ class BatcherContext {
         }
     }
 
-    /** Delivery items are the scheduler-owned BatchItem identities. */
+    /** Delivery items are the scheduler-owned ScheduledRequest identities. */
     @SuppressWarnings("unchecked")
-    private static List<BatchItem> batchItems(List<DeliveryItem> items) {
-        return (List<BatchItem>) (List<?>) items;
+    private static List<ScheduledRequest> batchItems(List<ScheduledRequest> items) {
+        return (List<ScheduledRequest>) (List<?>) items;
     }
 
-    private boolean candidateSelectionStillOwned(List<BatchItem> candidates) {
+    private boolean candidateSelectionStillOwned(List<ScheduledRequest> candidates) {
         queueLock.lock();
         try {
             if (stopped) {
                 return false;
             }
             long nowMs = now();
-            for (BatchItem item : candidates) {
+            for (ScheduledRequest item : candidates) {
                 if (!containsIdentity(item) || item.requestExpired(nowMs)) {
                     return false;
                 }
@@ -687,8 +689,8 @@ class BatcherContext {
     }
 
     /** Identity membership avoids conflating different request generations. */
-    private boolean containsIdentity(BatchItem expected) {
-        for (BatchItem item : queue) {
+    private boolean containsIdentity(ScheduledRequest expected) {
+        for (ScheduledRequest item : queue) {
             if (item == expected) {
                 return true;
             }
@@ -696,7 +698,7 @@ class BatcherContext {
         return false;
     }
 
-    private void notifyAdmissionFailure(BatchItem item, Throwable cause) {
+    private void notifyAdmissionFailure(ScheduledRequest item, Throwable cause) {
         try {
             deliveryLifecycle.onPreparedDeliveryFailure(item, cause);
         } catch (Throwable callbackFailure) {
@@ -707,7 +709,7 @@ class BatcherContext {
     }
 
     /** Terminate the head whose absolute request expiration has been reached. */
-    void dropHead(BatchItem head) {
+    void dropHead(ScheduledRequest head) {
         terminateActiveItem(head, ActiveQueueExpired.INSTANCE);
     }
 
@@ -718,7 +720,7 @@ class BatcherContext {
      * worker-wide invariant failure.
      */
     private void terminateActiveItem(
-            BatchItem item,
+            ScheduledRequest item,
             ActiveQueueTermination termination) {
         boolean removed;
         queueLock.lock();

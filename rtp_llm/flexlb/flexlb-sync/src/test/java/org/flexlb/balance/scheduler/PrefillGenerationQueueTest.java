@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime;
+import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.FlexlbConfig;
@@ -33,7 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical queue-order contract exposed by {@link PrefillGenerationRuntime}. */
+/** Canonical queue-order contract exposed by {@link WorkerBatcher}. */
 class PrefillGenerationQueueTest {
 
     private final List<WorkerBatcher> runtimes = new ArrayList<>();
@@ -67,7 +67,7 @@ class PrefillGenerationQueueTest {
         assertTrue(runtime.offer(item(3, 50, now + 1_000, now + 200, 128)));
         assertTrue(runtime.offer(item(4, 50, now + 5_000, now - 100, 128)));
 
-        PrefillGenerationRuntime.QueueSnapshot snapshot =
+        WorkerBatcher.QueueSnapshot snapshot =
                 runtime.captureQueueSnapshot();
         assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
@@ -107,14 +107,14 @@ class PrefillGenerationQueueTest {
     @Test
     void snapshotsExposeExactCanonicalIdentitiesAndMonotonicMutationVersion() {
         WorkerBatcher runtime = runningRuntime();
-        BatchItem first = item(11, 70, Long.MAX_VALUE, 1, 128);
-        BatchItem second = item(12, 50, Long.MAX_VALUE, 2, 128);
+        ScheduledRequest first = item(11, 70, Long.MAX_VALUE, 1, 128);
+        ScheduledRequest second = item(12, 50, Long.MAX_VALUE, 2, 128);
 
-        PrefillGenerationRuntime.QueueSnapshot empty =
+        WorkerBatcher.QueueSnapshot empty =
                 runtime.captureQueueSnapshot();
         assertTrue(runtime.offer(first));
         assertTrue(runtime.offer(second));
-        PrefillGenerationRuntime.QueueSnapshot offered =
+        WorkerBatcher.QueueSnapshot offered =
                 runtime.captureQueueSnapshot();
 
         assertTrue(offered.queueVersion() > empty.queueVersion());
@@ -125,7 +125,7 @@ class PrefillGenerationQueueTest {
                 runtime.queueSizeByPriority());
 
         assertTrue(runtime.removeQueued(first, "test exact removal"));
-        PrefillGenerationRuntime.QueueSnapshot removed =
+        WorkerBatcher.QueueSnapshot removed =
                 runtime.captureQueueSnapshot();
         assertTrue(removed.queueVersion() > offered.queueVersion());
         assertEquals(List.of(second), removed.items());
@@ -134,8 +134,8 @@ class PrefillGenerationQueueTest {
     @Test
     void removalRequiresTheExactQueuedIdentityEvenForSameRequestId() {
         WorkerBatcher runtime = runningRuntime();
-        BatchItem canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
-        BatchItem lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
+        ScheduledRequest canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
+        ScheduledRequest lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertTrue(runtime.offer(canonical));
 
         assertFalse(runtime.removeQueued(lookalike, "stale identity"));
@@ -150,13 +150,13 @@ class PrefillGenerationQueueTest {
                 prefillEndpoint,
                 config,
                 deliveryStrategy,
-                mock(DeliveryLifecyclePort.class));
+                mock(EndpointEventSink.class));
         runtimes.add(runtime);
         runtime.start();
         return runtime;
     }
 
-    private BatchItem item(long requestId, int priority, long expiresAtMs,
+    private ScheduledRequest item(long requestId, int priority, long expiresAtMs,
                            long enqueuedAtMs, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -167,7 +167,7 @@ class PrefillGenerationQueueTest {
         context.setConfig(config);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(priority, expiresAtMs));
-        return new BatchItem(
+        return new ScheduledRequest(
                 context,
                 new CompletableFuture<Response>(),
                 null,
@@ -179,8 +179,8 @@ class PrefillGenerationQueueTest {
                 enqueuedAtMs);
     }
 
-    private static List<Long> requestIds(List<DeliveryItem> items) {
-        return items.stream().map(DeliveryItem::requestId).toList();
+    private static List<Long> requestIds(List<ScheduledRequest> items) {
+        return items.stream().map(ScheduledRequest::requestId).toList();
     }
 
     private static PrefillEndpoint stablePrefillEndpoint() {
@@ -223,7 +223,7 @@ class PrefillGenerationQueueTest {
 
         @Override
         public Transaction prepare(
-                List<DeliveryItem> candidates,
+                List<ScheduledRequest> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             attempts.incrementAndGet();
@@ -240,7 +240,7 @@ class PrefillGenerationQueueTest {
 
         @Override
         public double projectGroupDurationMs(
-                List<DeliveryItem> items,
+                List<ScheduledRequest> items,
                 PrefillTimePredictor.Evaluator evaluator) {
             return 0.0;
         }

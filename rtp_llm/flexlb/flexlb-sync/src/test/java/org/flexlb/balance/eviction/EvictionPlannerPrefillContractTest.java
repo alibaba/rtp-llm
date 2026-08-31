@@ -1,11 +1,12 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
 import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.List;
@@ -37,19 +38,24 @@ class EvictionPlannerPrefillContractTest {
         return new PriorityRequestEnvelope(9999L, priority, 0L, 0L, 0L, 0L, 0L);
     }
 
-    private static DeliveryItem item(long id, int priority, long enqueuedAtMs) {
-        return new FakeDeliveryItem(id, priority, enqueuedAtMs);
+    private static ScheduledRequest item(long id, int priority, long enqueuedAtMs) {
+        ScheduledRequest item = Mockito.mock(ScheduledRequest.class);
+        Mockito.when(item.requestId()).thenReturn(id);
+        Mockito.when(item.priority()).thenReturn(priority);
+        Mockito.when(item.enqueuedAtMs()).thenReturn(enqueuedAtMs);
+        Mockito.when(item.seqLen()).thenReturn(128L);
+        return item;
     }
 
     private static PrefillEvictionProposal plan(
             PriorityRequestEnvelope envelope, int capacity,
-            List<DeliveryItem> items, Map<String, String> failures) {
+            List<ScheduledRequest> items, Map<String, String> failures) {
         QueueSnapshot queue = new QueueSnapshot(EP, 1L, capacity, items);
         return EvictionPlanner.planPrefillQueue(envelope, List.of(queue), failures);
     }
 
     private static List<Long> victimIds(PrefillEvictionProposal proposal) {
-        return proposal.victims().stream().map(DeliveryItem::requestId).toList();
+        return proposal.victims().stream().map(ScheduledRequest::requestId).toList();
     }
 
     // ─── Priority eligibility ───────────────────────────────────────────
@@ -194,19 +200,6 @@ class EvictionPlannerPrefillContractTest {
         }
     }
 
-    // ─── Fake DeliveryItem ──────────────────────────────────────────────
+    // ─── Fake ScheduledRequest ──────────────────────────────────────────────
 
-    private record FakeDeliveryItem(long requestId, int priority, long enqueuedAtMs)
-            implements DeliveryItem {
-
-        @Override
-        public long seqLen() {
-            return 128L;
-        }
-
-        @Override
-        public long hitCache() {
-            return 0L;
-        }
-    }
 }

@@ -1,7 +1,7 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.endpoint.PrefillGenerationRuntime.QueueSnapshot;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
 import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 
 import org.flexlb.config.PreemptionConfig;
@@ -32,12 +32,12 @@ public final class EvictionPlanner {
      * priority asc → arrival desc (newest first) → requestId asc
      * (deterministic).
      */
-    static final Comparator<DeliveryItem> CANDIDATE_ORDER = Comparator
-            .comparingInt(DeliveryItem::priority)
+    static final Comparator<ScheduledRequest> CANDIDATE_ORDER = Comparator
+            .comparingInt(ScheduledRequest::priority)
             .thenComparing(
-                    DeliveryItem::enqueuedAtMs,
+                    ScheduledRequest::enqueuedAtMs,
                     Comparator.reverseOrder())
-            .thenComparingLong(DeliveryItem::requestId);
+            .thenComparingLong(ScheduledRequest::requestId);
 
     private EvictionPlanner() {
     }
@@ -90,8 +90,8 @@ public final class EvictionPlanner {
         }
         // QueueSnapshot contains only exact live queue members. Priority-neutral
         // items are never selected as victims.
-        List<DeliveryItem> candidates = new ArrayList<>();
-        for (DeliveryItem item : queue.items()) {
+        List<ScheduledRequest> candidates = new ArrayList<>();
+        for (ScheduledRequest item : queue.items()) {
             if (PriorityNormalizer.hasPriority(item.priority())
                     && item.priority() < envelope.priority()) {
                 candidates.add(item);
@@ -103,7 +103,7 @@ public final class EvictionPlanner {
         }
 
         candidates.sort(CANDIDATE_ORDER);
-        List<DeliveryItem> victims = candidates.subList(0, queueDeficit);
+        List<ScheduledRequest> victims = candidates.subList(0, queueDeficit);
 
         // 9.3: retain the scalar cost for diagnostics; structured priority
         // harm is the absolute comparison dimension.
@@ -111,7 +111,7 @@ public final class EvictionPlanner {
         int minVictimPriority = Integer.MAX_VALUE;
         long tieBreak = Long.MAX_VALUE;
         PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
-        for (DeliveryItem victim : victims) {
+        for (ScheduledRequest victim : victims) {
             rawCost = PriorityCostFunction.saturatedAdd(
                     rawCost, PriorityCostFunction.f(victim.priority()));
             harmProfile.add(victim.priority(), 1);

@@ -48,7 +48,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -309,8 +309,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     @Override
-    protected EngineWorkerStatus createEngineWorkerStatus() {
-        return new EngineWorkerStatus(endpointRegistry);
+    protected WorkerDirectory createWorkerDirectory() {
+        return new WorkerDirectory(endpointRegistry);
     }
 
     @Override
@@ -440,7 +440,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new NoOpFlexMonitor(),
                 constructorOnlyCacheMetricsReporter,
                 grpcClient,
-                constructorOnlyLoopResources);
+                constructorOnlyLoopResources,
+                engineWorkerStatus);
     }
 
     @AfterEach

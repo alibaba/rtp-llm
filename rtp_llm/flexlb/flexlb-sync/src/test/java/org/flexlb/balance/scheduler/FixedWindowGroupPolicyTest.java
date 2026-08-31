@@ -1,6 +1,6 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryMetadata;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -40,7 +40,7 @@ class FixedWindowGroupPolicyTest {
     void incompleteWindowReturnsExactEventDrivenWait() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 4, 10_000L, 0L);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 10L, NOW_MS - 5_000L, NOW_MS + 20_000L);
         fixture.bumpSchedulingInputVersion();
 
@@ -64,7 +64,7 @@ class FixedWindowGroupPolicyTest {
     void collectionWaitIsCappedByAbsoluteHeadExpiry() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 4, 10_000L, 0L);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 10L, NOW_MS - 1_000L, NOW_MS + 2_000L);
 
         BatcherCycleResult.AwaitingSchedulingChange waiting =
@@ -106,7 +106,7 @@ class FixedWindowGroupPolicyTest {
         fixture.delivery().projection(items ->
                 items.size() == 1 ? 499.0 : 501.0);
         fixture.add(1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
-        BatchItem suffix = fixture.add(
+        ScheduledRequest suffix = fixture.add(
                 2L, 50, 10L, NOW_MS + 1L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -260,7 +260,7 @@ class FixedWindowGroupPolicyTest {
         fixture.delivery().projection(items -> 100.0);
         fixture.add(1L, 50, 100L, NOW_MS, Long.MAX_VALUE);
         fixture.add(2L, 50, 100L, NOW_MS + 1L, Long.MAX_VALUE);
-        BatchItem suffix = fixture.add(
+        ScheduledRequest suffix = fixture.add(
                 3L, 50, 100L, NOW_MS + 2L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -277,7 +277,7 @@ class FixedWindowGroupPolicyTest {
                 false, 1, 0L, 500L);
         fixture.delivery().projection(items -> 125.0);
         fixture.delivery().block();
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
 
         BatcherCycleResult.CapacityBlocked blocked = assertInstanceOf(
@@ -297,7 +297,7 @@ class FixedWindowGroupPolicyTest {
                 false, 2, 0L, 500L);
         fixture.delivery().limitPreparedPrefix(1);
         fixture.add(1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
-        BatchItem suffix = fixture.add(
+        ScheduledRequest suffix = fixture.add(
                 2L, 50, 10L, NOW_MS + 1L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -317,9 +317,9 @@ class FixedWindowGroupPolicyTest {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 4, 0L, 500L);
         fixture.delivery().projection(items -> Double.NaN);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
-        BatchItem suffix = fixture.add(
+        ScheduledRequest suffix = fixture.add(
                 2L, 50, 10L, NOW_MS + 1L, Long.MAX_VALUE);
 
         BatcherCycleResult result = policy.processQueue(fixture.context());
@@ -341,7 +341,7 @@ class FixedWindowGroupPolicyTest {
         fixture.delivery().projection(items -> 100.0);
         fixture.add(1L, 50, 100L, NOW_MS, Long.MAX_VALUE);
         fixture.add(2L, 50, 100L, NOW_MS + 1L, Long.MAX_VALUE);
-        BatchItem third = fixture.add(
+        ScheduledRequest third = fixture.add(
                 3L, 50, 100L, NOW_MS + 2L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -359,7 +359,7 @@ class FixedWindowGroupPolicyTest {
         fixture.status(capacity(300L, 0L, 0L, 0L));
         fixture.delivery().projection(items -> 100.0);
         fixture.add(1L, 50, 200L, NOW_MS, Long.MAX_VALUE);
-        BatchItem second = fixture.add(
+        ScheduledRequest second = fixture.add(
                 2L, 50, 200L, NOW_MS + 1L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -378,7 +378,7 @@ class FixedWindowGroupPolicyTest {
         fixture.delivery().projection(items -> 100.0);
         fixture.add(1L, 50, 100L, NOW_MS, Long.MAX_VALUE);
         fixture.add(2L, 50, 100L, NOW_MS + 1L, Long.MAX_VALUE);
-        BatchItem third = fixture.add(
+        ScheduledRequest third = fixture.add(
                 3L, 50, 100L, NOW_MS + 2L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -411,9 +411,9 @@ class FixedWindowGroupPolicyTest {
                 false, 4, 0L, 500L);
         fixture.status(capacity(409_600L, 1_048_576L, 0L, 0L));
         fixture.delivery().projection(items -> 500.0);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 910_537L, NOW_MS, Long.MAX_VALUE);
-        BatchItem next = fixture.add(
+        ScheduledRequest next = fixture.add(
                 2L, 50, 1_024L, NOW_MS + 1L, Long.MAX_VALUE);
 
         BatcherCycleResult.Admitted admitted = assertInstanceOf(
@@ -432,7 +432,7 @@ class FixedWindowGroupPolicyTest {
         fixture.add(1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
         fixture.add(2L, 40, 10L, NOW_MS + 1L, Long.MAX_VALUE);
         AtomicBoolean offered = new AtomicBoolean();
-        BatchItem urgent = fixture.item(
+        ScheduledRequest urgent = fixture.item(
                 3L, 100, 10L, NOW_MS + 2L, Long.MAX_VALUE);
         fixture.delivery().projection(items -> {
             if (offered.compareAndSet(false, true)) {
@@ -453,9 +453,9 @@ class FixedWindowGroupPolicyTest {
     void removalDuringPredictionInvalidatesWholeCapturedGroup() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 2, 60_000L, 500L);
-        BatchItem first = fixture.add(
+        ScheduledRequest first = fixture.add(
                 1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
-        BatchItem second = fixture.add(
+        ScheduledRequest second = fixture.add(
                 2L, 50, 10L, NOW_MS + 1L, Long.MAX_VALUE);
         AtomicBoolean removed = new AtomicBoolean();
         fixture.delivery().projection(items -> {
@@ -479,7 +479,7 @@ class FixedWindowGroupPolicyTest {
     void prioritySnapshotAdmitsStrictOrderedPrefixWithoutStarvation() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 true, 2, 0L, 0L);
-        BatchItem low = fixture.add(
+        ScheduledRequest low = fixture.add(
                 1L, 10, 10L, NOW_MS, Long.MAX_VALUE);
         fixture.add(2L, 100, 10L, NOW_MS + 1L, Long.MAX_VALUE);
         fixture.add(3L, 50, 10L, NOW_MS + 2L, Long.MAX_VALUE);
@@ -496,9 +496,9 @@ class FixedWindowGroupPolicyTest {
     void expiredMemberInsideCapturedPrefixIsRemovedBeforePrediction() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 3, 0L, 500L);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 10L, NOW_MS - 10L, Long.MAX_VALUE);
-        BatchItem expired = fixture.add(
+        ScheduledRequest expired = fixture.add(
                 2L, 50, 10L, NOW_MS - 9L, NOW_MS);
 
         BatcherCycleResult result = policy.processQueue(fixture.context());
@@ -513,7 +513,7 @@ class FixedWindowGroupPolicyTest {
     void requestExpiringDuringPredictionCannotCommit() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 1, 0L, 500L);
-        BatchItem expiring = fixture.add(
+        ScheduledRequest expiring = fixture.add(
                 1L, 50, 10L, NOW_MS, NOW_MS + 1L);
         fixture.delivery().projection(items -> {
             fixture.advanceTo(NOW_MS + 1L);
@@ -582,7 +582,7 @@ class FixedWindowGroupPolicyTest {
     void capacityBecomingUnavailableDuringPredictionBlocksAtDeliveryGate() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 1, 0L, 500L);
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 10L, NOW_MS, Long.MAX_VALUE);
         fixture.delivery().projection(items -> {
             fixture.delivery().block();
@@ -643,7 +643,7 @@ class FixedWindowGroupPolicyTest {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 4, 0L, 500L);
         fixture.status(capacity(1_000L, 0L, 1_000L, 99L));
-        BatchItem head = fixture.add(
+        ScheduledRequest head = fixture.add(
                 1L, 50, 100L, NOW_MS, NOW_MS + 10_000L);
 
         BatcherCycleResult.AwaitingSchedulingChange waiting =
@@ -664,7 +664,7 @@ class FixedWindowGroupPolicyTest {
     void expiredHeadIsTerminalizedAfterOneAdvisoryResourceRead() {
         GroupPolicyTestSupport.Fixture fixture = fixed(
                 false, 4, 0L, 500L);
-        BatchItem expired = fixture.add(
+        ScheduledRequest expired = fixture.add(
                 1L, 50, 10L, NOW_MS - 10L, NOW_MS);
 
         BatcherCycleResult result = policy.processQueue(fixture.context());
@@ -676,7 +676,7 @@ class FixedWindowGroupPolicyTest {
         assertTrue(fixture.activeItems().isEmpty());
     }
 
-    private static List<Long> ids(List<? extends DeliveryItem> items) {
-        return items.stream().map(DeliveryItem::requestId).toList();
+    private static List<Long> ids(List<? extends ScheduledRequest> items) {
+        return items.stream().map(ScheduledRequest::requestId).toList();
     }
 }

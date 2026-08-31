@@ -1,11 +1,11 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.PrefillAdmissionPort;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointGenerationRetiredException;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.strategy.EndpointSelection;
@@ -44,12 +44,12 @@ final class PrefillAdmissionResources {
     }
 
     static final class Member {
-        final BatchItem item;
+        final ScheduledRequest item;
         final DecodeEndpoint.EngineDispatchPermit permit;
         MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
 
         Member(
-                BatchItem item,
+                ScheduledRequest item,
                 DecodeEndpoint.EngineDispatchPermit permit) {
             this.item = Objects.requireNonNull(item, "item");
             this.permit = Objects.requireNonNull(permit, "permit");
@@ -57,8 +57,8 @@ final class PrefillAdmissionResources {
     }
 
     static CapacityBoundary.Attempt<Member> prepareMember(
-            BatchItem item) {
-        BatchItem.DecodeBinding binding = item.decodeBinding();
+            ScheduledRequest item) {
+        ScheduledRequest.DecodeBinding binding = item.decodeBinding();
         DecodeEndpoint decode = binding.endpoint();
         if (decode == null || binding.reservation() == null) {
             return failed(missingEndpoint("Decode reservation", item));
@@ -94,8 +94,8 @@ final class PrefillAdmissionResources {
      * reservation and hard-gate permit in one admission-lock transaction.
      */
     private static CapacityBoundary.Attempt<Member> prepareReplacementMember(
-            BatchItem item,
-            BatchItem.DecodeBinding original,
+            ScheduledRequest item,
+            ScheduledRequest.DecodeBinding original,
             long observedPoolSequence) {
         EndpointSelection selection;
         try {
@@ -149,7 +149,7 @@ final class PrefillAdmissionResources {
                 };
             }
 
-            BatchItem.DecodeBinding rebound = new BatchItem.DecodeBinding(
+            ScheduledRequest.DecodeBinding rebound = new ScheduledRequest.DecodeBinding(
                     RequestLifecycleCoordinator.copyOf(
                             replacement.serverStatus()),
                     candidate,
@@ -193,13 +193,13 @@ final class PrefillAdmissionResources {
         }
     }
 
-    private static long decodePoolSequence(BatchItem item) {
+    private static long decodePoolSequence(ScheduledRequest item) {
         PlacementAvailability pool = item.decodePlacementAvailability();
         return pool == null ? 0L : pool.sequence();
     }
 
     private static CapacityBoundary.Attempt<Member> decodeCapacityFull(
-            BatchItem item,
+            ScheduledRequest item,
             long observedPoolSequence) {
         return rejected(new CapacityBoundary.Unavailable(
                 new DecodeAvailability(item, observedPoolSequence),
@@ -231,7 +231,7 @@ final class PrefillAdmissionResources {
      * so both allocation windows are guarded by the exact permit rollback.
      */
     private static CapacityBoundary.Attempt<Member> captureMember(
-            BatchItem item,
+            ScheduledRequest item,
             DecodeEndpoint.EngineDispatchPermit permit) {
         Member member = null;
         try {
@@ -246,8 +246,8 @@ final class PrefillAdmissionResources {
     }
 
     static <T> CapacityBoundary.Attempt<T> rejectedPrefill(
-            BatchItem item,
-            PrefillWorkLedger.CapacityStatus status,
+            ScheduledRequest item,
+            PrefillState.CapacityStatus status,
             CapacityBoundary.Unavailable capacityFull) {
         return switch (status) {
             case CAPACITY_FULL -> rejected(capacityFull);
@@ -266,14 +266,14 @@ final class PrefillAdmissionResources {
 
     static IllegalStateException missingEndpoint(
             String role,
-            BatchItem item) {
+            ScheduledRequest item) {
         return new IllegalStateException(
                 role + " is unavailable: request_id=" + item.requestId());
     }
 
     static EndpointGenerationRetiredException retired(
             String role,
-            BatchItem item) {
+            ScheduledRequest item) {
         return new EndpointGenerationRetiredException(
                 role + " endpoint generation retired: request_id="
                         + item.requestId());
@@ -293,7 +293,7 @@ final class PrefillAdmissionResources {
     }
 
     static Throwable rollbackReservation(
-            PrefillWorkLedger.Reservation reservation,
+            PrefillState.Reservation reservation,
             Throwable priorFailure) {
         if (reservation == null) {
             return priorFailure;
@@ -375,7 +375,7 @@ final class PrefillAdmissionResources {
 
     static boolean sameIdentitySequence(
             List<Member> expected,
-            List<DeliveryItem> supplied) {
+            List<ScheduledRequest> supplied) {
         if (expected.size() != supplied.size()) {
             return false;
         }
@@ -405,7 +405,7 @@ final class PrefillAdmissionResources {
     }
 
     private static void releaseCommittedHandoff(
-            PrefillWorkLedger.CommittedHandoff handoff) {
+            PrefillState.CommittedHandoff handoff) {
         if (handoff == null) {
             return;
         }
@@ -435,10 +435,10 @@ final class PrefillAdmissionResources {
      */
     static final class CommittedAdmissionOwner
             implements PrefillAdmissionPort.CommittedAdmission {
-        private final IdentityHashMap<DeliveryItem, Member> membersByIdentity;
+        private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
         private final DecodeEndpoint.EngineDispatchPermit[] permits;
-        private final PrefillWorkLedger.CommittedHandoff[] handoffs;
+        private final PrefillState.CommittedHandoff[] handoffs;
         private boolean bound;
         private boolean closed;
 
@@ -450,7 +450,7 @@ final class PrefillAdmissionResources {
             membersByIdentity = new IdentityHashMap<>(exactMembers.size());
             members = exactMembers.toArray(Member[]::new);
             permits = new DecodeEndpoint.EngineDispatchPermit[members.length];
-            handoffs = new PrefillWorkLedger.CommittedHandoff[
+            handoffs = new PrefillState.CommittedHandoff[
                     committedHandoffCount];
             for (int index = 0; index < members.length; index++) {
                 Member member = members[index];
@@ -463,7 +463,7 @@ final class PrefillAdmissionResources {
 
         /** No-throw bind after one batch reservation has committed. */
         synchronized void bindBatchHandoff(
-                PrefillWorkLedger.CommittedHandoff exactHandoff) {
+                PrefillState.CommittedHandoff exactHandoff) {
             handoffs[0] = exactHandoff;
             bound = true;
         }
@@ -473,7 +473,7 @@ final class PrefillAdmissionResources {
          * contract guarantees one materialized handoff per exact reservation.
          */
         synchronized void bindRouteHandoffs(
-                List<PrefillWorkLedger.CommittedHandoff> exactHandoffs) {
+                List<PrefillState.CommittedHandoff> exactHandoffs) {
             for (int index = 0; index < handoffs.length; index++) {
                 handoffs[index] = exactHandoffs.get(index);
             }
@@ -482,7 +482,7 @@ final class PrefillAdmissionResources {
 
         @Override
         public synchronized boolean transferToEndpoint(
-                DeliveryItem exactItem) {
+                ScheduledRequest exactItem) {
             if (closed) {
                 throw new IllegalStateException(
                         "committed admission is closed");
@@ -533,7 +533,7 @@ final class PrefillAdmissionResources {
                     member.ownership = MemberOwnership.OWNERSHIP_LOST;
                 }
             }
-            for (PrefillWorkLedger.CommittedHandoff handoff
+            for (PrefillState.CommittedHandoff handoff
                     : handoffs) {
                 releaseCommittedHandoff(handoff);
             }
@@ -543,7 +543,7 @@ final class PrefillAdmissionResources {
     /** Decode is the exact event source for its request-scoped permit. */
     private static final class DecodeAvailability
             implements CapacityBoundary.Availability {
-        private final BatchItem item;
+        private final ScheduledRequest item;
         private final DecodeEndpoint endpoint;
         private final PlacementAvailability pool;
         private final PlacementKey poolKey;
@@ -552,10 +552,10 @@ final class PrefillAdmissionResources {
         private PlacementAvailability.Listener poolListener;
 
         private DecodeAvailability(
-                BatchItem item,
+                ScheduledRequest item,
                 long observedPoolSequence) {
             this.item = item;
-            BatchItem.DecodeBinding binding = item.decodeBinding();
+            ScheduledRequest.DecodeBinding binding = item.decodeBinding();
             this.endpoint = binding.endpoint();
             this.pool = item.decodePlacementAvailability();
             String group = binding.status() == null

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.FlexlbConfig;
@@ -86,7 +86,7 @@ class PrefillEndpointTest {
     void commitBatchIncreasesInflightCount() {
         assertEquals(0, endpoint.getInflightBatchCount());
 
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertEquals(1, endpoint.getInflightBatchCount());
@@ -97,7 +97,7 @@ class PrefillEndpointTest {
 
     @Test
     void releaseBatchDecreasesInflightCount() {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
         assertTrue(endpoint.releaseCommittedItem(item));
 
@@ -108,10 +108,10 @@ class PrefillEndpointTest {
 
     @Test
     void releaseBatchRetainsOnlyProtectedMembers() {
-        BatchItem protectedItem = createBatchItem(101L, 500, 200);
-        BatchItem sibling = createBatchItem(102L, 300, 100);
+        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+        ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(protectedItem, sibling));
-        PrefillWorkLedger.Protection protection =
+        PrefillState.Protection protection =
                 endpoint.acquireBatchMemberProtection(7L, protectedItem);
         assertNotNull(protection);
 
@@ -135,9 +135,9 @@ class PrefillEndpointTest {
 
     @Test
     void commitMultipleBatches() {
-        BatchItem item1 = createBatchItem(1L, 500, 200);
-        BatchItem item2 = createBatchItem(2L, 300, 100);
-        BatchItem item3 = createBatchItem(3L, 400, 0);
+        ScheduledRequest item1 = createScheduledRequest(1L, 500, 200);
+        ScheduledRequest item2 = createScheduledRequest(2L, 300, 100);
+        ScheduledRequest item3 = createScheduledRequest(3L, 400, 0);
 
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
         registerBatch(endpoint, 2L, 50, List.of(item3));
@@ -150,8 +150,8 @@ class PrefillEndpointTest {
 
     @Test
     void repackBatchRemovesFailedRequests() {
-        BatchItem item1 = createBatchItem(1L, 500, 200);
-        BatchItem item2 = createBatchItem(2L, 300, 100);
+        ScheduledRequest item1 = createScheduledRequest(1L, 500, 200);
+        ScheduledRequest item2 = createScheduledRequest(2L, 300, 100);
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
         assertTrue(endpoint.releaseCommittedItem(item2));
@@ -163,7 +163,7 @@ class PrefillEndpointTest {
 
     @Test
     void repackBatchAllFailedReturnsNull() {
-        BatchItem item1 = createBatchItem(1L, 500, 200);
+        ScheduledRequest item1 = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item1));
 
         assertTrue(endpoint.releaseCommittedItem(item1));
@@ -176,9 +176,9 @@ class PrefillEndpointTest {
     void failedRepackPredictionSettlesMembershipAndPublishesUnknownWork() {
         PrefillEndpoint invalidPredictorEndpoint = newEndpointWithFormula("-1");
         try {
-            BatchItem survivor = createBatchItem(
+            ScheduledRequest survivor = createScheduledRequest(
                     invalidPredictorEndpoint, 1L, 500L, 200L);
-            BatchItem failed = createBatchItem(
+            ScheduledRequest failed = createScheduledRequest(
                     invalidPredictorEndpoint, 2L, 300L, 100L);
             registerBatch(
                     invalidPredictorEndpoint,
@@ -213,7 +213,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateRemovesBatchOnSuccess() {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -230,7 +230,7 @@ class PrefillEndpointTest {
 
     @Test
     void completion_observer_failure_does_not_escape_finished_settlement() {
-        registerBatch(endpoint, 9L, 100, List.of(createBatchItem(9L, 500, 200)));
+        registerBatch(endpoint, 9L, 100, List.of(createScheduledRequest(9L, 500, 200)));
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(endpointReporter)
                 .reportBatchPredictedTimeMs("PREFILL", "127.0.0.1", 100);
@@ -246,8 +246,8 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateRepacksOnPartialFailure() {
-        BatchItem item1 = createBatchItem(1L, 500, 200);
-        BatchItem item2 = createBatchItem(2L, 300, 100);
+        ScheduledRequest item1 = createScheduledRequest(1L, 500, 200);
+        ScheduledRequest item2 = createScheduledRequest(2L, 300, 100);
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -266,8 +266,8 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateKeepsBatchInflightUntilEveryMemberFinishes() {
-        BatchItem shortItem = createBatchItem(1L, 500, 200);
-        BatchItem longItem = createBatchItem(2L, 10_000, 0);
+        ScheduledRequest shortItem = createScheduledRequest(1L, 500, 200);
+        ScheduledRequest longItem = createScheduledRequest(2L, 10_000, 0);
         registerBatch(endpoint, 1L, 2_000, List.of(shortItem, longItem));
 
         TaskInfo finishedShort = taskInfo(1L, 1L, null, 0, 40);
@@ -288,9 +288,9 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMixedTerminalMembersKeepsOnlyRunningSurvivor() {
-        BatchItem succeeded = createBatchItem(1L, 500, 200);
-        BatchItem failed = createBatchItem(2L, 300, 100);
-        BatchItem running = createBatchItem(3L, 10_000, 0);
+        ScheduledRequest succeeded = createScheduledRequest(1L, 500, 200);
+        ScheduledRequest failed = createScheduledRequest(2L, 300, 100);
+        ScheduledRequest running = createScheduledRequest(3L, 10_000, 0);
         registerBatch(endpoint, 1L, 2_000, List.of(succeeded, failed, running));
 
         TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
@@ -311,8 +311,8 @@ class PrefillEndpointTest {
     @Test
     void calibrateAllFailuresClearsBatchIdempotentlyWithoutCompletionMetrics() {
         registerBatch(endpoint, 1L, 2_000, List.of(
-                createBatchItem(1L, 500, 200),
-                createBatchItem(2L, 10_000, 0)));
+                createScheduledRequest(1L, 500, 200),
+                createScheduledRequest(2L, 10_000, 0)));
 
         TaskInfo firstFailure = taskInfo(1L, 1L, null, 500, 40);
         TaskInfo secondFailure = taskInfo(2L, 1L, null, 501, 50);
@@ -331,7 +331,7 @@ class PrefillEndpointTest {
 
     @Test
     void repeatedSuccessfulTerminalReportsCompletionExactlyOnce() {
-        registerBatch(endpoint, 1L, 100, List.of(createBatchItem(1L, 500, 200)));
+        registerBatch(endpoint, 1L, 100, List.of(createScheduledRequest(1L, 500, 200)));
         TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
 
         calibrate(Map.of("1", success), Map.of());
@@ -349,7 +349,7 @@ class PrefillEndpointTest {
     @Test
     void batchInflightReanchorsAcrossRunningQueuedRunning() {
         registerBatch(endpoint, 1L, 5_000,
-                List.of(createBatchItem(1L, 500, 0)));
+                List.of(createScheduledRequest(1L, 500, 0)));
         assertEquals(WorkSnapshot.Phase.COMMITTED,
                 onlyBatchWork(endpoint).phase());
 
@@ -377,7 +377,7 @@ class PrefillEndpointTest {
         // canonical owner alive (eviction) and resets the reported max age; the
         // age then grows with the time elapsed since that last observation.
         registerBatch(endpoint, 1L, 5_000,
-                List.of(createBatchItem(1L, 500, 0)));
+                List.of(createScheduledRequest(1L, 500, 0)));
         Thread.sleep(20);
         calibrate(Map.of(), Map.of(
                 "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
@@ -397,7 +397,7 @@ class PrefillEndpointTest {
         // Reported max age measures staleness (time since the batch was last
         // observed), not wall-clock time since creation: a fresh RUNNING
         // observation resets it, after which it grows with elapsed idle time.
-        registerBatch(endpoint, 1L, 5_000, List.of(createBatchItem(1L, 500, 0)));
+        registerBatch(endpoint, 1L, 5_000, List.of(createScheduledRequest(1L, 500, 0)));
         calibrate(Map.of(), Map.of(
                 "1", taskInfo(1L, 1L, TaskPhase.RUNNING, 0, 0)));
         Thread.sleep(30);
@@ -410,7 +410,7 @@ class PrefillEndpointTest {
 
     @Test
     void runningObservationRefreshesBatchInactivityTtl() throws InterruptedException {
-        BatchItem longItem = createBatchItem(1L, 10_000, 0);
+        ScheduledRequest longItem = createScheduledRequest(1L, 10_000, 0);
         registerBatch(endpoint, 1L, 2_000, List.of(longItem));
 
         Thread.sleep(150);
@@ -425,7 +425,7 @@ class PrefillEndpointTest {
     @Test
     void foreignRunningObservationDoesNotRefreshBatchInactivityTtl()
             throws InterruptedException {
-        registerBatch(endpoint, 1L, 2_000, List.of(createBatchItem(1L, 10_000, 0)));
+        registerBatch(endpoint, 1L, 2_000, List.of(createScheduledRequest(1L, 10_000, 0)));
         Thread.sleep(10);
 
         TaskInfo foreign = taskInfo(999L, 1L, TaskPhase.RUNNING, 0, 0);
@@ -437,8 +437,8 @@ class PrefillEndpointTest {
 
     @Test
     void partialCompletionKeepsFixedWindowMaxInflightGateClosed() throws Exception {
-        BatchItem shortItem = createBatchItem(101L, 500, 200);
-        BatchItem longItem = createBatchItem(102L, 10_000, 0);
+        ScheduledRequest shortItem = createScheduledRequest(101L, 500, 200);
+        ScheduledRequest longItem = createScheduledRequest(102L, 10_000, 0);
         registerBatch(endpoint, 700L, 2_000,
                 List.of(shortItem, longItem));
         assertFalse(endpoint.batchAdmissionAvailability(1).isAvailable());
@@ -462,7 +462,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateHandlesTaskWithNoBatchId() {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -479,7 +479,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMissingBatchIdDoesNotRetireRealBatchMember() {
-        registerBatch(endpoint, 700L, 100, List.of(createBatchItem(101L, 500, 200)));
+        registerBatch(endpoint, 700L, 100, List.of(createScheduledRequest(101L, 500, 200)));
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
@@ -511,7 +511,7 @@ class PrefillEndpointTest {
     @Test
     void directRegistrationCanRollbackFromAsyncCompletionThread()
             throws Exception {
-        PrefillWorkLedger.DirectRegistration registration =
+        PrefillState.DirectRegistration registration =
                 EndpointTestSupport.registerDirect(endpoint, 102L, 100L);
         assertEquals(1, endpoint.admissionPendingRequestCount());
 
@@ -528,8 +528,8 @@ class PrefillEndpointTest {
     @Test
     void calibrateMissingBatchIdLeavesMembersUntilExactBatchTerminal() {
         registerBatch(endpoint, 700L, 100, List.of(
-                createBatchItem(101L, 500, 200),
-                createBatchItem(102L, 300, 100)));
+                createScheduledRequest(101L, 500, 200),
+                createScheduledRequest(102L, 300, 100)));
 
         calibrate(Map.of("101", priorityCanceledTask(101L, -1L)), Map.of());
 
@@ -555,7 +555,7 @@ class PrefillEndpointTest {
     void directRequestIdMatchingQueueBatchIdDoesNotOverwriteEitherLifecycle() {
         // DIRECT request 101 and QUEUE batch 101 live in different ledgers.
         // Completing the DIRECT request must not erase QUEUE member 201.
-        registerBatch(endpoint, 101L, 100, List.of(createBatchItem(201L, 500, 200)));
+        registerBatch(endpoint, 101L, 100, List.of(createScheduledRequest(201L, 500, 200)));
         registerDirect(endpoint, 101L, 100L);
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1,
@@ -583,15 +583,15 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMissingBatchIdDoesNotGuessAcrossDuplicateLiveBatches() {
-        BatchItem first = createBatchItem(101L, 500, 200);
-        BatchItem reusedRequestId = createBatchItem(101L, 300, 100);
+        ScheduledRequest first = createScheduledRequest(101L, 500, 200);
+        ScheduledRequest reusedRequestId = createScheduledRequest(101L, 300, 100);
         registerBatch(endpoint, 700L, 100, List.of(first));
 
-        PrefillWorkLedger.BatchReservationResult duplicate =
+        PrefillState.BatchReservationResult duplicate =
                 endpoint.reserveBatch(reusedRequestId, 701L, 10);
 
         assertFalse(duplicate.status()
-                        == PrefillWorkLedger.CapacityStatus.ACQUIRED,
+                        == PrefillState.CapacityStatus.ACQUIRED,
                 "the canonical ledger rejects ambiguous duplicate live owners");
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.admissionPendingRequestCount());
@@ -599,11 +599,11 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMissingBatchIdPreservesProtectedBatchMember() {
-        BatchItem protectedItem = createBatchItem(101L, 500, 200);
-        BatchItem sibling = createBatchItem(102L, 300, 100);
+        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+        ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 700L, 100,
                 List.of(protectedItem, sibling));
-        PrefillWorkLedger.Protection protection =
+        PrefillState.Protection protection =
                 endpoint.acquireBatchMemberProtection(700L, protectedItem);
         assertNotNull(protection);
 
@@ -628,13 +628,13 @@ class PrefillEndpointTest {
 
     @Test
     void authoritativeWorkerTerminalSettlesProtectedBatchMemberImmediately() {
-        BatchItem protectedItem = createBatchItem(101L, 500, 200);
+        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
         registerBatch(
                 endpoint,
                 700L,
                 100,
                 List.of(protectedItem));
-        PrefillWorkLedger.Protection protection =
+        PrefillState.Protection protection =
                 endpoint.acquireBatchMemberProtection(700L, protectedItem);
         assertNotNull(protection);
 
@@ -673,7 +673,7 @@ class PrefillEndpointTest {
                         learningEndpoint,
                         batchId,
                         100L,
-                        List.of(createBatchItem(
+                        List.of(createScheduledRequest(
                                 learningEndpoint, requestId, 500L, 200L)));
                 reportSuccessfulBatchMember(
                         learningEndpoint, batchId, requestId, 100L + sample);
@@ -683,14 +683,14 @@ class PrefillEndpointTest {
 
             long batchId = 8_004L;
             long requestId = 9_004L;
-            BatchItem protectedItem = createBatchItem(
+            ScheduledRequest protectedItem = createScheduledRequest(
                     learningEndpoint, requestId, 500L, 200L);
             registerBatch(
                     learningEndpoint,
                     batchId,
                     100L,
                     List.of(protectedItem));
-            PrefillWorkLedger.Protection protection =
+            PrefillState.Protection protection =
                     learningEndpoint.acquireBatchMemberProtection(
                             batchId, protectedItem);
             assertNotNull(protection);
@@ -724,14 +724,14 @@ class PrefillEndpointTest {
                     learningEndpoint.getPredictor().evaluator();
             long batchId = 8_101L;
             long requestId = 9_101L;
-            BatchItem protectedItem = createBatchItem(
+            ScheduledRequest protectedItem = createScheduledRequest(
                     learningEndpoint, requestId, 500L, 200L);
             registerBatch(
                     learningEndpoint,
                     batchId,
                     100L,
                     List.of(protectedItem));
-            PrefillWorkLedger.Protection protection =
+            PrefillState.Protection protection =
                     learningEndpoint.acquireBatchMemberProtection(
                             batchId, protectedItem);
             assertNotNull(protection);
@@ -754,7 +754,7 @@ class PrefillEndpointTest {
 
     @Test
     void finishedSettlementRemovesMemberBeforeLateProtection() {
-        BatchItem item = createBatchItem(101L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(101L, 500, 200);
         registerBatch(
                 endpoint,
                 700L,
@@ -774,7 +774,7 @@ class PrefillEndpointTest {
     @Test
     void missingBatchIdTerminalDoesNotReleaseFixedWindowSlot() throws Exception {
         registerBatch(endpoint, 700L, 100,
-                List.of(createBatchItem(101L, 500, 200)));
+                List.of(createScheduledRequest(101L, 500, 200)));
         assertFalse(endpoint.batchAdmissionAvailability(1).isAvailable(),
                 "maxInflight=1 must stay closed while the ledger is occupied");
 
@@ -791,7 +791,7 @@ class PrefillEndpointTest {
     @Test
     void calibrateDoesNotRemoveBatchWithForeignRequestId() {
         // Commit batch with requestId=100
-        BatchItem item = createBatchItem(100L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(100L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
         assertEquals(1, endpoint.getInflightBatchCount());
 
@@ -810,7 +810,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateRemovesBatchWithMatchingRequestId() {
-        BatchItem item = createBatchItem(100L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(100L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -826,10 +826,10 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateSuccessOnlyRetiresSiblingWhileBatchMemberReconciles() {
-        BatchItem reconciling = createBatchItem(101L, 500, 200);
-        BatchItem sibling = createBatchItem(102L, 300, 100);
+        ScheduledRequest reconciling = createScheduledRequest(101L, 500, 200);
+        ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(reconciling, sibling));
-        PrefillWorkLedger.Protection protection =
+        PrefillState.Protection protection =
                 endpoint.acquireBatchMemberProtection(7L, reconciling);
         assertNotNull(protection);
 
@@ -863,11 +863,11 @@ class PrefillEndpointTest {
 
     @Test
     void protectedAndSiblingFailuresSettleFromOneWorkerSnapshot() {
-        BatchItem protectedItem = createBatchItem(101L, 500, 200);
-        BatchItem sibling = createBatchItem(102L, 300, 100);
+        ScheduledRequest protectedItem = createScheduledRequest(101L, 500, 200);
+        ScheduledRequest sibling = createScheduledRequest(102L, 300, 100);
         registerBatch(endpoint, 7L, 100,
                 List.of(protectedItem, sibling));
-        PrefillWorkLedger.Protection protection =
+        PrefillState.Protection protection =
                 endpoint.acquireBatchMemberProtection(7L, protectedItem);
         assertNotNull(protection);
 
@@ -902,7 +902,7 @@ class PrefillEndpointTest {
 
     @Test
     void committedWorkMetricReflectsInflightPrediction() {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 5000, List.of(item)); // 5s prediction
 
         long remainingWorkMs = endpoint.getLoadMetric().orElseThrow();
@@ -915,7 +915,7 @@ class PrefillEndpointTest {
     @Test
     void runningCommittedWorkMetricDecreasesWithElapsedTime()
             throws InterruptedException {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 5000, List.of(item));
 
         long remainingBefore = endpoint.getLoadMetric().orElseThrow();
@@ -940,7 +940,7 @@ class PrefillEndpointTest {
 
     @Test
     void evictExpiredBatchesCleansUpStaleEntries() throws InterruptedException {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertEquals(1, endpoint.getInflightBatchCount());
@@ -955,7 +955,7 @@ class PrefillEndpointTest {
 
     @Test
     void evictExpiredBatchesFreshEntriesSurvive() {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         int evicted = endpoint.evictExpiredBatches(60_000); // 60s TTL — fresh entry survives
@@ -966,9 +966,9 @@ class PrefillEndpointTest {
     @Test
     void evictExpiredBatchesRetainsAckAmbiguousBatchUntilReconciled()
             throws InterruptedException {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
-        PrefillWorkLedger.Protection protection =
+        PrefillState.Protection protection =
                 endpoint.acquireBatchMemberProtection(1L, item);
         assertNotNull(protection);
         Thread.sleep(10);
@@ -990,8 +990,8 @@ class PrefillEndpointTest {
     @Test
     void admissionPendingRequestCountUnionsEngineTasksWithLocalLedger() {
         registerBatch(endpoint, 1L, 100, List.of(
-                createBatchItem(101L, 500, 0),
-                createBatchItem(102L, 500, 0)));
+                createScheduledRequest(101L, 500, 0),
+                createScheduledRequest(102L, 500, 0)));
 
         TaskInfo overlapping = taskInfo(102L, 1L, TaskPhase.RUNNING, 0, 0);
         TaskInfo untrackedOne = taskInfo(900L, 90L, TaskPhase.RUNNING, 0, 0);
@@ -1020,7 +1020,7 @@ class PrefillEndpointTest {
 
     @Test
     void admissionPendingRequestCountFallsBackToEngineQueryLengthScalars() {
-        registerBatch(endpoint, 1L, 100, List.of(createBatchItem(101L, 500, 0)));
+        registerBatch(endpoint, 1L, 100, List.of(createScheduledRequest(101L, 500, 0)));
 
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(Map.of());
@@ -1036,7 +1036,7 @@ class PrefillEndpointTest {
 
     @Test
     void admissionPendingRequestCountUsesConservativeScalarBoundForPartialTaskDetails() {
-        registerBatch(endpoint, 1L, 100, List.of(createBatchItem(101L, 500, 0)));
+        registerBatch(endpoint, 1L, 100, List.of(createScheduledRequest(101L, 500, 0)));
 
         TaskInfo overlapping = taskInfo(101L, 1L, TaskPhase.RUNNING, 0, 0);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -1055,7 +1055,7 @@ class PrefillEndpointTest {
         PrefillEndpoint queuedEndpoint = newFixedWindowEndpoint(60_000L);
         try {
             assertEquals(0, queuedEndpoint.admissionPendingRequestCount());
-            BatchItem item = createBatchItem(
+            ScheduledRequest item = createScheduledRequest(
                     queuedEndpoint, 1L, 500L, 200L);
             assertTrue(EndpointTestSupport.offer(queuedEndpoint, item));
 
@@ -1070,7 +1070,7 @@ class PrefillEndpointTest {
     void admissionPendingRequestCountConservativelyCoversPublishedWorkBeforeActiveRemoval() {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         try {
-            BatchItem active = createBatchItem(handoffEndpoint, 111L, 500L, 0L);
+            ScheduledRequest active = createScheduledRequest(handoffEndpoint, 111L, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
 
             org.flexlb.balance.projection.RouteProjection.Inputs snapshot =
@@ -1091,7 +1091,7 @@ class PrefillEndpointTest {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         long requestId = 222L;
         try {
-            BatchItem active = createBatchItem(
+            ScheduledRequest active = createScheduledRequest(
                     handoffEndpoint, requestId, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
             assertTrue(handoffEndpoint.removeQueued(
@@ -1116,10 +1116,10 @@ class PrefillEndpointTest {
         PrefillEndpoint slowEndpoint = newFixedWindowEndpoint(60_000);
         try {
             assertTrue(EndpointTestSupport.offer(
-                    slowEndpoint, createPriorityBatchItem(slowEndpoint, 1L, 70)));
+                    slowEndpoint, createPriorityScheduledRequest(slowEndpoint, 1L, 70)));
             assertTrue(EndpointTestSupport.offer(
                     slowEndpoint,
-                    createBatchItem(slowEndpoint, 2L, 300, 0)));
+                    createScheduledRequest(slowEndpoint, 2L, 300, 0)));
 
             BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
             slowEndpoint.reportBatchMetrics(reporter);
@@ -1177,7 +1177,7 @@ class PrefillEndpointTest {
                 new EndpointTestSupport.TestRequestRuntime() {
             @Override
             public void onQueueOfferFailure(
-                    org.flexlb.balance.delivery.DeliveryItem item,
+                    org.flexlb.balance.scheduler.ScheduledRequest item,
                     Throwable error) {
                 reentrantCloseEntered.countDown();
                 try {
@@ -1202,7 +1202,7 @@ class PrefillEndpointTest {
         retirementEndpoint.startGeneration();
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            BatchItem item = createBatchItem(
+            ScheduledRequest item = createScheduledRequest(
                     retirementEndpoint, retirementConfig, 8_101L, 128, 0);
             assertTrue(EndpointTestSupport.offer(retirementEndpoint, item));
 
@@ -1215,9 +1215,9 @@ class PrefillEndpointTest {
                     () -> String.valueOf(callbackFailure.get()));
 
             assertEquals(
-                    PrefillWorkLedger.CapacityStatus.ENDPOINT_RETIRED,
+                    PrefillState.CapacityStatus.ENDPOINT_RETIRED,
                     retirementEndpoint.reserveRoute(
-                            createBatchItem(
+                            createScheduledRequest(
                                     retirementEndpoint,
                                     retirementConfig,
                                     8_102L,
@@ -1271,7 +1271,7 @@ class PrefillEndpointTest {
         retirementEndpointRef.set(retirementEndpoint);
         retirementEndpoint.startGeneration();
         try {
-            BatchItem admitted = createBatchItem(
+            ScheduledRequest admitted = createScheduledRequest(
                     retirementEndpoint, retirementConfig, 8_201L, 128, 0);
             assertTrue(EndpointTestSupport.offer(retirementEndpoint, admitted));
             assertTrue(callbackResolved.await(2, TimeUnit.SECONDS));
@@ -1284,7 +1284,7 @@ class PrefillEndpointTest {
 
     @Test
     void closePreservesRegisteredLifecycleAndRejectsNewBatchReservations() {
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(
                 endpoint,
                 1L,
@@ -1300,7 +1300,7 @@ class PrefillEndpointTest {
                         .orElseThrow();
         assertTrue(retirement.ownedItems().contains(item),
                 "retirement must publish the exact canonical owner");
-        assertEquals(PrefillWorkLedger.CapacityStatus.ENDPOINT_RETIRED,
+        assertEquals(PrefillState.CapacityStatus.ENDPOINT_RETIRED,
                 endpoint.reserveBatch(item, 2L, 1).status());
         endpoint.close();
     }
@@ -1308,15 +1308,15 @@ class PrefillEndpointTest {
     @Test
     void closeRetiresDirectAccountingAndPreservesCommittedQueueRoute() {
         registerDirect(endpoint, 100L, 100L);
-        BatchItem route = createBatchItem(200L, 200L, 0L);
+        ScheduledRequest route = createScheduledRequest(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been
         // offered into the ACTIVE queue; reserveRoute rejects a non-active
         // identity with REQUEST_NOT_ACTIVE.
         assertTrue(EndpointTestSupport.offer(endpoint, route));
-        List<PrefillWorkLedger.CommittedHandoff> handoffs =
+        List<PrefillState.CommittedHandoff> handoffs =
                 EndpointTestSupport.commitRoutes(
                         endpoint, 200L, List.of(route));
-        handoffs.forEach(PrefillWorkLedger.CommittedHandoff::close);
+        handoffs.forEach(PrefillState.CommittedHandoff::close);
         assertEquals(2, endpoint.getIndividuallyTrackedRequestCount());
 
         endpoint.close();
@@ -1333,7 +1333,7 @@ class PrefillEndpointTest {
     @Test
     void closeShutsDownBatcher() {
         endpoint.close();
-        BatchItem item = createBatchItem(1L, 500, 200);
+        ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         assertFalse(EndpointTestSupport.offer(endpoint, item));
         assertEquals(0, endpoint.queuedRequestCount());
     }
@@ -1386,7 +1386,7 @@ class PrefillEndpointTest {
         return created;
     }
 
-    private BatchItem createPriorityBatchItem(
+    private ScheduledRequest createPriorityScheduledRequest(
             PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request = new Request();
@@ -1399,7 +1399,7 @@ class PrefillEndpointTest {
         ctx.setConfig(config);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, now + 60_000));
 
-        return new BatchItem(
+        return new ScheduledRequest(
                 ctx, null, null, null, null, owner, null, null, now);
     }
 
@@ -1459,19 +1459,19 @@ class PrefillEndpointTest {
         return batches.get(0);
     }
 
-    private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen) {
-        return createBatchItem(endpoint, requestId, seqLen, hitCacheLen);
+    private ScheduledRequest createScheduledRequest(long requestId, long seqLen, long hitCacheLen) {
+        return createScheduledRequest(endpoint, requestId, seqLen, hitCacheLen);
     }
 
-    private static BatchItem createBatchItem(PrefillEndpoint owner,
+    private static ScheduledRequest createScheduledRequest(PrefillEndpoint owner,
                                              long requestId,
                                              long seqLen,
                                              long hitCacheLen) {
-        return createBatchItem(
+        return createScheduledRequest(
                 owner, new FlexlbConfig(), requestId, seqLen, hitCacheLen);
     }
 
-    private static BatchItem createBatchItem(
+    private static ScheduledRequest createScheduledRequest(
             PrefillEndpoint owner,
             FlexlbConfig requestConfig,
             long requestId,
@@ -1494,7 +1494,7 @@ class PrefillEndpointTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(
+        return new ScheduledRequest(
                 ctx,
                 null,
                 null,
@@ -1555,14 +1555,14 @@ class PrefillEndpointTest {
             PrefillEndpoint target,
             long batchId,
             long predictedMs,
-            List<BatchItem> items) {
-        for (BatchItem item : items) {
+            List<ScheduledRequest> items) {
+        for (ScheduledRequest item : items) {
             if (!EndpointTestSupport.offer(target, item)) {
                 throw new IllegalStateException(
                         "test item could not be offered to the endpoint queue");
             }
         }
-        try (PrefillWorkLedger.CommittedHandoff ignored =
+        try (PrefillState.CommittedHandoff ignored =
                      EndpointTestSupport.commitBatch(
                              target, batchId, predictedMs, items)) {
             // Keep canonical ledger ownership; release only the generation pin.
@@ -1573,7 +1573,7 @@ class PrefillEndpointTest {
             PrefillEndpoint target,
             long requestId,
             long predictedMs) {
-        try (PrefillWorkLedger.DirectRegistration registration =
+        try (PrefillState.DirectRegistration registration =
                      EndpointTestSupport.registerDirect(
                              target, requestId, predictedMs)) {
             registration.commit();

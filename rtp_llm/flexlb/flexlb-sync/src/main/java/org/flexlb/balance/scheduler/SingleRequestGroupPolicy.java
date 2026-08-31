@@ -22,7 +22,7 @@ final class SingleRequestGroupPolicy implements GroupPolicy {
     @Override
     public BatcherCycleResult processQueue(BatcherContext ctx) {
         BatcherContext.ActiveQueueSnapshot snapshot = ctx.snapshotActiveQueueHead();
-        BatchItem head = snapshot.head();
+        ScheduledRequest head = snapshot.head();
         if (head == null) {
             return BatcherCycleResult.Outcome.NO_ACTION;
         }
@@ -68,7 +68,7 @@ final class SingleRequestGroupPolicy implements GroupPolicy {
     private static BatcherCycleResult awaitPrefillKvCapacity(
             BatcherContext ctx,
             BatcherContext.ActiveQueueSnapshot snapshot,
-            BatchItem head) {
+            ScheduledRequest head) {
         return ctx.awaitingSchedulingChange(
                 head, snapshot.queueVersion(), snapshot.schedulingInputVersion(),
                 head.expiresAtMs(),

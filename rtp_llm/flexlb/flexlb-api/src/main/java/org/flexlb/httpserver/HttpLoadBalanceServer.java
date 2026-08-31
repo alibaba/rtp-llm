@@ -18,8 +18,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
@@ -56,6 +55,7 @@ public class HttpLoadBalanceServer {
     private final ConfigService configService;
     private final RequestScheduler requestScheduler;
     private final EndpointRegistry endpointRegistry;
+    private final WorkerDirectory workerDirectory;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
@@ -63,6 +63,7 @@ public class HttpLoadBalanceServer {
                                  ConfigService configService,
                                  RequestScheduler requestScheduler,
                                  EndpointRegistry endpointRegistry,
+                                 WorkerDirectory workerDirectory,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder) {
@@ -70,6 +71,7 @@ public class HttpLoadBalanceServer {
         this.configService = configService;
         this.requestScheduler = requestScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
     }
@@ -127,11 +129,10 @@ public class HttpLoadBalanceServer {
     }
 
     private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
-        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
         for (RoleType role : RoleType.values()) {
-            Map<String, WorkerStatus> statusMap = modelStatus.getRoleStatusMap(role);
-            if (statusMap == null || statusMap.isEmpty()) {
+            Map<String, WorkerStatus> statusMap = workerDirectory.statusMap(role);
+            if (statusMap.isEmpty()) {
                 continue;
             }
             Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();

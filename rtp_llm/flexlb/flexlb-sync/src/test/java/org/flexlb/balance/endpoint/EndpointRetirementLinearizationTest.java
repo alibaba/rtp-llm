@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -33,7 +33,6 @@ class EndpointRetirementLinearizationTest {
         EndpointRegistry registry = new EndpointRegistry(
                 configService,
                 requestRuntime,
-                requestRuntime,
                 mock(BatchSchedulerReporter.class),
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 EndpointTestSupport.realRuntimeFactory());
@@ -62,7 +61,7 @@ class EndpointRetirementLinearizationTest {
                 assertTrue(resumeAdmission.await(2, TimeUnit.SECONDS));
 
                 boolean queueOfferAccepted = EndpointTestSupport.offer(
-                        prefill, mock(BatchItem.class));
+                        prefill, mock(ScheduledRequest.class));
                 boolean directPinAvailable;
                 try (WorkerEndpoint.GenerationPin pin =
                              prefill.tryPinGeneration()) {

@@ -1,8 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryItem;
-import org.flexlb.balance.delivery.DeliveryLifecyclePort;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -147,10 +147,10 @@ class WorkerBatcherPerformanceTest {
                 endpoint,
                 config,
                 delivery,
-                mock(DeliveryLifecyclePort.class));
+                mock(EndpointEventSink.class));
         runtime.start();
         long now = System.currentTimeMillis();
-        List<BatchItem> items = new ArrayList<>(depth);
+        List<ScheduledRequest> items = new ArrayList<>(depth);
         for (int index = 0; index < depth; index++) {
             items.add(item(
                     config,
@@ -160,7 +160,7 @@ class WorkerBatcherPerformanceTest {
                     now - depth + index,
                     256L + (index % 32)));
         }
-        for (BatchItem item : items) {
+        for (ScheduledRequest item : items) {
             assertTrue(runtime.offer(item));
         }
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -171,7 +171,7 @@ class WorkerBatcherPerformanceTest {
         return runtime;
     }
 
-    private static BatchItem item(
+    private static ScheduledRequest item(
             FlexlbConfig config,
             PrefillEndpoint endpoint,
             long requestId,
@@ -187,7 +187,7 @@ class WorkerBatcherPerformanceTest {
         context.setConfig(config);
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-        return new BatchItem(
+        return new ScheduledRequest(
                 context,
                 new CompletableFuture<Response>(),
                 null,
@@ -237,7 +237,7 @@ class WorkerBatcherPerformanceTest {
 
         @Override
         public Transaction prepare(
-                List<DeliveryItem> candidates,
+                List<ScheduledRequest> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             return GroupPolicyTestSupport.boundaryOnly(
@@ -253,7 +253,7 @@ class WorkerBatcherPerformanceTest {
 
         @Override
         public double projectGroupDurationMs(
-                List<DeliveryItem> items,
+                List<ScheduledRequest> items,
                 PrefillTimePredictor.Evaluator evaluator) {
             return 0.0;
         }

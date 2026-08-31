@@ -20,8 +20,7 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.service.address.WorkerAddressService;
-import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.AbstractEngineStatusSynchronizer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -86,16 +85,20 @@ public class EngineHealthReporter {
 
     private final EngineGrpcClient engineGrpcClient;
 
+    private final WorkerDirectory workerDirectory;
+
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
                                 EngineGrpcClient engineGrpcClient,
-                                LoopResources serverLoopResources) {
+                                LoopResources serverLoopResources,
+                                WorkerDirectory workerDirectory) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
+        this.workerDirectory = workerDirectory;
         this.eventLoopGroupMap = Map.of(
                 "serverWorker", serverLoopResources.onServer(true),
                 "serverSelector", serverLoopResources.onServerSelect(true),
@@ -169,14 +172,14 @@ public class EngineHealthReporter {
 
     @Scheduled(fixedRate = 2000)
     private void reportEngineMetric() {
-        ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        if (modelWorkerStatus != null) {
-            String modelName = "engine_service";
-            FlexMetricTags tags = FlexMetricTags.of("model", modelName);
-            monitor.report(ENGINE_WORKER_NUMBER, tags, modelWorkerStatus.getWorkerTotalCount());
-            monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags, modelWorkerStatus.getPrefillStatusMap().size());
-            monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, modelWorkerStatus.getDecodeStatusMap().size());
-        }
+        String modelName = "engine_service";
+        FlexMetricTags tags = FlexMetricTags.of("model", modelName);
+        monitor.report(ENGINE_WORKER_NUMBER, tags,
+                workerDirectory.discoveredCount());
+        monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags,
+                workerDirectory.discoveredCount(RoleType.PREFILL));
+        monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags,
+                workerDirectory.discoveredCount(RoleType.DECODE));
 
         if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null
                 && AbstractEngineStatusSynchronizer.statusCheckExecutor != null

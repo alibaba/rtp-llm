@@ -13,7 +13,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -30,12 +30,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private static final int SNAPSHOT_CAPTURE_ATTEMPTS = 2;
 
-    private final EngineWorkerStatus engineWorkerStatus;
+    private final WorkerDirectory workerDirectory;
     private final ResourceMeasureFactory resourceMeasureFactory;
 
-    public CostBasedDecodeStrategy(EngineWorkerStatus engineWorkerStatus,
+    public CostBasedDecodeStrategy(WorkerDirectory workerDirectory,
                                     ResourceMeasureFactory resourceMeasureFactory) {
-        this.engineWorkerStatus = engineWorkerStatus;
+        this.workerDirectory = workerDirectory;
         this.resourceMeasureFactory = resourceMeasureFactory;
     }
 
@@ -140,7 +140,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
 
         WorkerEndpoint.GenerationPin pin =
-                engineWorkerStatus.captureCurrentDecodeWorker(
+                workerDirectory.captureCurrentDecode(
                         selected);
         if (pin == null) {
             return SnapshotSelection.conflict();
@@ -286,7 +286,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                     List.of(), Map.of("NO_REGISTERED", 1), 0, null);
         }
         List<EndpointRegistry.DecodeRoutingSnapshot> snapshots =
-                engineWorkerStatus.decodeWorkerRoutingSnapshot(group);
+                workerDirectory.decodeRoutingSnapshot(group);
         int registered = snapshots.size();
         if (registered == 0) {
             return new EndpointFilterResult<>(
@@ -355,7 +355,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                     List.of(), Map.of("NO_REGISTERED", 1), 0, null);
         }
         List<WorkerEndpoint.GenerationPin> captured =
-                engineWorkerStatus.captureModelWorkerEndpoints(roleType, group);
+                workerDirectory.captureEndpoints(roleType, group);
         List<DecodeCandidate> result = new ArrayList<>(captured.size());
         int unavailable = 0;
         try {

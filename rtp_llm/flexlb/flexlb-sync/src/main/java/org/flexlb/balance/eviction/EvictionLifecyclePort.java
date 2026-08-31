@@ -1,7 +1,7 @@
 package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.admission.AdmissionMutation;
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -14,7 +14,7 @@ public interface EvictionLifecyclePort {
     AdmissionMutation claimAdmissionMutation(
             long requestId, CompletableFuture<?> exactFuture);
 
-    void finishYielded(DeliveryItem victim, String detail);
+    void finishYielded(ScheduledRequest victim, String detail);
 
     void finishYieldedReservation(
             long requestId, long reservationToken, String detail);

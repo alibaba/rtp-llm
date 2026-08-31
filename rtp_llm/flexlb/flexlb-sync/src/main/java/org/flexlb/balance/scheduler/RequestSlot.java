@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.admission.AdmissionMutation;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillWorkLedger;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionClaim;
 import org.flexlb.balance.preemption.PreemptionLifecyclePort;
@@ -38,7 +38,7 @@ final class RequestSlot extends RequestLifecycle {
     private final long requestId;
     private final RequestFuture future;
 
-    private BatchItem item;
+    private ScheduledRequest item;
     private boolean priorityAdmission;
     private StrategyErrorType deadlineErrorType =
             StrategyErrorType.BATCH_SLO_EXPIRED;
@@ -134,7 +134,7 @@ final class RequestSlot extends RequestLifecycle {
      * immediately claimable.
      */
     boolean tryBindItemForPublication(
-            BatchItem candidate,
+            ScheduledRequest candidate,
             boolean priority) {
         requireSlotLock("request item publication begin");
         if (!ownsActiveGeneration()
@@ -152,7 +152,7 @@ final class RequestSlot extends RequestLifecycle {
     }
 
     /** Roll back only the exact binding whose queue publication did not commit. */
-    void rollbackItemPublication(BatchItem exact) {
+    void rollbackItemPublication(ScheduledRequest exact) {
         requireSlotLock("request item publication rollback");
         if (item != exact || admissionMutation == null) {
             throw new IllegalStateException(
@@ -165,7 +165,7 @@ final class RequestSlot extends RequestLifecycle {
     }
 
     /** Roll back an unpublished item and its exact acceptance capability. */
-    AdmissionCleanup rollbackAdmissionPublication(BatchItem exact) {
+    AdmissionCleanup rollbackAdmissionPublication(ScheduledRequest exact) {
         rollbackItemPublication(exact);
         AdmissionCleanup cleanup = detachAdmissionCleanup(true);
         assertInvariant();
@@ -173,7 +173,7 @@ final class RequestSlot extends RequestLifecycle {
     }
 
     /** Exact ACTIVE item, or null when this generation no longer owns one. */
-    BatchItem activeItem() {
+    ScheduledRequest activeItem() {
         requireSlotLock("active item lookup");
         return ownsActiveGeneration() ? item : null;
     }
@@ -190,12 +190,12 @@ final class RequestSlot extends RequestLifecycle {
                 && !snapshot().state().isTerminal();
     }
 
-    boolean ownsActiveItem(BatchItem expected) {
+    boolean ownsActiveItem(ScheduledRequest expected) {
         requireSlotLock("active item ownership lookup");
         return ownsActiveGeneration() && item == expected;
     }
 
-    boolean ownsPrefillFact(PrefillEndpoint source, BatchItem expected) {
+    boolean ownsPrefillFact(PrefillEndpoint source, ScheduledRequest expected) {
         requireSlotLock("Prefill fact ownership lookup");
         return ownsActiveItem(expected) && expected.prefillEp() == source;
     }
@@ -210,7 +210,7 @@ final class RequestSlot extends RequestLifecycle {
                 && reservation.equals(item.decodeReservation());
     }
 
-    BatchItem activeItemForReservation(long reservationToken) {
+    ScheduledRequest activeItemForReservation(long reservationToken) {
         requireSlotLock("reservation item lookup");
         DecodeEndpoint.ReservationHandle reservation =
                 item == null ? null : item.decodeReservation();
@@ -221,7 +221,7 @@ final class RequestSlot extends RequestLifecycle {
     }
 
     boolean ownsDeliveryClaim(
-            BatchItem expected,
+            ScheduledRequest expected,
             DeliveryClaimKind kind,
             long expectedBatchId) {
         requireSlotLock("delivery claim lookup");
@@ -237,7 +237,7 @@ final class RequestSlot extends RequestLifecycle {
      * needed by its unlocked publication out of the slot.
      */
     DeliveryConfirmation confirmDeliveryForPublication(
-            BatchItem expected,
+            ScheduledRequest expected,
             DeliveryClaimKind expectedKind,
             long expectedBatchId) {
         requireSlotLock("delivery confirmation");
@@ -505,7 +505,7 @@ final class RequestSlot extends RequestLifecycle {
     /** Exact Prefill retirement retained only by its in-flight admission. */
     private record PendingPrefillRetirement(
             PrefillEndpoint source,
-            BatchItem item,
+            ScheduledRequest item,
             Function<RequestSlot, RequestLifecycleSnapshot> transition,
             Response response) {
     }
@@ -589,7 +589,7 @@ final class RequestSlot extends RequestLifecycle {
             return AcceptanceExpiry.IGNORED;
         }
         acceptanceDeadline = null;
-        BatchItem expected = item;
+        ScheduledRequest expected = item;
         boolean needsFence = ownsActiveGeneration()
                 && expected != null
                 && engineOwnership != EngineOwnership.DECODE_OWNED;
@@ -1136,7 +1136,7 @@ final class RequestSlot extends RequestLifecycle {
         }
         PreemptionFact.DeliveryConfirmed delivered =
                 (PreemptionFact.DeliveryConfirmed) fact;
-        BatchItem active = activeItem();
+        ScheduledRequest active = activeItem();
         RequestLifecycleSnapshot lifecycle = snapshot();
         DeliveryClaimKind deliveryKind = lifecycle.deliveryClaimKind();
         if (active == null
@@ -1273,7 +1273,7 @@ final class RequestSlot extends RequestLifecycle {
         DeferredTerminal terminal = exact.pendingTerminal();
         if (terminal != null
                 && (!transportUnknown || terminal.authoritativeWorker())) {
-            BatchItem active = activeItem();
+            ScheduledRequest active = activeItem();
             DecodeEndpoint decode = active == null ? null : active.decodeEp();
             boolean ordinaryWon = terminalOwnsDecodeSettlement(
                     terminal,
@@ -1293,7 +1293,7 @@ final class RequestSlot extends RequestLifecycle {
             return PreemptionReduction.None.INSTANCE;
         }
 
-        BatchItem active = activeItem();
+        ScheduledRequest active = activeItem();
         DecodeEndpoint decode = active == null ? null : active.decodeEp();
         boolean activeWon = decode == null
                 || decode.reconcilePriorityVictimActive(
@@ -1439,11 +1439,11 @@ final class RequestSlot extends RequestLifecycle {
     /** Acquire every exact fence leaf only after aggregate ownership is valid. */
     private EngineFenceResources acquireFenceResources() {
         requireSlotLock("Engine fence resource acquisition");
-        BatchItem active = activeItem();
+        ScheduledRequest active = activeItem();
         assert active != null : "Engine fence requires active item";
         RequestLifecycleSnapshot lifecycle = snapshot();
         PrefillEndpoint prefill = active.prefillEp();
-        PrefillWorkLedger.Protection protection = null;
+        PrefillState.Protection protection = null;
         if (prefill != null) {
             protection = lifecycle.deliveryClaimKind()
                             == DeliveryClaimKind.BATCH_ENQUEUE
@@ -1462,7 +1462,7 @@ final class RequestSlot extends RequestLifecycle {
     private EngineFenceResources acquireNotFoundFenceResources(
             PreemptionRegistration exact) {
         EngineFenceResources resources = acquireFenceResources();
-        BatchItem active = activeItem();
+        ScheduledRequest active = activeItem();
         DecodeEndpoint decode = active == null ? null : active.decodeEp();
         boolean transferred = decode == null
                 || (engineOwnership == EngineOwnership.DECODE_OWNED
@@ -1487,7 +1487,7 @@ final class RequestSlot extends RequestLifecycle {
         return exact;
     }
 
-    private static CancelTarget cancelTarget(BatchItem active) {
+    private static CancelTarget cancelTarget(ScheduledRequest active) {
         ServerStatus prefill = active == null ? null : active.prefill();
         return prefill == null ? null
                 : new CancelTarget(
@@ -1553,7 +1553,7 @@ final class RequestSlot extends RequestLifecycle {
 
     TerminalAction beginPrefillRetirementTerminal(
             PrefillEndpoint source,
-            BatchItem expected,
+            ScheduledRequest expected,
             Function<RequestSlot, RequestLifecycleSnapshot> transition,
             Response response) {
         requireSlotLock("Prefill retirement terminal claim");
@@ -1572,7 +1572,7 @@ final class RequestSlot extends RequestLifecycle {
 
     private boolean canTerminateFromPrefillRetirement(
             PrefillEndpoint source,
-            BatchItem expected) {
+            ScheduledRequest expected) {
         return ownsPrefillFact(source, expected)
                 && engineOwnership != EngineOwnership.DECODE_OWNED
                 && engineFence == null
@@ -1898,12 +1898,12 @@ final class RequestSlot extends RequestLifecycle {
 
     /** External facts which advance the exact preemption owner. */
     sealed interface PreemptionFact {
-        record PrefillActive(PrefillEndpoint source, BatchItem expected)
+        record PrefillActive(PrefillEndpoint source, ScheduledRequest expected)
                 implements PreemptionFact {
         }
 
         record WorkerTerminal(
-                BatchItem expected,
+                ScheduledRequest expected,
                 DeferredTerminal terminal)
                 implements PreemptionFact {
             public WorkerTerminal {
@@ -1915,7 +1915,7 @@ final class RequestSlot extends RequestLifecycle {
         }
 
         record OrdinaryTerminal(
-                BatchItem expected,
+                ScheduledRequest expected,
                 DeferredTerminal terminal)
                 implements PreemptionFact {
             public OrdinaryTerminal {
@@ -1929,7 +1929,7 @@ final class RequestSlot extends RequestLifecycle {
         record DispatchRejected(
                 DecodeEndpoint source,
                 DecodeEndpoint.ReservationHandle reservation,
-                BatchItem expected,
+                ScheduledRequest expected,
                 DeferredTerminal terminal)
                 implements PreemptionFact {
             public DispatchRejected {
@@ -1942,7 +1942,7 @@ final class RequestSlot extends RequestLifecycle {
 
         record PriorityCanceled(
                 PrefillEndpoint source,
-                BatchItem expected,
+                ScheduledRequest expected,
                 DeferredTerminal terminal)
                 implements PreemptionFact {
         }
@@ -1966,7 +1966,7 @@ final class RequestSlot extends RequestLifecycle {
 
         record Delivery(
                 DeliveryConfirmation exact,
-                BatchItem item,
+                ScheduledRequest item,
                 DeliveryClaimKind kind,
                 long batchId)
                 implements ReplayPayload {
@@ -2046,7 +2046,7 @@ final class RequestSlot extends RequestLifecycle {
 
     record AcceptanceExpiry(
             boolean consumed,
-            BatchItem item,
+            ScheduledRequest item,
             boolean needsFence,
             AdmissionCleanup cleanup) {
         private static final AcceptanceExpiry IGNORED =
@@ -2375,13 +2375,13 @@ final class RequestSlot extends RequestLifecycle {
      */
     private static final class EngineFenceResources {
         private final PrefillEndpoint prefill;
-        private final PrefillWorkLedger.Protection prefillProtection;
+        private final PrefillState.Protection prefillProtection;
         private final DecodeEndpoint.EngineFenceLease decodeProtection;
         private boolean released;
 
         private EngineFenceResources(
                 PrefillEndpoint prefill,
-                PrefillWorkLedger.Protection prefillProtection,
+                PrefillState.Protection prefillProtection,
                 DecodeEndpoint.EngineFenceLease decodeProtection) {
             this.prefill = prefill;
             this.prefillProtection = prefillProtection;
@@ -2389,8 +2389,8 @@ final class RequestSlot extends RequestLifecycle {
         }
 
         private static EngineFenceResources acquire(
-                BatchItem item,
-                PrefillWorkLedger.Protection prefillProtection) {
+                ScheduledRequest item,
+                PrefillState.Protection prefillProtection) {
             PrefillEndpoint prefill = item.prefillEp();
             DecodeEndpoint decode = item.decodeEp();
             DecodeEndpoint.EngineFenceLease decodeProtection = null;
@@ -2476,12 +2476,12 @@ final class RequestSlot extends RequestLifecycle {
     private static final class ExactPrefillOnlyCleanup
             implements PrefillOnlyCleanup {
         private final PrefillEndpoint prefill;
-        private final PrefillWorkLedger.Protection protection;
+        private final PrefillState.Protection protection;
         private final AtomicBoolean released = new AtomicBoolean();
 
         private ExactPrefillOnlyCleanup(
                 PrefillEndpoint prefill,
-                PrefillWorkLedger.Protection protection) {
+                PrefillState.Protection protection) {
             this.prefill = prefill;
             this.protection = protection;
         }
@@ -2615,7 +2615,7 @@ sealed interface DeferredTerminal
 /** One-shot capability moved out of an ACTIVE slot; never stored or retried. */
 record TerminalAction(
         RequestSlot slot,
-        BatchItem item,
+        ScheduledRequest item,
         RequestSlot.FenceCleanup fence,
         RequestSlot.TerminalResources terminalResources,
         boolean removePrefillQueue,

@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.delivery.DeliveryItem;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.List;
 
@@ -11,9 +11,15 @@ public interface EndpointEventSink {
 
     void onPrefillGenerationRetired(
             PrefillEndpoint endpoint,
-            List<DeliveryItem> ownedItems);
+            List<ScheduledRequest> ownedItems);
 
     void onDecodeGenerationRetired(
             DecodeEndpoint endpoint,
             List<DecodeEndpoint.ReservationHandle> ownedReservations);
+
+    void onQueuedItemExpired(ScheduledRequest exactItem);
+
+    void onQueueOfferFailure(ScheduledRequest exactItem, Throwable cause);
+
+    void onPreparedDeliveryFailure(ScheduledRequest exactItem, Throwable cause);
 }

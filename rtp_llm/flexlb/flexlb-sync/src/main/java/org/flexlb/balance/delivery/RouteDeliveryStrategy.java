@@ -1,5 +1,7 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.balance.scheduler.ScheduledRequest;
+
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -32,7 +34,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
     @Override
     public Transaction prepare(
-            List<DeliveryItem> candidates,
+            List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
         if (candidates.isEmpty()) {
@@ -43,10 +45,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     private RouteTransaction prepareTransaction(
-            List<DeliveryItem> candidates,
+            List<ScheduledRequest> candidates,
             PrefillTimePredictor.Evaluator evaluator) {
-        DeliveryItem head = candidates.get(0);
-        List<DeliveryItem> admitted = new ArrayList<>(candidates.size());
+        ScheduledRequest head = candidates.get(0);
+        List<ScheduledRequest> admitted = new ArrayList<>(candidates.size());
         CapacityBoundary.Attempt<PrefillAdmissionPort.PreparedAdmission>
                 beginAttempt = admissionPort.tryBegin(head);
         if (beginAttempt
@@ -63,21 +65,21 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 ((CapacityBoundary.Attempt.Accepted<
                         PrefillAdmissionPort.PreparedAdmission>) beginAttempt)
                         .value();
-        DeliveryItem blockedItem = null;
+        ScheduledRequest blockedItem = null;
         CapacityBoundary blockedResult = null;
         try {
-            for (DeliveryItem item : candidates) {
-                CapacityBoundary.Attempt<DeliveryItem> attempt =
+            for (ScheduledRequest item : candidates) {
+                CapacityBoundary.Attempt<ScheduledRequest> attempt =
                         slotPort.prepareIfOwned(
                                 item,
                                 () -> prepared.tryAppend(
                                         item,
                                         predict(evaluator, item)))
                         .orElseGet(
-                                RouteDeliveryStrategy::<DeliveryItem>
+                                RouteDeliveryStrategy::<ScheduledRequest>
                                         ownershipLost);
                 if (attempt
-                        instanceof CapacityBoundary.Attempt.Rejected<DeliveryItem>
+                        instanceof CapacityBoundary.Attempt.Rejected<ScheduledRequest>
                                 rejected) {
                     blockedItem = item;
                     blockedResult = rejected.boundary();
@@ -105,13 +107,13 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     private void deliver(
-            List<DeliveryItem> items,
+            List<ScheduledRequest> items,
             PrefillAdmissionPort.CommittedAdmission admission,
             DeliveryMetadata metadata) {
         Throwable deliveryFailure = null;
-        List<DeliveryItem> delivered = new ArrayList<>(items.size());
+        List<ScheduledRequest> delivered = new ArrayList<>(items.size());
         try {
-            for (DeliveryItem item : items) {
+            for (ScheduledRequest item : items) {
                 SlotDeliveryPort.Claim claim;
                 try {
                     claim = slotPort.tryClaimForDelivery(
@@ -155,10 +157,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
     @Override
     public double projectGroupDurationMs(
-            List<DeliveryItem> items,
+            List<ScheduledRequest> items,
             PrefillTimePredictor.Evaluator evaluator) {
         double totalMs = 0.0;
-        for (DeliveryItem item : items) {
+        for (ScheduledRequest item : items) {
             totalMs += PrefillPredictionBoundary.predictSingleRequestMs(
                     evaluator, item.seqLen(), item.hitCache());
         }
@@ -172,7 +174,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
     private static long predict(
             PrefillTimePredictor.Evaluator evaluator,
-            DeliveryItem item) {
+            ScheduledRequest item) {
         return PrefillPredictionBoundary.predictSingleRequestMs(
                 evaluator, item.seqLen(), item.hitCache());
     }
@@ -217,17 +219,17 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     /** Ordered route callback payload and sole owner of its exact members. */
     private static final class RouteTransaction implements Transaction {
         private final RouteDeliveryStrategy owner;
-        private final List<DeliveryItem> items;
-        private final DeliveryItem blockedItem;
+        private final List<ScheduledRequest> items;
+        private final ScheduledRequest blockedItem;
         private final CapacityBoundary blockedResult;
         private PrefillAdmissionPort.PreparedAdmission prepared;
         private PrefillAdmissionPort.CommittedAdmission committed;
 
         private RouteTransaction(
                 RouteDeliveryStrategy owner,
-                List<DeliveryItem> items,
+                List<ScheduledRequest> items,
                 PrefillAdmissionPort.PreparedAdmission prepared,
-                DeliveryItem blockedItem,
+                ScheduledRequest blockedItem,
                 CapacityBoundary blockedResult) {
             this.owner = owner;
             this.items = items;
@@ -239,12 +241,12 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public List<DeliveryItem> items() {
+        public List<ScheduledRequest> items() {
             return items;
         }
 
         @Override
-        public DeliveryItem blockedItem() {
+        public ScheduledRequest blockedItem() {
             return blockedItem;
         }
 
