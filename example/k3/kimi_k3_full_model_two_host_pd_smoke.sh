@@ -119,7 +119,8 @@ Important optional variables:
                             Projection-KTP replicates DP-local KDA/O-proj
                             weights, so the older 42000 MiB budget can OOM
                             before CUDA Graph capture on a 93-layer model.
-  SMOKE_DECODE_TOPOLOGY     dp8_ktp8_ep8 (default) or dp16_ktp16_ep16
+  SMOKE_DECODE_TOPOLOGY     dp8_ktp8_ep8 (default), tp8_ep8, or
+                            dp16_ktp16_ep16
   SMOKE_DECODE_NODE_INDEX   Decode gang node index: 0 for DP8/first DP16 node,
                             1 for the second DP16 node
   SMOKE_DECODE_ROLE_ADDRS   optional comma-separated ordered
@@ -159,13 +160,13 @@ SMOKE_RUN_ID="${SMOKE_RUN_ID:-manual}"
     || die "SMOKE_RUN_ID may contain only letters, digits, dot, underscore and dash"
 smoke_decode_topology="${SMOKE_DECODE_TOPOLOGY:-dp8_ktp8_ep8}"
 case "${smoke_decode_topology}" in
-    dp8_ktp8_ep8 | dp16_ktp16_ep16) ;;
-    *) die "SMOKE_DECODE_TOPOLOGY must be dp8_ktp8_ep8 or dp16_ktp16_ep16" ;;
+    tp8_ep8 | dp8_ktp8_ep8 | dp16_ktp16_ep16) ;;
+    *) die "SMOKE_DECODE_TOPOLOGY must be tp8_ep8, dp8_ktp8_ep8, or dp16_ktp16_ep16" ;;
 esac
 smoke_decode_node_index="${SMOKE_DECODE_NODE_INDEX:-0}"
 [[ "${smoke_decode_node_index}" == "0" || "${smoke_decode_node_index}" == "1" ]] \
     || die "SMOKE_DECODE_NODE_INDEX must be 0 or 1"
-if [[ "${role}" == "prefill" || "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]]; then
+if [[ "${role}" == "prefill" || "${smoke_decode_topology}" != "dp16_ktp16_ep16" ]]; then
     [[ "${smoke_decode_node_index}" == "0" ]] \
         || die "only the second DP16 Decode node may use SMOKE_DECODE_NODE_INDEX=1"
 fi
@@ -439,6 +440,21 @@ verify_projection_ktp_decode_log() {
     fi
     local logs=("${service_log}" "${engine_log}" "${rank_logs[@]}")
     : >"${evidence_file}"
+    if [[ "${smoke_decode_topology}" == "tp8_ep8" ]]; then
+        grep -Eh \
+            'ParallelismConfig: tp_size=8, dp_size=1, ktp_size=1, ep_size=8, world_size=8' \
+            "${logs[@]}" | tail -20 >>"${evidence_file}" \
+            || die "Decode log has no TP8/DP1/KTP1/EP8 topology evidence"
+        if grep -Ehq 'K3_PROJECTION_KTP_(LAYOUT|STEP|GRAPH_REPLAY)' "${logs[@]}"; then
+            die "TP8/KTP1 Decode unexpectedly emitted Projection-KTP evidence"
+        fi
+        for bucket in 1 2 4 8; do
+            grep -Eh "captured batch[ _]size ${bucket}([ :]|$)" "${logs[@]}" \
+                | tail -1 >>"${evidence_file}" \
+                || die "Decode log has no CUDA Graph capture evidence for bucket ${bucket}"
+        done
+        return 0
+    fi
     for marker in \
         K3_PROJECTION_KTP_LAYOUT \
         K3_PROJECTION_KTP_STEP \
@@ -802,7 +818,7 @@ decode_role_addrs=()
 if [[ -n "${SMOKE_DECODE_ROLE_ADDRS:-}" ]]; then
     IFS=',' read -r -a decode_role_addrs <<<"${SMOKE_DECODE_ROLE_ADDRS}"
 else
-    [[ "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]] \
+    [[ "${smoke_decode_topology}" != "dp16_ktp16_ep16" ]] \
         || die "DP16 smoke requires SMOKE_DECODE_ROLE_ADDRS for all 16 ranks"
     for ((rank = 0; rank < 8; ++rank)); do
         rank_http_port="$((decode_port + rank * 9))"
@@ -813,7 +829,7 @@ else
     done
 fi
 expected_decode_roles=8
-[[ "${smoke_decode_topology}" == "dp8_ktp8_ep8" ]] \
+[[ "${smoke_decode_topology}" != "dp16_ktp16_ep16" ]] \
     || expected_decode_roles=16
 [[ "${#decode_role_addrs[@]}" -eq "${expected_decode_roles}" ]] \
     || die "${smoke_decode_topology} smoke requires exactly ${expected_decode_roles} ordered Decode role addresses"
