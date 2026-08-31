@@ -17,7 +17,7 @@ BlockTreeTaskPool::~BlockTreeTaskPool() {
 
 bool BlockTreeTaskPool::start() {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    if (started_ || shutdown_ || thread_count_ == 0) {
+    if (started_ || shutdown_ || thread_count_ == 0 || queue_size_ == 0) {
         return false;
     }
 
@@ -44,31 +44,16 @@ bool BlockTreeTaskPool::start() {
     return true;
 }
 
-bool BlockTreeTaskPool::submit(std::function<void()>     task,
-                               std::chrono::milliseconds max_queue_wait,
-                               std::function<void()>     on_timeout) {
+bool BlockTreeTaskPool::submit(std::function<void()> task) {
     if (!task) {
         return false;
     }
 
-    std::optional<std::chrono::steady_clock::time_point> deadline;
-    if (max_queue_wait < std::chrono::milliseconds::zero()) {
-        return false;
-    }
-    if (max_queue_wait > std::chrono::milliseconds::zero()) {
-        if (!on_timeout) {
-            return false;
-        }
-        deadline = std::chrono::steady_clock::now() + max_queue_wait;
-    } else {
-        on_timeout = {};
-    }
-
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (!started_ || admission_stopped_ || shutdown_ || (queue_size_ != 0 && normal_queue_.size() >= queue_size_)) {
+    if (!started_ || admission_stopped_ || shutdown_ || normal_queue_.size() >= queue_size_) {
         return false;
     }
-    normal_queue_.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
+    normal_queue_.push_back(std::move(task));
     taskStarted();
     queue_cv_.notify_one();
     return true;
@@ -88,17 +73,17 @@ bool BlockTreeTaskPool::submitCompletion(std::function<void()> task) {
     return true;
 }
 
-bool BlockTreeTaskPool::startBusiness() {
+bool BlockTreeTaskPool::acquireBusinessCredit() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (!started_ || admission_stopped_ || shutdown_) {
+    if (!started_ || admission_stopped_ || shutdown_ || business_credits_.load() >= queue_size_) {
         return false;
     }
-    active_businesses_.fetch_add(1);
+    business_credits_.fetch_add(1);
     return true;
 }
 
-void BlockTreeTaskPool::finishBusiness() {
-    const size_t previous = active_businesses_.fetch_sub(1);
+void BlockTreeTaskPool::releaseBusinessCredit() {
+    const size_t previous = business_credits_.fetch_sub(1);
     assert(previous > 0);
     (void)previous;
     std::lock_guard<std::mutex> lock(wait_mutex_);
@@ -120,13 +105,8 @@ void BlockTreeTaskPool::workerLoop() {
                 task = std::move(completion_queue_.front());
                 completion_queue_.pop_front();
             } else if (!normal_queue_.empty()) {
-                QueuedTask queued_task = std::move(normal_queue_.front());
+                task = std::move(normal_queue_.front());
                 normal_queue_.pop_front();
-                if (queued_task.deadline && std::chrono::steady_clock::now() >= *queued_task.deadline) {
-                    task = std::move(queued_task.on_timeout);
-                } else {
-                    task = std::move(queued_task.run);
-                }
             } else if (shutdown_) {
                 return;
             }
@@ -147,14 +127,14 @@ void BlockTreeTaskPool::waitForIdle() {
     bool                         wait_observer_invoked = false;
     wait_cv_.wait(lock, [this, &wait_observer_invoked] {
         const int pending_tasks = pending_tasks_.load();
-        if ((pending_tasks > 0 || active_businesses_.load() > 0) && !wait_observer_invoked) {
+        if ((pending_tasks > 0 || business_credits_.load() > 0) && !wait_observer_invoked) {
             wait_observer_invoked = true;
             const auto observer   = pending_task_wait_observer_for_test_;
             if (observer) {
                 observer();
             }
         }
-        return pending_tasks <= 0 && active_businesses_.load() == 0;
+        return pending_tasks <= 0 && business_credits_.load() == 0;
     });
 }
 
