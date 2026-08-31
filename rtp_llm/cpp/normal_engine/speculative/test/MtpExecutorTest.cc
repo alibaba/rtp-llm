@@ -572,6 +572,28 @@ TEST_F(MtpExecutorTest, testMtpHiddenOverrideRejectsInvalidRowPolicyAndMissingCp
                  std::exception);
 }
 
+TEST_F(MtpExecutorTest, testMultimodalCpMtpUsesGlobalHandoffPolicy) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* source     = components.fake_target_model.get();
+
+    GptModelInputs multimodal_input;
+    multimodal_input.combo_tokens = torch::arange(6, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    multimodal_input.mm_features_locs =
+        torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    // This is the production failure shape: the multimodal target forward has
+    // no native MTP buffer, so GLOBAL handoff must be a no-op rather than an
+    // assertion. CP_LOCAL is precisely the unsafe operation being avoided.
+    EXPECT_FALSE(components.executor->maybeOverrideLastHiddenWithMtpBuffer(
+        multimodal_input, *source, MtpHiddenStatesLayout::GLOBAL));
+    EXPECT_FALSE(MtpExecutor::canUseCpLocalMtpHidden(
+        multimodal_input, /*cp_request=*/true, /*supports_mtp_target_hidden_states=*/true));
+    EXPECT_TRUE(MtpExecutor::canUseCpLocalMtpHidden(
+        GptModelInputs{}, /*cp_request=*/true, /*supports_mtp_target_hidden_states=*/true));
+    EXPECT_FALSE(MtpExecutor::canUseCpLocalMtpHidden(
+        multimodal_input, /*cp_request=*/false, /*supports_mtp_target_hidden_states=*/true));
+}
+
 TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsDraftPointMassAndMappedToken) {
     auto d2t_map = torch::tensor({0, 1, 3, 2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
     spec::FastTopKSampler sampler(d2t_map, spec::DraftProposalMode::DETERMINISTIC);

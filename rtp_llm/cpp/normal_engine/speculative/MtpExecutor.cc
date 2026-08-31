@@ -481,6 +481,12 @@ bool isCpContextRequest(const ParallelismConfig& parallelism_config, const GptMo
 
 }  // namespace
 
+bool MtpExecutor::canUseCpLocalMtpHidden(const GptModelInputs& model_input,
+                                         bool                  cp_request,
+                                         bool                  supports_mtp_target_hidden_states) {
+    return cp_request && !hasMultimodalModelInputs(model_input) && supports_mtp_target_hidden_states;
+}
+
 void MtpExecutor::notifyStop() {
     stop_requested_.store(true, std::memory_order_release);
 }
@@ -1178,8 +1184,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
     const bool saved_need_all_hidden_states = model_input.need_all_hidden_states;
-    const bool use_cp_local_mtp_hidden = cp_enabled && !model_input.need_all_logits && !saved_need_all_hidden_states
-                                         && model_->supportsMtpTargetHiddenStates();
+    // A multimodal CP forward owns a request-local copy of the token-side
+    // metadata and is not required to publish the native MTP residual buffer
+    // on every path. Do not select the compact CP-local handoff for it: the
+    // draft model needs a complete GLOBAL hidden sequence aligned with the
+    // original multimodal token layout. Text-only native MTP keeps the compact
+    // rank-local buffer path.
+    const bool use_cp_local_mtp_hidden =
+        canUseCpLocalMtpHidden(model_input, cp_enabled, model_->supportsMtpTargetHiddenStates())
+        && !model_input.need_all_logits && !saved_need_all_hidden_states;
     if (cp_enabled && !use_cp_local_mtp_hidden) {
         // Generic CP+MTP models feed the target model's per-token output into
         // the draft model. Force a full hidden result for that hand-off. Models
@@ -1613,7 +1626,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                             "input_batch=%ld decode_batch=%ld",
                             model_input.input_lengths.defined() ? model_input.input_lengths.size(0) : -1,
                             model_input.sequence_lengths.defined() ? model_input.sequence_lengths.size(0) : -1);
-    const bool use_cp_local_decode_hidden = cp_context_request && model_->supportsMtpTargetHiddenStates();
+    // Multimodal CP context verification must use the full GLOBAL hidden
+    // sequence.  The target model is not required to publish a rank-local
+    // native-MTP buffer after every multimodal forward, and selecting
+    // CP_LOCAL here would make the draft-prefill hand-off assert when that
+    // buffer is empty.  Text-only native MTP keeps the compact fast path.
+    const bool use_cp_local_decode_hidden =
+        canUseCpLocalMtpHidden(model_input, cp_context_request, model_->supportsMtpTargetHiddenStates());
     if (useAsyncPrepare()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_target_verify_prepare)");
         target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
