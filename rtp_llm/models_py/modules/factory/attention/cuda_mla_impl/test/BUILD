@@ -25,6 +25,21 @@ py_test(
 )
 
 py_test(
+    name = "glm53_nope_fp8_sparse_mla_test",
+    srcs = ["sparse_mla_op_test.py"],
+    main = "sparse_mla_op_test.py",
+    args = ["SparseMlaOpTest.test_nope_fp8_cache_write_then_sparse_attention_page128"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {
+        'gpu': 'L20A_DEV',
+        'gpu_count': '1',
+    },
+)
+
+py_test(
     name = "glm53_grouped_topk_test",
     srcs = ["sparse_mla_op_test.py"],
     main = "sparse_mla_op_test.py",

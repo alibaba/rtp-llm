@@ -40,6 +40,22 @@ def _sparse_prefill_fast_path_limit(attn_configs: AttentionConfigs) -> int:
     return sparse_topk if sparse_topk > 0 else int(attn_configs.indexer_topk)
 
 
+def _supports_sparse_prefill_dense_fast_path(
+    attn_configs: AttentionConfigs,
+) -> bool:
+    """Whether dense prefill can consume this sparse model's KV cache.
+
+    FlashMLA does not consume GLM-5.3's 528-byte FP8 NoPE cache directly.
+    Keep that layout on SparseMlaFp8Op, which gathers and dequantizes selected
+    entries before attention. FP8 RoPE and unquantized caches remain eligible
+    for the exact dense fast path at short sequence lengths.
+    """
+    return not (
+        attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        and int(attn_configs.rope_head_dim) == 0
+    )
+
+
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -98,6 +114,7 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not use_decode_mla
+            and _supports_sparse_prefill_dense_fast_path(attn_configs)
             and attn_inputs.cu_kv_seqlens.max().item()
             <= _sparse_prefill_fast_path_limit(attn_configs)
             and not (

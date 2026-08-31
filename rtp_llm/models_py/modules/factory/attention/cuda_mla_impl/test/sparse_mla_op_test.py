@@ -29,6 +29,7 @@ SKIP_REASON = f"Requires CUDA >= 12.9, current: {torch.version.cuda if torch.ver
 # Only import if CUDA version is sufficient
 if CUDA_VERSION_OK:
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+        SparseMlaFp8Op,
         SparseMlaOp,
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
@@ -752,6 +753,94 @@ class SparseMlaOpTest(TestCase):
                 output.float().flatten(), expected.float().flatten(), dim=0
             ).item(),
             0.99,
+        )
+
+    def test_nope_fp8_cache_write_then_sparse_attention_page128(self):
+        """GLM-5.3 sparse attention consumes its 528-byte FP8 NoPE cache."""
+        seq_len = top_k = page_size = 128
+        kv_lora_rank = 512
+        num_heads = 64
+        set_seed(42)
+
+        compressed_kv = torch.randn(
+            seq_len, kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+        )
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.empty(
+            2, page_size, 528, dtype=torch.uint8, device="cuda"
+        )
+        MlaKVCacheWriteOp(KvCacheDataType.FP8).forward(
+            compressed_kv,
+            compressed_kv.new_empty(seq_len, 0),
+            kv_cache,
+            SimpleNamespace(
+                slot_mapping=torch.arange(
+                    page_size, page_size + seq_len, dtype=torch.int64, device="cuda"
+                )
+            ),
+        )
+
+        params = TestParam(
+            num_tokens=1,
+            total_cache_len=seq_len,
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=0,
+            qk_nope_head_dim=256,
+            page_size=page_size,
+            top_k=top_k,
+        )
+        testcase = generate_testcase(params)
+        # Physical block zero is reserved by BlockPool and rejected by the
+        # request-local to physical-index translator.
+        testcase.block_table.fill_(1)
+        q = torch.randn(
+            1, num_heads, kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+        )
+        topk_indices = torch.arange(
+            top_k, dtype=torch.int32, device="cuda"
+        ).view(1, 1, top_k)
+        op = SparseMlaFp8Op(
+            num_heads=num_heads,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=0,
+            qk_nope_head_dim=256,
+            page_size=page_size,
+            softmax_extra_scale=1.0,
+            top_k=top_k,
+        )
+        op.plan(testcase.mla_params, testcase.block_table)
+        global_indices = op._convert_topk_indices_to_global(topk_indices)[:, 0, :]
+        torch.testing.assert_close(
+            global_indices,
+            torch.arange(
+                page_size, page_size + top_k, dtype=torch.int32, device="cuda"
+            ).view(1, top_k),
+        )
+        gathered_kv = torch.empty_like(compressed_kv)
+        rtp_llm_ops.gather_selected_glm53_fp8_mla_kv(
+            kv_cache.kv_cache_base,
+            gathered_kv,
+            global_indices.reshape(-1).contiguous(),
+        )
+        torch.testing.assert_close(
+            gathered_kv.float(), compressed_kv.float(), rtol=0.13, atol=0.03
+        )
+
+        output = op.forward(q, kv_cache.kv_cache_base, topk_indices)
+        expected = ref_sparse_mla_forward(
+            q,
+            gathered_kv.unsqueeze(1),
+            torch.arange(top_k, dtype=torch.int32, device="cuda").view(1, top_k),
+            256**-0.5,
+            kv_lora_rank,
+        )
+
+        self.assertGreater(
+            F.cosine_similarity(
+                output.float().flatten(), expected.float().flatten(), dim=0
+            ).item(),
+            0.995,
         )
 
 
