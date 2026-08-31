@@ -357,7 +357,7 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
         w2_alpha = torch.ones(E, dtype=torch.float32, device=device)
         fc2_input_scale = torch.ones(1, dtype=torch.float32, device=device)
 
-        # flashinfer-python 0.6.12rc1+rtp.260523 checks CUDA>=13 directly in
+        # flashinfer-python 0.6.9 checks CUDA>=13 directly in
         # B12xMoEWrapper.__init__. Keeping the compatibility patch around the
         # pinned wrapper construction leaves forward execution and kernel JIT
         # under the real CUDA version.
@@ -370,8 +370,6 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             output_dtype=torch.bfloat16,
             device=str(device),
             activation="silu",
-            quant_mode="nvfp4",
-            source_format="modelopt",
         )
         b12x_moe, b12x_moe_eager = create_b12x_wrappers(
             wrapper_args,

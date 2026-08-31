@@ -182,8 +182,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         choices=[strategy.value for strategy in MoeStrategyName],
         default=MoeStrategyName.AUTO.value,
         help=(
-            "指定moe strategy, 默认为auto。sm120_fp8_grouped 和 fp4_b12x "
-            "仅适用于 sm_120/121；fp4_b12x 还要求单卡 (ep_size=1)。"
+            "指定moe strategy, 默认为auto。fp4_b12x 仅适用于 sm_120/121，"
+            "并要求单卡 (ep_size=1)。"
         ),
     )
     moe_group.add_argument(

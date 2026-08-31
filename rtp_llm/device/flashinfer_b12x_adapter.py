@@ -12,7 +12,7 @@ from rtp_llm.config.quant_config import NVFP4_BLOCK_SIZE
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_FLASHINFER_VERSION = "0.6.12rc1+rtp.260523"
+SUPPORTED_FLASHINFER_VERSION = "0.6.9"
 
 _version_gate_warned = False
 _version_gate_lock = threading.Lock()
@@ -46,7 +46,7 @@ def _load_b12x_symbols() -> _B12xSymbols:
         from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
         from flashinfer.fused_moe.cute_dsl import B12xMoEWrapper
         from flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch import (
-            _level_tile_n,
+            _LEVEL_TILE_N,
         )
     except (ImportError, AttributeError) as error:
         raise RuntimeError(
@@ -54,7 +54,7 @@ def _load_b12x_symbols() -> _B12xSymbols:
             "reinstall the CUDA 12.9 lock or update the RTP-LLM adapter"
         ) from error
 
-    tile_n = _level_tile_n()
+    tile_n = _LEVEL_TILE_N
     if not isinstance(tile_n, int) or tile_n <= 0:
         raise RuntimeError(
             f"FlashInfer returned an invalid b12x tile width: {tile_n!r}"

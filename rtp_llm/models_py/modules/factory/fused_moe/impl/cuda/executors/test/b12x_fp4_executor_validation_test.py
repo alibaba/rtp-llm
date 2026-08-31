@@ -269,7 +269,7 @@ class B12xWeightValidationTest(unittest.TestCase):
             )
 
     def test_rejects_w13_rows_not_aligned_to_swizzle_tile(self):
-        with self.assertRaisesRegex(ValueError, "2\*intermediate_size"):
+        with self.assertRaisesRegex(ValueError, r"2\*intermediate_size"):
             _validate_b12x_weight_shapes(
                 *self._weights(intermediate=96),
                 num_experts=2,
@@ -654,9 +654,8 @@ class B12xFlashInferCompatibilityTest(unittest.TestCase):
         )
 
     def test_pinned_dependency_closure_is_available(self):
-        self.assertEqual(metadata.version("cuda-tile"), "1.3.0")
-        self.assertEqual(metadata.version("nvidia-cutlass-dsl"), "4.5.3")
-        self.assertEqual(metadata.version("nvidia-cuda-tileiras"), "13.2.86")
+        self.assertEqual(metadata.version("cuda-tile"), "1.4.0")
+        self.assertEqual(metadata.version("nvidia-cutlass-dsl"), "4.4.2")
 
 
 if __name__ == "__main__":

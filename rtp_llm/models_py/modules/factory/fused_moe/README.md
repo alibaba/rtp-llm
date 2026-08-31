@@ -67,12 +67,10 @@ The interface is fully compatible with the old version, no need to modify existi
 The `fp4_b12x` strategy and `b12x` FP4 operator require BF16 ModelOpt NVFP4
 weights, an SM120/SM121 GPU, and `ep_size=1`. The kernel uses global expert
 IDs and therefore does not support expert-sharded weights or DeepEP routing.
-The validated dependency matrix is NVIDIA driver 580.159.03, CUDA toolkit
-12.9, PyTorch 2.8.0+cu129, and flashinfer-python
-0.6.12rc1+rtp.260523 on RTX PRO 5000 (SM120). The local adapter deliberately
-fails startup when that pinned FlashInfer version, the CUDA 12.9 compatibility
-version, or its private B12x APIs drift, so dependency updates must include
-adapter and GPU test updates.
+The current main dependency matrix pins CUDA toolkit 12.9, PyTorch
+2.8.0+cu129, and flashinfer-python 0.6.9. The local adapter deliberately fails
+startup when that FlashInfer version or its private B12x APIs drift, so
+dependency updates must include adapter and GPU test updates.
 When CUDA Graph is enabled, the executor uses the configured decode capacity
 `ll_num_max_token` for captured calls and falls back to eager execution for
 larger prefill calls. The server derives this capacity from
