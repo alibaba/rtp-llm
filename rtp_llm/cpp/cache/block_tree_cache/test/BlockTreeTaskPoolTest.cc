@@ -5,12 +5,17 @@
 #include <future>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
 namespace rtp_llm {
 namespace {
+
+TEST(BlockTreeTaskPoolTest, DefaultQueueSizeRemainsResourceLeakGuard) {
+    EXPECT_EQ(BlockTreeTaskPool::kDefaultQueueSize, 10000u);
+}
 
 TEST(BlockTreeTaskPoolTest, StartOnlySucceedsOnce) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
@@ -58,8 +63,8 @@ TEST(BlockTreeTaskPoolTest, CompletionTasksPreemptQueuedNormalTasksAndRemainFifo
     std::promise<void> release_worker;
     auto               ready_future   = worker_ready.get_future();
     auto               release_future = release_worker.get_future();
-    std::mutex          events_mutex;
-    std::vector<int>    events;
+    std::mutex         events_mutex;
+    std::vector<int>   events;
     ASSERT_TRUE(pool.submit([&] {
         worker_ready.set_value();
         release_future.wait();
@@ -99,6 +104,69 @@ TEST(BlockTreeTaskPoolTest, StopAdmissionKeepsUnboundedCompletionQueueOpen) {
     ASSERT_TRUE(pool.submitCompletion([&] { ++completions; }));
     pool.waitForIdle();
     EXPECT_EQ(completions.load(), 2);
+}
+
+TEST(BlockTreeTaskPoolTest, SubmitUsesOneConfigurableInterface) {
+    BlockTreeTaskPool pool(1, 0, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    auto             submit = &BlockTreeTaskPool::submit;
+    std::atomic<int> completed{0};
+    ASSERT_TRUE((pool.*submit)([&] { ++completed; }, std::chrono::milliseconds::zero(), std::function<void()>{}));
+
+    pool.waitForIdle();
+    EXPECT_EQ(completed.load(), 1);
+    pool.shutdown();
+}
+
+TEST(BlockTreeTaskPoolTest, SubmitRejectsNegativeQueueWait) {
+    BlockTreeTaskPool pool(1, 0, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    std::atomic<int> run_count{0};
+    std::atomic<int> timeout_count{0};
+    EXPECT_FALSE(pool.submit([&] { ++run_count; }, std::chrono::milliseconds(-1), [&] { ++timeout_count; }));
+
+    pool.waitForIdle();
+    EXPECT_EQ(run_count.load(), 0);
+    EXPECT_EQ(timeout_count.load(), 0);
+    pool.shutdown();
+}
+
+TEST(BlockTreeTaskPoolTest, ZeroQueueSizeAcceptsUnboundedNormalTasks) {
+    BlockTreeTaskPool pool(1, 0, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    std::promise<void> worker_ready;
+    std::promise<void> release_worker;
+    auto               ready_future   = worker_ready.get_future();
+    auto               release_future = release_worker.get_future();
+    ASSERT_TRUE(pool.submit([&] {
+        worker_ready.set_value();
+        release_future.wait();
+    }));
+    ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+    constexpr int    kQueuedTasks = 64;
+    std::atomic<int> completed{0};
+    for (int i = 0; i < kQueuedTasks; ++i) {
+        ASSERT_TRUE(pool.submit([&completed] { completed.fetch_add(1); }));
+    }
+
+    release_worker.set_value();
+    pool.waitForIdle();
+    EXPECT_EQ(completed.load(), kQueuedTasks);
+}
+
+TEST(BlockTreeTaskPoolTest, TimedTaskRunsWhenWorkerStartsBeforeDeadline) {
+    BlockTreeTaskPool pool(1, 0, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+    std::atomic<int> run_count{0};
+    std::atomic<int> timeout_count{0};
+    ASSERT_TRUE(pool.submit([&] { ++run_count; }, std::chrono::seconds(5), [&] { ++timeout_count; }));
+    pool.waitForIdle();
+    EXPECT_EQ(run_count.load(), 1);
+    EXPECT_EQ(timeout_count.load(), 0);
 }
 
 TEST(BlockTreeTaskPoolTest, FullQueueRejectsSubmissionWithoutBlockingAndRestoresPendingCount) {
@@ -144,31 +212,58 @@ TEST(BlockTreeTaskPoolTest, FullQueueRejectsSubmissionWithoutBlockingAndRestores
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-TEST(BlockTreeTaskPoolTest, BusinessCreditsBoundInFlightWorkAndKeepWaitForIdleBlocked) {
-    BlockTreeTaskPool pool(1, 2, "BlockTreeTaskPoolTest");
+TEST(BlockTreeTaskPoolTest, QueuedTimedTaskExpiresWithoutRunning) {
+    BlockTreeTaskPool pool(1, 0, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
 
-    ASSERT_TRUE(pool.acquireBusinessCredit());
-    ASSERT_TRUE(pool.acquireBusinessCredit());
-    EXPECT_FALSE(pool.acquireBusinessCredit());
+    std::promise<void> worker_ready;
+    std::promise<void> release_worker;
+    auto               ready_future   = worker_ready.get_future();
+    auto               release_future = release_worker.get_future();
+    ASSERT_TRUE(pool.submit([&] {
+        worker_ready.set_value();
+        release_future.wait();
+    }));
+    ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+    std::atomic<int> run_count{0};
+    std::atomic<int> timeout_count{0};
+    ASSERT_TRUE(pool.submit([&] { ++run_count; }, std::chrono::milliseconds(20), [&] { ++timeout_count; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    release_worker.set_value();
+    pool.waitForIdle();
+
+    EXPECT_EQ(run_count.load(), 0);
+    EXPECT_EQ(timeout_count.load(), 1);
+    EXPECT_EQ(pool.pending_tasks_.load(), 0);
+}
+
+TEST(BlockTreeTaskPoolTest, ActiveBusinessesDoNotLimitAdmissionAndKeepWaitForIdleBlocked) {
+    BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    constexpr int kBusinessCount = 32;
+    for (int i = 0; i < kBusinessCount; ++i) {
+        ASSERT_TRUE(pool.startBusiness());
+    }
 
     auto idle = std::async(std::launch::async, [&pool] { pool.waitForIdle(); });
     EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
 
-    pool.releaseBusinessCredit();
-    EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
-    pool.releaseBusinessCredit();
+    for (int i = 0; i < kBusinessCount; ++i) {
+        pool.finishBusiness();
+    }
     EXPECT_EQ(idle.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 }
 
-TEST(BlockTreeTaskPoolTest, StopAdmissionRejectsNewBusinessCreditsButAllowsRelease) {
+TEST(BlockTreeTaskPoolTest, StopAdmissionRejectsNewBusinessesButAllowsFinish) {
     BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
-    ASSERT_TRUE(pool.acquireBusinessCredit());
+    ASSERT_TRUE(pool.startBusiness());
     pool.stopAdmission();
 
-    EXPECT_FALSE(pool.acquireBusinessCredit());
-    pool.releaseBusinessCredit();
+    EXPECT_FALSE(pool.startBusiness());
+    pool.finishBusiness();
     pool.waitForIdle();
 }
 

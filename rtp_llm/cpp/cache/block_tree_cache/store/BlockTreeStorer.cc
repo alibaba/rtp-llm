@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 
+#include <chrono>
 #include <exception>
 #include <utility>
 
@@ -38,24 +39,15 @@ void BlockTreeStorer::stopAdmissionLocked() {
 
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
-                                              Tier                                              target_tier,
-                                              bool                                              write_remote) {
-    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK
-                                || target_tier == Tier::REMOTE,
-                            "unsupported store target tier: %s",
-                            tierName(target_tier));
-    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || storage_backend_ != nullptr,
-                            "remote store target requires a storage backend");
-    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || write_remote,
-                            "remote store target requires remote write to be enabled");
+                                              Tier                                              target_tier) {
     if (target_tier == Tier::DEVICE) {
-        (void)publishDeviceLocked(cache_keys, resources);
-    } else if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
-        submitLowerTierLocked(cache_keys, resources, target_tier);
+        return publishDeviceLocked(cache_keys, resources);
     }
-    return write_remote && storage_backend_ ?
-               storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
-               StorageWriteTask{};
+    if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
+        submitLowerTierLocked(cache_keys, resources, target_tier);
+        return {};
+    }
+    RTP_LLM_FAIL("unsupported store target tier: %s", tierName(target_tier));
 }
 
 StorageWriteTask BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
@@ -65,14 +57,14 @@ StorageWriteTask BlockTreeStorer::publishDeviceLocked(const CacheKeysType&      
         evictor_.onInserted(insert_result);
         settled_(true, true);
     }
-    return {};
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+                              StorageWriteTask{};
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
                                                    const std::vector<std::vector<GroupSetResource>>& resources) const {
     StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
-                           std::vector<std::vector<StorageBlockHandle>>(cache_keys.size()),
-                           /*local_matched_blocks_num=*/0};
+                           std::vector<std::vector<StorageBlockHandle>>(cache_keys.size())};
     for (size_t key_index = 0; key_index < resources.size(); ++key_index) {
         auto& key_handles = request.handles[key_index];
         for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
@@ -100,10 +92,10 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     task->target_tier = target_tier;
     task->cache_keys  = cache_keys;
 
-    bool                                   business_credit_acquired = false;
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &business_credit_acquired]() {
-        if (business_credit_acquired) {
-            task_pool_->releaseBusinessCredit();
+    bool                                   business_started = false;
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &business_started]() {
+        if (business_started) {
+            task_pool_->finishBusiness();
         }
         settleLocked(*task, /*publish=*/false);
     });
@@ -111,15 +103,24 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
     }
-    if (!task_pool_->acquireBusinessCredit()) {
-        RTP_LLM_LOG_WARNING("store aborted: in-flight business limit reached, target=%s blocks=%zu",
+    if (!task_pool_->startBusiness()) {
+        RTP_LLM_LOG_WARNING("store aborted: business task admission stopped, target=%s blocks=%zu",
                             tierName(target_tier),
                             task->descriptors.size());
         return;
     }
-    business_credit_acquired = true;
-    if (!task_pool_->submit([this, task]() { runStoreTask(task); })) {
-        RTP_LLM_LOG_WARNING("store aborted: cache task queue full, target=%s blocks=%zu",
+    business_started           = true;
+    const int queue_timeout_ms = target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_;
+    auto      on_timeout       = [this, task]() {
+        RTP_LLM_LOG_WARNING("store expired in business queue, target=%s blocks=%zu",
+                            tierName(task->target_tier),
+                            task->descriptors.size());
+        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business queue timeout"));
+    };
+    if (!task_pool_->submit([this, task]() { runStoreTask(task); },
+                            std::chrono::milliseconds(queue_timeout_ms),
+                            std::move(on_timeout))) {
+        RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),
                             task->descriptors.size());
         return;
@@ -159,7 +160,7 @@ void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInf
 }
 
 void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
-    block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
+    block_tree_cache_detail::ScopeRollback business_guard([this]() { task_pool_->finishBusiness(); });
     bool                                   stopping = false;
     size_t                                 accepted = 0;
     {

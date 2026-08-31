@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <exception>
 #include <utility>
 
@@ -312,15 +313,15 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
-    const std::vector<bool>&               joined_loads             = context->joinedLoads();
-    const uint64_t                         context_id               = context->contextId();
-    size_t                                 prepared_desc_count      = 0;
-    bool                                   business_credit_acquired = false;
+    const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
+    const std::vector<bool>&               joined_loads        = context->joinedLoads();
+    const uint64_t                         context_id          = context->contextId();
+    size_t                                 prepared_desc_count = 0;
+    bool                                   business_started    = false;
     block_tree_cache_detail::ScopeRollback rollback_guard(
-        [this, &load_descs, &joined_loads, &prepared_desc_count, &business_credit_acquired, context_id]() {
-            if (business_credit_acquired) {
-                task_pool_->releaseBusinessCredit();
+        [this, &load_descs, &joined_loads, &prepared_desc_count, &business_started, context_id]() {
+            if (business_started) {
+                task_pool_->finishBusiness();
             }
             abortLoadLocked(load_descs,
                             joined_loads,
@@ -350,18 +351,30 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
     }
 
     LoadTaskRunner::TaskPtr task = load_task_runner_.createTask(context);
-    if (task) {
-        if (!task_pool_->acquireBusinessCredit()) {
-            return false;
-        }
-        business_credit_acquired = true;
-        if (!task_pool_->submit([this, task]() { runLoadTask(task); })) {
-            return false;
-        }
-    }
     context->setSettlementReadyCallback([this, task](const std::shared_ptr<LoadAsyncContext>& ready_context) {
         scheduleContextSettlement(task, ready_context);
     });
+    if (task) {
+        if (!task_pool_->startBusiness()) {
+            return false;
+        }
+        business_started     = true;
+        const bool uses_disk = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
+            return desc.source_tier == Tier::DISK;
+        });
+        const int  queue_timeout_ms = uses_disk ? disk_timeout_ms_ : host_timeout_ms_;
+        auto       on_timeout       = [task]() {
+            RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", task->load_descs.size());
+            if (!task->context->completeTransfers(task->load_descs.size(), false)) {
+                RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", task->load_descs.size());
+            }
+        };
+        if (!task_pool_->submit([this, task]() { runLoadTask(task); },
+                                std::chrono::milliseconds(queue_timeout_ms),
+                                std::move(on_timeout))) {
+            return false;
+        }
+    }
 
     rollback_guard.dismiss();
     return true;
@@ -455,7 +468,7 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         bool                                           settlement_success = context->aggregateSuccess();
         std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
         if (task) {
-            block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
+            block_tree_cache_detail::ScopeRollback business_guard([this]() { task_pool_->finishBusiness(); });
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
