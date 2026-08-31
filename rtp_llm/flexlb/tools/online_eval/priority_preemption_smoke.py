@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end smoke for RUNNING Decode priority preemption.
 
-This is deliberately separate from ``cancel_smoke.py``: the existing six
-scenarios cover client cancellation, while this scenario proves that a P70
+This scenario complements client-cancel coverage (now in the
+``flexlb_ft/`` framework): it proves that a P70
 incoming request evicts a P30 request already running on Decode through the
 Master -> original-Prefill weak-Cancel protocol.
 """
@@ -196,9 +196,9 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 int(endpoint.get("inflight_requests", 0))
                 for endpoint in inflight_before.get("decode_endpoints", [])
             )
-            assert scheduler_inflight_before >= 1, (
-                f"Master did not account the low victim: {inflight_before}"
-            )
+            assert (
+                scheduler_inflight_before >= 1
+            ), f"Master did not account the low victim: {inflight_before}"
 
             high_schedule_task = asyncio.create_task(
                 self._schedule(
@@ -217,9 +217,9 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 timeout_s=5.0,
             )
             assert len(canceling_matches) == 1
-            assert not high_schedule_task.done(), (
-                "high request completed Schedule during weak ACK before typed CANCELED"
-            )
+            assert (
+                not high_schedule_task.done()
+            ), "high request completed Schedule during weak ACK before typed CANCELED"
             assert not any(
                 int(task.request_id) == low_rid
                 and task.priority_preemption_progress
@@ -236,12 +236,12 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 .get("end_state")
                 == "running"
             ), "Decode released the victim before the Prefill completion fence"
-            assert int(weak_decode.get("active_kv_tokens", 0)) == low_kv_before, (
-                "Decode KV accounting changed during weak ACK"
-            )
-            assert not self._lifecycle(weak_snapshot, high_rid), (
-                "high request reached an engine before typed CANCELED"
-            )
+            assert (
+                int(weak_decode.get("active_kv_tokens", 0)) == low_kv_before
+            ), "Decode KV accounting changed during weak ACK"
+            assert not self._lifecycle(
+                weak_snapshot, high_rid
+            ), "high request reached an engine before typed CANCELED"
             weak_cancel = self._cancel_counts(weak_snapshot)
             original_prefill_name = self._engine(weak_snapshot, prefill_target)["name"]
             for name, count in weak_cancel.items():
@@ -272,9 +272,9 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 self.pb2.PRIORITY_PREEMPTION_CANCELED,
                 timeout_s=5.0,
             )
-            assert len(canceled_matches) == 1, (
-                f"expected one typed CANCELED terminal, got {len(canceled_matches)}"
-            )
+            assert (
+                len(canceled_matches) == 1
+            ), f"expected one typed CANCELED terminal, got {len(canceled_matches)}"
             terminal_task = canceled_matches[0]
             assert int(terminal_task.error_info.error_code) == 8429
             canceled_end_ms = int(terminal_task.end_time_ms)
@@ -306,12 +306,12 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
             )
 
             await asyncio.wait_for(low_stream_task, timeout=5.0)
-            assert victim_terminal.grpc_code == grpc.StatusCode.RESOURCE_EXHAUSTED, (
-                f"victim gRPC status mismatch: {victim_terminal}"
-            )
-            assert victim_terminal.raw_error_code == 8429, (
-                f"victim raw engine code mismatch: {victim_terminal}"
-            )
+            assert (
+                victim_terminal.grpc_code == grpc.StatusCode.RESOURCE_EXHAUSTED
+            ), f"victim gRPC status mismatch: {victim_terminal}"
+            assert (
+                victim_terminal.raw_error_code == 8429
+            ), f"victim raw engine code mismatch: {victim_terminal}"
 
             # Retry the same priority Cancel directly against the original
             # Prefill tombstone.  It must ACK ACCEPTED and must not republish.
@@ -331,9 +331,9 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 == self.pb2.PRIORITY_PREEMPTION_CANCELED
                 and int(task.error_info.error_code) == 8429
             ]
-            assert len(retry_terminals) == 1, (
-                "repeated Cancel republished typed CANCELED+8429"
-            )
+            assert (
+                len(retry_terminals) == 1
+            ), "repeated Cancel republished typed CANCELED+8429"
 
             final_snapshot = await self._get_snapshot()
             final_cancel = self._cancel_counts(final_snapshot)
@@ -351,9 +351,9 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 self._consume_stream(high_stream, high_snap)
             )
             await asyncio.wait_for(high_stream_task, timeout=5.0)
-            assert high_snap.completed and high_snap.error is None, (
-                f"high request did not complete normally: {high_snap}"
-            )
+            assert (
+                high_snap.completed and high_snap.error is None
+            ), f"high request did not complete normally: {high_snap}"
 
             return True, (
                 f"victim={low_rid} P30 RUNNING -> CANCELED+8429; "

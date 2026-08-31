@@ -1,8 +1,13 @@
-"""Runtime generation and loading for FlexLB protobuf modules."""
+"""Runtime generation and loading for FlexLB protobuf modules.
+
+Also hosts ``encode_unique_key``, the canonical encoding used by load
+clients and smoke tests to attach eval metadata to requests.
+"""
 
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -21,6 +26,14 @@ DEFAULT_OUT_DIR = Path(
         str(Path(tempfile.gettempdir()) / "flexlb_eval_proto"),
     )
 )
+
+UNIQUE_KEY_PREFIX = "flexlb_eval:"
+
+
+def encode_unique_key(meta: dict) -> str:
+    """Encode eval metadata into the unique_key carried on requests."""
+
+    return UNIQUE_KEY_PREFIX + json.dumps(meta, separators=(",", ":"))
 
 
 def ensure_proto_modules(out_dir: Path | None = None) -> Tuple[ModuleType, ModuleType]:
