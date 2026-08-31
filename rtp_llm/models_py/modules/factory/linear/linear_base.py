@@ -23,6 +23,7 @@ class LinearBase(nn.Module, ABC):
     supports_deferred_bias = False
     supports_fused_bias_gelu_quant = False
     supports_prequantized_activation = False
+    fused_activation_quant_format: Optional[str] = None
 
     @classmethod
     @abstractmethod
