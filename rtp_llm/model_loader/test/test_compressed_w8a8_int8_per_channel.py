@@ -174,6 +174,13 @@ class BackendAvailabilityGuardTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "registered MOE compute backend"):
             StrategyRegistry().get_strategy(self._moe_config())
 
+    def test_moe_uses_effective_quant_config_for_missing_backend_error(self):
+        config = self._moe_config()
+        config.quant_config = None
+
+        with self.assertRaisesRegex(ValueError, "No suitable MOE strategy"):
+            StrategyRegistry().get_strategy(config)
+
     def test_registered_moe_backend_is_not_blocked(self):
         registry = StrategyRegistry()
         strategy = _AcceptingMoeStrategy()

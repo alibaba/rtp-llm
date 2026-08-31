@@ -72,8 +72,8 @@ class StrategyRegistry:
 
         if not candidates:
             quant_method = (
-                config.model_config.quant_config.get_method()
-                if config.model_config.quant_config is not None
+                config.quant_config.get_method()
+                if config.quant_config is not None
                 else None
             )
             logger.error(
