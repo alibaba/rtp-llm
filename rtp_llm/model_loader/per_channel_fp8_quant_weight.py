@@ -111,7 +111,9 @@ def _ckpt_base_matches_quant_exclude(
     return False
 
 
-def _ckpt_base_matches_regex_exclude(base_name_template: str, exclude_modules: set) -> bool:
+def _ckpt_base_matches_regex_exclude(
+    base_name_template: str, exclude_modules: set
+) -> bool:
     """Return whether a regex ignore matches the whole weight template."""
     candidate = base_name_template.replace("{i}", "0")
     for exclude in exclude_modules:
@@ -806,14 +808,20 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
         )
         num_experts = len(selected_experts)
 
-        if kernel.stacked_ckpt_keys and tensor_source.has_tensor(
-            kernel.weights[0].tensor_name(layer_id)
-        ):
+        uses_stacked_keys = kernel.uses_stacked_expert_keys(
+            tensor_source.get_database(), layer_id
+        ) or kernel._has_logical_expert_tensors(
+            tensor_source, layer_id, selected_experts
+        )
+        source_contains_raw_stacked = uses_stacked_keys and (
+            kernel._has_raw_stacked_tensors(tensor_source, layer_id)
+        )
+        if source_contains_raw_stacked:
             tensor_source = StackSplitTensorSource(
                 tensor_source, kernel._build_split_config(layer_id, load_config)
             )
         ckpt_weights = (
-            kernel._get_expert_weights() if kernel.stacked_ckpt_keys else kernel.weights
+            kernel._get_expert_weights() if uses_stacked_keys else kernel.weights
         )
         num_ckpt = len(ckpt_weights)
 
@@ -916,16 +924,13 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             swapped_scale[:, half:, :].copy_(scale_out[:, :half, :])
             scale_out = swapped_scale
 
-        used_prequant = (
-            has_prequant
-            and any(
-                tensor_source.has_prequantized_scale(
-                    ckpt_weights[0].name.format(
-                        i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
-                    )
+        used_prequant = has_prequant and any(
+            tensor_source.has_prequantized_scale(
+                ckpt_weights[0].name.format(
+                    i=str(layer_id), i_1=str((layer_id or 0) + 1), expert_id=str(eid)
                 )
-                for eid in selected_experts[:1]
             )
+            for eid in selected_experts[:1]
         )
         logging.info(
             f"inline MoE FP8 quant: {self.kernel.name} layer={layer_id} "

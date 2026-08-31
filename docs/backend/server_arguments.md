@@ -205,34 +205,87 @@ The following legacy options and environment variables were removed and must no 
 
 ### FastSafeTensors loader configuration
 
-When `LOAD_METHOD=fastsafetensors`, RTP-LLM uses the config-driven `AutoLoader`.
+When `LOAD_METHOD=fastsafetensors`, or when the default `auto` mode selects the
+FastSafeTensors path, RTP-LLM uses the config-driven `AutoLoader`. RTP checks
+the installed package capabilities before loading: the full capability set uses
+bounded `per-expert` delivery, a package without `dim0_split_templates` falls
+back to the higher-memory `full-stacked` compatibility path, and a package
+without `local_copyout_filter` continues with full materialization and RTP
+consumer-side filtering. A missing package/`AutoLoader`, an import/ABI failure,
+an unmet AUTO prerequisite, or an insufficient memory preflight falls back to
+`scratch`. These compatibility paths apply to both `auto` and an explicit
+`LOAD_METHOD=fastsafetensors`, so package age alone does not fail model startup.
+The two optional keywords control independent optimizations:
+
+| Capability | Present | Missing |
+|---|---|---|
+| `local_copyout_filter` | rank-local copy-out | full materialization, RTP consumer filtering |
+| `dim0_split_templates` | bounded `per-expert` MoE delivery | `full-stacked` MoE delivery |
+
+When a degraded FastSafeTensors mode remains usable, RTP logs
+`requested_mode`, `effective_mode` and `degraded_reason`. A scratch fallback
+contains `falls back to scratch`; package absence is INFO and other fallback
+causes are WARNING. CI or image builds that require both optimizations must
+install the matching wheel and treat a missing capability as a packaging
+failure. Set `RTP_LLM_EXPECT_FASTSAFETENSORS_TIER=per-expert` for the installed
+wheel contract test to turn a lower tier into a test failure; supported tiers
+are `scratch`, `consumer-filter`, `full-stacked`, and `per-expert`.
+
 Pass the standard fastsafetensors configuration as either an inline JSON string
-or a JSON file path. Inline JSON has higher priority when both are set:
+or a JSON file path. The installed FastSafeTensors version defines the precise
+configuration defaults and precedence:
 
 ```bash
-# Inline JSON string
-export FASTSAFETENSORS_CONFIG_JSON='{"loader":"base","base":{"copier_type":"nogds"}}'
+# Inline JSON string; progress is controlled by the upstream parallel config.
+export FASTSAFETENSORS_CONFIG_JSON='{"loader":"base","base":{"copier_type":"nogds"},"parallel":{"use_tqdm_on_load":true}}'
 
 # JSON file path; the file contains the same JSON object
 export FASTSAFETENSORS_CONFIG=/path/to/fastsafetensors.json
 ```
 
+The same configuration also affects `auto` selection. RTP reads
+`estimated_peak_device_bytes` from the installed package; missing or invalid
+values use the historical `3 × max checkpoint shard` estimate. Larger buffers,
+queues or producer counts can raise `transient_mem` enough for `auto` to choose
+`scratch`. Inspect the `fastsafetensor memory check` log and its `enough` field.
+
 For compatibility with existing development environments,
-`FASTSAFETENSORS_NOGDS=1` remains supported. Before constructing `AutoLoader`,
-RTP-LLM directly overrides `FASTSAFETENSORS_CONFIG_JSON` with
+`FASTSAFETENSORS_NOGDS=1` remains supported. Before memory preflight or
+constructing `AutoLoader`, RTP-LLM overrides `FASTSAFETENSORS_CONFIG_JSON`
+process-wide with
 `{"loader":"base","base":{"copier_type":"nogds"}}`. This compatibility switch
-therefore takes priority over other fastsafetensors configuration. Prefer one
-of the standard configuration variables above for new deployments.
+therefore remains in effect for subsequent loaders in the same process. Prefer
+one of the standard configuration variables above for new deployments. When
+`FASTSAFETENSORS_CONFIG` is also set, the final precedence remains an upstream
+package contract; current pinned wheels prefer the inline JSON value.
 
 Stacked MoE checkpoints use bounded-memory per-expert delivery by default: the
 source rank slices the stacked tensor first, then every rank broadcasts one
-expert at a time. The higher-memory full-stacked path is retained only for
-controlled performance comparisons:
+expert at a time. The higher-memory full-stacked path is a temporary
+compatibility rollback for wheels or deployments that cannot use the bounded
+split path, and it may also be used for controlled performance comparisons:
 
 ```bash
 export RTP_FASTSAFETENSORS_STACKED_MOE_MODE=full-stacked
 ```
 
-The accepted values are `per-expert` (default) and `full-stacked`. This RTP
-switch only selects how stacked MoE tensors are delivered; ordinary tensors
-continue to use the FastSafeTensors bucket and rank-local-copy settings.
+The accepted values are `per-expert` (default) and `full-stacked`; an empty
+value also selects the default. `full-stacked` adds a conservative extra shard
+to the FastSafeTensors memory preflight because it materializes a whole stacked
+tensor before RTP clones expert slices. A passive downgrade logs a warning with
+`degraded_reason`; an explicit request is reported as the selected mode. The
+additional warning is emitted only when the checkpoint actually contains raw
+stacked MoE tensors. Use `LOAD_METHOD=scratch` as the more conservative
+rollback. This transitional RTP switch only selects stacked MoE delivery.
+Bucket size, copier/backend, queue depth, producer count, loading progress and
+tensor ordering are otherwise owned by the installed FastSafeTensors
+configuration; rank-local copy-out is supplied by RTP's local checkpoint-key
+predicate.
+
+`RTP_FASTSAFETENSORS_STACKED_MOE_MODE` is a transitional, environment-only
+switch: it has no command-line flag, is not shown by `--help`, and is not part
+of the startup config dump. It is read only when the FastSafeTensors path is
+considered. Values are case-sensitive and use a hyphen; any non-empty value
+other than `per-expert` or `full-stacked` raises `ValueError` during
+FastSafeTensors selection. It has no effect for `LOAD_METHOD=scratch` or for
+weights that cannot use the FastSafeTensors path.

@@ -1,19 +1,118 @@
+import inspect
 import json
 import logging
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import torch
-from tqdm.auto import tqdm
 
 from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils import ckpt_file_info
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, FinetuneType
 
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
+
+FASTSAFETENSORS_STACKED_MOE_MODE_ENV = "RTP_FASTSAFETENSORS_STACKED_MOE_MODE"
+FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT = "per-expert"
+FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED = "full-stacked"
+_FASTSAFETENSORS_STACKED_MOE_MODES = frozenset(
+    {
+        FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
+        FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED,
+    }
+)
+_FASTSAFETENSORS_NOGDS_CONFIG_JSON = '{"loader":"base","base":{"copier_type":"nogds"}}'
+
+
+def _apply_fastsafetensors_env_compat() -> None:
+    """Apply legacy FastSafeTensors environment compatibility process-wide."""
+
+    if os.environ.get("FASTSAFETENSORS_NOGDS", "0") != "1":
+        return
+    if (
+        os.environ.get("FASTSAFETENSORS_CONFIG_JSON")
+        == _FASTSAFETENSORS_NOGDS_CONFIG_JSON
+    ):
+        return
+    os.environ["FASTSAFETENSORS_CONFIG_JSON"] = _FASTSAFETENSORS_NOGDS_CONFIG_JSON
+    logging.warning(
+        "FASTSAFETENSORS_NOGDS=1 overrides FASTSAFETENSORS_CONFIG_JSON "
+        "with the process-wide base/nogds config"
+    )
+
+
+def _normalize_fastsafetensors_stacked_moe_mode(
+    mode: Optional[str] = None,
+) -> str:
+    """Return the transitional stacked-MoE delivery mode."""
+
+    raw_mode = (
+        os.environ.get(
+            FASTSAFETENSORS_STACKED_MOE_MODE_ENV,
+            FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
+        )
+        if mode is None
+        else mode
+    )
+    normalized = (
+        raw_mode.strip()
+        if raw_mode and raw_mode.strip()
+        else FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT
+    )
+    if normalized not in _FASTSAFETENSORS_STACKED_MOE_MODES:
+        raise ValueError(
+            f"{FASTSAFETENSORS_STACKED_MOE_MODE_ENV} must be "
+            f"'{FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT}' or "
+            f"'{FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED}', "
+            f"got {normalized!r}"
+        )
+    return normalized
+
+
+def _callable_accepts_keyword(callable_obj: Any, keyword: str) -> bool:
+    """Return whether a callable explicitly accepts a named keyword.
+
+    ``**kwargs`` alone is not a capability declaration: a compatibility
+    wrapper may silently discard an unknown optimization keyword.
+    """
+
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    parameter = parameters.get(keyword)
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def _iter_fastsafetensors_weights(
+    loader: Any,
+    stacked_key_config: Optional[Dict[str, str]],
+    local_copyout_filter: Optional[Callable[[str], bool]],
+) -> Generator[Tuple[str, Any], None, None]:
+    """Adapt wrapper output to RTP keys while preserving tensor ownership."""
+
+    for key, tensor in loader.iterate_weights():
+        template = (stacked_key_config or {}).get(key)
+        if template is None:
+            yield key, tensor
+            continue
+
+        # MoE/Next checkpoints may store all experts in one tensor
+        # [num_experts, ...], while the RTP collectors expect one key per
+        # expert. Clone each selected slice because the loader can release the
+        # current batch buffer after iteration moves on to the next batch.
+        for expert_id in range(tensor.shape[0]):
+            expert_key = template.format(expert_id=expert_id)
+            if local_copyout_filter is not None and not local_copyout_filter(
+                expert_key
+            ):
+                continue
+            yield expert_key, tensor[expert_id].clone()
 
 
 class BaseDatabase:
@@ -309,20 +408,28 @@ class CkptDatabase(BaseDatabase):
     def fastsafetensors_weights_iterator(
         self,
         device: str,
-        use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
         local_copyout_filter: Optional[Callable[[str], bool]] = None,
-        stacked_moe_mode: str = "per-expert",
+        stacked_moe_mode: str = FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
     ):
+        stacked_moe_mode = _normalize_fastsafetensors_stacked_moe_mode(stacked_moe_mode)
+        _apply_fastsafetensors_env_compat()
         from fastsafetensors import AutoLoader, SingleGroup
 
-        if stacked_moe_mode not in {"per-expert", "full-stacked"}:
-            raise ValueError(
-                "stacked_moe_mode must be 'per-expert' or 'full-stacked', "
-                f"got {stacked_moe_mode!r}"
+        if (
+            stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT
+            and not _callable_accepts_keyword(
+                AutoLoader.__init__, "dim0_split_templates"
             )
+        ):
+            logging.warning(
+                "installed fastsafetensors AutoLoader does not support "
+                "dim0_split_templates; use the temporary full-stacked "
+                "compatibility path"
+            )
+            stacked_moe_mode = FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED
 
-        def iterator(device: str, use_tqdm_on_load: bool):
+        def iterator(device: str):
             if torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
             else:
@@ -339,60 +446,36 @@ class CkptDatabase(BaseDatabase):
             # read size and tensor ordering all belong to fastsafetensors. RTP
             # only supplies the process group, files and target device. Standard
             # config entry points are FASTSAFETENSORS_CONFIG_JSON (inline JSON)
-            # and FASTSAFETENSORS_CONFIG (JSON file path). Keep the legacy RTP
-            # dev switch by mapping it to the equivalent inline JSON config.
-            if os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1":
-                os.environ["FASTSAFETENSORS_CONFIG_JSON"] = (
-                    '{"loader":"base","base":{"copier_type":"nogds"}}'
-                )
+            # and FASTSAFETENSORS_CONFIG (JSON file path). The legacy NOGDS
+            # compatibility mapping was applied before config probing.
+            loader_kwargs: Dict[str, Any] = {}
+            if _callable_accepts_keyword(AutoLoader.__init__, "local_copyout_filter"):
+                loader_kwargs["local_copyout_filter"] = local_copyout_filter
+            elif local_copyout_filter is not None:
                 logging.warning(
-                    "FASTSAFETENSORS_NOGDS=1 overrides "
-                    "FASTSAFETENSORS_CONFIG_JSON with the base/nogds config"
+                    "installed fastsafetensors AutoLoader does not support "
+                    "local_copyout_filter; materialize all tensors and filter "
+                    "at the RTP consumer"
                 )
-            loader_kwargs: Dict[str, Any] = {
-                "local_copyout_filter": local_copyout_filter,
-            }
-            if stacked_key_config and stacked_moe_mode == "per-expert":
+            if (
+                stacked_key_config
+                and stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT
+            ):
                 loader_kwargs["dim0_split_templates"] = stacked_key_config
+            loader = AutoLoader(
+                pg,
+                hf_weights_files,
+                device=device,
+                **loader_kwargs,
+            )
             try:
-                loader = AutoLoader(
-                    pg,
-                    hf_weights_files,
-                    device=device,
-                    **loader_kwargs,
+                yield from _iter_fastsafetensors_weights(
+                    loader, stacked_key_config, local_copyout_filter
                 )
-            except TypeError as error:
-                if "dim0_split_templates" in loader_kwargs and (
-                    "dim0_split_templates" in str(error)
-                ):
-                    raise RuntimeError(
-                        "installed fastsafetensors does not support bounded-memory "
-                        "stacked MoE delivery; install the matching wrapper wheel or "
-                        "set RTP_FASTSAFETENSORS_STACKED_MOE_MODE=full-stacked for "
-                        "the higher-memory comparison path"
-                    ) from error
-                raise
-            try:
-                for key, tensor in loader.iterate_weights():
-                    template = (stacked_key_config or {}).get(key)
-                    if template is None:
-                        yield key, tensor
-                        continue
-
-                    # MoE/Next checkpoints may store all experts in one tensor
-                    # [num_experts, ...], while the RTP collectors expect one
-                    # key per expert. Clone each slice because the loader can
-                    # release the current batch buffer after iteration moves
-                    # on to the next batch.
-                    for expert_id in range(tensor.shape[0]):
-                        yield (
-                            template.format(expert_id=expert_id),
-                            tensor[expert_id].clone(),
-                        )
             finally:
                 loader.close()
 
-        return iterator(device, use_tqdm_on_load)
+        return iterator(device)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.lora_ckpt.get_lora_tensor_names(config_name)

@@ -3,6 +3,13 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_fastsafetensors_loader_policy",
+    srcs = ["test_fastsafetensors_loader_policy.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

@@ -361,6 +361,57 @@ class MoeAtomicWeight(AtomicWeight):
             for idx in range(len(self.weights))
         ]
 
+    def _raw_stacked_tensor_names(self, layer_id: Optional[int]) -> List[str]:
+        """Return concrete raw stacked keys, or empty for per-expert templates."""
+
+        if not self.stacked_ckpt_keys or not self.weights:
+            return []
+        names = []
+        for ckpt_weight in self.weights:
+            # A checkpoint template that names ``expert_id`` is already a
+            # per-expert layout. Formatting it as a raw stacked key would
+            # either raise KeyError or misclassify expert 0 as a stacked tensor.
+            if "{expert_id" in ckpt_weight.name:
+                return []
+            names.append(ckpt_weight.tensor_name(layer_id))
+        return names
+
+    def _has_raw_stacked_tensors(self, tensor_source, layer_id: Optional[int]) -> bool:
+        """Return whether every raw tensor required by this atomic weight exists."""
+
+        names = self._raw_stacked_tensor_names(layer_id)
+        return bool(names) and all(tensor_source.has_tensor(name) for name in names)
+
+    def uses_stacked_expert_keys(self, database, layer_id: Optional[int]) -> bool:
+        """Return whether the checkpoint layout requires logical expert keys.
+
+        This decision must use the immutable checkpoint database. A
+        TensorCollector populated by AutoLoader contains logical expert keys
+        even when the underlying checkpoint stores raw stacked tensors.
+        """
+
+        return self._has_raw_stacked_tensors(database, layer_id)
+
+    def _has_logical_expert_tensors(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        selected_experts: List[int],
+    ) -> bool:
+        """Return whether the source already contains every logical expert key."""
+
+        if not self.stacked_ckpt_keys or not selected_experts:
+            return False
+        return all(
+            tensor_source.has_tensor(
+                self._expert_key_pattern(idx).format(
+                    i=str(layer_id), expert_id=str(expert_id)
+                )
+            )
+            for idx in range(len(self.weights))
+            for expert_id in selected_experts
+        )
+
     def _build_split_config(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> Dict[str, Tuple[str, int, Callable]]:
@@ -369,8 +420,10 @@ class MoeAtomicWeight(AtomicWeight):
         selected_experts = load_config.get_selected_experts(
             layer_id, self.config.expert_num
         )
-        for idx, ckpt_weight in enumerate(self.weights):
-            stacked_key = ckpt_weight.tensor_name(layer_id)
+        stacked_keys = self._raw_stacked_tensor_names(layer_id)
+        for idx, (ckpt_weight, stacked_key) in enumerate(
+            zip(self.weights, stacked_keys)
+        ):
             pattern = self._expert_key_pattern(idx)
             for expert_id in selected_experts:
                 per_expert_key = pattern.format(
@@ -413,22 +466,24 @@ class MoeAtomicWeight(AtomicWeight):
         if pre_sharded is not None:
             return {self.name: PreShardedTensor(pre_sharded)}
 
-        if self.stacked_ckpt_keys and tensor_source.has_tensor(
-            self.weights[0].tensor_name(layer_id)
-        ):
+        selected_experts = load_config.get_selected_experts(
+            layer_id, self.config.expert_num
+        )
+        uses_stacked_keys = self.uses_stacked_expert_keys(
+            tensor_source.get_database(), layer_id
+        ) or self._has_logical_expert_tensors(tensor_source, layer_id, selected_experts)
+        source_contains_raw_stacked = uses_stacked_keys and (
+            self._has_raw_stacked_tensors(tensor_source, layer_id)
+        )
+        if source_contains_raw_stacked:
             tensor_source = StackSplitTensorSource(
                 tensor_source,
                 self._build_split_config(layer_id, load_config),
             )
-        ckpt_weights = (
-            self._get_expert_weights() if self.stacked_ckpt_keys else self.weights
-        )
+        ckpt_weights = self._get_expert_weights() if uses_stacked_keys else self.weights
 
         convert_type = (
             self.data_type if self.data_type is not None else load_config.compute_dtype
-        )
-        selected_experts = load_config.get_selected_experts(
-            layer_id, self.config.expert_num
         )
         num_experts = len(selected_experts)
         num_ckpt_weights = len(ckpt_weights)
@@ -509,9 +564,7 @@ class MoeAtomicWeight(AtomicWeight):
             return None
 
         split_dim, segments, requires_stacked, split_func = layout
-        is_stacked = self.stacked_ckpt_keys and tensor_source.has_tensor(
-            self.weights[0].tensor_name(layer_id)
-        )
+        is_stacked = self.uses_stacked_expert_keys(database, layer_id)
         if (requires_stacked and not is_stacked) or (
             self._get_split_func() is not split_func
         ):
@@ -706,8 +759,11 @@ class MoeAtomicWeight(AtomicWeight):
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
+        has_stacked_tensor = self.uses_stacked_expert_keys(
+            load_config.database, layer_id
+        )
         ckpt_weights = (
-            self._get_expert_weights() if self.stacked_ckpt_keys else self.weights
+            self._get_expert_weights() if has_stacked_tensor else self.weights
         )
 
         names = set[str]()
