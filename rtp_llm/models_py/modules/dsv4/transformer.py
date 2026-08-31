@@ -492,7 +492,9 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
-        self.begin_decode(attn_metadata)
+        begin_decode = getattr(self, "begin_decode", None)
+        if begin_decode is not None:
+            begin_decode(attn_metadata)
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx, layer in enumerate(self.layers):
             with layer_forward_range(layer_idx):
