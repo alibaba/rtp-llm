@@ -672,6 +672,13 @@ def _append_image_visible_workspace_indices(
     swa_offset: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Append image-left overflow and future-image SWA rows to packed indices."""
+    flash_mla_indices = combined_indices.dim() == 3
+    if flash_mla_indices:
+        assert combined_indices.size(1) == 1
+        combined_indices_2d = combined_indices.squeeze(1)
+    else:
+        assert combined_indices.dim() == 2
+        combined_indices_2d = combined_indices
     query_positions = _flat_1d(query_positions).to(torch.long)
     image_spans = image_spans.reshape(-1, 2).to(
         device=query_positions.device, dtype=torch.long
@@ -708,19 +715,19 @@ def _append_image_visible_workspace_indices(
         torch.full_like(token_positions, -1),
     ).to(combined_indices.dtype)
 
-    old_width = combined_indices.size(1)
+    old_width = combined_indices_2d.size(1)
     out = torch.full(
-        (combined_indices.size(0), old_width + max_extra),
+        (combined_indices_2d.size(0), old_width + max_extra),
         -1,
-        dtype=combined_indices.dtype,
-        device=combined_indices.device,
+        dtype=combined_indices_2d.dtype,
+        device=combined_indices_2d.device,
     )
-    out[:, :old_width] = combined_indices
+    out[:, :old_width] = combined_indices_2d
     columns = combined_lens.to(torch.long).unsqueeze(1) + offsets
     rows = torch.arange(out.size(0), device=out.device).unsqueeze(1).expand_as(columns)
     out[rows[valid], columns[valid]] = extras[valid]
     return (
-        out.contiguous(),
+        (out.unsqueeze(1) if flash_mla_indices else out).contiguous(),
         (combined_lens + extra_count.to(combined_lens.dtype)).contiguous(),
     )
 

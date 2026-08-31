@@ -44,6 +44,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     PrefillQKV,
     SwaPrefillMeta,
     WorkspaceMeta,
+    _append_image_visible_workspace_indices,
     _get_window_topk_idxs_visible,
     _prefill_cp_overlap_enabled,
 )
@@ -157,6 +158,39 @@ class ImageVisibleTopKTest(unittest.TestCase):
             visible = indices[row, : lengths[row]].to(torch.long)
             self.assertTrue(torch.equal(visible, expected), row)
             self.assertTrue(bool((indices[row, lengths[row] :] == -1).all()), row)
+
+    def test_workspace_indices_preserve_flash_mla_cp_dimension(self) -> None:
+        combined = torch.full((4, 1, 640), -1, dtype=torch.int32)
+        lengths = torch.tensor([1, 128, 128, 128], dtype=torch.int32)
+        for row, length in enumerate(lengths.tolist()):
+            combined[row, 0, :length] = torch.arange(length, dtype=torch.int32)
+
+        out, out_lengths = _append_image_visible_workspace_indices(
+            combined,
+            lengths,
+            torch.tensor([0, 100, 200, 322]),
+            torch.tensor([[10, 309]]),
+            window_size=128,
+            swa_offset=7,
+        )
+
+        self.assertEqual(tuple(out.shape), (4, 1, 1024))
+        self.assertTrue(torch.equal(out[:, :, :640], combined))
+        self.assertTrue(
+            torch.equal(
+                out_lengths, torch.tensor([1, 337, 300, 128], dtype=torch.int32)
+            )
+        )
+        self.assertTrue(
+            torch.equal(out[1, 0, 128:337], torch.arange(108, 317, dtype=torch.int32))
+        )
+        expected_row_2 = torch.cat(
+            (
+                torch.arange(17, 80, dtype=torch.int32),
+                torch.arange(208, 317, dtype=torch.int32),
+            )
+        )
+        self.assertTrue(torch.equal(out[2, 0, 128:300], expected_row_2))
 
 
 class HCAOverlapGateTest(unittest.TestCase):
