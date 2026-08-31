@@ -70,7 +70,7 @@ def _build_compressor(
     freqs_cis = torch.ones(
         4096, rope_head_dim // 2, dtype=torch.complex64, device=DEVICE
     )
-    cmp.freqs_cis = freqs_cis
+    cmp.init_rope_cache(freqs_cis)
     return cmp
 
 

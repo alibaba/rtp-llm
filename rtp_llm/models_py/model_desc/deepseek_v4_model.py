@@ -717,10 +717,10 @@ class DeepSeekV4Model(GptModelBase):
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
-        # Recompute RoPE cache on real device (precompute_freqs_cis under
-        # meta context yields zeros; we need real values).
+        # Recompute RoPE on the real device and prebuild the compressors'
+        # shared cos_sin_cache before runtime memory allocation starts.
         for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+            layer.attn.init_rope_cache(device=device_str)
 
         # Subclass hook: lift any model-level weights (e.g. MTP fusion
         # norms / projections) off the ModelWeights wrapper before we
