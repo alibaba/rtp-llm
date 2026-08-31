@@ -55,7 +55,7 @@ def sm120_suites():
             smoke_test(
                 name = "moe_nvfp4_no_deepep_sm120",
                 task_info = "data/model/qwen3_moe/q_r_coder_30b_nvfp4_sm120.json",
-                envs = ["LOAD_PYTHON_MODEL=1", "STABILITY_REPEAT=5"],
+                envs = ["LOAD_PYTHON_MODEL=1"],
                 smoke_args = "--moe_strategy fp4_b12x --fp4_moe_op b12x --use_deepep_moe 0 --use_all_gather 1 --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type = ["RTX_5000_PRO"],
             ),

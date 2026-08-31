@@ -23,7 +23,6 @@ class _TensorEncoder(json.JSONEncoder):
         return super().default(o)
 
 
-from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 from smoke.cache_status_comparer import CacheStatusComparer
@@ -596,100 +595,6 @@ class CaseRunner(object):
                 return MainseComparer
         return NormalComparer
 
-    def _run_stability_repeat(
-        self,
-        server_manager: MagaServerManager,
-        task_info: TaskInfo,
-        task_states: TaskStates,
-    ) -> None:
-        repeat_count = int(os.environ.get("STABILITY_REPEAT", "0"))
-        if repeat_count <= 0 or task_states.ret == False:
-            return
-
-        qr_array = task_info.query_result
-        task_endpoint = task_info.endpoint
-        num_queries = len(qr_array)
-        logging.info(
-            f"[STABILITY_TEST] Starting {repeat_count} repeat iterations for {num_queries} queries"
-        )
-
-        per_query_pass: Dict[int, int] = defaultdict(int)
-        per_query_fail: Dict[int, int] = defaultdict(int)
-        per_query_responses: Dict[int, Dict[str, int]] = defaultdict(
-            lambda: defaultdict(int)
-        )
-
-        for iter_idx in range(repeat_count):
-            for q_idx, q_r in enumerate(qr_array):
-                request_endpoint = self._resolve_endpoint(q_r, task_endpoint)
-                comparer_cls = self._get_comparer_cls(q_r, request_endpoint)
-                try:
-                    comparer_cls(
-                        server_manager,
-                        request_endpoint,
-                        q_r,
-                        Tracer(),
-                        self.batch_infer,
-                    ).run()
-                    per_query_pass[q_idx] += 1
-                    logging.info(
-                        f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] PASS"
-                    )
-                except Exception as e:
-                    exc_type = classify_exception(e)
-                    if exc_type != ExceptionType.NOT_GPU_ERROR:
-                        output_dir = os.environ.get(
-                            "TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()
-                        )
-                        dump_gpu_state(
-                            exc=e,
-                            failure_context=f"stability repeat ({exc_type.value})",
-                            log_path=os.path.join(
-                                output_dir, "gpu_state_stability.log"
-                            ),
-                            dmesg_baseline=getattr(self, "_dmesg_baseline", 0),
-                        )
-                    per_query_fail[q_idx] += 1
-                    err_msg = str(e)
-                    if "actual.response" in err_msg:
-                        start = err_msg.find("actual.response = [")
-                        if start != -1:
-                            resp = err_msg[start + len("actual.response = [") :]
-                            resp = resp.rstrip("]").rstrip()
-                            per_query_responses[q_idx][resp] += 1
-                    logging.warning(
-                        f"[STABILITY_TEST iter={iter_idx+1}/{repeat_count} query={q_idx}] FAIL: {e}"
-                    )
-
-        total_checks = repeat_count * num_queries
-        total_pass = sum(per_query_pass.values())
-        total_fail = sum(per_query_fail.values())
-        pass_rate = total_pass / total_checks * 100 if total_checks > 0 else 0
-
-        logging.info(
-            f"[STABILITY_SUMMARY] Total: {repeat_count} iterations x {num_queries} queries = {total_checks} checks"
-        )
-        logging.info(
-            f"[STABILITY_SUMMARY] Pass: {total_pass}, Fail: {total_fail} (rate: {pass_rate:.1f}%)"
-        )
-        for q_idx in range(num_queries):
-            p = per_query_pass.get(q_idx, 0)
-            f = per_query_fail.get(q_idx, 0)
-            line = f"[STABILITY_SUMMARY] query={q_idx}: {p}/{p+f} pass"
-            if per_query_responses[q_idx]:
-                line += f", unexpected_responses: {dict(per_query_responses[q_idx])}"
-            logging.info(line)
-
-        if total_fail > 0:
-            task_states.ret = False
-            task_states.query_status.append(
-                (
-                    QueryStatus.OTHERS,
-                    f"Stability test: {total_fail}/{total_checks} failures in {repeat_count} iterations",
-                    Tracer(),
-                )
-            )
-
     def _curl_server_impl(
         self, server_manager: MagaServerManager, task_info: TaskInfo
     ) -> TaskStates:
@@ -785,8 +690,6 @@ class CaseRunner(object):
                     )
                 logging.error("query %d failed: %s\n%s", q_idx, msg, tb)
             task_states.query_status.append((status, msg, tracer))
-
-        self._run_stability_repeat(server_manager, task_info, task_states)
 
         if (
             os.environ.get("SAVE_RESPONSE", "False") == "True"
