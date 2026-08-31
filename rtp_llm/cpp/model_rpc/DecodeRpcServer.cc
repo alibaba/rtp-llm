@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 #include "autil/LockFreeThreadPool.h"
 
 using namespace std;
@@ -33,10 +34,23 @@ const int EXTRA_TIMEOUT_MS        = 100;
 const int RDMA_CONNECT_RETRY_TIME = 3;
 
 #define GRPC_RET_IF_ERROR(decode_context, stat, code, msg)                                                             \
-    if (!(stat)) {                                                                                                     \
-        decode_context.error_status = grpc::Status(code, msg);                                                         \
-        return;                                                                                                        \
-    }
+    do {                                                                                                               \
+        if (!(stat)) {                                                                                                 \
+            const auto        grpc_error_code    = (code);                                                             \
+            const std::string grpc_error_message = (msg);                                                              \
+            decode_context.error_status          = grpc::Status(grpc_error_code, grpc_error_message);                  \
+            const std::string request_identity   = decode_context.request_key == "0" ?                                 \
+                                                       (decode_context.server_context != nullptr ?                     \
+                                                            "pending peer " + decode_context.server_context->peer() :  \
+                                                            "pending") :                                               \
+                                                       decode_context.request_key;                                     \
+            RTP_LLM_LOG_WARNING("request [%s] RPC stage failed, grpc status code [%d], message [%s]",                  \
+                                request_identity.c_str(),                                                              \
+                                static_cast<int>(grpc_error_code),                                                     \
+                                grpc_error_message.c_str());                                                           \
+            return;                                                                                                    \
+        }                                                                                                              \
+    } while (false)
 
 string makeRequestKey(const string& client_id, size_t request_id) {
     return client_id + "_request_id_" + std::to_string(request_id);
@@ -67,6 +81,42 @@ torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
 }
 
 }  // namespace
+
+grpc::Status DecodeRpcServer::generateRequestReadFailureStatus(bool cancelled) {
+    if (cancelled) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, "poll generate request failed");
+}
+
+const char* DecodeRpcServer::phaseErrorType(bool                         request_ok,
+                                            DecodeStatInfo::ExecuteStage stage,
+                                            const ErrorInfo&             error_info,
+                                            const grpc::Status&          error_status) {
+    if (request_ok) {
+        return nullptr;
+    }
+    // Cancellation is a request outcome even when the stage has not yet copied
+    // the transport status into error_status (loadCacheFromPrefill synthesizes
+    // its child span before the final GRPC_RET_IF_ERROR below).
+    if (error_info.hasError() && error_info.code() == ErrorCode::CANCELLED) {
+        return "Cancelled";
+    }
+    // A failure while waiting for KV cache from Prefill is an upstream dependency
+    // problem rather than a fault of this node, so the wait span must say so. The
+    // gRPC status cannot carry that distinction: transErrorCodeToGrpc maps the
+    // cache timeouts onto DEADLINE_EXCEEDED, indistinguishable from a request
+    // deadline elsewhere. Client cancellation also surfaces in this stage and
+    // keeps its own classification.
+    if (stage == DecodeStatInfo::loadCacheFromPrefill && error_info.hasError()
+        && error_info.code() != ErrorCode::CANCELLED) {
+        return "DependencyFailure";
+    }
+    if (!error_status.ok()) {
+        return telemetry::grpcStatusCodeName(error_status.error_code());
+    }
+    return "Exception";
+}
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
@@ -145,10 +195,17 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     RTP_LLM_PROFILE_FUNCTION();
     decode_context.time_info.updateRequestBegineTime();
     auto& allocate_request = decode_context.allocate_request;
-    GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Read(&allocate_request),
-                      grpc::StatusCode::INTERNAL,
-                      "failed to get message");
+    if (!decode_context.rpc_context.grpc_stream->Read(&allocate_request)) {
+        const bool cancelled        = decode_context.isRequestCancelled();
+        decode_context.error_status = generateRequestReadFailureStatus(cancelled);
+        const auto peer = decode_context.server_context != nullptr ? decode_context.server_context->peer() : "unknown";
+        RTP_LLM_LOG_WARNING(
+            "request [pending peer=%s] read allocate request failed, cancelled [%d], grpc status code [%d]",
+            peer.c_str(),
+            cancelled ? 1 : 0,
+            static_cast<int>(decode_context.error_status.error_code()));
+        return;
+    }
     GRPC_RET_IF_ERROR(decode_context,
                       allocate_request.stage() == RemoteStage::ALLOCATE,
                       grpc::StatusCode::INTERNAL,
@@ -222,11 +279,31 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
+    const auto  error_reason = error_info.ok() ? std::string() : ErrorCodeToString(error_info.code());
+    const auto* error_type =
+        error_info.ok() ? nullptr :
+                          phaseErrorType(
+                              /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, grpc::Status::OK);
     if (!error_info.ok()) {
+        decode_context.error_info = error_info;
         RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
                             decode_context.request_key.c_str(),
                             error_info.ToString().c_str(),
                             decode_context.time_info.loadCacheTimeMs());
+    }
+    // load_cache child span [load_begin, load_end): decode's KV-arrival wait
+    // window, parallel to the prefill computation (see synthesizeKvLoadSpan).
+    // Synthesized on failure too — CACHE_STORE_LOAD_BUFFER_TIMEOUT lives here
+    // and must show up on the waterfall instead of an unnamed gap.
+    if (decode_context.trace_span_guard && decode_context.trace_span_guard->valid()) {
+        telemetry::synthesizeKvLoadSpan(decode_context.trace_span_guard->sharedSpan(),
+                                        decode_context.time_info.load_begin_time_us,
+                                        decode_context.time_info.load_end_time_us,
+                                        decode_context.request_id,
+                                        error_info.ok(),
+                                        error_type,
+                                        static_cast<int64_t>(error_info.code()),
+                                        error_reason.c_str());
     }
 
     GenerateOutputsPB load_response;
@@ -234,14 +311,14 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
     if (!error_info.ok()) {
-        decode_context.error_info = error_info;
         // loadCacheFromPrefill is not retried (not wrapped by EXECUTE_WITH_RETRY), so this is a final
         // failure point: report to FlexLB immediately.
         reportEarlyFinishTask(decode_context,
                               static_cast<int64_t>(error_info.code()),
                               "decode load cache from prefill failed: " + error_info.ToString());
+        decode_context.error_status = grpc::Status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+        return;
     }
-    GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
@@ -251,10 +328,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
-    GRPC_RET_IF_ERROR(decode_context,
-                      grpc_stream->Read(&generate_request),
-                      grpc::StatusCode::INTERNAL,
-                      "poll generate request failed");
+    if (!grpc_stream->Read(&generate_request)) {
+        const bool cancelled        = decode_context.isRequestCancelled();
+        decode_context.error_status = generateRequestReadFailureStatus(cancelled);
+        RTP_LLM_LOG_WARNING("request [%s] read generate request failed, cancelled [%d], grpc status code [%d]",
+                            decode_context.request_key.c_str(),
+                            cancelled ? 1 : 0,
+                            static_cast<int>(decode_context.error_status.error_code()));
+        return;
+    }
     GRPC_RET_IF_ERROR(decode_context,
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
@@ -1326,12 +1408,58 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
 
+    // Decode SERVER span: wrapping the handler covers the whole decode
+    // lifecycle of this request; RemoteLoad fan-out stays span-free
+    // (aggregate attribute strategy). RAII guard covers all exit paths.
+    if (telemetry::TelemetryRuntime::isActive()) {
+        auto span = telemetry::startRpcServerSpan(
+            "rtp_llm.decode_remote_generate", server_context, true, "RpcService/RemoteGenerate");
+        decode_context.trace_span_guard =
+            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &decode_context.error_status);
+    }
+    telemetry::PhaseSpanSynthesisScope phase_span_scope([&decode_context](bool exception_unwinding) {
+        if (!decode_context.trace_span_guard || !decode_context.trace_span_guard->valid()) {
+            return;
+        }
+        auto& stream = decode_context.getStream();
+        if (!stream) {
+            return;
+        }
+        const auto             time_info  = stream->getTimeInfo();
+        const bool             request_ok = decode_context.error_status.ok() && !exception_unwinding;
+        telemetry::PhaseTiming phase_timing;
+        phase_timing.begin_time_us           = time_info.begin_time_us;
+        phase_timing.running_started         = time_info.running_started;
+        phase_timing.running_started_time_us = time_info.running_started_time_us;
+        phase_timing.first_token_committed   = time_info.first_token_committed;
+        phase_timing.first_token_time_us     = time_info.first_token_time_us;
+        phase_timing.generation_done         = time_info.generation_done;
+        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
+        phase_timing.synthesis_end_time_us   = currentTimeUs();
+        phase_timing.request_id              = decode_context.request_id;
+        phase_timing.error_type              = DecodeRpcServer::phaseErrorType(
+            request_ok, decode_context.stat_info.stage, decode_context.error_info, decode_context.error_status);
+        telemetry::synthesizePhaseSpans(
+            decode_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Decode, request_ok);
+        if (request_ok && time_info.generation_done) {
+            telemetry::setUsageTokenAttributes(
+                *decode_context.trace_span_guard, (int64_t)stream->inputLength(), (int64_t)stream->outputTokenLen());
+        }
+    });
+
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
     int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+        if (decode_context.trace_span_guard) {
+            // request_id becomes known only after the first ALLOCATE message;
+            // `request_id` (string) is the Bailian Unitrace index key
+            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
+                                                          std::to_string(decode_context.request_id));
+            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
+        }
         EXECUTE_WITH_RETRY(
             allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (decode_context.hasError()) {

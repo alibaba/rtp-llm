@@ -216,6 +216,30 @@ class OpenaiEndpoint(object):
             no_think_excludes=base_format.no_think_excludes,
         )
 
+    def _tokenize_request_stop_words(self, stop_words: List[str]) -> List[List[int]]:
+        stop_word_ids = []
+        for stop_word in stop_words:
+            # Byte-level tokenizers encode a word differently after a space.
+            variants = [stop_word]
+            if stop_word and not stop_word[0].isspace():
+                variants.append(" " + stop_word)
+            for variant in variants:
+                try:
+                    token_ids = self.tokenizer.encode(variant, add_special_tokens=False)
+                except TypeError:
+                    if not getattr(self, "_legacy_tokenizer_warned", False):
+                        self._legacy_tokenizer_warned = True
+                        logging.warning(
+                            "tokenizer %s does not accept add_special_tokens; "
+                            "stop words may pick up special tokens and never "
+                            "match in the engine",
+                            type(self.tokenizer).__name__,
+                        )
+                    token_ids = self.tokenizer.encode(variant)
+                if token_ids:
+                    stop_word_ids.append(list(token_ids))
+        return stop_word_ids
+
     def _extract_generation_config(
         self,
         request: ChatCompletionRequest,
@@ -252,16 +276,16 @@ class OpenaiEndpoint(object):
         request_stop_words_list = request.stop if request.stop != None else []
         if isinstance(request_stop_words_list, str):
             request_stop_words_list = [request_stop_words_list]
+        else:
+            request_stop_words_list = list(request_stop_words_list)
+        request_stop_words_list.extend(config.stop_words_str)
         config.stop_words_str = list(
-            set(
-                self.stop_words_str_list
-                + request_stop_words_list
-                + config.stop_words_str
-            )
+            set(self.stop_words_str_list + request_stop_words_list)
         )
         config.stop_words_list = self._dedup_stop_words_list(
             self.stop_words_id_list
-            + self.chat_renderer.tokenize_words(config.stop_words_str)
+            + self.chat_renderer.tokenize_words(self.stop_words_str_list)
+            + self._tokenize_request_stop_words(request_stop_words_list)
             + config.stop_words_list
         )
         if request.chat_id != None:

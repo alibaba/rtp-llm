@@ -351,6 +351,14 @@ build:rocm --action_env TF_NEED_ROCM=1
 build:rocm --action_env GPU_ARCHS=gfx942
 build:rocm --copt="-DUSING_CUDA=0"
 build:rocm --copt="-DUSING_ROCM=1"
+# Pin the OTel STL mode to a literal value. The default "best" mode defines
+# OPENTELEMETRY_STL_VERSION=(__cplusplus/100); the parentheses make shlex.quote
+# wrap the -D argument in single quotes inside crosstool_wrapper_driver_rocm,
+# so the hipcc branch silently drops it. TUs built with -x rocm then fall back
+# to the nostd ABI while the gcc-built OTel SDK static lib uses the std ABI,
+# leaving libth_transformer.so with undefined nostd symbols at dlopen time.
+# 2017 matches the --cxxopt=-std=c++17 result of "best" on the gcc side.
+build:rocm --@io_opentelemetry_cpp//api:with_cxx_stdlib=2017
 
 build:rocm_gfx950 --config=rocm
 build:rocm_gfx950 --action_env GPU_ARCHS=gfx950

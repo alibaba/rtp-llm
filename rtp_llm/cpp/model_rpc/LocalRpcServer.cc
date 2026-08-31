@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 
 using namespace std;
 
@@ -196,7 +197,57 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    std::shared_ptr<GenerateInput> input;
+    // gRPC SERVER span doubles as the request span on the fusion path; guard
+    // destruction covers CHECK_ERROR_STATUS early returns.
+    if (telemetry::TelemetryRuntime::isActive()) {
+        auto span = telemetry::startRpcServerSpan(
+            "rtp_llm.generate_stream_call", context, false, "RpcService/GenerateStreamCall");
+        generate_context.trace_span_guard =
+            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &generate_context.error_status);
+        // `request_id` is the Bailian Unitrace index key (string, verified);
+        // rtp_llm.request_id stays as the internal numeric field.
+        generate_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId, std::to_string(request_id));
+        generate_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, request_id);
+    }
+    telemetry::PhaseSpanSynthesisScope phase_span_scope([&generate_context](bool exception_unwinding) {
+        if (!generate_context.trace_span_guard || !generate_context.trace_span_guard->valid()) {
+            return;
+        }
+        auto& stream = generate_context.getStream();
+        if (!stream) {
+            return;
+        }
+        const auto             time_info = stream->getTimeInfo();
+        telemetry::PhaseTiming phase_timing;
+        phase_timing.begin_time_us           = time_info.begin_time_us;
+        phase_timing.running_started         = time_info.running_started;
+        phase_timing.running_started_time_us = time_info.running_started_time_us;
+        phase_timing.first_token_committed   = time_info.first_token_committed;
+        phase_timing.first_token_time_us     = time_info.first_token_time_us;
+        phase_timing.generation_done         = time_info.generation_done;
+        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
+        phase_timing.synthesis_end_time_us   = currentTimeUs();
+        phase_timing.request_id              = generate_context.request_id;
+        const bool request_ok                = generate_context.error_status.ok() && !exception_unwinding;
+        if (request_ok && time_info.generation_done) {
+            // Beam rows are an internal search width; Fusion exposes one primary
+            // sequence (the remaining candidates live in beam_responses). Only
+            // ordinary multi-return requests aggregate all active rows.
+            const auto returned_sequence_count = stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) :
+                                                                            stream->currentBatchSize();
+            telemetry::setUsageTokenAttributes(*generate_context.trace_span_guard,
+                                               (int64_t)stream->inputLength(),
+                                               (int64_t)(stream->outputTokenLen() * returned_sequence_count));
+        }
+        phase_timing.error_type = request_ok ?
+                                      nullptr :
+                                      (!generate_context.error_status.ok() ?
+                                           telemetry::grpcStatusCodeName(generate_context.error_status.error_code()) :
+                                           "Exception");
+        telemetry::synthesizePhaseSpans(
+            generate_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Fusion, request_ok);
+    });
+    std::shared_ptr<GenerateInput>     input;
     {
         auto mm_res = prepareInput(*request, input);
         if (!mm_res.ok()) {
@@ -220,6 +271,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
 
     generate_context.error_status =
         pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
     return generate_context.error_status;
 }

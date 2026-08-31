@@ -26,6 +26,7 @@ import grpc
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import QueryStatus, SmokeException
+from smoke.dash_cancel_state import classify_dash_cancel
 from smoke.grammar_constraint_validator import validate_constraint
 
 from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
@@ -51,10 +52,15 @@ class DashQueryInfo(BaseModel):
     model_name: str = "default"
     return_input_ids: bool = False
     enable_thinking: Optional[bool] = None
+    cancel_after_response_count: Optional[int] = None
 
 
 class DashSmokeResponse(BaseModel):
     response: str
+    cancelled: bool = False
+    cancel_requested: bool = False
+    cancel_exercised: bool = False
+    completed_before_cancel: bool = False
     finish_reason: Optional[int] = None
     generated_ids: List[int] = []
     prompt_token_ids: List[int] = []
@@ -239,6 +245,16 @@ class DashGrpcComparer(BaseComparer):
                 ) from e
             return
 
+        if expect.cancelled:
+            if not actual.cancelled or not actual.cancel_exercised:
+                raise SmokeException(
+                    QueryStatus.COMPARE_FAILED,
+                    "dash cancellation was not exercised successfully: "
+                    f"cancelled={actual.cancelled} "
+                    f"cancel_exercised={actual.cancel_exercised} "
+                    f"completed_before_cancel={actual.completed_before_cancel}",
+                )
+            return
         if expect.response != actual.response:
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
@@ -309,6 +325,14 @@ class DashGrpcComparer(BaseComparer):
             )
 
         sampling = _build_sampling_params(query_info.generate_config)
+        if (
+            query_info.cancel_after_response_count is not None
+            and query_info.cancel_after_response_count <= 0
+        ):
+            raise SmokeException(
+                QueryStatus.VALID_FAILED,
+                "cancel_after_response_count must be greater than 0",
+            )
         request = build_model_infer_request(
             request_id=query_info.request_id or f"smoke_dash_{id(self)}",
             model_name=query_info.model_name,
@@ -330,9 +354,16 @@ class DashGrpcComparer(BaseComparer):
             prompt_token_num: Optional[int] = None
             prompt_cached_token_num: Optional[int] = None
             prompt_token_ids: Optional[List[int]] = None
-            for resp in stub.ModelStreamInfer(
+            cancelled = False
+            cancel_requested = False
+            cancel_exercised = False
+            completed_before_cancel = False
+            response_count = 0
+            call = stub.ModelStreamInfer(
                 iter([request]), timeout=DASH_GRPC_TIMEOUT_SECONDS
-            ):
+            )
+            for resp in call:
+                response_count += 1
                 if resp.error_message:
                     raise SmokeException(
                         QueryStatus.VISIT_FAILED,
@@ -373,6 +404,30 @@ class DashGrpcComparer(BaseComparer):
                     ):
                         values = _int32_values(out, raw)
                         prompt_cached_token_num = values[0] if values else None
+                if (
+                    query_info.cancel_after_response_count is not None
+                    and response_count >= query_info.cancel_after_response_count
+                ):
+                    cancel_requested = True
+                    cancel_exercised = bool(call.cancel())
+                    terminal_code = call.code()
+                    try:
+                        cancel_state = classify_dash_cancel(
+                            cancel_exercised=cancel_exercised,
+                            terminal_code=terminal_code,
+                            cancelled_code=grpc.StatusCode.CANCELLED,
+                            ok_code=grpc.StatusCode.OK,
+                        )
+                    except ValueError as exc:
+                        raise SmokeException(
+                            QueryStatus.VISIT_FAILED,
+                            str(exc),
+                        ) from exc
+                    cancel_requested = cancel_state.cancel_requested
+                    cancel_exercised = cancel_state.cancel_exercised
+                    cancelled = cancel_state.cancelled
+                    completed_before_cancel = cancel_state.completed_before_cancel
+                    break
         finally:
             channel.close()
 
@@ -382,6 +437,10 @@ class DashGrpcComparer(BaseComparer):
             response_text = ""
         actual = DashSmokeResponse(
             response=response_text,
+            cancelled=cancelled,
+            cancel_requested=cancel_requested,
+            cancel_exercised=cancel_exercised,
+            completed_before_cancel=completed_before_cancel,
             finish_reason=last_finish,
             generated_ids=generated_ids,
             prompt_token_ids=prompt_token_ids or [],

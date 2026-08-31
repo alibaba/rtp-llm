@@ -437,10 +437,21 @@ py_library(
         ":ops",
         ":config",
         ":structure",
+        ":telemetry",
     ],
     data = [
         "openai/renderers/qwen_agent/utils/qwen.tiktoken"
     ],
+)
+
+py_library(
+    name = "telemetry",
+    srcs = glob([
+        "telemetry/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+    # The tracing SDK is optional at runtime; tracing.py degrades to a no-op
+    # when the import is unavailable, so telemetry never blocks inference.
 )
 
 py_library(
@@ -450,7 +461,8 @@ py_library(
         "frontend/**/*.py",
     ]),
     deps = [
-        ":openai_api"
+        ":openai_api",
+        ":telemetry",
     ]
 )
 
@@ -685,6 +697,9 @@ whl_reqs = [
     "concurrent_log_handler",
     "apache-tvm-ffi",
     "xgrammar==0.2.5",
+    # OTel trace runtime; keep the pinned protobuf compatibility constraint.
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.15.0",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(

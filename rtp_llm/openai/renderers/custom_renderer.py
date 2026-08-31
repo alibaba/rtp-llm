@@ -41,6 +41,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import normalize_request_headers
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -1166,36 +1167,45 @@ class CustomChatRenderer:
             )
             for _ in range(nums_output)
         ]
-        async for outputs in output_generator:
-            if index == 0:
-                yield await self._generate_first(nums_output)
-            index += 1
-            if len(outputs.generate_outputs) != nums_output:
-                raise Exception(
-                    f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
-                )
-            delta_list: List[OutputDelta] = []
-            for status, output in zip(status_list, outputs.generate_outputs):
-                delta = await self._update_single_status(
-                    status,
-                    output,
-                    generate_config.max_new_tokens,
-                    generate_config.stop_words_str,
-                    stop_word_slice_list,
-                    generate_config.is_streaming,
-                )
-                if delta.extra_outputs is None:
-                    delta.extra_outputs = await self._generate_extra_outputs(
-                        output, generate_config
+        try:
+            async for outputs in output_generator:
+                if index == 0:
+                    yield await self._generate_first(nums_output)
+                index += 1
+                if len(outputs.generate_outputs) != nums_output:
+                    raise Exception(
+                        f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
                     )
-                delta_list.append(delta)
-            stream_response = await self._generate_stream_response(
-                delta_list, think_status_list
-            )
-            if self._should_yield_stream_response(stream_response):
-                yield stream_response
-            if self._check_all_finished(status_list):
-                break
+                delta_list: List[OutputDelta] = []
+                for status, output in zip(status_list, outputs.generate_outputs):
+                    delta = await self._update_single_status(
+                        status,
+                        output,
+                        generate_config.max_new_tokens,
+                        generate_config.stop_words_str,
+                        stop_word_slice_list,
+                        generate_config.is_streaming,
+                    )
+                    if delta.extra_outputs is None:
+                        delta.extra_outputs = await self._generate_extra_outputs(
+                            output, generate_config
+                        )
+                    delta_list.append(delta)
+                stream_response = await self._generate_stream_response(
+                    delta_list, think_status_list
+                )
+                if self._should_yield_stream_response(stream_response):
+                    yield stream_response
+                if self._check_all_finished(status_list):
+                    trace_state = CURRENT_TRACE_STATE.get()
+                    if trace_state is not None:
+                        trace_state.mark_renderer_completed()
+                    break
+        finally:
+            # `async for ... break` does not synchronously close an async
+            # generator. Close the owned backend stream before the renderer
+            # emits its final chunks so RPC spans cannot outlive the request.
+            await output_generator.aclose()
         if index != 0:
             flush_response = await self._flush_buffer(
                 status_list,

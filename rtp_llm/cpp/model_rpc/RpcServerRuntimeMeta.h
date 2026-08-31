@@ -80,14 +80,15 @@ public:
     }
 
     void enqueue(const TaskIdentity& identity, const GenerateStreamPtr& stream) {
+        const auto time_info       = stream->getTimeInfo();
+        const auto stream_batch_id = stream->generateInput()->group_id;
+        const auto batch_id        = resolveBatchId(identity, stream_batch_id);
+        auto       new_task        = makeTaskInfo(TaskIdentity{identity.request_id, batch_id},
+                                     stream->prefixLength(),
+                                     stream->inputLength(),
+                                     time_info.wait_time_us / 1000);
+
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        const auto                          stream_batch_id = stream->generateInput()->group_id;
-        const auto                          batch_id        = resolveBatchId(identity, stream_batch_id);
-        auto                                new_task        = makeTaskInfo(
-            TaskIdentity{identity.request_id, batch_id},
-            stream->prefixLength(),
-            stream->inputLength(),
-            stream->getTimeInfo().wait_time_us);
         running_streams_[identity.request_id] = RunningEntry{std::move(new_task), stream};
     }
 
@@ -104,7 +105,7 @@ public:
                                       /*prefix_length=*/0,
                                       /*input_length=*/0,
                                       /*waiting_time_ms=*/0);
-        auto running = running_streams_.find(request_id);
+        auto running   = running_streams_.find(request_id);
         if (running != running_streams_.end()) {
             task_info = running->second.task_info;
         } else {
@@ -124,42 +125,45 @@ public:
 
     // Publish the single authoritative completion delta for priority Cancel.
     // The caller must invoke this only after the Prefill request execution has
-    // quiesced and its local/downstream cleanup path has returned.
-    bool markPriorityPreemptionCanceled(int64_t request_id,
-                                        int64_t error_code,
-                                        const std::string& error_message) {
+    // quiesced and its local/downstream cleanup path has returned. `stream`
+    // must be the registered stream, or null when no local stream was enqueued.
+    bool markPriorityPreemptionCanceled(int64_t                  request_id,
+                                        int64_t                  error_code,
+                                        const std::string&       error_message,
+                                        const GenerateStreamPtr& stream) {
+        StreamRuntimeSnapshot stream_snapshot;
+        const bool            has_stream_snapshot = stream != nullptr;
+        if (has_stream_snapshot) {
+            stream_snapshot = captureStreamRuntimeSnapshot(stream);
+        }
+
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                overlay = priority_preemption_overlays_.find(request_id);
         if (overlay == priority_preemption_overlays_.end()) {
             return false;
         }
+        auto running   = running_streams_.find(request_id);
         auto task_info = overlay->second;
         priority_preemption_overlays_.erase(overlay);
         // Complete the control record and remove a still-visible Prefill
         // runtime entry in one critical section. Calling dequeue() first would
         // publish an untyped finished record and then a second typed CANCELED
         // record for the same request.
-        auto running = running_streams_.find(request_id);
-        if (running != running_streams_.end()) {
-            task_info          = running->second.task_info;
-            const auto& stream = running->second.stream;
-            if (stream) {
-                const int64_t current = autil::TimeUtility::currentTimeInMilliSeconds();
-                task_info.end_time_ms       = current;
-                task_info.prefix_length     = stream->prefixLength();
-                task_info.input_length      = stream->inputLength();
-                task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
-                task_info.iterate_count     = stream->iterCount();
-                task_info.execution_time_ms =
-                    computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
-            }
+        if (running != running_streams_.end() && has_stream_snapshot && running->second.stream == stream) {
+            task_info = running->second.task_info;
+            applyStreamRuntimeSnapshot(task_info, stream_snapshot);
             running_streams_.erase(running);
+        } else if (has_stream_snapshot) {
+            // The request id may already belong to a replacement stream. The
+            // overlay still belongs to the canceled request, so finalize it
+            // from the preserved stream without consuming the replacement.
+            applyStreamRuntimeSnapshot(task_info, stream_snapshot);
         }
         if (task_info.end_time_ms < 0) {
             task_info.end_time_ms = autil::TimeUtility::currentTimeInMilliSeconds();
         }
-        task_info.error_code    = error_code;
-        task_info.error_message = error_message;
+        task_info.error_code                   = error_code;
+        task_info.error_message                = error_message;
         task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELED;
         if (finished_streams_.size() >= finished_capacity_) {
             finished_streams_.pop_front();
@@ -170,46 +174,18 @@ public:
     }
 
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
-        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
-        auto                                ptr = running_streams_.find(request_id);
-        if (ptr == running_streams_.end()) {
+        if (!stream) {
             return;
         }
-        auto& task_info = ptr->second.task_info;
-        int64_t current             = autil::TimeUtility::currentTimeInMilliSeconds();
-        task_info.end_time_ms       = current;
-        task_info.prefix_length     = stream->prefixLength();
-        task_info.input_length      = stream->inputLength();
-        task_info.waiting_time_ms   = stream->getTimeInfo().wait_time_us / 1000;
-        task_info.iterate_count     = stream->iterCount();
-        task_info.execution_time_ms = computeExecutionTimeMs(current, stream->beginTimeUs(), task_info.waiting_time_ms);
-
-        auto overlay = priority_preemption_overlays_.find(request_id);
-        if (overlay != priority_preemption_overlays_.end()) {
-            // Once priority Cancel has published CANCELING, ordinary stream
-            // teardown must not emit an untyped terminal record. Preserve the
-            // latest runtime metrics in the control overlay; the priority
-            // finalizer will publish the one authoritative CANCELED record.
-            overlay->second                              = task_info;
-            overlay->second.end_time_ms                  = -1;
-            overlay->second.error_code                   = 0;
-            overlay->second.error_message.clear();
-            overlay->second.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
-            running_streams_.erase(ptr);
-            return;
+        {
+            std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+            const auto                          running = running_streams_.find(request_id);
+            if (running == running_streams_.end() || running->second.stream != stream) {
+                return;
+            }
         }
-
-        if (finished_streams_.size() >= finished_capacity_) {
-            finished_streams_.pop_front();
-        }
-        if (stream->hasError()) {
-            task_info.error_code    = static_cast<int64_t>(stream->statusInfo().code());
-            task_info.error_message = stream->statusInfo().ToString();
-        }
-
-        int64_t version = version_.fetch_add(1, std::memory_order_relaxed);
-        finished_streams_.push_back(std::make_pair(version, task_info));
-        running_streams_.erase(ptr);
+        const auto stream_snapshot = captureStreamRuntimeSnapshot(stream);
+        commitDequeueSnapshot(request_id, stream, stream_snapshot);
     }
 
     void finishTask(int64_t            request_id,
@@ -246,6 +222,83 @@ public:
     }
 
 protected:
+    struct StreamRuntimeSnapshot {
+        int64_t   end_time_ms     = -1;
+        int64_t   begin_time_us   = 0;
+        int64_t   waiting_time_ms = 0;
+        int64_t   prefix_length   = 0;
+        int64_t   input_length    = 0;
+        size_t    iterate_count   = 0;
+        ErrorInfo status;
+    };
+
+    static StreamRuntimeSnapshot captureStreamRuntimeSnapshot(const GenerateStreamPtr& stream) {
+        // Read the coherent TimeInfo before the wall clock. resetBeginTime()
+        // uses the same stream mutex, so the sampled current time cannot precede
+        // the captured begin epoch during a production reset.
+        const auto time_info = stream->getTimeInfo();
+
+        StreamRuntimeSnapshot snapshot;
+        snapshot.end_time_ms     = autil::TimeUtility::currentTimeInMilliSeconds();
+        snapshot.begin_time_us   = time_info.begin_time_us;
+        snapshot.waiting_time_ms = time_info.wait_time_us / 1000;
+        snapshot.prefix_length   = stream->prefixLength();
+        snapshot.input_length    = stream->inputLength();
+        snapshot.iterate_count   = stream->iterCount();
+        snapshot.status          = stream->statusInfo();
+        return snapshot;
+    }
+
+    static void applyStreamRuntimeSnapshot(EngineScheduleInfo::TaskInfo& task_info,
+                                           const StreamRuntimeSnapshot&  snapshot) {
+        task_info.end_time_ms     = snapshot.end_time_ms;
+        task_info.prefix_length   = snapshot.prefix_length;
+        task_info.input_length    = snapshot.input_length;
+        task_info.waiting_time_ms = snapshot.waiting_time_ms;
+        task_info.iterate_count   = snapshot.iterate_count;
+        task_info.execution_time_ms =
+            computeExecutionTimeMs(snapshot.end_time_ms, snapshot.begin_time_us, snapshot.waiting_time_ms);
+    }
+
+    void commitDequeueSnapshot(int64_t                      request_id,
+                               const GenerateStreamPtr&     stream,
+                               const StreamRuntimeSnapshot& stream_snapshot) {
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        auto                                ptr = running_streams_.find(request_id);
+        if (ptr == running_streams_.end() || ptr->second.stream != stream) {
+            return;
+        }
+        auto& task_info = ptr->second.task_info;
+        applyStreamRuntimeSnapshot(task_info, stream_snapshot);
+
+        auto overlay = priority_preemption_overlays_.find(request_id);
+        if (overlay != priority_preemption_overlays_.end()) {
+            // Once priority Cancel has published CANCELING, ordinary stream
+            // teardown must not emit an untyped terminal record. Preserve the
+            // latest runtime metrics in the control overlay; the priority
+            // finalizer will publish the one authoritative CANCELED record.
+            overlay->second             = task_info;
+            overlay->second.end_time_ms = -1;
+            overlay->second.error_code  = 0;
+            overlay->second.error_message.clear();
+            overlay->second.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
+            running_streams_.erase(ptr);
+            return;
+        }
+
+        if (finished_streams_.size() >= finished_capacity_) {
+            finished_streams_.pop_front();
+        }
+        if (stream_snapshot.status.hasError()) {
+            task_info.error_code    = static_cast<int64_t>(stream_snapshot.status.code());
+            task_info.error_message = stream_snapshot.status.ToString();
+        }
+
+        int64_t version = version_.fetch_add(1, std::memory_order_relaxed);
+        finished_streams_.push_back(std::make_pair(version, task_info));
+        running_streams_.erase(ptr);
+    }
+
     static int64_t resolveBatchId(const TaskIdentity& identity, int64_t stream_batch_id) {
         if (identity.batch_id >= 0) {
             if (stream_batch_id >= 0 && stream_batch_id != identity.batch_id) {
@@ -260,12 +313,9 @@ protected:
         return stream_batch_id;
     }
 
-    static EngineScheduleInfo::TaskInfo makeTaskInfo(const TaskIdentity& identity,
-                                                      int64_t             prefix_length,
-                                                      int64_t             input_length,
-                                                      int64_t             waiting_time_ms) {
-        EngineScheduleInfo::TaskInfo task_info{
-            identity.request_id, prefix_length, input_length, waiting_time_ms};
+    static EngineScheduleInfo::TaskInfo
+    makeTaskInfo(const TaskIdentity& identity, int64_t prefix_length, int64_t input_length, int64_t waiting_time_ms) {
+        EngineScheduleInfo::TaskInfo task_info{identity.request_id, prefix_length, input_length, waiting_time_ms};
         task_info.batch_id = identity.batch_id;
         return task_info;
     }

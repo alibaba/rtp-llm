@@ -1,5 +1,25 @@
 workspace(name = "rtp_llm")
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "io_opentelemetry_cpp",
+    # v1.21.0 tag commit: b9cf499ff5715433848b316059714b5c59af1f2c
+    sha256 = "d020f3aa595a9e0cb8db468c07383e8771744cfe8d0257af4aa721f82c5b4220",
+    strip_prefix = "opentelemetry-cpp-b9cf499ff5715433848b316059714b5c59af1f2c",
+    patch_args = ["-p1"],
+    # See the patch header for the trace-only compatibility contract and the
+    # conditions under which the upstream metrics inputs must be restored.
+    patches = ["//patches/opentelemetry_cpp:0001-trace-only-otlp-recordable.patch"],
+    repo_mapping = {
+        "@zlib": "@zlib_archive",
+    },
+    urls = [
+        "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/third_party/opentelemetry-cpp/opentelemetry-cpp-b9cf499ff5715433848b316059714b5c59af1f2c.tar.gz",
+        "https://github.com/open-telemetry/opentelemetry-cpp/archive/b9cf499ff5715433848b316059714b5c59af1f2c.tar.gz",
+    ],
+)
+
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")
@@ -31,6 +51,10 @@ git_deps()
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()
+
+load("@io_opentelemetry_cpp//bazel:repository.bzl", "opentelemetry_cpp_deps")
+
+opentelemetry_cpp_deps()
 
 load("@rules_python//python:repositories.bzl", "py_repositories")
 
