@@ -39,4 +39,27 @@ class MonitorClientConfigTest {
                     assertThat(context).doesNotHaveBean("flexMonitor");
                 });
     }
+
+    @Test
+    void defaultsToNoOpMonitorWhenProviderIsNotConfigured() {
+        new ApplicationContextRunner().withUserConfiguration(MonitorDisableConfig.class)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(FlexMonitor.class);
+                    assertThat(context.getBean(FlexMonitor.class))
+                            .isSameAs(NoOpFlexMonitor.getInstance());
+                });
+    }
+
+    @Test
+    void providesNoOpMonitorWhenProviderIsExplicitlyNoOp() {
+        new ApplicationContextRunner().withUserConfiguration(MonitorDisableConfig.class)
+                .withPropertyValues("flexlb.monitor.provider=noop")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(FlexMonitor.class);
+                    assertThat(context.getBean(FlexMonitor.class))
+                            .isSameAs(NoOpFlexMonitor.getInstance());
+                });
+    }
 }
