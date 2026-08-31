@@ -615,6 +615,8 @@ def main():
         for k, _, _ in ERR_DEFS:
             err_totals[k] += p.get(k, 0) or 0
     queue_ts = agg.get("queue_timeseries") or []
+    capacity_ts = agg.get("capacity_ts") or {}
+    capacity_stats = agg.get("capacity_stats") or {}
     # compact time series (aggregate_canvas_run.py 861f3a9+；旧 aggregate 无这些键 ->
     # 空 list，对应图条件渲染)
     stage_ts = agg.get("stage_latency_ts") or []
@@ -956,6 +958,46 @@ def main():
                     ]
                 ),
             )
+
+    # 引擎容量 μ（在线估计，aggregate capacity_ts）：集群 μ_req EMA 主线
+    # + raw 差分参考淡线 + λ 到达率参考线（master arrivals，TQ 轴 1s
+    # step 前向对齐）。旧 aggregate 无 capacity_ts 键 -> 面板整体缺省。
+    cap_mu_req = cap_mu_req_raw = cap_lambda = None
+    cap_pe_cats = None
+    cap_pe_series = []
+    if capacity_ts.get("t"):
+        cap_t_vals = [float(t) for t in capacity_ts["t"]]
+        TCAP = const("TCAP", str_arr(sparse_cats(cap_t_vals)))
+        reg_time(TCAP, cap_t_vals)
+        cap_mu_req = const("capMuReq", num_arr(capacity_ts.get("mu_req") or []))
+        cap_mu_req_raw = const(
+            "capMuReqRaw", num_arr(capacity_ts.get("mu_req_raw") or [])
+        )
+        if m_arr_by_t:
+            cap_lambda = const(
+                "capLambda",
+                num_arr(ts_step_values(sorted(m_arr_by_t.items()), cap_t_vals)),
+            )
+        _cap_pe = capacity_ts.get("per_engine") or {}
+        _cap_pe_rows = _cap_pe.get("rows") or []
+        if _cap_pe.get("engines") and _cap_pe_rows:
+            pe_t_vals = [float(r[0]) for r in _cap_pe_rows]
+            TCPE = const("TCPE", str_arr(sparse_cats(pe_t_vals)))
+            reg_time(TCPE, pe_t_vals)
+            cap_pe_cats = TCPE
+            _pe_tones = ("info", "success", "warning", "danger", "neutral")
+            for _j, _eng in enumerate(_cap_pe["engines"]):
+                cap_pe_series.append(
+                    (
+                        "pe%d" % _j,
+                        _eng,
+                        const(
+                            "capPe%d" % _j,
+                            num_arr([r[_j + 1] for r in _cap_pe_rows]),
+                        ),
+                        _pe_tones[_j % len(_pe_tones)],
+                    )
+                )
 
     # engine_dist：窗口 Gini（按池独立，过滤 null 点）
     wg = (ed or {}).get("window_gini") or {}
@@ -1892,6 +1934,82 @@ def main():
                 ),
             )
         )
+        # 引擎容量 μ 面板（L0 容量观测）：集群 μ_req/s EMA + raw 差分参考
+        # 淡线 + λ 到达率参考线；λ 持续高于 μ 即容量超载的直接证据
+        # （275 QPS run：稳态 μ≈250 -> 拥塞衰减至 ~140）。per-engine 子
+        # 面板依赖新引擎构建的 per-engine 批计数（旧 run 无该系列 ->
+        # 整块缺省，不编造）。caliber 跟随 interval_avg_batch_size 口径。
+        if cap_mu_req is not None:
+            if (capacity_ts.get("caliber") or "") == "executed":
+                _cap_caliber_note = (
+                    "executed 口径（μ_req = μ_batches × interval_avg_batch_size，"
+                    "分子 Δprefill_batch_requests 与分母同为执行口径）"
+                )
+            else:
+                _cap_caliber_note = (
+                    "enqueued_fallback 降级口径（旧引擎 stats 无"
+                    " prefill_batch_requests 字段，分子含排队未执行请求，"
+                    "过载下偏虚高）"
+                )
+            cap_series = [
+                ("mu", "μ_req/s（EMA α=0.3）", cap_mu_req, "success"),
+                ("mur", "μ_req/s（raw 差分）", cap_mu_req_raw, "neutral"),
+            ]
+            cap_pan_cap = (
+                "x = 压测时间（s，" + str(q_step) + "s 采样）；y = req/s。"
+                "μ = 引擎集群 prefill 执行吞吐（EMA α=0.3 平滑；淡线为"
+                "原始逐秒差分）——" + _cap_caliber_note
+            )
+            if cap_lambda is not None:
+                cap_series.append(("lam", "λ 到达率（master）", cap_lambda, "danger"))
+                cap_pan_cap += (
+                    "；λ = master 每秒到达（1s step 对齐同轴）——"
+                    "λ 持续高于 μ 的时段即容量超载（引擎侧只能以 μ 消化）"
+                )
+            _cs_mu = ((capacity_stats.get("cluster") or {}).get("mu_req")) or {}
+            if (
+                _cs_mu.get("first60_mean") is not None
+                and _cs_mu.get("last60_mean") is not None
+            ):
+                cap_pan_cap += (
+                    "；run 级：前 60s μ="
+                    + num(_cs_mu.get("first60_mean"))
+                    + "/s · 末 60s μ="
+                    + num(_cs_mu.get("last60_mean"))
+                    + "/s（λ 超载下的拥塞衰减，μ 在线估计的意义所在）"
+                )
+            queue_containers.append(
+                emit_container(
+                    "引擎容量 μ（在线估计）：集群 μ_req/s",
+                    cap_pan_cap,
+                    emit_chart(
+                        "LineChart",
+                        TCAP,
+                        230,
+                        cap_series,
+                        suffix=" req/s",
+                    ),
+                )
+            )
+            if cap_pe_series:
+                queue_containers.append(
+                    emit_container(
+                        "引擎容量 μ（在线估计）：per-engine μ_batches/s",
+                        "x = 压测时间（s，1s 采样）；y = 批/s / 引擎。"
+                        "per-engine prefill 批完成率（Δprefill_batches_total"
+                        " ÷ Δt，EMA α=0.3）；数据源"
+                        " mock_per_engine_timeseries.json.gz 的"
+                        " mock_engine_prefill_batches_total（新引擎构建）；"
+                        "旧 run 无该系列时本面板整体缺省",
+                        emit_chart(
+                            "LineChart",
+                            cap_pe_cats,
+                            230,
+                            cap_pe_series,
+                            suffix=" 批/s",
+                        ),
+                    )
+                )
         # master dispatch 批大小（调度器组队视角，与上方引擎侧执行口径互补）：
         # flexlb_navi_queue_wait 行 requests= = 每个 flush 窗口调度器实际组队
         # 的请求数；NAVI_BATCH 不发 flexlb_batch_dispatch 日志，该行是调度器
@@ -3323,6 +3441,29 @@ def main():
         TAG + " rendered HTML must not contain leak verdict text "
         "(header KPI chip removed by design)"
     )
+
+    # ---- 容量 μ 面板自检（fail-closed，L0 容量观测） ----
+    # 1) capacity_ts 有非零 μ 样本 -> HTML 必含集群 μ 面板标题与 EMA
+    #    序列名；2) per_engine 引擎序列存在 -> HTML 必含 per-engine 子
+    #    面板标题；不存在（旧 run 无 mock_engine_prefill_batches_total
+    #    系列）-> HTML 不得出现该标题（防旧数据伪造空图）。
+    if capacity_ts and any(capacity_ts.get("mu_req") or []):
+        assert "引擎容量 μ（在线估计）：集群" in html_out, (
+            TAG + " capacity_ts present but the cluster-mu panel is missing from HTML"
+        )
+        assert "μ_req/s（EMA" in html_out, (
+            TAG + " cluster-mu panel must label the EMA series"
+        )
+        _pe_has = bool((capacity_ts.get("per_engine") or {}).get("engines"))
+        if _pe_has:
+            assert "per-engine μ_batches" in html_out, (
+                TAG + " per-engine capacity data present but the panel is missing"
+            )
+        else:
+            assert "per-engine μ_batches" not in html_out, (
+                TAG + " per-engine capacity panel must not render "
+                "without per-engine data"
+            )
 
     # ---- 观测口径自检（fail-closed，20260829 口径修正批次）----
     # 1) KPI 发送 QPS：master arrival 口径优先，有 server_arrival_qps 时

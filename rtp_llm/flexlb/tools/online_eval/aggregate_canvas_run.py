@@ -37,6 +37,11 @@ real windowed team size; NAVI_BATCH emits no flexlb_batch_dispatch line,
 so this row is its only observability source),
 engine_waiting_ts (mock per-engine prefill waiting 1s series),
 engine_accepted (per-engine ok-row prefill routing counts, named),
+capacity_ts (online engine-capacity estimate: per-second cluster
+mu_batches / mu_req differenced from the java_mock_stats cumulative
+counters, EMA-smoothed, plus per-engine mu_batches when the new
+mock_engine_prefill_batches_total series exists) and capacity_stats
+(run-level mu summary incl. first60/last60 congestion-decay windows),
 latency_summary (run-level sched/e2e percentiles + err_rows + status dist)
 and sched_latency_10s (10s-bucket sched p50/p95/p99 + completion qps).
 cancel_qps_ts additionally carries master/prefill/decode cancel split rates
@@ -2160,6 +2165,164 @@ if mock_per_engine_ts:
             ),
         }
 
+# ---- capacity_ts / capacity_stats：μ 在线估计（L0 容量观测） ----
+# 集群口径：java_mock_stats 的集群级累计计数器逐秒差分——
+#   μ_batches = Δprefill_batches / Δt（集群 prefill 批完成率）
+#   μ_req = μ_batches × interval_avg_batch_size（集群 prefill 执行吞吐，
+#   与 Σ每引擎 μ_batches × 该引擎 interval_avg_batch_size 数学等价；
+#   caliber 跟随 interval_avg_batch_size：executed = 分子
+#   Δprefill_batch_requests 与分母同为执行口径；enqueued_fallback =
+#   旧引擎 stats 无该字段，分子含排队未执行请求，过载下偏虚高）
+# EMA α=0.3 短窗自适应（首样本无前值，μ=0）。per-engine 口径依赖新
+# 引擎构建输出的 mock_engine_prefill_batches_total{engine_name=
+# "prefill-N"} 系列（mock_per_engine_timeseries.json.gz，1s 采样）；
+# 旧 run 无该系列 -> per_engine 空表（engines=[]、rows=[]），报告端
+# 跳过 per-engine 子面板，不编造数据。
+CAPACITY_EMA_ALPHA = 0.3
+capacity_per_engine = {"engines": [], "rows": []}
+if mock_per_engine_ts:
+    _pe_series = []
+    for x in mock_per_engine_ts:
+        met = x.get("metrics") or {}
+        if not isinstance(met, dict):
+            continue
+        bmap = {}
+        for k, v in met.items():
+            if not isinstance(v, (int, float)):
+                continue
+            mm = re.search(
+                r'mock_engine_prefill_batches_total\{[^}]*engine_name="(prefill-\d+)"',
+                str(k),
+            )
+            if mm:
+                bmap[mm.group(1)] = int(v)
+        if bmap:
+            if not capacity_per_engine["engines"]:
+                capacity_per_engine["engines"] = sorted(bmap.keys())
+            _pe_series.append(
+                (x.get("ts"), [bmap.get(n, 0) for n in capacity_per_engine["engines"]])
+            )
+    if _pe_series:
+        _pe_anchor = epoch0 or _pe_series[0][0]
+        _pe_emas = [0.0] * len(capacity_per_engine["engines"])
+        _pe_prev_ts = None
+        _pe_prev_vals = None
+        for _ts, _vals in _pe_series:
+            _row = [round((_ts - _pe_anchor) / 1000.0, 1)]
+            if _pe_prev_ts is not None and _ts > _pe_prev_ts:
+                _pe_dt = (_ts - _pe_prev_ts) / 1000.0
+                for _j in range(len(_vals)):
+                    _raw = max(0, _vals[_j] - _pe_prev_vals[_j]) / _pe_dt
+                    _pe_emas[_j] = (
+                        CAPACITY_EMA_ALPHA * _raw
+                        + (1 - CAPACITY_EMA_ALPHA) * _pe_emas[_j]
+                    )
+                    _row.append(round(_pe_emas[_j], 2))
+            else:
+                _row.extend([0] * len(_vals))
+            _pe_prev_ts = _ts
+            _pe_prev_vals = _vals
+            capacity_per_engine["rows"].append(_row)
+
+capacity_ts = {
+    "t": [],
+    "mu_batches": [],
+    "mu_batches_raw": [],
+    "mu_req": [],
+    "mu_req_raw": [],
+    "alpha": CAPACITY_EMA_ALPHA,
+    "caliber": "enqueued_fallback",
+    "per_engine": capacity_per_engine,
+}
+if queue_ts:
+    capacity_ts["caliber"] = next(
+        (
+            q.get("interval_avg_batch_size_caliber")
+            for q in queue_ts
+            if q.get("interval_avg_batch_size_caliber")
+        ),
+        "enqueued_fallback",
+    )
+    _mu_b_ema = 0.0
+    _mu_r_ema = 0.0
+    for _i, _q in enumerate(queue_ts):
+        capacity_ts["t"].append(_q["t_offset_s"])
+        if _i == 0:
+            capacity_ts["mu_batches"].append(0)
+            capacity_ts["mu_batches_raw"].append(0)
+            capacity_ts["mu_req"].append(0)
+            capacity_ts["mu_req_raw"].append(0)
+            continue
+        _dt = _q["t_offset_s"] - queue_ts[_i - 1]["t_offset_s"]
+        if _dt <= 0:
+            _dt = 1
+        _mu_b_raw = _q.get("interval_batches", 0) / _dt
+        _mu_r_raw = _mu_b_raw * (_q.get("interval_avg_batch_size", 0) or 0)
+        _mu_b_ema = (
+            CAPACITY_EMA_ALPHA * _mu_b_raw + (1 - CAPACITY_EMA_ALPHA) * _mu_b_ema
+        )
+        _mu_r_ema = (
+            CAPACITY_EMA_ALPHA * _mu_r_raw + (1 - CAPACITY_EMA_ALPHA) * _mu_r_ema
+        )
+        capacity_ts["mu_batches_raw"].append(round(_mu_b_raw, 2))
+        capacity_ts["mu_req_raw"].append(round(_mu_r_raw, 2))
+        capacity_ts["mu_batches"].append(round(_mu_b_ema, 2))
+        capacity_ts["mu_req"].append(round(_mu_r_ema, 2))
+
+# capacity_stats：run 级 μ 汇总。活跃窗 = 首个非零 μ_req EMA 样本起
+# （去启动零段稀释）；first60/last60 = 拥塞衰减取证——λ 超载 run 的
+# 首/末 60s μ 均值对比（如 275 QPS run：稳态 ~250 -> 拥塞 ~140）。
+capacity_stats = {}
+if capacity_ts["t"]:
+
+    def _cap_window_stats(t_vals, mu_vals, lo, hi):
+        _seg = [v for t, v in zip(t_vals, mu_vals) if v is not None and lo <= t < hi]
+        return round(sum(_seg) / len(_seg), 2) if _seg else None
+
+    _t_last = capacity_ts["t"][-1]
+    _active_idx = next((i for i, v in enumerate(capacity_ts["mu_req"]) if v), None)
+    _act_mu_req = capacity_ts["mu_req"][_active_idx:] if _active_idx is not None else []
+    _act_mu_b = (
+        capacity_ts["mu_batches"][_active_idx:] if _active_idx is not None else []
+    )
+    _pe_means = {}
+    if capacity_per_engine["engines"] and capacity_per_engine["rows"]:
+        for _j, _eng in enumerate(capacity_per_engine["engines"]):
+            _col = [r[_j + 1] for r in capacity_per_engine["rows"] if len(r) > _j + 1]
+            _pe_means[_eng] = round(sum(_col) / len(_col), 2) if _col else None
+    capacity_stats = {
+        "alpha": CAPACITY_EMA_ALPHA,
+        "caliber": capacity_ts["caliber"],
+        "engines": len(capacity_per_engine["engines"]) or None,
+        "cluster": {
+            "mu_batches": {
+                "last": capacity_ts["mu_batches"][-1],
+                "mean_active": (
+                    round(sum(_act_mu_b) / len(_act_mu_b), 2) if _act_mu_b else None
+                ),
+            },
+            "mu_req": {
+                "last": capacity_ts["mu_req"][-1],
+                "mean_active": (
+                    round(sum(_act_mu_req) / len(_act_mu_req), 2)
+                    if _act_mu_req
+                    else None
+                ),
+                "p50_active": _pct_cent(_act_mu_req, 50) if _act_mu_req else None,
+                "first60_mean": _cap_window_stats(
+                    capacity_ts["t"], capacity_ts["mu_req"], 1, 61
+                ),
+                "last60_mean": _cap_window_stats(
+                    capacity_ts["t"],
+                    capacity_ts["mu_req"],
+                    max(1, _t_last - 59),
+                    _t_last + 1,
+                ),
+            },
+        },
+        "per_engine_mu_batches_mean": _pe_means,
+    }
+
 # ---- latency_summary + sched_latency_10s（run 级分位与 10s 桶，供 ----
 # ---- html_report_gen.py 多 run 对照；均为既有数据的增量字段） ----
 # sched 分位：is_ok 行的 schedule_ms（与 per_second 同口径）；
@@ -2365,6 +2528,8 @@ out = {
     "navi_dispatch_stats": navi_dispatch_stats,
     "engine_waiting_ts": engine_waiting_ts,
     "engine_accepted": engine_accepted,
+    "capacity_ts": capacity_ts,
+    "capacity_stats": capacity_stats,
     "latency_summary": latency_summary,
     "sched_latency_10s": sched_latency_10s,
 }

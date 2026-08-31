@@ -39,7 +39,9 @@ import threading
 import time
 import urllib.request
 
-# G1 C whitelist — the six analyzer-consumed mock per-engine series.
+# G1 C whitelist — the analyzer-consumed mock per-engine series (the
+# original six plus mock_engine_prefill_batches_total, the per-engine
+# online-capacity source consumed by aggregate_canvas_run.py capacity_ts).
 MOCK_KEEP_SERIES = {
     "mock_engine_running",
     "mock_engine_waiting",
@@ -47,6 +49,7 @@ MOCK_KEEP_SERIES = {
     "mock_engine_available_kv_tokens",
     "mock_engine_accepted_total",
     "mock_engine_completed_total",
+    "mock_engine_prefill_batches_total",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,
@@ -109,8 +112,9 @@ def run_master_counter_poller(http_addr, out_path, interval_s):
 def run_mock_per_engine_poller(port, out_path, interval_s):
     """G1 (was: start_mock_per_engine_poller heredoc).
 
-    GET http://127.0.0.1:{port}/metrics?per_engine=true, keep only the six
-    analyzer-consumed series, one "# ts=" grouped block per round."""
+    GET http://127.0.0.1:{port}/metrics?per_engine=true, keep only the
+    analyzer-consumed series (MOCK_KEEP_SERIES), one "# ts=" grouped block
+    per round."""
     keep = MOCK_KEEP_SERIES
     url = f"http://127.0.0.1:{port}/metrics?per_engine=true"
     with open(out_path, "a", encoding="utf-8") as out:
