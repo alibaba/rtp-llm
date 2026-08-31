@@ -11,6 +11,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NaviBatchSchedulerConfig;
+import org.flexlb.config.BatchDispatcherConfig;
 import com.google.protobuf.ByteString;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -32,7 +33,11 @@ import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -62,6 +67,7 @@ class NaviBatchSchedulerTest {
     private ConfiguredLoadBalanceSelector decodeSelector;
     private NaviBatchScheduler scheduler;
     private FlexlbConfig flexlbConfig;
+    private NaviBatchSchedulerConfig batchCfg;
 
     @BeforeEach
     void setUp() {
@@ -71,7 +77,7 @@ class NaviBatchSchedulerTest {
         batchSubmissionPort = mock(BatchSubmissionPort.class);
         decodeSelector = mock(ConfiguredLoadBalanceSelector.class);
 
-        NaviBatchSchedulerConfig batchCfg = new NaviBatchSchedulerConfig();
+        batchCfg = new NaviBatchSchedulerConfig();
         batchCfg.setNaviBatchMaxCount(4);
         batchCfg.setNaviBatchWindowMs(100);
         batchCfg.setNaviBatchMaxLoopCount(5);
@@ -133,6 +139,49 @@ class NaviBatchSchedulerTest {
         return new WorkerStatus.EngineObservation(
                 RoleType.PREFILL, null, 0L, 0L, Map.of(), 0.0,
                 0L, 0L, 0L, 0L, 0L, 0L, 0L, waitingQueryLen);
+    }
+
+    /** Committed engine observation with an explicit capacity report. */
+    private static WorkerStatus.EngineObservation observationWithCapacity(
+            long availableConcurrency, long waitingQueryLen) {
+        return new WorkerStatus.EngineObservation(
+                RoleType.PREFILL, availableConcurrency, 0L, 0L, Map.of(), 0.0,
+                0L, 0L, 0L, 0L, 0L, 0L, 0L, waitingQueryLen);
+    }
+
+    /** Endpoint whose committed observation can change mid-test. */
+    private PrefillEndpoint mutableObservationEndpoint(
+            String ip, int port,
+            AtomicReference<WorkerStatus.EngineObservation> observation) {
+        PrefillEndpoint ep = mock(PrefillEndpoint.class);
+        WorkerStatus ws = mock(WorkerStatus.class);
+        when(ws.isActiveGeneration()).thenReturn(true);
+        when(ws.getGroup()).thenReturn("g1");
+        when(ws.getGenerationId()).thenReturn(1L);
+        when(ws.committedEngineObservation()).thenAnswer(inv -> observation.get());
+        when(ep.getStatus()).thenReturn(ws);
+        when(ep.getIp()).thenReturn(ip);
+        when(ep.getHttpPort()).thenReturn(port);
+        when(ep.ipPort()).thenReturn(ip + ":" + port);
+        when(ep.getLoadMetric()).thenReturn(OptionalLong.of(0L));
+        LearningPredictor predictor = mock(LearningPredictor.class);
+        when(predictor.weightsSnapshot()).thenReturn(NAVI_PARAMS.clone());
+        when(ep.getPredictor()).thenReturn(predictor);
+        return ep;
+    }
+
+    /** Mock a successful decode selection for batch-dispatch tests. */
+    private void stubSuccessfulDecode() {
+        ServerStatus decodeStatus = new ServerStatus();
+        decodeStatus.setSuccess(true);
+        decodeStatus.setRole(RoleType.DECODE);
+        decodeStatus.setServerIp("10.0.1.1");
+        decodeStatus.setHttpPort(9090);
+        decodeStatus.setGroup("g1");
+        SelectedRole selectedDecode = mock(SelectedRole.class);
+        when(selectedDecode.serverStatus()).thenReturn(decodeStatus);
+        when(decodeSelector.select(any(BalanceContext.class), eq(RoleType.DECODE), any()))
+                .thenReturn(selectedDecode);
     }
 
     /**
@@ -546,6 +595,277 @@ class NaviBatchSchedulerTest {
             assertTrue(resp.isSuccess(),
                     "null engine observation must not break placement ("
                             + "waitMs falls back to the ledger signal)");
+        }
+    }
+
+    // ==================== L2 capacity gating (feasible domain + signals) ====================
+
+    @Test
+    @DisplayName("L2: slot-free signal flushes the window before the timer fires")
+    void capacitySignalFlushesBeforeWindowTimer() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        batchCfg.setNaviBatchWindowMs(10_000);
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        PrefillEndpoint ep = mockEndpoint(
+                "10.0.0.1", 8080, observationWithCapacity(1L, 0L));
+        map.put("10.0.0.1:8080", ep);
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        CompletableFuture<Response> future = scheduler.submit(makeContext(1024));
+        // A 0 → positive edge (first observation already positive counts as
+        // one) must flush immediately; without the signal path the future
+        // could only complete after the 10s window timer.
+        scheduler.onEngineObservationPublished(
+                ep, observationWithCapacity(1L, 0L));
+
+        Response resp = future.get(2, TimeUnit.SECONDS);
+        assertNotNull(resp);
+        assertTrue(resp.isSuccess(),
+                "signal-triggered flush must place the request before the timer");
+    }
+
+    @Test
+    @DisplayName("L2: full endpoints are removed from the PGD feasible domain")
+    void capacityGatingShrinksFeasibleDomain() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        map.put("10.0.0.1:8080", mockEndpoint(
+                "10.0.0.1", 8080, observationWithCapacity(0L, 0L)));
+        map.put("10.0.0.2:8080", mockEndpoint(
+                "10.0.0.2", 8080, observationWithCapacity(1L, 0L)));
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        List<String> logLines = captureQueueWaitLogs(() -> {
+            CompletableFuture<Response>[] futures = new CompletableFuture[4];
+            for (int i = 0; i < 4; i++) {
+                futures[i] = scheduler.submit(makeContext(2048));
+            }
+            for (int i = 0; i < 4; i++) {
+                Response resp = futures[i].join();
+                assertNotNull(resp);
+                assertTrue(resp.isSuccess());
+                assertEquals("10.0.0.2",
+                        resp.getServerStatus().get(0).getServerIp(),
+                        "requests must avoid the endpoint observed at capacity");
+            }
+        });
+        assertFalse(logLines.isEmpty(), "optimizer input observation expected");
+        String line = logLines.get(0);
+        assertEquals("1", fieldValue(line, "nodes"),
+                "feasible domain shrinks to the endpoint with a free slot");
+        assertEquals("1", fieldValue(line, "capacity_full"),
+                "one endpoint was removed by capacity gating");
+        assertEquals("true", fieldValue(line, "capacity_gated"));
+    }
+
+    @Test
+    @DisplayName("L2: empty feasible domain requeues into the buffer until a slot frees")
+    void emptyFeasibleDomainRequeuesIntoBuffer() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        batchCfg.setNaviCapacityStallLimitMs(60_000);
+        AtomicReference<WorkerStatus.EngineObservation> observation =
+                new AtomicReference<>(observationWithCapacity(0L, 0L));
+        PrefillEndpoint ep =
+                mutableObservationEndpoint("10.0.0.1", 8080, observation);
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        map.put("10.0.0.1:8080", ep);
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        CompletableFuture<Response>[] futures = new CompletableFuture[4];
+        for (int i = 0; i < 4; i++) {
+            futures[i] = scheduler.submit(makeContext(1024));
+        }
+        // The count-triggered flush found every eligible endpoint at
+        // capacity and must have requeued the window; the requeue timer keeps
+        // retrying, but the stall valve (60s) stays shut, so nothing completes.
+        Thread.sleep(300);
+        for (int i = 0; i < 4; i++) {
+            assertFalse(futures[i].isDone(),
+                    "requeued requests must stay buffered while every "
+                            + "endpoint is observed at capacity");
+        }
+        // A slot frees (0 → positive edge): the signal flushes immediately.
+        observation.set(observationWithCapacity(1L, 0L));
+        scheduler.onEngineObservationPublished(
+                ep, observationWithCapacity(1L, 0L));
+        for (int i = 0; i < 4; i++) {
+            Response resp = futures[i].get(2, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertTrue(resp.isSuccess(),
+                    "freed slot must release the buffered window");
+        }
+    }
+
+    @Test
+    @DisplayName("L2: window timer still flushes when no signal ever fires")
+    void windowTimerStillFlushesWithoutSignals() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        map.put("10.0.0.1:8080", mockEndpoint(
+                "10.0.0.1", 8080, observationWithCapacity(1L, 0L)));
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        // No onEngineObservationPublished call at all: the plain window timer
+        // (100ms in setUp) must remain the flush backstop under gating.
+        CompletableFuture<Response> future = scheduler.submit(makeContext(1024));
+        Response resp = future.get(2, TimeUnit.SECONDS);
+        assertNotNull(resp);
+        assertTrue(resp.isSuccess(),
+                "window timer must flush without signals");
+    }
+
+    @Test
+    @DisplayName("L2: count trigger (maxCount) semantics unaffected by gating")
+    void countTriggerUnaffectedByGating() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        batchCfg.setNaviBatchWindowMs(10_000);
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        map.put("10.0.0.1:8080", mockEndpoint(
+                "10.0.0.1", 8080, observationWithCapacity(1L, 0L)));
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        CompletableFuture<Response>[] futures = new CompletableFuture[4];
+        for (int i = 0; i < 3; i++) {
+            futures[i] = scheduler.submit(makeContext(1024));
+        }
+        // Below maxCount with a 10s timer: nothing may flush.
+        Thread.sleep(150);
+        for (int i = 0; i < 3; i++) {
+            assertFalse(futures[i].isDone(),
+                    "below maxCount nothing flushes");
+        }
+        // The 4th submit reaches maxCount=4 and must flush immediately.
+        futures[3] = scheduler.submit(makeContext(1024));
+        Response resp = futures[3].get(2, TimeUnit.SECONDS);
+        assertNotNull(resp);
+        assertTrue(resp.isSuccess(),
+                "count trigger must flush immediately under gating");
+    }
+
+    @Test
+    @DisplayName("L2: stall valve forces the full domain after the stall limit")
+    void stallValveForcesFullDomain() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        batchCfg.setNaviCapacityStallLimitMs(50);
+        // windowMs=100 (setUp): the count-triggered flush requeues at ~0ms
+        // stall; the requeue timer fires at ~100ms, exceeding the 50ms valve,
+        // so the second attempt must force the full endpoint domain.
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        map.put("10.0.0.1:8080", mockEndpoint(
+                "10.0.0.1", 8080, observationWithCapacity(0L, 0L)));
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        CompletableFuture<Response>[] futures = new CompletableFuture[4];
+        for (int i = 0; i < 4; i++) {
+            futures[i] = scheduler.submit(makeContext(1024));
+        }
+        for (int i = 0; i < 4; i++) {
+            Response resp = futures[i].get(5, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertTrue(resp.isSuccess(),
+                    "stall valve must force the full domain so requests "
+                            + "are never starved by capacity observations");
+        }
+    }
+
+    @Test
+    @DisplayName("L2: master inflight ledger gates a second window while a batch is in flight")
+    void inflightLedgerGatesSecondWindow() throws Exception {
+        batchCfg.setNaviCapacityGatingEnabled(true);
+        batchCfg.setNaviCapacityStallLimitMs(60_000);
+        // Engine observation always reports spare concurrency: this test
+        // isolates the master-side inflight ledger dimension (cap=1).
+        BatchDispatcherConfig dispatcher = new BatchDispatcherConfig();
+        dispatcher.setMaxInflightBatchesPerPrefillWorker(1);
+        when(flexlbConfig.getDispatcher()).thenReturn(dispatcher);
+        stubSuccessfulDecode();
+
+        AtomicReference<WorkerStatus.EngineObservation> observation =
+                new AtomicReference<>(observationWithCapacity(99L, 0L));
+        PrefillEndpoint ep =
+                mutableObservationEndpoint("10.0.0.1", 8080, observation);
+        ConcurrentHashMap<String, PrefillEndpoint> map = new ConcurrentHashMap<>();
+        map.put("10.0.0.1:8080", ep);
+        when(endpointRegistry.snapshotPrefillEndpoints()).thenReturn(map);
+
+        // First window: the transport accepts the batch but never delivers
+        // (the observer is held), so it stays inflight against cap=1.
+        CountDownLatch firstSubmitted = new CountDownLatch(1);
+        AtomicReference<BatchSubmissionPort.Command> firstCommand =
+                new AtomicReference<>();
+        AtomicReference<BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion>>
+                firstObserver = new AtomicReference<>();
+        BatchSubmissionPort.PreparedSubmission held =
+                mock(BatchSubmissionPort.PreparedSubmission.class);
+        org.mockito.Mockito.doAnswer(inv -> {
+            firstCommand.set(inv.getArgument(0));
+            firstObserver.set(inv.getArgument(1));
+            firstSubmitted.countDown();
+            return null;
+        }).when(held).submitBatch(any(), any());
+        AtomicInteger preparations = new AtomicInteger();
+        when(batchSubmissionPort.tryPrepareSubmission()).thenAnswer(inv -> {
+            if (preparations.getAndIncrement() == 0) {
+                return new org.flexlb.balance.delivery.CapacityBoundary.Attempt.Accepted<>(
+                        held);
+            }
+            BatchSubmissionPort.PreparedSubmission immediate =
+                    mock(BatchSubmissionPort.PreparedSubmission.class);
+            org.mockito.Mockito.doAnswer(submit -> {
+                BatchSubmissionPort.Command command = submit.getArgument(0);
+                @SuppressWarnings("unchecked")
+                BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion> observer =
+                        (BiConsumer<ScheduledRequest, SlotDeliveryPort.Completion>)
+                                submit.getArgument(1);
+                for (ScheduledRequest item : command.exactItems()) {
+                    observer.accept(item,
+                            SlotDeliveryPort.Completion.Delivered.INSTANCE);
+                }
+                return null;
+            }).when(immediate).submitBatch(any(), any());
+            return new org.flexlb.balance.delivery.CapacityBoundary.Attempt.Accepted<>(
+                    immediate);
+        });
+
+        CompletableFuture<Response>[] first = new CompletableFuture[4];
+        for (int i = 0; i < 4; i++) {
+            first[i] = scheduler.submit(makeContext(1024));
+        }
+        assertTrue(firstSubmitted.await(2, TimeUnit.SECONDS),
+                "first batch must reach the transport");
+
+        // Second window: the endpoint reports spare engine concurrency, but
+        // the master ledger (1 inflight batch, cap 1) removes it from the
+        // feasible domain, so the window requeues and waits.
+        CompletableFuture<Response>[] second = new CompletableFuture[4];
+        for (int i = 0; i < 4; i++) {
+            second[i] = scheduler.submit(makeContext(1024));
+        }
+        Thread.sleep(200);
+        for (int i = 0; i < 4; i++) {
+            assertFalse(second[i].isDone(),
+                    "second window must requeue while the first batch "
+                            + "is still inflight");
+        }
+
+        // Terminal outcomes for the first batch settle the ledger; the
+        // requeue timer (windowMs=100) then flushes the second window.
+        for (ScheduledRequest item : firstCommand.get().exactItems()) {
+            firstObserver.get().accept(item,
+                    SlotDeliveryPort.Completion.Delivered.INSTANCE);
+        }
+        for (int i = 0; i < 4; i++) {
+            Response resp = first[i].get(2, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertTrue(resp.isEnqueuedByMaster(),
+                    "first batch settles as delivered");
+        }
+        for (int i = 0; i < 4; i++) {
+            Response resp = second[i].get(5, TimeUnit.SECONDS);
+            assertNotNull(resp);
+            assertTrue(resp.isSuccess(),
+                    "ledger release must let the second window dispatch");
+            assertTrue(resp.isEnqueuedByMaster());
         }
     }
 }

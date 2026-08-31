@@ -6,7 +6,9 @@ import org.flexlb.balance.endpoint.EndpointStatusReduction;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -20,9 +22,20 @@ import java.util.Objects;
 @Component
 final class EndpointEventProjector implements EndpointEventSink {
     private final RequestLifecycleCoordinator scheduler;
+    /**
+     * Lazy reference to the NAVI scheduler: injecting it directly would close
+     * the construction cycle NaviBatchScheduler → EndpointRegistry →
+     * EndpointEventSink (this projector). Resolved once on first use, when
+     * the container is fully initialized.
+     */
+    private final ObjectProvider<NaviBatchScheduler> naviSchedulerProvider;
+    private volatile NaviBatchScheduler naviScheduler;
 
-    EndpointEventProjector(RequestLifecycleCoordinator scheduler) {
+    EndpointEventProjector(RequestLifecycleCoordinator scheduler,
+                           ObjectProvider<NaviBatchScheduler> naviSchedulerProvider) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+        this.naviSchedulerProvider = Objects.requireNonNull(
+                naviSchedulerProvider, "naviSchedulerProvider");
     }
 
     @Override
@@ -34,6 +47,29 @@ final class EndpointEventProjector implements EndpointEventSink {
             projectStatusReduction(reduction);
         } catch (Throwable failure) {
             logEventProjectionFailureNoFail("status", failure);
+        }
+    }
+
+    @Override
+    public void onEngineObservationPublished(
+            PrefillEndpoint endpoint,
+            WorkerStatus.EngineObservation observation) {
+        // Not a RequestSlot projection: forward the read-only observation to
+        // the NAVI scheduler's O(1) slot-free edge detector. Failure here must
+        // never break the status poll cycle.
+        try {
+            NaviBatchScheduler navi = this.naviScheduler;
+            if (navi == null) {
+                navi = naviSchedulerProvider.getIfAvailable();
+                if (navi != null) {
+                    this.naviScheduler = navi;
+                }
+            }
+            if (navi != null) {
+                navi.onEngineObservationPublished(endpoint, observation);
+            }
+        } catch (Throwable failure) {
+            logEventProjectionFailureNoFail("engine observation", failure);
         }
     }
 

@@ -23,6 +23,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -57,7 +58,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             EngineCancelChannel cancelChannel) {
         this.lifecycle = new RequestLifecycleCoordinator(
                 configService, batchReporter, requestReporter, cancelChannel);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents = new EndpointEventProjector(
+                lifecycle, noNaviScheduler());
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
@@ -96,6 +98,34 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 lifecycle, registry);
         this.shutdown = new RequestShutdownOrchestrator(
                 lifecycle, registry, scheduler);
+    }
+
+    /**
+     * No NAVI scheduler in this fixture: the lazy provider resolves to null,
+     * so the projector's engine-observation forwarding stays inert.
+     */
+    private static ObjectProvider<NaviBatchScheduler> noNaviScheduler() {
+        return new ObjectProvider<NaviBatchScheduler>() {
+            @Override
+            public NaviBatchScheduler getObject() {
+                return null;
+            }
+
+            @Override
+            public NaviBatchScheduler getObject(Object... args) {
+                return null;
+            }
+
+            @Override
+            public NaviBatchScheduler getIfAvailable() {
+                return null;
+            }
+
+            @Override
+            public NaviBatchScheduler getIfUnique() {
+                return null;
+            }
+        };
     }
 
     public RequestScheduler scheduler() {

@@ -41,4 +41,26 @@ public final class NaviBatchSchedulerConfig implements SchedulerConfig {
 
     /** Maximum requests gathered into a single optimization call. */
     private int naviBatchMaxCount = 30;
+
+    /**
+     * L2 capacity closed loop: shrink the PGD feasible domain to endpoints
+     * with free capacity and add engine slot-free signals as an extra flush
+     * trigger. Off by default: it is a behavior change that depends on the
+     * engine reporting {@code available_concurrency} (the Java mock engine
+     * reports {@code max_prefill_concurrency - running prefill batches};
+     * production engines that leave the protobuf field unset read as 0 and
+     * would look permanently full). With the flag off the scheduler behaves
+     * exactly as before.
+     */
+    private boolean naviCapacityGatingEnabled = false;
+
+    /**
+     * Safety valve for the feasible-domain skip: when every eligible endpoint
+     * is observed at capacity, a flushed window requeues into the buffer and
+     * waits for the next trigger. Once the oldest requeued request has been
+     * stalled for this long, the next flush forces the full endpoint domain
+     * (pre-LS behavior) so requests can never be starved by a stale or
+     * misleading capacity observation.
+     */
+    private long naviCapacityStallLimitMs = 300;
 }

@@ -16,6 +16,7 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -332,7 +333,31 @@ class RequestAdmissionResourceLeakTest {
     }
 
     private void publishDecodeAccepted(Registered registered) {
-        new EndpointEventProjector(lifecycle).onStatusReduced(
+        // No NAVI scheduler in this harness: the lazy provider resolves to
+        // null, leaving the observation forwarding disabled.
+        ObjectProvider<NaviBatchScheduler> noNaviScheduler =
+                new ObjectProvider<NaviBatchScheduler>() {
+                    @Override
+                    public NaviBatchScheduler getObject() {
+                        return null;
+                    }
+
+                    @Override
+                    public NaviBatchScheduler getObject(Object... args) {
+                        return null;
+                    }
+
+                    @Override
+                    public NaviBatchScheduler getIfAvailable() {
+                        return null;
+                    }
+
+                    @Override
+                    public NaviBatchScheduler getIfUnique() {
+                        return null;
+                    }
+                };
+        new EndpointEventProjector(lifecycle, noNaviScheduler).onStatusReduced(
                 new DecodeEndpoint.StatusReduction(
                 registered.item().decodeEp(),
                 List.of(new DecodeEndpoint.AcceptedWorkerStatusFact(

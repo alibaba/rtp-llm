@@ -36,11 +36,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
@@ -63,8 +66,23 @@ import java.util.function.BiConsumer;
  *   <li>the first request of an empty buffer arms a {@code naviBatchWindowMs}
  *       timer — flush when it fires;</li>
  *   <li>a defensive overflow guard flushes when the buffer grows beyond twice
- *       the configured maximum.</li>
+ *       the configured maximum;</li>
+ *   <li>with L2 capacity gating enabled, an engine slot-free signal (observed
+ *       {@code available_concurrency} rising to a positive value) flushes
+ *       immediately. The signal is a trigger, never a decision domain: the
+ *       window timer stays armed as the worst-case backstop, so the flush
+ *       gap is bounded by {@code naviBatchWindowMs} when no signal fires.</li>
  * </ul>
+ *
+ * <p>L2 capacity gating (off by default, {@code naviCapacityGatingEnabled})
+ * additionally shrinks each round's PGD feasible domain to endpoints that
+ * currently look able to accept work (see {@link #hasFreeCapacity}). Full
+ * endpoints simply do not join that round's joint optimization — smooth
+ * feasible-domain contraction instead of all-or-nothing weight zeroing. If
+ * every eligible endpoint is observed at capacity the window is requeued
+ * into the one and only buffer (no shadow queue) and retries on the next
+ * trigger, bounded by the {@code naviCapacityStallLimitMs} starvation
+ * valve which forces the full domain.
  *
  * <p>All optimize-and-dispatch work is serialized on a single-thread executor,
  * which keeps the {@link NaviPgdOptimizer} instance thread-confined (it is not
@@ -104,6 +122,27 @@ public class NaviBatchScheduler {
     private volatile boolean closed;
     /** Cumulative P0-1 degrade events (decode unavailable -> prefill-only). */
     private final AtomicLong decodeDegradeCount = new AtomicLong();
+    /**
+     * L2 capacity gating: master-side count of EnqueueBatch batches submitted
+     * to an endpoint but not yet at a transport terminal outcome. Navi batches
+     * bypass PrefillState's reserveBatch ledger, so this is the scheduler's
+     * own O(1) inflight view, keyed by endpoint ip:port.
+     */
+    private final ConcurrentHashMap<String, AtomicInteger> inflightBatches =
+            new ConcurrentHashMap<>();
+    /**
+     * L2 capacity gating: last observed {@code availableConcurrency} per
+     * endpoint, used for O(1) slot-free edge detection on the status signal.
+     */
+    private final ConcurrentHashMap<String, Long> lastAvailableConcurrency =
+            new ConcurrentHashMap<>();
+    /**
+     * L2 capacity gating: coalescing flag so a burst of status signals merges
+     * into at most one queued flush task on the single-thread executor.
+     */
+    private final AtomicBoolean signalFlushPending = new AtomicBoolean();
+    /** Cumulative feasible-domain requeues (every eligible endpoint observed full). */
+    private final AtomicLong capacityRequeueCount = new AtomicLong();
 
     @Autowired
     public NaviBatchScheduler(ConfigService configService,
@@ -134,6 +173,42 @@ public class NaviBatchScheduler {
     }
 
     // ==================== Public API ====================
+
+    /**
+     * Engine status signal for the L2 capacity closed loop. Called (outside
+     * any worker-status lock, from the status polling callback) every time a
+     * prefill endpoint's committed observation is republished; the scheduler
+     * keeps only the last observed {@code availableConcurrency} per endpoint
+     * and turns a 0 → positive edge (a freed slot) into an immediate flush of
+     * the buffered window — without waiting for the window timer.
+     *
+     * <p>The whole path is O(1): one map read/write, one CAS, at most one
+     * task submission. Signal bursts coalesce through
+     * {@link #signalFlushPending}; with gating disabled the call returns
+     * right after the config read.
+     */
+    public void onEngineObservationPublished(
+            PrefillEndpoint endpoint,
+            WorkerStatus.EngineObservation observation) {
+        if (endpoint == null || observation == null) {
+            return;
+        }
+        if (!currentConfig().isNaviCapacityGatingEnabled()) {
+            return;
+        }
+        Long available = observation.availableConcurrency();
+        if (available == null || available <= 0L) {
+            // No free slot observed (or the engine cannot report one):
+            // remember the non-positive value so the next rise is an edge.
+            lastAvailableConcurrency.put(endpoint.ipPort(), 0L);
+            return;
+        }
+        Long previous = lastAvailableConcurrency.put(
+                endpoint.ipPort(), available);
+        if (previous == null || previous <= 0L) {
+            requestSignalFlush();
+        }
+    }
 
     /**
      * Submit one request into the global attbatch window. The returned future
@@ -194,6 +269,35 @@ public class NaviBatchScheduler {
 
     /** Timer callback: flush whatever accumulated within the collection window. */
     private void onWindowElapsed() {
+        flushBufferNow();
+    }
+
+    /**
+     * Coalesce a capacity signal into at most one queued flush task. The
+     * flag is released when the task starts running, so signals arriving
+     * while a flush is in flight queue exactly one follow-up; signals
+     * arriving with an empty buffer are no-ops inside the task.
+     */
+    private void requestSignalFlush() {
+        if (!signalFlushPending.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            flushExecutor.execute(() -> {
+                signalFlushPending.set(false);
+                flushBufferNow();
+            });
+        } catch (RuntimeException rejected) {
+            signalFlushPending.set(false);
+        }
+    }
+
+    /**
+     * Swap out and optimize the whole current buffer. Runs inline on the
+     * flush-executor thread (both callers — window timer and capacity
+     * signal — are already there), preserving window ordering.
+     */
+    private void flushBufferNow() {
         List<PendingRequest> toFlush;
         lock.lock();
         try {
@@ -260,14 +364,6 @@ public class NaviBatchScheduler {
                     ? config.naviBatchScheduler()
                     : new NaviBatchSchedulerConfig();
 
-            // 1. Collect eligible Prefill endpoints (alive + learning predictor)
-            //    and their navi latency parameters.
-            List<PrefillEndpoint> nodes = new ArrayList<>();
-            List<double[]> nodeParams = new ArrayList<>();
-            List<Double> nodeQueue = new ArrayList<>();
-            List<Long> nodeLedgerMs = new ArrayList<>();
-            List<Long> nodeEngineMs = new ArrayList<>();
-            List<Long> nodeWaiting = new ArrayList<>();
             // Average request length of this window (tokens); the O(1)
             // pricing basis for every node's engine queue estimate below.
             long windowTotalTokens = 0L;
@@ -277,63 +373,71 @@ public class NaviBatchScheduler {
                         ? 1L : Math.max(1L, request.getSeqLen());
             }
             long windowAvgTokens = Math.max(1L, windowTotalTokens / batch.size());
-            for (PrefillEndpoint endpoint
-                    : endpointRegistry.snapshotPrefillEndpoints().values()) {
-                if (endpoint.getStatus() == null
-                        || !endpoint.getStatus().isActiveGeneration()) {
-                    continue;
+
+            // 1. Collect eligible Prefill endpoints (alive + learning
+            //    predictor) and their navi latency parameters. With L2
+            //    capacity gating enabled the PGD feasible domain shrinks to
+            //    endpoints that currently look able to accept work — full
+            //    endpoints do not join this round's joint optimization at
+            //    all (smooth feasible-domain contraction, never weight
+            //    zeroing). See #collectNodeCandidates / #hasFreeCapacity.
+            boolean capacityGating = cfg.isNaviCapacityGatingEnabled();
+            Integer inflightCap = capacityGating
+                    ? dispatcherInflightCap(config) : null;
+            NodeCandidates candidates = collectNodeCandidates(
+                    windowAvgTokens, capacityGating, inflightCap);
+            if (candidates.nodes.isEmpty()) {
+                boolean anyAtCapacity =
+                        capacityGating && candidates.capacityFullCount > 0;
+                if (!anyAtCapacity) {
+                    failAll(batch, StrategyErrorType.NO_AVAILABLE_WORKER);
+                    return;
                 }
-                PrefillTimePredictor predictor = endpoint.getPredictor();
-                if (!(predictor instanceof LearningPredictor learning)) {
-                    continue;
+                // Every eligible endpoint is observed at capacity: skip this
+                // flush round and requeue the window into the buffer — the
+                // requests stay in the one and only buffer, no new waiting
+                // area. The stall valve below bounds the requeue chain.
+                long stalledMs = (System.nanoTime() - batch.get(0).arrivalNanos())
+                        / 1_000_000L;
+                if (stalledMs < Math.max(0L, cfg.getNaviCapacityStallLimitMs())) {
+                    long requeues = capacityRequeueCount.incrementAndGet();
+                    if (requeues == 1L || requeues % 100L == 0L) {
+                        Logger.info("flexlb_navi_capacity_requeue requests={} "
+                                        + "stalled_ms={} full_endpoints={} "
+                                        + "stall_limit_ms={} total_requeues={}",
+                                batch.size(), stalledMs,
+                                candidates.capacityFullCount,
+                                Math.max(0L, cfg.getNaviCapacityStallLimitMs()),
+                                requeues);
+                    }
+                    requeueBatch(batch);
+                    return;
                 }
-                double[] weights = learning.weightsSnapshot();
-                if (weights == null) {
-                    continue;
+                // Stall valve: the oldest requeued request has waited past the
+                // configured limit, so a stale or misleading capacity
+                // observation must not starve it — force the full endpoint
+                // domain (pre-L2 behavior) for this round.
+                Logger.warn("flexlb_navi_capacity_stall_forced requests={} "
+                                + "stalled_ms={} full_endpoints={}: "
+                                + "forcing full feasible domain",
+                        batch.size(), stalledMs, candidates.capacityFullCount);
+                candidates = collectNodeCandidates(windowAvgTokens, false, null);
+                if (candidates.nodes.isEmpty()) {
+                    failAll(batch, StrategyErrorType.NO_AVAILABLE_WORKER);
+                    return;
                 }
-                // Queue wait merges two independent measures of the work
-                // already sitting on this endpoint. ledgerMs is the
-                // per-endpoint work ledger: navi batches bypass
-                // reserveBatch/reserveRoute, so under a navi-only deployment
-                // the ledger's committed snapshot goes empty (unknown engine
-                // requests make totalRemainingWorkMs() absent) and reads as
-                // zero — the defect fixed here. engineMs is the engine's
-                // directly reported waiting count priced into milliseconds
-                // through the same navi latency model the optimizer uses
-                // (see #engineQueueWaitEstimateMs); it is ledger-independent,
-                // O(1) in queue depth, and stays observable under navi-only
-                // load. Both estimate the same backlog, so taking the max
-                // avoids double counting either measure while staying
-                // conservative; in a mixed deployment the larger of ledgered
-                // and engine-reported backlog wins.
-                long ledgerMs = endpoint.getLoadMetric().orElse(0L);
-                WorkerStatus.EngineObservation observation =
-                        endpoint.getStatus().committedEngineObservation();
-                long engineMs = engineQueueWaitEstimateMs(
-                        observation, weights, windowAvgTokens);
-                long waitMs = Math.max(ledgerMs, engineMs);
-                nodes.add(endpoint);
-                nodeParams.add(weights);
-                nodeQueue.add((double) Math.max(0L, waitMs));
-                nodeLedgerMs.add(Math.max(0L, ledgerMs));
-                nodeEngineMs.add(engineMs);
-                nodeWaiting.add(observation == null
-                        ? 0L : Math.max(0L, observation.waitingQueryLen()));
             }
 
-            int nodeCount = nodes.size();
+            int nodeCount = candidates.nodes.size();
             int requestCount = batch.size();
-            if (nodeCount == 0) {
-                failAll(batch, StrategyErrorType.NO_AVAILABLE_WORKER);
-                return;
-            }
 
             // 2. Build the optimizer inputs. cacheHitTokens is node-major:
             //    index = nodeIndex * requestCount + requestIndex.
-            double[][] latencyParameters = nodeParams.toArray(new double[0][]);
+            List<PrefillEndpoint> nodes = candidates.nodes;
+            double[][] latencyParameters = candidates.params.toArray(new double[0][]);
             double[] queueWaitMs = new double[nodeCount];
             for (int n = 0; n < nodeCount; n++) {
-                queueWaitMs[n] = nodeQueue.get(n);
+                queueWaitMs[n] = candidates.queueWait.get(n);
             }
             long[] requestTokenCounts = new long[requestCount];
             long[] cacheHitTokens = new long[nodeCount * requestCount];
@@ -360,6 +464,9 @@ public class NaviBatchScheduler {
             // ledger_ms expose the two components merged by the max() above;
             // waiting is the engine-reported waitingQueryLen per node and
             // avg_tokens the window-scalar pricing basis behind engine_ms.
+            // capacity_gated / capacity_full expose the L2 feasible-domain
+            // contraction: whether gating shaped this round and how many
+            // eligible endpoints it removed.
             // Rate note: one INFO line per optimize-and-dispatch call —
             // ceiling ~33 lines/s at naviBatchWindowMs=30 under continuous
             // full load, each line well under ~400 chars; logback's
@@ -379,15 +486,17 @@ public class NaviBatchScheduler {
                     waitingDiag.append(',');
                 }
                 queueWaitDiag.append((long) queueWaitMs[n]);
-                engineMsDiag.append(nodeEngineMs.get(n));
-                ledgerMsDiag.append(nodeLedgerMs.get(n));
-                waitingDiag.append(nodeWaiting.get(n));
+                engineMsDiag.append(candidates.engineMs.get(n));
+                ledgerMsDiag.append(candidates.ledgerMs.get(n));
+                waitingDiag.append(candidates.waiting.get(n));
             }
             Logger.info("flexlb_navi_queue_wait nodes={} requests={} "
                             + "avg_tokens={} queue_wait_ms={} engine_ms={} "
-                            + "ledger_ms={} waiting={}",
+                            + "ledger_ms={} waiting={} capacity_gated={} "
+                            + "capacity_full={}",
                     nodeCount, requestCount, windowAvgTokens, queueWaitDiag,
-                    engineMsDiag, ledgerMsDiag, waitingDiag);
+                    engineMsDiag, ledgerMsDiag, waitingDiag, capacityGating,
+                    candidates.capacityFullCount);
 
             // 3. Run the joint PGD assignment.
             optimizer.configure(
@@ -442,6 +551,162 @@ public class NaviBatchScheduler {
             Logger.warn("NAVI_BATCH optimize/dispatch failed for {} requests",
                     batch.size(), failure);
             failAll(batch, StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
+    }
+
+    // ==================== L2 capacity feasible domain ====================
+
+    /** Optimizer-input candidates for one flush round (flush-executor thread). */
+    private static final class NodeCandidates {
+        final List<PrefillEndpoint> nodes = new ArrayList<>();
+        final List<double[]> params = new ArrayList<>();
+        final List<Double> queueWait = new ArrayList<>();
+        final List<Long> ledgerMs = new ArrayList<>();
+        final List<Long> engineMs = new ArrayList<>();
+        final List<Long> waiting = new ArrayList<>();
+        /** Eligible endpoints removed by capacity gating this round. */
+        int capacityFullCount;
+    }
+
+    /**
+     * Collect the PGD feasible domain for one flush round. When
+     * {@code applyCapacityGating} is set, endpoints failing
+     * {@link #hasFreeCapacity} are counted and skipped: they do not join
+     * this round's joint optimization at all. O(eligible endpoints) with
+     * O(1) work per endpoint — no per-request or per-task traversal.
+     */
+    private NodeCandidates collectNodeCandidates(long windowAvgTokens,
+                                                 boolean applyCapacityGating,
+                                                 Integer inflightCap) {
+        NodeCandidates candidates = new NodeCandidates();
+        for (PrefillEndpoint endpoint
+                : endpointRegistry.snapshotPrefillEndpoints().values()) {
+            if (endpoint.getStatus() == null
+                    || !endpoint.getStatus().isActiveGeneration()) {
+                continue;
+            }
+            PrefillTimePredictor predictor = endpoint.getPredictor();
+            if (!(predictor instanceof LearningPredictor learning)) {
+                continue;
+            }
+            double[] weights = learning.weightsSnapshot();
+            if (weights == null) {
+                continue;
+            }
+            WorkerStatus.EngineObservation observation =
+                    endpoint.getStatus().committedEngineObservation();
+            if (applyCapacityGating
+                    && !hasFreeCapacity(endpoint.ipPort(), observation, inflightCap)) {
+                candidates.capacityFullCount++;
+                continue;
+            }
+            // Queue wait merges two independent measures of the work
+            // already sitting on this endpoint. ledgerMs is the
+            // per-endpoint work ledger: navi batches bypass
+            // reserveBatch/reserveRoute, so under a navi-only deployment
+            // the ledger's committed snapshot goes empty (unknown engine
+            // requests make totalRemainingWorkMs() absent) and reads as
+            // zero — the defect fixed here. engineMs is the engine's
+            // directly reported waiting count priced into milliseconds
+            // through the same navi latency model the optimizer uses
+            // (see #engineQueueWaitEstimateMs); it is ledger-independent,
+            // O(1) in queue depth, and stays observable under navi-only
+            // load. Both estimate the same backlog, so taking the max
+            // avoids double counting either measure while staying
+            // conservative; in a mixed deployment the larger of ledgered
+            // and engine-reported backlog wins.
+            long ledgerMs = endpoint.getLoadMetric().orElse(0L);
+            long engineMs = engineQueueWaitEstimateMs(
+                    observation, weights, windowAvgTokens);
+            long waitMs = Math.max(ledgerMs, engineMs);
+            candidates.nodes.add(endpoint);
+            candidates.params.add(weights);
+            candidates.queueWait.add((double) Math.max(0L, waitMs));
+            candidates.ledgerMs.add(Math.max(0L, ledgerMs));
+            candidates.engineMs.add(engineMs);
+            candidates.waiting.add(observation == null
+                    ? 0L : Math.max(0L, observation.waitingQueryLen()));
+        }
+        return candidates;
+    }
+
+    /**
+     * Free-capacity verdict for one endpoint, the intersection (AND) of the
+     * two capacity signals — the conservative combination:
+     *
+     * <ul>
+     *   <li>Master side (primary): this scheduler's own EnqueueBatch
+     *       inflight ledger against
+     *       {@code maxInflightBatchesPerPrefillWorker}. Real-time and exact,
+     *       but blind to work the engine took through other paths (e.g.
+     *       route-decision traffic driven straight at the engine).</li>
+     *   <li>Engine side (secondary): the committed
+     *       {@code availableConcurrency} observation (~20 ms polling
+     *       freshness; the mock engine reports
+     *       {@code max_prefill_concurrency - running prefill batches}).
+     *       {@code null} means the engine does not report the field, in
+     *       which case only the master ledger decides.</li>
+     * </ul>
+     *
+     * <p>Both lookups are O(1) map reads; the endpoint's waiting-queue depth
+     * is deliberately not traversed (hot-path red line).
+     */
+    private boolean hasFreeCapacity(String endpointKey,
+                                    WorkerStatus.EngineObservation observation,
+                                    Integer inflightCap) {
+        if (inflightCap != null && inflightCap > 0) {
+            AtomicInteger inflight = inflightBatches.get(endpointKey);
+            if (inflight != null && inflight.get() >= inflightCap) {
+                return false;
+            }
+        }
+        if (observation != null && observation.availableConcurrency() != null) {
+            return observation.availableConcurrency() > 0L;
+        }
+        return true;
+    }
+
+    /** Master-side inflight batch cap from the batch dispatcher config. */
+    private static Integer dispatcherInflightCap(FlexlbConfig config) {
+        return config.getDispatcher() instanceof BatchDispatcherConfig batch
+                ? batch.maxInflightDeliveriesPerPrefillWorker()
+                : null;
+    }
+
+    /**
+     * Return a requeued window to the front of the buffer (its requests
+     * arrived earlier than anything submitted meanwhile) and re-arm the
+     * window timer so the worst-case retry gap stays one window period; a
+     * slot-free signal can still preempt the timer at any moment. The
+     * requests never leave the one and only buffer — no shadow queue.
+     */
+    private void requeueBatch(List<PendingRequest> batch) {
+        boolean failInstead = false;
+        lock.lock();
+        try {
+            if (closed) {
+                failInstead = true;
+            } else {
+                if (pendingFlush != null) {
+                    pendingFlush.cancel(false);
+                    pendingFlush = null;
+                }
+                List<PendingRequest> merged =
+                        new ArrayList<>(batch.size() + buffer.size());
+                merged.addAll(batch);
+                merged.addAll(buffer);
+                buffer = merged;
+                long earliest = batch.get(0).arrivalNanos();
+                oldestArrivalNanos = oldestArrivalNanos == 0L
+                        ? earliest : Math.min(oldestArrivalNanos, earliest);
+                scheduleTimerLocked(
+                        Math.max(0L, currentConfig().getNaviBatchWindowMs()));
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (failInstead) {
+            failAll(batch, StrategyErrorType.BATCH_DISPATCH_FAILED);
         }
     }
 
@@ -561,17 +826,26 @@ public class NaviBatchScheduler {
             return false;
         }
         BatchSubmissionPort.PreparedSubmission prepared = accepted.value();
+        // L2 capacity ledger: the batch is accounted as inflight before the
+        // submit call, so synchronous observer callbacks (which settle the
+        // ledger on the last member) never decrement below zero. A submit
+        // failure rolls the increment back exactly once (idempotent settle).
+        String endpointKey = endpoint.ipPort();
+        inflightBatches.computeIfAbsent(endpointKey, ignored -> new AtomicInteger())
+                .incrementAndGet();
+        NaviDispatchObserver observer = new NaviDispatchObserver(
+                members, endpoint, cacheHitTokens, requestCount, nodeIndex,
+                requestIndexes, endpointKey);
         boolean submitted = false;
         try {
             BatchSubmissionPort.Command command = new BatchSubmissionPort.Command(
                     List.copyOf(items), batchId, 0L,
                     new DeliveryMetadata(REASON, 0));
-            prepared.submitBatch(command, new NaviDispatchObserver(
-                    members, endpoint, cacheHitTokens, requestCount, nodeIndex,
-                    requestIndexes));
+            prepared.submitBatch(command, observer);
             submitted = true;
             return true;
         } catch (RuntimeException submitFailure) {
+            observer.abandonInflight();
             Logger.debug("NAVI_BATCH dispatcher submit failed, using route decisions",
                     submitFailure);
             return false;
@@ -598,19 +872,27 @@ public class NaviBatchScheduler {
         private final int requestCount;
         private final int nodeIndex;
         private final List<Integer> requestIndexes;
+        /** L2 capacity ledger: endpoint key and settle-once state. */
+        private final String endpointKey;
+        private final AtomicInteger remainingMembers;
+        private final AtomicBoolean inflightSettled;
 
         private NaviDispatchObserver(List<PendingRequest> members,
                                      PrefillEndpoint endpoint,
                                      long[] cacheHitTokens,
                                      int requestCount,
                                      int nodeIndex,
-                                     List<Integer> requestIndexes) {
+                                     List<Integer> requestIndexes,
+                                     String endpointKey) {
             this.members = members;
             this.endpoint = endpoint;
             this.cacheHitTokens = cacheHitTokens;
             this.requestCount = requestCount;
             this.nodeIndex = nodeIndex;
             this.requestIndexes = requestIndexes;
+            this.endpointKey = endpointKey;
+            this.remainingMembers = new AtomicInteger(members.size());
+            this.inflightSettled = new AtomicBoolean();
         }
 
         private int memberIndexOf(ScheduledRequest item) {
@@ -627,14 +909,37 @@ public class NaviBatchScheduler {
             return cacheHitTokens[nodeIndex * requestCount + requestIndex];
         }
 
+        /**
+         * Roll the pre-submit inflight increment back when submission
+         * failed before ownership moved to the dispatcher.
+         */
+        private void abandonInflight() {
+            settleInflightOnce();
+        }
+
+        /** Decrement the endpoint inflight ledger exactly once per batch. */
+        private void settleInflightOnce() {
+            if (!inflightSettled.compareAndSet(false, true)) {
+                return;
+            }
+            AtomicInteger counter = inflightBatches.get(endpointKey);
+            if (counter != null) {
+                counter.decrementAndGet();
+            }
+        }
+
         @Override
         public void accept(ScheduledRequest exactItem,
                            SlotDeliveryPort.Completion completion) {
             if (!(exactItem instanceof ScheduledRequest item)) {
+                settleInflightOnce();
                 return;
             }
             int memberIndex = memberIndexOf(item);
             if (memberIndex < 0) {
+                // Defensive: an unknown item cannot be waited for, so settle
+                // directly rather than leaking the inflight increment.
+                settleInflightOnce();
                 return;
             }
             PendingRequest pending = members.get(memberIndex);
@@ -654,6 +959,9 @@ public class NaviBatchScheduler {
                 // batch-dispatch failure for the buffered request.
                 pending.future().complete(
                         Response.error(StrategyErrorType.BATCH_DISPATCH_FAILED));
+            }
+            if (remainingMembers.decrementAndGet() == 0) {
+                settleInflightOnce();
             }
         }
     }

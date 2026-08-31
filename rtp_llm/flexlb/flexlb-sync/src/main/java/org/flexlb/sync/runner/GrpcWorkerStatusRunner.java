@@ -157,7 +157,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 logger.debug("Ignore stale worker status callback for {}, role: {}", ipPort, roleType);
                 return;
             }
-            WorkerEndpoint ep;
+            // Initialized eagerly: the projection finally-block below can
+            // observe ep before any assignment path ran (e.g. a validation
+            // throw inside the locked section), and the L2 capacity signal
+            // reads it there.
+            WorkerEndpoint ep = null;
             WorkerStatus.StatusObservation committedObservation;
             EndpointStatusReduction statusReduction =
                     EndpointStatusReduction.none();
@@ -278,6 +282,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 try {
                     projectScheduler(statusReduction);
                     projectScheduler(activityReduction);
+                    notifyEngineObservation(ep);
                 } finally {
                     if (generationRetiring) {
                         WorkerGenerationRetirement.complete(
@@ -335,6 +340,25 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private void projectScheduler(EndpointStatusReduction reduction) {
         endpointEventSink.onStatusReduced(reduction);
+    }
+
+    /**
+     * L2 capacity signal: forward the endpoint's freshly committed engine
+     * observation to the event sink (outside the worker-status lock). The
+     * receiver performs O(1) slot-free edge detection; decode endpoints and
+     * not-yet-committed statuses are skipped. Never fails the poll cycle.
+     */
+    private void notifyEngineObservation(WorkerEndpoint endpoint) {
+        if (!(endpoint instanceof PrefillEndpoint prefill)) {
+            return;
+        }
+        try {
+            endpointEventSink.onEngineObservationPublished(
+                    prefill, workerStatus.committedEngineObservation());
+        } catch (Throwable signalFailure) {
+            logger.debug("Engine observation signal failed for {}", ipPort,
+                    signalFailure);
+        }
     }
 
     private static void throwIfPrefillPublicationFailed(

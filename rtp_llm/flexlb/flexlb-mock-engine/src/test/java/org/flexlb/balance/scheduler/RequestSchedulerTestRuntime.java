@@ -20,6 +20,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.springframework.beans.factory.ObjectProvider;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -49,7 +50,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         Objects.requireNonNull(batchSubmission, "batchSubmission");
         this.lifecycle = new RequestLifecycleCoordinator(
                 configService, batchReporter, requestReporter, cancelChannel);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents = new EndpointEventProjector(
+                lifecycle, noNaviScheduler());
         AtomicLong batchIds = new AtomicLong();
         this.registry = new EndpointRegistry(
                 configService,
@@ -84,6 +86,34 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 placementAvailability);
         this.shutdown = new RequestShutdownOrchestrator(
                 lifecycle, registry, scheduler);
+    }
+
+    /**
+     * No NAVI scheduler in this fixture: the lazy provider resolves to null,
+     * so the projector's engine-observation forwarding stays inert.
+     */
+    private static ObjectProvider<NaviBatchScheduler> noNaviScheduler() {
+        return new ObjectProvider<NaviBatchScheduler>() {
+            @Override
+            public NaviBatchScheduler getObject() {
+                return null;
+            }
+
+            @Override
+            public NaviBatchScheduler getObject(Object... args) {
+                return null;
+            }
+
+            @Override
+            public NaviBatchScheduler getIfAvailable() {
+                return null;
+            }
+
+            @Override
+            public NaviBatchScheduler getIfUnique() {
+                return null;
+            }
+        };
     }
 
     public RequestScheduler scheduler() {
