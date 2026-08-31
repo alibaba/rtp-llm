@@ -6,7 +6,6 @@ Selected by LinearFactory only on the compiled sm_120 architecture; sm_9x / sm_1
 keep using DeepGEMM via `CudaFp8GEMMLinear`.
 """
 
-import os
 from typing import Optional
 
 import torch
@@ -61,6 +60,14 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     M (no alignment padding).  scale_tma_aligned=True would pad to ceil4(M),
     causing a stride mismatch for non-multiple-of-4 M values.
     """
+
+    supports_deferred_bias = True
+    supports_fused_bias_gelu_quant = True
+    fused_activation_quant_format = "fp8_float_block128_colmajor"
+    # Generic prequantized inputs may carry DeepGEMM UE8M0 scales.  Keep this
+    # capability disabled; DenseMLP uses forward_quantized directly only with
+    # the float scales produced by this backend's fused GELU path.
+    supports_prequantized_activation = False
 
     @staticmethod
     def _restore_blockwise_weight_layout(
@@ -196,10 +203,6 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         self.weight_scales = weight_scales
         self.input_scales = input_scales
         self.bias = bias
-        self.fast_gelu_min_m = int(
-            os.environ.get("RTP_LLM_SM120_CUTLASS_FAST_GELU_MIN_M", "0")
-        )
-
         if self.weight.dim() != 2 or self.weight_scales.dim() != 2:
             raise ValueError(
                 f"Weight and weight scale must be 2D tensors, got weight dim "
@@ -243,7 +246,9 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 raise ValueError(f"Bias dtype must be bfloat16, got {self.bias.dtype}")
             self.bias = self.bias.to(device=self.weight.device)
 
-    def _forward_impl(self, input: torch.Tensor, use_gelu: bool) -> torch.Tensor:
+    def _forward_impl(
+        self, input: torch.Tensor, apply_bias: bool = True
+    ) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
             raise ValueError(f"Input tensor dtype must be bfloat16, got {input.dtype}")
         if input.dim() != 2:
@@ -276,17 +281,63 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.weight,
             input_scales,
             self.weight_scales,
-            self.bias,
-            use_gelu,
+            self.bias if apply_bias else None,
+            False,
         )
         return output
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(input, use_gelu=False)
+        return self._forward_impl(input)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, apply_bias=False)
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
-        if self.fast_gelu_min_m > 0 and input.shape[0] >= self.fast_gelu_min_m:
-            return self._forward_impl(input, use_gelu=True)
-        # Small-M and default path retain exact GELU. The fast epilogue is
-        # opt-in because GELU_taylor can change borderline classifications.
-        return F.gelu(self._forward_impl(input, use_gelu=False))
+        return F.gelu(self._forward_impl(input))
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if self.bias is None or self.N % 128 != 0:
+            return None
+        output = self._forward_impl(input, apply_bias=True)
+        output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
+        groups = self.N // 128
+        output_scales = torch.empty_strided(
+            (output.shape[0], groups),
+            (1, output.shape[0]),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu_quant_fp8(
+            output, self.bias.to(output.dtype), output_fp8, output_scales, False
+        )
+        return output_fp8, output_scales
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        if input.dtype != torch.float8_e4m3fn or input.dim() != 2:
+            raise ValueError("pre-quantized input must be a 2D float8_e4m3fn tensor")
+        if input.shape[1] != self.K:
+            raise ValueError(f"input K must be {self.K}, got {input.shape[1]}")
+        if input_scales.dtype != torch.float32:
+            raise ValueError("CUTLASS pre-quantized input scales must be float32")
+        output = torch.empty(
+            input.shape[0], self.N, dtype=torch.bfloat16, device=input.device
+        )
+        self._gemm_op(
+            output,
+            input,
+            self.weight,
+            input_scales,
+            self.weight_scales,
+            self.bias if apply_bias else None,
+            False,
+        )
+        return output
