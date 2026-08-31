@@ -61,6 +61,7 @@ struct MtpExecutorTestConfig {
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
     int64_t         dspark_mask_token_id = -1;
+    RoleType        role_type            = RoleType::PDFUSION;
 };
 
 template<typename T>
@@ -501,6 +502,11 @@ public:
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;
+        // Keep the test fixture's role plumbing identical to production
+        // EngineConfig: DSpARK's commit-only policy is enabled only for a
+        // dedicated PREFILL worker, never for colocated PDFUSION/DECODE.
+        params.pd_sep_config.role_type      = test_config.role_type;
+        params.parallelism_config.role_type = test_config.role_type;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -1300,6 +1306,41 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
         EXPECT_TRUE(actual_q.gather(1, sampled_token.unsqueeze(1)).gt(0).all().item<bool>());
         previous_tokens = std::move(sampled_token);
     }
+}
+
+TEST_F(MtpExecutorTest, testDSparkPrefillUsesCommitOnlyExecutorPolicy) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    // The fixture has no Python model, so wrapper construction is skipped;
+    // these assertions isolate the C++ role policy and Markov contract.  A
+    // real PREFILL worker receives the commit wrapper from the same branch,
+    // while its proposal-only tensors are absent from the weight descriptor.
+    EXPECT_TRUE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_FALSE(components.executor->draft_model_);
+    EXPECT_FALSE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_FALSE(components.executor->dspark_markov_w2_.defined());
+}
+
+TEST_F(MtpExecutorTest, testDSparkDecodeKeepsProposalAndMarkovContract) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::DECODE;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    EXPECT_FALSE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_TRUE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_TRUE(components.executor->dspark_markov_w2_.defined());
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {

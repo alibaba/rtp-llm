@@ -89,6 +89,11 @@ class V4Args:
     world_size: int = 1
     world_rank: int = 0
     is_decode_role: bool = False
+    # Dedicated DSpARK prefill workers execute only the commit side: target
+    # features are projected into the draft SWA pools and no query/FFN/mHC
+    # forward is run.  Keeping this as an explicit construction flag lets the
+    # same model class retain the full graph for decode and PDFUSION.
+    commit_only: bool = False
     # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
     # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
     # ``Attention`` path. Resolved from
@@ -103,6 +108,7 @@ def _block_kwargs(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]],
+    commit_only: bool = False,
 ) -> Dict:
     """Kwargs common to Block construction.
 
@@ -152,6 +158,7 @@ def _block_kwargs(
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
+        commit_only=commit_only,
     )
 
 
@@ -159,8 +166,11 @@ def _build_block(
     layer_id: int,
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+    commit_only: bool = False,
 ) -> Block:
-    return Block(**_block_kwargs(layer_id, args, layer_weights))
+    return Block(
+        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only)
+    )
 
 
 class V4Transformer(nn.Module):
@@ -176,6 +186,7 @@ class V4Transformer(nn.Module):
         self.args = args
         self.max_seq_len = args.max_seq_len
         self.hc_mult = args.hc_mult
+        self.commit_only = bool(getattr(args, "commit_only", False))
         # Surface ``fp8_kv_cache`` as a top-level attr so
         # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
         # can dispatch via ``v4.fp8_kv_cache`` without reading args.
@@ -184,17 +195,32 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
-        # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
-        # ``nn.Parameter``); the framework dict supplies the real tensor.
-        self.embed = EmbeddingTorch(gw[W.embedding])
-
         self.layers = nn.ModuleList(
             [
-                _build_block(i, args, layer_weights=mw.weights[i])
+                _build_block(
+                    i,
+                    args,
+                    layer_weights=mw.weights[i],
+                    commit_only=self.commit_only,
+                )
                 for i in range(args.n_layers)
             ]
         )
-        self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+
+        if self.commit_only:
+            # A commit worker never embeds tokens, reduces mHC lanes, or
+            # applies the target LM head.  Deliberately leave these members as
+            # ``None`` rather than materializing dummy tensors: accidental use
+            # of the ordinary V4 forward then fails loudly at the call site.
+            self.embed = None
+            self.norm = None
+            self.head_weight = None
+            self.head_hc = None
+        else:
+            # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
+            # ``nn.Parameter``); the framework dict supplies the real tensor.
+            self.embed = EmbeddingTorch(gw[W.embedding])
+            self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either
         # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or
@@ -204,20 +230,21 @@ class V4Transformer(nn.Module):
         # path and the standalone ``forward`` (B==1) path below call
         # ``F.linear`` / ``torch.mm`` with the input cast to
         # ``self.head_weight.dtype`` so both dtypes work there too.
-        self.head_weight = gw[W.lm_head]
-        if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
-            raise TypeError(
-                f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+        if not self.commit_only:
+            self.head_weight = gw[W.lm_head]
+            if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
+                raise TypeError(
+                    f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+                )
+            self.head_hc = build_hc_head(
+                gw[W.v4_hc_head_fn],
+                gw[W.v4_hc_head_base],
+                gw[W.v4_hc_head_scale],
+                dim=args.dim,
+                hc_mult=args.hc_mult,
+                norm_eps=args.norm_eps,
+                hc_eps=args.hc_eps,
             )
-        self.head_hc = build_hc_head(
-            gw[W.v4_hc_head_fn],
-            gw[W.v4_hc_head_base],
-            gw[W.v4_hc_head_scale],
-            dim=args.dim,
-            hc_mult=args.hc_mult,
-            norm_eps=args.norm_eps,
-            hc_eps=args.hc_eps,
-        )
 
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)

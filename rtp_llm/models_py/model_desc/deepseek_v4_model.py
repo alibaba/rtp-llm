@@ -537,6 +537,53 @@ class DeepSeekV4Model(GptModelBase):
         idx_w = 2 * 2 * index_head_dim
         return main_w, idx_w
 
+    def _initialize_commit_only(
+        self, init_resource: PyModelInitResources, device_str: str
+    ) -> bool:
+        """Initialize the DSpARK prefill commit-only transformer.
+
+        A dedicated prefill worker executes no ordinary V4 forward and has no
+        reason to construct the embedding, mHC/FFN blocks, final norm, or
+        speculative head.  ``V4Transformer`` switches to its lightweight
+        attention-only construction when ``V4Args.commit_only`` is set.  Keep
+        this path beside the regular initializer so decode/PDFUSION behavior
+        and all existing warmup/JIT policy remain unchanged.
+        """
+        logging.info(
+            "[DeepSeekV4Model] building DSpARK commit-only transformer "
+            "(layers=%d, globals=%d)",
+            len(self.weight.weights),
+            len(self.weight.global_weights),
+        )
+        prev_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            with torch.device("meta"):
+                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+        finally:
+            torch.set_default_dtype(prev_dtype)
+
+        # ``precompute_freqs_cis`` is intentionally zero/host-backed while the
+        # module tree is built under ``meta``; bind the real device table just
+        # as the full path does.  Commit projection uses this table directly.
+        for layer in self.v4.layers:
+            layer.attn.reset_rope_cache(device=device_str)
+
+        self._load_extra_weights(self.weight)
+        del self.weight
+
+        # The commit model still participates in the framework's shared
+        # runtime-buffer contract (and may consume a target-owned MTP feature
+        # view), but it does not need any of the full-model JIT warmups.
+        self._bind_runtime_buffers(torch.device(device_str))
+        logging.info(
+            "[DeepSeekV4Model] commit-only runtime buffers bound: "
+            "prefill_ws_q_tokens=%d",
+            self._resolve_prefill_q_token_capacity(),
+        )
+        self._materialized = True
+        return True
+
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         v4: V4Transformer = self.v4  # type: ignore[assignment]
         mtp_hidden = None
@@ -640,6 +687,9 @@ class DeepSeekV4Model(GptModelBase):
                 self._gen_num_per_cycle,
             )
             self._v4_args.max_tokens_per_rank = runtime_resolved_max_tokens_per_rank
+
+        if bool(getattr(self._v4_args, "commit_only", False)):
+            return self._initialize_commit_only(init_resource, device_str)
 
         # ``self.weight`` is a framework ``ModelWeights`` populated by the
         # ``DeepSeekV4Weight`` descriptor (see ``rtp_llm/models/deepseek_v4.py``)

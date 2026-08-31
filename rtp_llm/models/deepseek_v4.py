@@ -43,6 +43,7 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3Mtp,
     DeepSeekV3MtpWeight,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -57,6 +58,19 @@ from rtp_llm.utils.model_weight import (
 SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
+
+
+def _is_prefill_role(role_type: object) -> bool:
+    """Return whether a framework role is the dedicated prefill worker.
+
+    ``ParallelismConfig.role_type`` is a pybind enum in production, but a few
+    lightweight/unit-test configurations expose the value as a string.  Keep
+    this compatibility at the boundary so role-sensitive weight selection
+    never depends on the process ``ROLE_TYPE`` environment variable.
+    """
+    if role_type == RoleType.PREFILL:
+        return True
+    return str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -843,6 +857,70 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
         # DSpARK stages use the regular learned noaux_tc router rather than
         # the target model's initial hash-router schedule.
         self._num_hash_layers = 0
+
+    @property
+    def prefill_commit_only(self) -> bool:
+        """Whether this descriptor belongs to a dedicated prefill worker.
+
+        DSpARK's prefill-side model only executes ``forward_commit``: it
+        projects target features into each draft layer's SWA KV pool and never
+        evaluates queries, mHC, or MoE.  Decode and colocated (PDFUSION)
+        workers still execute ``forward_propose`` and therefore retain the
+        complete three-stage graph.
+        """
+        return _is_prefill_role(getattr(self, "role_type", None))
+
+    def get_weight_info(self) -> ModelWeightInfo:
+        """Build the normal weight descriptors, then prune them for
+        prefill commit workers.
+
+        Running the inherited descriptor normalization first is intentional:
+        it preserves all existing quantization, TP split, tied-embedding, and
+        output-vocabulary handling.  The final graph is filtered only after
+        those transforms, so a quantized ``wkv``/``main_proj`` remains a
+        complete weight+scale composite.  Descriptor construction is cheap;
+        the loader's name map is what controls checkpoint I/O and HBM usage.
+        """
+        info = super().get_weight_info()
+        if not self.prefill_commit_only:
+            return info
+
+        # ``run_commit_step`` consumes exactly these per-layer tensors.  The
+        # proposal-only sink is intentionally excluded: commit only performs
+        # wkv -> norm/RoPE before writing the SWA pool.
+        layer_names = {
+            W.v4_attn_wkv_w,
+            W.v4_attn_kv_norm,
+        }
+        global_names = {
+            # Kept for ModelLoader._load_dynamic_weights and the normal
+            # speculative alias contract.  In production these two names are
+            # aliases to the target model and do not allocate another copy.
+            W.embedding,
+            W.lm_head,
+            W.v4_dspark_main_norm,
+            W.v4_dspark_main_proj_w,
+        }
+        original_layer_count = len(info.layer_weights)
+        info.layer_weights = [
+            (
+                [weight for weight in layer if weight.name in layer_names]
+                if isinstance(layer, list)
+                else layer
+            )
+            for layer in info.layer_weights
+        ]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
+        logging.info(
+            "[DeepSeekV4DSparkWeight] prefill commit-only weight descriptors: %d layers, "
+            "per-layer tags=%s, global tags=%s",
+            original_layer_count,
+            sorted(layer_names),
+            sorted(global_names),
+        )
+        return info
 
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = [
