@@ -235,9 +235,25 @@ def sgl_per_token_group_quant_fp8(
                 f"got {quant_kernel!r}"
             )
 
+        requires_v2 = masked_m is not None or fuse_silu_and_mul
+        if quant_kernel == "legacy" and requires_v2:
+            raise ValueError(
+                "DSV4_FP8_QUANT_KERNEL=legacy does not support masked_m or "
+                "fuse_silu_and_mul"
+            )
+        if quant_kernel == "v2" and not can_use_v2():
+            raise ValueError(
+                "DSV4_FP8_QUANT_KERNEL=v2 does not support this group_size or "
+                "masked/fused configuration"
+            )
+        if quant_kernel == "auto" and requires_v2 and not can_use_v2():
+            raise ValueError(
+                "masked_m/fuse_silu_and_mul requires the v2 FP8 quant kernel, "
+                "but this configuration is not supported by v2"
+            )
+
         use_v2 = quant_kernel == "v2" or (
-            quant_kernel == "auto"
-            and (should_auto_use_v2() or masked_m is not None)
+            quant_kernel == "auto" and should_auto_use_v2()
         )
         with torch.cuda.device(x.device):
             if use_v2:
@@ -322,6 +338,8 @@ def scaled_fp8_per_token_quant(
     _validate_native_quant_input(
         input, "FP8 per-token quantization", allow_empty=True
     )
+    if input.shape[1] == 0:
+        raise ValueError("FP8 per-token input width must be positive")
     if input.shape[1] % 8 != 0:
         raise ValueError(
             f"FP8 per-token input width must be divisible by 8, got {input.shape[1]}"
