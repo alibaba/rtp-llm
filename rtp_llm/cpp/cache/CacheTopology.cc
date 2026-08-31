@@ -91,6 +91,18 @@ void CacheTopology::validateAndBuildIndex() {
                                     layer_id);
         }
     }
+
+    // Unassigned canonical columns default to the group's own position, so
+    // topologies without a PP canonical table keep identity mapping.
+    std::unordered_set<size_t> canonical_seen;
+    for (size_t group_id = 0; group_id < groups_.size(); ++group_id) {
+        if (groups_[group_id].canonical_idx == kCanonicalIdxUnset) {
+            groups_[group_id].canonical_idx = group_id;
+        }
+        RTP_LLM_CHECK_WITH_INFO(canonical_seen.emplace(groups_[group_id].canonical_idx).second,
+                                "CacheTopology has duplicate canonical_idx=%zu",
+                                groups_[group_id].canonical_idx);
+    }
 }
 
 size_t CacheTopology::groupIdForTag(std::string_view tag) const {
@@ -160,10 +172,12 @@ void CacheTopology::buildSnapshots() const {
     snapshots->group_tags.reserve(groups_.size());
     snapshots->group_types.reserve(groups_.size());
     snapshots->group_spec_types.reserve(groups_.size());
+    snapshots->canonical_indices.reserve(groups_.size());
     for (const auto& group : groups_) {
         snapshots->group_tags.push_back(group.tag);
         snapshots->group_types.push_back(group.policy.group_type);
         snapshots->group_spec_types.push_back(group.spec->type);
+        snapshots->canonical_indices.push_back(group.canonical_idx);
     }
 
     snapshots->layer_group_ids.reserve(layers_.size());
@@ -196,6 +210,11 @@ const std::vector<CacheGroupType>& CacheTopology::groupTypesSnapshot() const {
 const std::vector<KVCacheSpecType>& CacheTopology::groupSpecTypesSnapshot() const {
     std::call_once(snapshot_once_, [this]() { buildSnapshots(); });
     return snapshots_->group_spec_types;
+}
+
+const std::vector<size_t>& CacheTopology::canonicalIndicesSnapshot() const {
+    std::call_once(snapshot_once_, [this]() { buildSnapshots(); });
+    return snapshots_->canonical_indices;
 }
 
 const std::vector<std::vector<int>>& CacheTopology::layerGroupIdsSnapshot() const {

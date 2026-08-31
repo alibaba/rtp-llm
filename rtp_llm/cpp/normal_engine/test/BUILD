@@ -94,6 +94,29 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+# pp_size=1 equivalence baseline for gatherModelInput's block-table behavior.
+cc_test(
+    name = "pp_kv_block_table_equivalence_test",
+    srcs = glob([
+        "PPKvBlockTableEquivalenceTest.cc",
+    ]),
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
 cc_test(
     name = "async_runner_test",
     srcs = [

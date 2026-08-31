@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -24,6 +25,7 @@
 #include <cstring>
 #include <list>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <random>
 
@@ -521,22 +523,50 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
+        // PP: fail-fast cache geometry validation at startup. Under
+        // pp_size>1 every stage exchanges its snapshot over the PP process
+        // group (registered by collective_torch at distributed init) and all
+        // stages agree on the logical (min) block count; pp_size=1 keeps the
+        // local collector. Runs after computeBlockNum (block counts are
+        // final) and before any request traffic, so it acts as a startup
+        // barrier.
+        PPValidationResult pp_validation;
+        {
+            const auto                              local_snapshot = StageCacheSnapshot::fromConfig(result);
+            std::unique_ptr<StageSnapshotCollector> pp_snapshot_collector;
+            if (parallelism_config.pp_size > 1) {
+                pp_snapshot_collector = std::make_unique<PPSnapshotCollector>(local_snapshot);
+            } else {
+                pp_snapshot_collector = std::make_unique<LocalStageSnapshotCollector>(local_snapshot);
+            }
+            pp_validation = initPPCacheGeometry(*pp_snapshot_collector);
+            RTP_LLM_CHECK_WITH_INFO(
+                pp_validation.ok, "pp cache geometry validation failed: %s", pp_validation.error.c_str());
+        }
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        resource_context_.cache_manager = make_shared<KVCacheManager>(result,
-                                                                      false,
-                                                                      metrics_reporter_,
-                                                                      kv_cache_config,
-                                                                      parallelism_config,
-                                                                      runtime_config,
-                                                                      SpeculativeExecutionConfig{},
-                                                                      pd_sep_config,
-                                                                      cache_store_config,
-                                                                      use_cuda_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
+        // The validated cross-stage logical capacity is handed to the
+        // manager, which caps per-group block counts internally (after its
+        // finalizeBlockNums, before init() builds the pools) so admission
+        // never admits a request some stage cannot serve; a richer stage
+        // simply sizes its pools to the capped counts, leaving the surplus
+        // VRAM free.
+        resource_context_.cache_manager = make_shared<KVCacheManager>(
+            result,
+            false,
+            metrics_reporter_,
+            kv_cache_config,
+            parallelism_config,
+            runtime_config,
+            SpeculativeExecutionConfig{},
+            pd_sep_config,
+            cache_store_config,
+            use_cuda_malloc_block_pool,
+            parallelism_config.pp_size > 1 ? std::make_optional(pp_validation) : std::nullopt);
+        resource_context_.role_type = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -732,8 +762,7 @@ absl::Status NormalEngine::step() {
 absl::Status NormalEngine::pp_step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.pp_step_work");
 
-    const int64_t ranks_per_stage          = parallelism_config.dp_size * parallelism_config.tp_size;
-    const int64_t pp_rank                  = parallelism_config.world_rank / ranks_per_stage;
+    const int64_t pp_rank                  = parallelism_config.pp_rank;
     const bool    is_first_stage_scheduler = pp_rank == 0 && parallelism_config.tp_rank == 0;
 
     // Pauses only new pipeline admission so other ranks can continue draining

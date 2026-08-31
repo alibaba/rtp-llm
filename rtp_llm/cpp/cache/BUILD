@@ -93,6 +93,19 @@ cc_library(
 )
 
 cc_library(
+    name = "pp_topology_validator",
+    srcs = ["PPTopologyValidator.cc"],
+    hdrs = ["PPTopologyValidator.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        ":cache_group_type",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+    ],
+)
+
+cc_library(
     name = "cache_layout",
     hdrs = ["BufferTypes.h"],
     copts = copts(),
@@ -318,6 +331,7 @@ cc_library(
         ":kv_cache_allocator",
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/config:pp_layout",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:type_convert",
@@ -371,6 +385,7 @@ cc_library(
         ":cache_core",
         ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
+        ":pp_topology_validator",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

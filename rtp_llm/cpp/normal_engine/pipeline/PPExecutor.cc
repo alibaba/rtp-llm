@@ -43,7 +43,9 @@ PPSamplingData buildSamplingData(const StreamGroups& stream_groups) {
 
     for (const auto& stream : all_streams) {
         const auto& config = *stream->generateConfig();
-        RTP_LLM_CHECK_WITH_INFO(!stream->hasNumBeams() && stream->numReturnSequences() == 1,
+        // num_return_sequences: 0 = feature disabled (the Python-side
+        // default), 1 = single sequence; both are fine here.
+        RTP_LLM_CHECK_WITH_INFO(!stream->hasNumBeams() && stream->numReturnSequences() <= 1,
                                 "initial PP sampling does not support beam search or multiple return sequences, "
                                 "request_id=%ld",
                                 stream->streamId());
@@ -292,17 +294,17 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.world_rank == 0 ? metrics_reporter_ : nullptr)),
     parallelism_config_(params.parallelism_config),
-    pp_rank_(parallelism_config_.world_rank / parallelism_config_.tp_size),
+    // Stage-role truth (hasEmbedding/hasLmHead) and the materialized layer
+    // partition, shared with cache creation and the Python mirrors.
+    pp_layout_(PPLayout::fromParallelismConfig(parallelism_config_, params.model_config_.num_layers)),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     slots_(parallelism_config_.pp_size + 1) {
 
-    const auto previous_stage = (pp_rank_ + parallelism_config_.pp_size - 1) % parallelism_config_.pp_size;
-    const auto next_stage     = (pp_rank_ + 1) % parallelism_config_.pp_size;
-    const auto previous_rank =
-        static_cast<int>(previous_stage * parallelism_config_.tp_size + parallelism_config_.tp_rank);
-    const auto next_rank = static_cast<int>(next_stage * parallelism_config_.tp_size + parallelism_config_.tp_rank);
-    transport_           = std::make_unique<NcclPPTransport>(previous_rank, next_rank);
+    // Ring transport channels: send to the next stage, receive from the
+    // previous one (both wrap around; the protocol gates actual usage).
+    transport_ = std::make_unique<NcclPPTransport>(static_cast<int>(pp_layout_.prevRank()),
+                                                   static_cast<int>(pp_layout_.nextRank()));
 
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, parallelism_config_.tp_rank);

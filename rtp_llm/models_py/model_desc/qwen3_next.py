@@ -1065,8 +1065,15 @@ class Qwen3NextModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
-        self.embed_tokens = Embedding(
-            model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        # PP : first stage owns the embedding; see Qwen3Model for the
+        # exemplar. pp_size=1 keeps today's behavior. (PP gates CP off, so the
+        # CP metadata path below never meets a non-first stage.)
+        self.embed_tokens = (
+            Embedding(
+                model_config, parallelism_config, weights.get_global_weight(W.embedding)
+            )
+            if self.pp_has_embedding
+            else None
         )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
@@ -1074,6 +1081,7 @@ class Qwen3NextModel(GptModelBase):
             if py_hw_kernel_config is not None
             else False
         )
+        self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
                 Qwen3NextDecoderLayer(
@@ -1086,11 +1094,16 @@ class Qwen3NextModel(GptModelBase):
                     enable_cuda_graph,
                     hw_kernel_config=py_hw_kernel_config,
                 )
-                for idx in range(self.layer_num)
+                for idx in self.pp_layer_ids_list
             ]
         )
-        self.norm = RMSResNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
+        self.norm = (
+            RMSResNorm(
+                weights.get_global_weight(W.final_ln_gamma),
+                eps=model_config.layernorm_eps,
+            )
+            if self.pp_has_lm_head
+            else None
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
@@ -1166,7 +1179,32 @@ class Qwen3NextModel(GptModelBase):
         return self.embed_tokens(input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        hidden_states = self.word_embedding(inputs)
+        # First stage embeds token ids (word_embedding is overridden by
+        # multimodal subclasses); later PP stages continue from the upstream
+        # stage's activations in pp_intermediates; input_hiddens stays as the
+        # legacy/MTP fallback channel.
+        if self.embed_tokens is not None:
+            hidden_states = self.word_embedding(inputs)
+        else:
+            upstream_hidden = (
+                inputs.pp_intermediates.get("hidden_states")
+                if inputs.pp_intermediates
+                else None
+            )
+            hidden_states = (
+                upstream_hidden if upstream_hidden is not None else inputs.input_hiddens
+            )
+
+        # PP: this model uses the fused add-norm pattern, so the stream at a
+        # stage boundary is split into (branch output, accumulated residual).
+        # The upstream stage's residual arrives in pp_intermediates; first
+        # stage / pp_size=1 starts from zeros.
+        residual = torch.zeros_like(hidden_states)
+        upstream_residual = (
+            inputs.pp_intermediates.get("residual") if inputs.pp_intermediates else None
+        )
+        if upstream_residual is not None:
+            residual = upstream_residual
 
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         prefill_conv1d_meta = None
@@ -1209,28 +1247,43 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        residual = torch.zeros_like(hidden_states)
-
-        for i, decoder_layer in enumerate(self.layers):
+        # Cache surfaces (get_layer_cache / select_*_for_layer) are indexed by
+        # model-local layer ids: under PP the C++ layout is projected to this
+        # stage's layers. Global layer ids are only needed at construction
+        # time (weight / attention-type indexing), already baked into layers.
+        for local_idx, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
-                inputs, self.kv_cache, i
+                inputs, self.kv_cache, local_idx
             )
             layer_fmha_impl = (
                 None
                 if decoder_layer.layer_type == HybridAttentionType.LINEAR
-                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, local_idx)
             )
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                ),
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
 
-        hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        if self.norm is not None:
+            hidden_states, residual = self.norm(hidden_states, residual)
+            return PyModelOutputs(hidden_states)
+        # Non-last PP stage: emit the stage-boundary tensors verbatim so the
+        # downstream stage can resume the fused (branch, residual) stream.
+        # Dropping `residual` here would make the downstream stage restart
+        # from zeros and compute garbage.
+        outputs = PyModelOutputs(hidden_states)
+        outputs.pp_intermediates = {
+            "hidden_states": hidden_states,
+            "residual": residual,
+        }
+        return outputs
 
 
 class Qwen35Model(Qwen3NextModel):

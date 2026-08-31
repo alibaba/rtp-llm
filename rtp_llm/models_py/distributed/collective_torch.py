@@ -25,6 +25,11 @@ class Group(Enum):
 
     DP = "DP"
     TP = "TP"
+    PP = "PP"
+    # Legacy name from the pre-PP era: DP_AND_TP is bound to
+    # torch.distributed WORLD, so it spans ALL ranks including every PP
+    # stage. Do not "narrow" it per stage; rename to ALL/WORLD together with
+    # C++ ParallelMode the next time it is touched.
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -77,8 +82,11 @@ def _make_cpu_tp_broadcaster_base_path(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
     os.makedirs(base_dir, mode=0o700, exist_ok=True)
+    # pp_rank disambiguates the TP groups of different PP stages (they share
+    # dp_rank under the PP gate); pp_rank is 0 when pp_size == 1.
     base_path = os.path.join(
-        base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
+        base_dir,
+        f"rtp_llm_tp_{session_id}_pp{parallelism_config.pp_rank}_dp{parallelism_config.dp_rank}",
     )
     rank0_path = f"{base_path}_0.sock"
     if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
@@ -96,7 +104,13 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
         old_tp_rank = parallelism_config.tp_rank
         old_dp_rank = parallelism_config.dp_rank
         tp_rank = parallelism_config.world_rank % parallelism_config.tp_size
-        dp_rank = parallelism_config.world_rank // parallelism_config.tp_size
+        # Layout is PP-outermost (world_rank = pp_rank*(dp*tp) + dp_rank*tp +
+        # tp_rank): the extra "% dp_size" strips the pp component so dp_rank
+        # stays correct when pp_size > 1. With pp_size == 1 it reduces to the
+        # historical (world_rank // tp_size), so non-PP behavior is unchanged.
+        dp_rank = (parallelism_config.world_rank // parallelism_config.tp_size) % max(
+            parallelism_config.dp_size, 1
+        )
         if (old_tp_rank, old_dp_rank) != (tp_rank, dp_rank):
             logging.warning(
                 "Normalize ParallelismConfig ranks from tp_rank=%s, dp_rank=%s "
@@ -110,6 +124,15 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
             )
         parallelism_config.tp_rank = tp_rank
         parallelism_config.dp_rank = dp_rank
+
+    # PP stage id: PP is the outermost dim of the world-rank layout
+    # (world_rank = pp_rank * (dp_size * tp_size) + ...), matching
+    # NormalEngine::pp_step. Under the PP gate (dp_size == 1) this is
+    # equivalent to (world_rank // tp_size) % pp_size.
+    if parallelism_config.pp_size > 0:
+        parallelism_config.pp_rank = parallelism_config.world_rank // (
+            parallelism_config.dp_size * parallelism_config.tp_size
+        )
 
 
 def init_distributed_environment(
@@ -236,62 +259,125 @@ def _create_process_groups(
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
+    # PP is the outermost dim of the world-rank layout (world_rank =
+    # pp_rank*(dp*tp) + dp_rank*tp + tp_rank), matching
+    # _normalize_parallelism_ranks. Group membership must pin the pp
+    # component: a TP/DP collective under PP must stay inside one stage,
+    # otherwise stage-local collectives (e.g. tpSyncModelInputs broadcasts)
+    # would wait forever on ranks of other stages. With pp_size == 1 every
+    # formula and key reduces to the historical one.
+    pp_size = max(parallelism_config.pp_size, 1)
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups
-        # DP group: ranks with the same tp_rank (i.e., world_rank % tp_size)
-        # There are tp_size DP groups (one for each tp_rank value)
-        for tp_rank_val in range(tp_size):
-            dp_ranks = [r for r in range(world_size) if r % tp_size == tp_rank_val]
-            if len(dp_ranks) > 0:
-                logging.info(
-                    f"[rank: {world_rank}] Creating DP group for tp_rank {tp_rank_val} with ranks: {dp_ranks}"
-                )
-                dp_group = torch.distributed.new_group(
-                    ranks=dp_ranks,
-                    backend=backend,
-                    timeout=timedelta(days=36500),
-                )
-                # Only store the group if this rank is part of it
-                if world_rank in dp_ranks:
-                    group_key = Group.DP.name + str(tp_rank_val)
-                    _group_map[group_key] = dp_group
+        # DP group: ranks with the same pp_rank and tp_rank.
+        # There are pp_size*tp_size DP groups; the key suffix
+        # (pp_rank*tp_size + tp_rank) reduces to tp_rank when pp_size == 1.
+        for pp_rank_val in range(pp_size):
+            for tp_rank_val in range(tp_size):
+                dp_ranks = [
+                    r
+                    for r in range(world_size)
+                    if r % tp_size == tp_rank_val
+                    and r // (tp_size * dp_size) == pp_rank_val
+                ]
+                if len(dp_ranks) > 0:
                     logging.info(
-                        f"[rank: {world_rank}] Stored DP group with key: {group_key} {dp_group} with ranks: {dp_ranks}"
+                        f"[rank: {world_rank}] Creating DP group for pp_rank {pp_rank_val}, "
+                        f"tp_rank {tp_rank_val} with ranks: {dp_ranks}"
                     )
-                # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
+                    dp_group = torch.distributed.new_group(
+                        ranks=dp_ranks,
+                        backend=backend,
+                        timeout=timedelta(days=36500),
+                    )
+                    # Only store the group if this rank is part of it
+                    if world_rank in dp_ranks:
+                        group_key = Group.DP.name + str(
+                            pp_rank_val * tp_size + tp_rank_val
+                        )
+                        _group_map[group_key] = dp_group
+                        logging.info(
+                            f"[rank: {world_rank}] Stored DP group with key: {group_key} {dp_group} with ranks: {dp_ranks}"
+                        )
+                    # All ranks must wait for group creation to complete
+                    torch.distributed.barrier()
 
     if tp_size > 1 and world_size != tp_size:
         # Create all TP groups - all ranks must participate in creating all TP groups
-        # TP group: ranks with the same dp_rank (i.e., world_rank // tp_size)
-        # There are dp_size TP groups (one for each dp_rank value)
-        for dp_rank_val in range(dp_size):
-            tp_ranks = [r for r in range(world_size) if r // tp_size == dp_rank_val]
-            if len(tp_ranks) > 0:
-                logging.info(
-                    f"[rank: {world_rank}] Creating TP group for dp_rank {dp_rank_val} with ranks: {tp_ranks}"
-                )
-                tp_group = torch.distributed.new_group(
-                    ranks=tp_ranks,
-                    backend=backend,
-                    timeout=timedelta(days=36500),
-                )
-                # Only store the group if this rank is part of it
-                if world_rank in tp_ranks:
-                    group_key = Group.TP.name + str(dp_rank_val)
-                    _group_map[group_key] = tp_group
+        # TP group: ranks with the same pp_rank and dp_rank.
+        # There are pp_size*dp_size TP groups; the key suffix
+        # (pp_rank*dp_size + dp_rank) equals world_rank // tp_size, so
+        # key-derivation callsites (_get_group / C++ registration) keep
+        # working unchanged.
+        for pp_rank_val in range(pp_size):
+            for dp_rank_val in range(dp_size):
+                tp_ranks = [
+                    r
+                    for r in range(world_size)
+                    if r // tp_size == pp_rank_val * dp_size + dp_rank_val
+                ]
+                if len(tp_ranks) > 0:
                     logging.info(
-                        f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
+                        f"[rank: {world_rank}] Creating TP group for pp_rank {pp_rank_val}, "
+                        f"dp_rank {dp_rank_val} with ranks: {tp_ranks}"
                     )
+                    tp_group = torch.distributed.new_group(
+                        ranks=tp_ranks,
+                        backend=backend,
+                        timeout=timedelta(days=36500),
+                    )
+                    # Only store the group if this rank is part of it
+                    if world_rank in tp_ranks:
+                        group_key = Group.TP.name + str(
+                            pp_rank_val * dp_size + dp_rank_val
+                        )
+                        _group_map[group_key] = tp_group
+                        logging.info(
+                            f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
+                        )
+                        # symm_mem fast path is per-member; only init for a
+                        # group this rank actually joins.
+                        _get_symm_mem().init_symm_mem_communicator(tp_group)
 
-                _get_symm_mem().init_symm_mem_communicator(tp_group)
-
-                # All ranks must wait for group creation to complete
-                torch.distributed.barrier()
+                    # All ranks must wait for group creation to complete
+                    torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+
+    if pp_size > 1:
+        # PP groups: ranks of the same (dp_rank, tp_rank) lane across stages.
+        # Consumed by the PP startup snapshot exchange and the PP transport
+        # P2P bootstrap; kept out of the C++ ParallelMode mapping (no mode
+        # enum change) until a C++ consumer exists.
+        for dp_rank_val in range(dp_size):
+            for tp_rank_val in range(tp_size):
+                pp_ranks = [
+                    r
+                    for r in range(world_size)
+                    if r % tp_size == tp_rank_val
+                    and (r // tp_size) % dp_size == dp_rank_val
+                ]
+                if len(pp_ranks) > 0:
+                    logging.info(
+                        f"[rank: {world_rank}] Creating PP group for dp_rank {dp_rank_val}, "
+                        f"tp_rank {tp_rank_val} with ranks: {pp_ranks}"
+                    )
+                    pp_group = torch.distributed.new_group(
+                        ranks=pp_ranks,
+                        backend=backend,
+                        timeout=timedelta(days=36500),
+                    )
+                    if world_rank in pp_ranks:
+                        group_key = Group.PP.name + str(
+                            dp_rank_val * tp_size + tp_rank_val
+                        )
+                        _group_map[group_key] = pp_group
+                        logging.info(
+                            f"[rank: {world_rank}] Stored PP group with key: {group_key} {pp_group} with ranks: {pp_ranks}"
+                        )
+                    torch.distributed.barrier()
 
 
 def _register_process_groups_to_cpp():
@@ -334,8 +420,17 @@ def _register_process_groups_to_cpp():
                         registered_modes.add(_CPP_PARALLEL_MODE_TP)
             elif group_key.startswith(Group.DP.name):
                 if _parallelism_config is not None:
-                    tp_rank = torch.distributed.get_rank() % _parallelism_config.tp_size
-                    expected_key = Group.DP.name + str(tp_rank)
+                    rank = torch.distributed.get_rank()
+                    tp_rank = rank % _parallelism_config.tp_size
+                    # PP-outermost layout: the DP key suffix is
+                    # pp_rank*tp_size + tp_rank (reduces to tp_rank at pp=1),
+                    # matching _create_process_groups.
+                    pp_rank = rank // (
+                        _parallelism_config.tp_size * _parallelism_config.dp_size
+                    )
+                    expected_key = Group.DP.name + str(
+                        pp_rank * _parallelism_config.tp_size + tp_rank
+                    )
                     if (
                         group_key == expected_key
                         and _CPP_PARALLEL_MODE_DP not in registered_modes
@@ -489,6 +584,17 @@ def _register_process_groups_to_cpp():
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
 
+    # PP communication callbacks: P2P tensor transport plus the startup
+    # snapshot exchange for the cross-stage cache geometry validator.
+    # Registered together as one lifecycle via the unified entry.
+    if (
+        hasattr(librtp_compute_ops, "register_pp_ops")
+        and _parallelism_config is not None
+        and _parallelism_config.pp_size > 1
+    ):
+        register_pp_process_group(_get_group(Group.PP))
+        logging.info("Registered PP communication callbacks (p2p + snapshot exchange)")
+
     # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
     # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
     # binds; cross-node TP keeps the NCCL fallback.
@@ -513,18 +619,38 @@ def _register_process_groups_to_cpp():
         )
 
 
-def register_p2p_process_group(
+def register_pp_process_group(
     process_group: torch.distributed.ProcessGroup,
 ) -> None:
+    """Register all PP communication callbacks in one call.
+
+    - isend/irecv bind the passed group (used by the PP transport). torch
+      isend/irecv take GROUP-LOCAL ranks as peer; groups are built from
+      ascending world ranks, so the global->local mapping is the member
+      array index.
+    - The snapshot exchange is always fixed to the PP lane group:
+      the all_gather must span every stage of the same lane.
+    """
     import librtp_compute_ops
 
-    if not hasattr(librtp_compute_ops, "register_p2p_ops"):
-        raise RuntimeError("register_p2p_ops is not available")
+    if not hasattr(librtp_compute_ops, "register_pp_ops"):
+        raise RuntimeError("register_pp_ops is not available")
+
+    group_ranks = torch.distributed.get_process_group_ranks(process_group)
+
+    def _to_local_peer(global_peer: int) -> int:
+        try:
+            return group_ranks.index(global_peer)
+        except ValueError:
+            raise RuntimeError(
+                f"global peer {global_peer} is not a member of the PP "
+                f"transport group {group_ranks}"
+            )
 
     def cpp_isend(tensor: torch.Tensor, global_peer: int):
         work = torch.distributed.isend(
             tensor,
-            dst=global_peer,
+            dst=_to_local_peer(global_peer),
             group=process_group,
         )
         if work is None:
@@ -534,24 +660,34 @@ def register_p2p_process_group(
     def cpp_irecv(tensor: torch.Tensor, global_peer: int):
         work = torch.distributed.irecv(
             tensor,
-            src=global_peer,
+            src=_to_local_peer(global_peer),
             group=process_group,
         )
         if work is None:
             raise RuntimeError("irecv returned no work")
         return work
 
-    librtp_compute_ops.register_p2p_ops(cpp_isend, cpp_irecv)
+    # Startup snapshot exchange for the cross-stage cache geometry validator.
+    # all_gather_object preserves group-rank order; PP group members are the
+    # ascending world ranks of one (dp, tp) lane, so the returned list is
+    # indexed by pp_rank (stage order).
+    def cpp_pp_snapshot_exchange(snapshot_bytes: bytes) -> List[bytes]:
+        pg = _get_group(Group.PP)
+        payloads: List[bytes] = [b""] * pg.size()
+        torch.distributed.all_gather_object(payloads, snapshot_bytes, group=pg)
+        return payloads
+
+    librtp_compute_ops.register_pp_ops(cpp_isend, cpp_irecv, cpp_pp_snapshot_exchange)
 
 
-def unregister_p2p_process_group() -> None:
+def unregister_pp_process_group() -> None:
     try:
         import librtp_compute_ops
     except ImportError:
         return
 
-    if hasattr(librtp_compute_ops, "clear_p2p_ops"):
-        librtp_compute_ops.clear_p2p_ops()
+    if hasattr(librtp_compute_ops, "clear_pp_ops"):
+        librtp_compute_ops.clear_pp_ops()
 
 
 def distributed_environment_initialized() -> bool:
@@ -607,7 +743,7 @@ def destroy_distributed_environment():
 
         destroy_user_buffers_communicator()
 
-    unregister_p2p_process_group()
+    unregister_pp_process_group()
 
     try:
         import librtp_compute_ops
@@ -673,13 +809,22 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     group_key = group
     tp_size = _parallelism_config.tp_size
     dp_size = _parallelism_config.dp_size
+    pp_size = max(_parallelism_config.pp_size, 1)
     world_size = _parallelism_config.world_size
+    rank = torch.distributed.get_rank()
     if group == Group.DP and dp_size > 1 and world_size != dp_size:
-        tp_rank = torch.distributed.get_rank() % tp_size
-        group_key = Group.DP.name + str(tp_rank)
+        tp_rank = rank % tp_size
+        pp_rank = rank // (tp_size * dp_size)
+        group_key = Group.DP.name + str(pp_rank * tp_size + tp_rank)
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
-        dp_rank = torch.distributed.get_rank() // tp_size
+        # Key suffix == rank // tp_size == pp_rank*dp_size + dp_rank
+        # (matches _create_process_groups).
+        dp_rank = rank // tp_size
         group_key = Group.TP.name + str(dp_rank)
+    elif group == Group.PP and pp_size > 1:
+        tp_rank = rank % tp_size
+        dp_rank = (rank // tp_size) % dp_size
+        group_key = Group.PP.name + str(dp_rank * tp_size + tp_rank)
     else:
         # DP_AND_TP always uses Group.DP_AND_TP as key
         group_key = Group.DP_AND_TP
@@ -864,8 +1009,8 @@ __all__ = [
     "Group",
     "init_distributed_environment",
     "init_user_buffers_environment",
-    "register_p2p_process_group",
-    "unregister_p2p_process_group",
+    "register_pp_process_group",
+    "unregister_pp_process_group",
     "distributed_environment_initialized",
     "destroy_distributed_environment",
     "send",

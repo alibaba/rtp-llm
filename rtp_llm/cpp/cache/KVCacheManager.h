@@ -4,6 +4,7 @@
 #include <cassert>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -13,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -28,16 +30,20 @@ class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
-    KVCacheManager(const CacheConfig&                 config,
-                   bool                               warmup                     = false,
-                   const kmonitor::MetricsReporterPtr metrics_reporter           = nullptr,
-                   const KVCacheConfig&               kv_cache_config            = KVCacheConfig{},
-                   const ParallelismConfig&           parallelism_config         = ParallelismConfig{},
-                   const RuntimeConfig&               runtime_config             = RuntimeConfig{},
-                   const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
-                   const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
-                   const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
-                   bool                               use_cuda_malloc_block_pool = false);
+    // pp_logical_capacity: validated cross-stage logical block counts,
+    // REQUIRED under pp_size>1 (applied right after allocateAndSync's
+    // finalizeBlockNums). Leave nullopt for pp_size<=1.
+    KVCacheManager(const CacheConfig&                       config,
+                   bool                                     warmup                     = false,
+                   const kmonitor::MetricsReporterPtr       metrics_reporter           = nullptr,
+                   const KVCacheConfig&                     kv_cache_config            = KVCacheConfig{},
+                   const ParallelismConfig&                 parallelism_config         = ParallelismConfig{},
+                   const RuntimeConfig&                     runtime_config             = RuntimeConfig{},
+                   const SpeculativeExecutionConfig&        sp_config                  = SpeculativeExecutionConfig{},
+                   const PDSepConfig&                       pd_sep_config              = PDSepConfig{},
+                   const CacheStoreConfig&                  cache_store_config         = CacheStoreConfig{},
+                   bool                                     use_cuda_malloc_block_pool = false,
+                   const std::optional<PPValidationResult>& pp_logical_capacity        = std::nullopt);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -176,14 +182,15 @@ private:
     CacheConfig         config_;
     KVCacheAllocatorPtr allocator_;
 
-    const kmonitor::MetricsReporterPtr metrics_reporter_;
-    const KVCacheConfig                kv_cache_config_;
-    const ParallelismConfig            parallelism_config_;
-    const RuntimeConfig                runtime_config_;
-    const SpeculativeExecutionConfig   sp_config_;
-    const PDSepConfig                  pd_sep_config_;
-    const CacheStoreConfig             cache_store_config_;
-    const bool                         use_cuda_malloc_block_pool_;
+    const kmonitor::MetricsReporterPtr      metrics_reporter_;
+    const KVCacheConfig                     kv_cache_config_;
+    const ParallelismConfig                 parallelism_config_;
+    const RuntimeConfig                     runtime_config_;
+    const SpeculativeExecutionConfig        sp_config_;
+    const PDSepConfig                       pd_sep_config_;
+    const CacheStoreConfig                  cache_store_config_;
+    const bool                              use_cuda_malloc_block_pool_;
+    const std::optional<PPValidationResult> pp_logical_capacity_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
