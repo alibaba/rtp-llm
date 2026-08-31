@@ -76,6 +76,19 @@ TEST(BlockPoolConfigHelperTest, MTPSparseIndexerUsesProposeTopologyAndScaleStrid
     EXPECT_EQ(pool_config.total_size_bytes, 1536u);
 }
 
+TEST(BlockPoolConfigHelperTest, MTPSparseIndexerPrefersSelectedGroupScaleStride) {
+    auto score_config   = makeSparseMlaConfig(2, 4, 4, 4, 32);
+    auto propose_config = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 128));
+    propose_config->setGroupBlockLayout({4}, {64}, {96});
+    score_config.mtp_sub_configs = {propose_config};
+
+    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
+    EXPECT_EQ(propose_config->kv_scale_stride_bytes, 128u);
+    EXPECT_EQ(propose_config->kvScaleStrideBytesForGroup(0), 96u);
+    EXPECT_EQ(pool_config.memory_layouts[1].kv_scale_stride_bytes, 96u);
+}
+
 TEST(BlockPoolConfigHelperTest, MTPNonSparseUsesNonzeroPhysicalScaleStride) {
     auto score_config   = makeSparseMlaConfig(/*layer_num=*/2,
                                             /*block_num=*/4,
