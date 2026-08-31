@@ -179,6 +179,15 @@ static void expectSingleGroupBlock(const MemoryOperationRequestPB::CopyItem& ite
     EXPECT_EQ(item.group_blocks(0).block_id(), block);
 }
 
+static void waitForEvictionSettlement(BlockTreeCache& cache) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(cache) != 0
+           && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(cache), 0u);
+}
+
 class MultiRankBlockTransferEngineTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -701,6 +710,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    waitForEvictionSettlement(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -763,6 +773,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    waitForEvictionSettlement(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -819,6 +830,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    waitForEvictionSettlement(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());
@@ -872,6 +884,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    waitForEvictionSettlement(*cache);
 
     auto after = cache->tree()->findNode({100});
     ASSERT_FALSE(after.empty());

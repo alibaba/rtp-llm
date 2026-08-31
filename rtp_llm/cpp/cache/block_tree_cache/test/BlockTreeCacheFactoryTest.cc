@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <future>
 #include <limits>
 #include <memory>
 #include <string>
@@ -695,7 +696,11 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLoca
         matched_blocks = matched;
         return current.commit();
     });
+    std::promise<void> callback_done;
+    auto               callback_future = callback_done.get_future();
+    context->onDone([&callback_done](ErrorInfo) { callback_done.set_value(); });
     context->startBackendMatch();
+    callback_future.wait();
 
     EXPECT_EQ(backend->matchCalls(), 1u);
     EXPECT_EQ(backend->matchKeys(), (CacheKeysType{local_key, local_key + 1}));
