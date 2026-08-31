@@ -236,6 +236,11 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model(
         "minimax_m3_mtp", "rtp_llm.models.minimax_m3_mtp", ["MiniMaxM3MTP"]
     )
+    register_lazy_model(
+        "minimax_m3_vl_mtp",
+        "rtp_llm.models.minimax_m3_mtp",
+        ["MiniMaxM3VLMTP"],
+    )
     register_lazy_model("internlm", "rtp_llm.models.llama", ["InternLMForCausalLM"])
     register_lazy_model("internlm2", "rtp_llm.models.llama", ["InternLM2ForCausalLM"])
     register_lazy_model("xverse", "rtp_llm.models.llama", ["XverseForCausalLM"])

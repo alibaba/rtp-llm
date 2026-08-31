@@ -159,3 +159,9 @@ class MiniMaxM3MTPModel(GenericMoeMTPModel):
             decode_rows = inputs_embeds.size(0) - shuffle.numel()
             zero_mask = torch.cat([zero_mask[:decode_rows], prefill_zero_mask], dim=0)
         return torch.where(zero_mask.unsqueeze(-1), 0, inputs_embeds)
+
+
+class MiniMaxM3VLMTPModel(MiniMaxM3MTPModel):
+    """MiniMax-M3 VL MTP model; multimodal embedding injection is request-aware."""
+
+    pass

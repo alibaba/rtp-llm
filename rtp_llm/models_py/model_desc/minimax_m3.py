@@ -12,7 +12,6 @@ from rtp_llm.models_py.model_desc.generic_moe import (
     GenericMoeDecoderLayer,
     GenericMoeModel,
 )
-from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
 from rtp_llm.models_py.modules import CausalAttention
 from rtp_llm.models_py.modules.factory.attention.common import copy_kv_cache_offset
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -769,8 +768,4 @@ class _MiniMaxM3ModelMixin:
 
 
 class MiniMaxM3Model(_MiniMaxM3ModelMixin, GenericMoeModel):
-    decoder_layer_cls = MiniMaxM3DecoderLayer
-
-
-class MiniMaxM3MultimodalModel(_MiniMaxM3ModelMixin, MultimodalGenericModel):
     decoder_layer_cls = MiniMaxM3DecoderLayer

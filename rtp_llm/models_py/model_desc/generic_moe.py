@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
+    MultimodalEmbeddingInjector,
     RMSNorm,
     RMSResNorm,
     SelectTopk,
@@ -790,6 +791,17 @@ class GenericMoeModel(GptModelBase):
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if bool(
+                getattr(
+                    getattr(model_config, "mm_model_config", None),
+                    "is_multimodal",
+                    False,
+                )
+            )
+            else None
+        )
         # Get enable_cuda_graph from py_hw_kernel_config
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
@@ -839,6 +851,32 @@ class GenericMoeModel(GptModelBase):
     ) -> None:
         pass
 
+    def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Build token embeddings and inject features for an MM request.
+
+        The model-level flag controls whether the injector is constructed;
+        the request-level feature list controls whether this invocation uses
+        the multimodal path. This keeps text-only requests on the original
+        embedding kernel even when a VL model serves a mixed workload.
+        """
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        multimodal_features = getattr(multimodal_inputs, "multimodal_features", None)
+        injector = getattr(self, "multimodal_embedding_injector", None)
+        if injector is None or not multimodal_features:
+            return self.embed_tokens(inputs.input_ids)
+
+        inputs_embeds = self.embed_tokens(
+            inputs.input_ids,
+            inputs.combo_position_ids,
+            inputs.embedding_inputs.combo_tokens_type_ids,
+            inputs.embedding_inputs.text_tokens_mask,
+        )
+        return injector(
+            inputs_embeds,
+            multimodal_features,
+            multimodal_inputs.mm_features_locs,
+        )
+
     def _layers_for_forward(self) -> nn.ModuleList:
         use_cuda_graph_layers = (
             cuda_graph_capture_forward_enabled() or cuda_graph_warmup_forward_enabled()
@@ -860,7 +898,7 @@ class GenericMoeModel(GptModelBase):
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self.embedding(inputs)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(
                 inputs

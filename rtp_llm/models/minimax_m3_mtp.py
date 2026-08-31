@@ -263,10 +263,10 @@ class MiniMaxM3MTP(MiniMaxM3):
         )
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.minimax_m3_mtp import MiniMaxM3MTPModel
+        from rtp_llm.models_py.model_desc.minimax_m3_mtp import MiniMaxM3VLMTPModel
 
         self._validate_kv_cache_dtype(self.model_config)
-        self.py_model = MiniMaxM3MTPModel(
+        self.py_model = MiniMaxM3VLMTPModel(
             self.model_config,
             self.parallelism_config,
             self.weight,
@@ -283,3 +283,44 @@ class MiniMaxM3MTP(MiniMaxM3):
 
 
 register_model("minimax_m3_mtp", MiniMaxM3MTP, ["MiniMaxM3MTP"])
+
+
+class MiniMaxM3VLMTP(MiniMaxM3MTP):
+    """MiniMax-M3 VL MTP draft model without a local ViT instance."""
+
+    @classmethod
+    def _from_hf(cls, config: ModelConfig, ckpt_path: str):
+        config_path = os.path.join(ckpt_path, "config.json")
+        if not os.path.exists(config_path):
+            return
+        with open(config_path) as reader:
+            config_json = json.load(reader)
+
+        from rtp_llm.models.minimax_m3_vl import _apply_minimax_m3_vl_config
+
+        _apply_minimax_m3_vl_config(config, config_json, ckpt_path)
+        return config
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str) -> ModelConfig:
+        config = super()._create_config(ckpt_path)
+        config.model_type = "minimax_m3_vl_mtp"
+        return config
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.minimax_m3_mtp import MiniMaxM3MTPModel
+
+        self._validate_kv_cache_dtype(self.model_config)
+        self.py_model = MiniMaxM3MTPModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+
+
+register_model("minimax_m3_vl_mtp", MiniMaxM3VLMTP, ["MiniMaxM3VLMTP"])

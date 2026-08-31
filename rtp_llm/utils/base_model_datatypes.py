@@ -39,13 +39,22 @@ class VitParameters:
     """Vit parameters for multimodal models."""
 
     # config includes origin vit config in ckpt/config.json
-    config: Dict[str, Any] = {}
-    special_token_ids: Dict[str, Any] = {}
-    special_tokens: Dict[str, Any] = {}
-    vit_weights: Any = None
-    preprocess_batch_size: int = 1
-    eval_param_count = None
-    eval_model_size = None
+    config: Dict[str, Any]
+    special_token_ids: Dict[str, Any]
+    special_tokens: Dict[str, Any]
+    vit_weights: Any
+    preprocess_batch_size: int
+    eval_param_count: Any
+    eval_model_size: Any
+
+    def __init__(self):
+        self.config = {}
+        self.special_token_ids = {}
+        self.special_tokens = {}
+        self.vit_weights = None
+        self.preprocess_batch_size = 1
+        self.eval_param_count = None
+        self.eval_model_size = None
 
 
 # single batch prompt input

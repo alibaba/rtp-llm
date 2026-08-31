@@ -8,7 +8,13 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
+from rtp_llm.models_py.modules import (
+    Embedding,
+    LinearFactory,
+    MultimodalEmbeddingInjector,
+    RMSNorm,
+    RMSResNorm,
+)
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -42,6 +48,17 @@ class GenericMoeMTPModel(GptModelBase):
         self.device_resource_config = device_resource_config
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
+        )
+        self.multimodal_embedding_injector = (
+            MultimodalEmbeddingInjector()
+            if bool(
+                getattr(
+                    getattr(model_config, "mm_model_config", None),
+                    "is_multimodal",
+                    False,
+                )
+            )
+            else None
         )
         self.pre_fc_norm_embedding = RMSNorm(
             weights.global_weights[W.multi_tokens_predict_enorm],
@@ -145,14 +162,37 @@ class GenericMoeMTPModel(GptModelBase):
         clone._mtp_iteration_topk_valid_tokens = self._mtp_iteration_topk_valid_tokens
         clone._mtp_iteration_topk_indices = self._mtp_iteration_topk_indices
         clone._mtp_recurrent_hidden_states = None
+        clone.multimodal_embedding_injector = getattr(
+            self, "multimodal_embedding_injector", None
+        )
 
         return clone
+
+    def embedding(self, inputs: PyModelInputs) -> torch.Tensor:
+        """Build MTP embeddings, injecting features only when supplied."""
+        multimodal_inputs = getattr(inputs, "multimodal_inputs", None)
+        multimodal_features = getattr(multimodal_inputs, "multimodal_features", None)
+        injector = getattr(self, "multimodal_embedding_injector", None)
+        if injector is None or not multimodal_features:
+            return self.embed_tokens(inputs.input_ids)
+
+        inputs_embeds = self.embed_tokens(
+            inputs.input_ids,
+            inputs.combo_position_ids,
+            inputs.embedding_inputs.combo_tokens_type_ids,
+            inputs.embedding_inputs.text_tokens_mask,
+        )
+        return injector(
+            inputs_embeds,
+            multimodal_features,
+            multimodal_inputs.mm_features_locs,
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.embedding(inputs)
         inputs_embeds = self._mask_position_zero_embeddings(
             inputs_embeds, fmha_impl, inputs.attention_inputs
         )
