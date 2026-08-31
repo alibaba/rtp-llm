@@ -79,6 +79,66 @@ void sanitizeLegacyStructures(JsonMap& root) {
     }
 }
 
+// JSON Schema keywords whose value is an instance rather than a schema. xgrammar serializes such a value into
+// the grammar verbatim, so rewriting it would change the literal the model is required to emit.
+bool isInstanceValuedKeyword(const std::string& key) {
+    return key == "const" || key == "enum" || key == "default" || key == "examples";
+}
+
+// Drops `minLength` / `maxLength` from every schema node reachable from `any`, reporting whether anything was
+// removed.
+//
+// xgrammar lowers a string length bound into a counted repetition, so the remaining-length counter becomes
+// part of the grammar state: every token generated inside the string lands in a state the adaptive token mask
+// cache has never seen, and each decode step pays a full vocabulary scan. Away from the bounds the mask it
+// computes is the one the unbounded field yields, so the scan buys nothing there. The lowering also drops the
+// escape branch of the string rule in the pinned version, which makes legal escaped content unemittable.
+// Until both are fixed upstream the bound is worse than no bound, so it is removed before compiling.
+//
+// A member only counts as the keyword when its value is a number. Under `properties` the same name denotes a
+// field and carries a schema instead, and the keyword is inert on non-string types, so that test alone decides
+// and no type check is needed -- which also covers the string nodes whose type xgrammar infers rather than
+// reads, such as the one under `propertyNames`.
+//
+// `in_json_schema` tracks whether xgrammar interprets this node as JSON Schema. The structural-tag DSL around
+// it may carry unrelated payloads, so keywords are only honoured once a `json_schema` value or a legacy
+// StructuralTagItem `schema` value has been entered.
+bool stripStringLengthBounds(autil::legacy::Any& any, bool in_json_schema) {
+    if (auto* arr = autil::legacy::AnyCast<JsonArray>(&any)) {
+        bool stripped = false;
+        for (auto& el : *arr) {
+            stripped |= stripStringLengthBounds(el, in_json_schema);
+        }
+        return stripped;
+    }
+    auto* map = autil::legacy::AnyCast<JsonMap>(&any);
+    if (!map) {
+        return false;
+    }
+
+    bool stripped = false;
+    if (in_json_schema) {
+        for (const char* key : {"minLength", "maxLength"}) {
+            auto it = map->find(key);
+            if (it != map->end() && autil::legacy::json::IsJsonNumber(it->second)) {
+                map->erase(it);
+                stripped = true;
+            }
+        }
+    }
+
+    const bool legacy_schema_item = map->count("schema") && map->count("begin") && map->count("end");
+    for (auto& [key, value] : *map) {
+        if (isInstanceValuedKeyword(key)) {
+            continue;
+        }
+        const bool child_in_json_schema =
+            in_json_schema || key == "json_schema" || (legacy_schema_item && key == "schema");
+        stripped |= stripStringLengthBounds(value, child_in_json_schema);
+    }
+    return stripped;
+}
+
 }  // namespace
 
 std::string XGrammarBackendCpp::sanitizeStructuralTag(const std::string& tag_json) {
@@ -97,11 +157,42 @@ std::string XGrammarBackendCpp::sanitizeStructuralTag(const std::string& tag_jso
     } else if (auto fmt = root->find("format"); fmt != root->end()) {
         sanitizeStructuralFormat(fmt->second);
     }
+    const bool stripped = stripStringLengthBounds(any, /*in_json_schema=*/false);
+    std::string sanitized;
     try {
-        return autil::legacy::json::ToString(any, true);
+        sanitized = autil::legacy::json::ToString(any, true);
     } catch (...) {
         return tag_json;
     }
+    if (stripped) {
+        RTP_LLM_LOG_WARNING("XGrammarBackendCpp: removed string minLength/maxLength from a structural tag before "
+                            "compiling; the bound would invalidate the token mask cache on every decode step");
+    }
+    return sanitized;
+}
+
+std::string XGrammarBackendCpp::sanitizeJsonSchema(const std::string& schema_json) {
+    autil::legacy::Any any;
+    try {
+        autil::legacy::json::ParseJson(schema_json, any);
+    } catch (...) {
+        return schema_json;
+    }
+    // Re-serializing sorts object keys, which would reorder `properties` and with it the order the schema
+    // forces fields to be generated in. An untouched schema therefore has to reach xgrammar verbatim; a
+    // stripped one pays that reordering, which is why nothing else is rewritten here.
+    if (!stripStringLengthBounds(any, /*in_json_schema=*/true)) {
+        return schema_json;
+    }
+    std::string sanitized;
+    try {
+        sanitized = autil::legacy::json::ToString(any, true);
+    } catch (...) {
+        return schema_json;
+    }
+    RTP_LLM_LOG_WARNING("XGrammarBackendCpp: removed string minLength/maxLength from a json schema before "
+                        "compiling; the bound would invalidate the token mask cache on every decode step");
+    return sanitized;
 }
 
 XGrammarBackendCpp::XGrammarBackendCpp(const std::string&            tokenizer_info_json,
@@ -338,10 +429,12 @@ CompileResult XGrammarBackendCpp::invokeCompiler(const GrammarKeyCpp& key) {
 
     const auto& grammar = key.key_string;
     if (key.key_type == "json") {
-        return wrap(grammar == "$$ANY$$" ?
-                        compiler_.CompileBuiltinJSONGrammar() :
-                        compiler_.CompileJSONSchema(
-                            grammar, options_.any_whitespace, std::nullopt, std::nullopt, options_.strict_mode));
+        return wrap(grammar == "$$ANY$$" ? compiler_.CompileBuiltinJSONGrammar() :
+                                           compiler_.CompileJSONSchema(sanitizeJsonSchema(grammar),
+                                                                       options_.any_whitespace,
+                                                                       std::nullopt,
+                                                                       std::nullopt,
+                                                                       options_.strict_mode));
     }
     if (key.key_type == "regex") {
         return wrap(compiler_.CompileRegex(grammar));

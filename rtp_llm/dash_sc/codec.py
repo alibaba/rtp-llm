@@ -23,6 +23,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
     adapt_dashscope_tool_call_wrapper_to_tag,
+    strip_string_length_bounds,
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
@@ -588,6 +589,11 @@ def _parse_grammar_controls(
             if structural_tag is None:
                 structural_tag = response_structural_tag
             response_format = None
+
+    # Normalize before serializing: SamplingParams is what admission validates and what
+    # to_generate_config forwards, so both must carry the spec the engine will compile.
+    strip_string_length_bounds(response_format)
+    strip_string_length_bounds(structural_tag)
 
     return (
         _jsonable_to_string(response_format),

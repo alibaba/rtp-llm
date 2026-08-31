@@ -918,32 +918,6 @@ class GrammarValidator:
     # -- shape checks (pure; never build/compile a grammar) ----------------- #
 
     @staticmethod
-    def _has_oversized_min_length(node: Any) -> bool:
-        """Return whether any nested JSON value requests ``minLength > 128``.
-
-        Large minimum string lengths currently make xgrammar bitmask generation
-        pathologically slow. Keep this admission guard until the upstream issue is
-        fixed: https://github.com/mlc-ai/xgrammar/issues/805.
-        """
-        if isinstance(node, dict):
-            min_length = node.get("minLength")
-            if (
-                isinstance(min_length, (int, float))
-                and not isinstance(min_length, bool)
-                and min_length > 128
-            ):
-                return True
-            return any(
-                GrammarValidator._has_oversized_min_length(value)
-                for value in node.values()
-            )
-        if isinstance(node, list):
-            return any(
-                GrammarValidator._has_oversized_min_length(value) for value in node
-            )
-        return False
-
-    @staticmethod
     def validate_json_schema(json_schema: str | dict) -> bool:
         """Return whether the schema parses and is valid Draft 7 JSON Schema.
 
@@ -957,8 +931,6 @@ class GrammarValidator:
             Draft7Validator.check_schema(schema)
         except Exception:
             return False
-        if GrammarValidator._has_oversized_min_length(schema):
-            return False
         return True
 
     @staticmethod
@@ -968,8 +940,6 @@ class GrammarValidator:
         own pydantic model (falls back to _check_structural_format without xgrammar)."""
         structural_tag = GrammarValidator._as_nonempty_dict(structural_tag)
         if structural_tag is None:
-            return False
-        if GrammarValidator._has_oversized_min_length(structural_tag):
             return False
 
         if structural_tag.get("structures") is not None:  # legacy form

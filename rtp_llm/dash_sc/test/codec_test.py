@@ -432,6 +432,92 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(json.loads(sp.structural_tag), normalized)
         self.assertEqual(json.loads(sp.to_generate_config().structural_tag), normalized)
 
+    def test_parse_sampling_strips_string_length_bounds_from_structural_tag(
+        self,
+    ) -> None:
+        # A string length bound costs a full vocabulary rescan per decode step and forbids
+        # nothing the engine keeps, so it is removed here too: otherwise admission would
+        # trial-compile a spec the engine never compiles.
+        tag = _tool_call_structural_tag()
+        tag["format"]["tags"][0]["content"]["json_schema"] = {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "minLength": 1, "maxLength": 8000},
+                "keyed": {"type": "object", "propertyNames": {"maxLength": 24}},
+                "count": {"type": "integer", "minimum": 1},
+                "maxLength": {"type": "integer"},
+                "textual": {"type": "string", "maxLength": "8000"},
+                "literal": {"const": {"type": "string", "maxLength": 12}},
+                "choice": {"enum": [{"type": "string", "minLength": 3}]},
+            },
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            tag, ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+        properties = json.loads(sp.structural_tag)["format"]["tags"][0]["content"][
+            "json_schema"
+        ]["properties"]
+
+        self.assertEqual(properties["action"], {"type": "string"})
+        # xgrammar infers the string type under `propertyNames` instead of reading it, and
+        # honours the bound there all the same.
+        self.assertEqual(properties["keyed"], {"type": "object", "propertyNames": {}})
+        self.assertEqual(properties["count"], {"type": "integer", "minimum": 1})
+        # A property whose name happens to be `maxLength` declares a field, not a bound.
+        self.assertEqual(properties["maxLength"], {"type": "integer"})
+        # Same gate from the other side: a bound that is not a number is not the keyword.
+        self.assertEqual(properties["textual"], {"type": "string", "maxLength": "8000"})
+        # `const` and `enum` carry instances that xgrammar puts into the grammar verbatim,
+        # so rewriting one would change the literal the model has to emit.
+        self.assertEqual(
+            properties["literal"], {"const": {"type": "string", "maxLength": 12}}
+        )
+        self.assertEqual(
+            properties["choice"], {"enum": [{"type": "string", "minLength": 3}]}
+        )
+
+    def test_parse_sampling_strips_string_length_bounds_from_guided_json(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"a": {"type": "string", "maxLength": 8000}},
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["guided_json"].string_param = json.dumps(
+            schema, ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(
+            json.loads(sp.response_format)["json_schema"]["schema"],
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+        )
+
+    def test_parse_sampling_strips_string_length_bounds_from_encoded_schema(
+        self,
+    ) -> None:
+        # A doubly encoded guided_json leaves the schema as a JSON string. The engine
+        # unwraps that shape before compiling, so admission has to reach into it too.
+        schema = {
+            "type": "object",
+            "properties": {"a": {"type": "string", "maxLength": 8000}},
+        }
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["guided_json"].string_param = json.dumps(
+            json.dumps(schema, ensure_ascii=False), ensure_ascii=False
+        )
+
+        sp = parse_sampling_params(req)
+        encoded = json.loads(sp.response_format)["json_schema"]["schema"]
+
+        self.assertEqual(
+            json.loads(encoded),
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+        )
+
     def test_parse_sampling_tool_call_structural_tag_unwraps_dashscope_list(
         self,
     ) -> None:

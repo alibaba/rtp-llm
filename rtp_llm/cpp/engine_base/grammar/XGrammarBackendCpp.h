@@ -147,7 +147,10 @@ public:
     void setCompileFnForTest(CompileFn fn);
 
 private:
+    // Both run below the cache layer, on the string handed to xgrammar. The cache stays keyed on the
+    // request's original spec, so a rewrite here neither splits the cache nor recompiles.
     static std::string sanitizeStructuralTag(const std::string& tag_json);
+    static std::string sanitizeJsonSchema(const std::string& schema_json);
 
     // Removes the in-flight entry for one key exactly once, on whichever path leaves the compile task.
     class InflightGuard {
