@@ -166,8 +166,8 @@ REASON_NAMES = {
 ROUTE_REJECT_FAMILY = (CODE_NO_PREFILL, CODE_QUEUE_REJECTED)
 
 # The observed terminal family for a decode-role-blocked incoming under
-# EV-2 (decode eviction never fires — see _single_park_pattern's EV-1
-# sibling note and the E9/E11 probes): the ordinary route fails on the
+# EV-2 (decode eviction never fires — see _design_final_pattern's EV-1
+# history note and the E9/E11 probes): the ordinary route fails on the
 # strict decode KV gate (8403 NO_DECODE_WORKER) or the route/commit
 # family, and the admission fallback cannot repair it, so the client
 # keeps a rejection from this family.  Actual codes are recorded in the
@@ -179,10 +179,19 @@ EV2_REJECT_FAMILY = (8403,) + ROUTE_REJECT_FAMILY + (CODE_RESOURCE_EXHAUSTED,)
 # carries its key ("[EV-1]" / "[EV-2]"); once the Java side fixes the
 # underlying behaviour, grep these keys to enumerate every assertion
 # point that must be flipped back to the designed shape.
+# [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+# (commit 6ad0315f10, 2026-08-31): capacity blocking now parks EVERY
+# submitter in the pull-based coordinator (priority desc + FIFO
+# tiebreak) — the design-final assertions were restored from the EV-1
+# downgrades; grep [EV-1-FIXED] for every flip point.  EV-2 remains the
+# live downgrade baseline (decode eviction still unreachable).
 EXPECTED_BASELINES = {
     "EV-1": (
-        "single park slot — only a wave FIRST submitter parks, every "
-        "later submitter route-rejects {8402, 8510}"
+        "FIXED (flipped at intake3 PendingPlacementCoordinator, commit "
+        "6ad0315f10): capacity blocking parks every submitter (pull-based, "
+        "priority desc + FIFO); all-200 design-final dispatch shape — "
+        "zero route-reject (was: single park slot, later submitters "
+        "route-reject {8402, 8510})"
     ),
     "EV-2": (
         "decode eviction never fires — zero 8400/8429 victims, the "
@@ -597,11 +606,18 @@ def _dispatch_rows(ops, fires: list) -> list:
     return rows
 
 
-def _inversion_ratio(order: list, priorities: dict) -> float:
+def _inversion_ratio(order: list, priorities: dict, exclude=None) -> float:
     """PR1 calibre: (high, low) pairs dispatched inverted / total
-    cross-priority pairs; 0.0 under a deterministic choreography."""
+    cross-priority pairs, computed on the REAL dispatch order (engine
+    running_ms asc + settle-rank arbitration).  ``exclude`` removes the
+    design-final first parker (and any pre-wave running placeholder)
+    from the scoring set — under the intake3 pull model the wave's first
+    submitter legitimately wins the first release slot ahead of higher
+    priorities, so counting it would blur the inversion signal
+    ([EV-1-FIXED]).  0.0 under a deterministic choreography."""
+    skip = set(exclude or ())
     pos = {rid: i for i, rid in enumerate(order)}
-    rids = [r for r in priorities if r in pos]
+    rids = [r for r in priorities if r in pos and r not in skip]
     inversions = 0
     total = 0
     for i, a in enumerate(rids):
@@ -624,33 +640,49 @@ def _group_order_ok(order: list, rids: list) -> bool:
     return seq == sorted(seq)
 
 
-# EV-1 (single park slot, empirically established 2026-08-28): under
-# PRIORITY+SINGLE+NON_BATCH with a capacity-blocked head, every probe after
-# the first parked request is route-rejected with the route-reject family
-# {8402, 8510} regardless of priority — CostBasedPrefillStrategy.
-# evaluateCandidates drops the BLOCKED projection (RouteAdmissionPolicy
-# AFTER_PROBE -> CAPACITY_BLOCK AfterProbeAdmission.BLOCKED), select
-# returns null -> Rejected 8402, and the eviction fallback re-routes through
-# the same blocked head (EvictionPlacementAdapter.preparePrefillEviction
-# requires an Admitted route) so no eviction ever happens. Probe evidence:
-# E8 (prio 70 over parked 30 -> 8402), E8b (same priority), E8c (FIFO),
-# E10 (8511 on the parked head + 8402 for the second submitter). The wave's
-# FIRST submitter parks; later submitters are rejected.
-def _single_park_pattern(m: dict, ordered_rids: list) -> tuple:
-    """EV-1 baseline classifier for one wave's outcomes.
+# EV-1 history — FIXED at intake3 (2026-08-31): the former single-park
+# slot baseline (only a wave's first submitter parked; every later
+# submitter route-rejected {8402, 8510} regardless of priority — probes
+# E8/E8b/E8c/E10, CostBasedPrefillStrategy evaluateCandidates dropping
+# BLOCKED projections) was superseded by the pull-based
+# PendingPlacementCoordinator (commit 6ad0315f10; park path
+# RequestScheduler.java L95-112): capacity-blocked submitters park in a
+# WaitBucket (TreeSet, ORDER = priority desc + sequence asc) and are
+# re-pulled on every capacity release.  [EV-1-FIXED] probe evidence (ph +
+# 30a/30b/50a/50b/70a/70b wave, prefill_fixed_ms=3000): all code=200,
+# dispatch order [ph, 30a (first parker), 70a, 70b, 50a, 50b, 30b],
+# gaps ~3015ms — the wave's FIRST submitter legitimately wins the FIRST
+# release slot; every later release follows strict priority desc +
+# same-level FIFO.
+def _design_final_pattern(
+    ops, fires: list, ordered_rids: list, priorities: dict, fifo: bool = False
+) -> tuple:
+    """Design-final (intake3 PendingPlacementCoordinator) shape classifier
+    for one wave's dispatch order.
 
-    Returns (parked_rid, pattern_ok): pattern_ok is True when exactly the
-    first submitter escaped the route-reject family and every later
-    submitter is in ROUTE_REJECT_FAMILY.
-    """
-    rejected = [rid for rid in ordered_rids if m[rid][1] in ROUTE_REJECT_FAMILY]
-    escaped = [rid for rid in ordered_rids if rid not in rejected]
-    pattern_ok = (
-        len(escaped) == 1
-        and escaped[0] == ordered_rids[0]
-        and len(rejected) == len(ordered_rids) - 1
-    )
-    return (escaped[0] if escaped else None), pattern_ok
+    Returns (first_parker_rid, shape_ok, wave_dispatch_order): shape_ok is
+    True when the wave's dispatch order (engine running_ms asc +
+    settle-rank arbitration) equals [first submitter — the wave's first
+    parker, by design] + remaining rids sorted by (priority desc, submit
+    order) — or pure submit order under ``fifo``.  The first-parker
+    precedence is the DESIGNED pull-model behaviour, not an inversion;
+    the flip contract lives in EXPECTED_BASELINES ("[EV-1-FIXED]")."""
+    order = _dispatch_order(ops, fires)
+    pos = {rid: i for i, rid in enumerate(order)}
+    wave_order = [r for r in ordered_rids if r in pos]
+    first_parker = ordered_rids[0] if ordered_rids else None
+    if len(wave_order) != len(ordered_rids):
+        return first_parker, False, wave_order
+    rest = ordered_rids[1:]
+    if fifo:
+        expected_rest = list(rest)
+    else:
+        submit_rank = {rid: i for i, rid in enumerate(rest)}
+        expected_rest = sorted(
+            rest, key=lambda r: (-priorities.get(r, 0), submit_rank[r])
+        )
+    shape_ok = wave_order == [ordered_rids[0]] + expected_rest
+    return first_parker, shape_ok, wave_order
 
 
 # ===========================================================================
@@ -816,8 +848,17 @@ def _f1_spec(ctx: CaseContext) -> EnvSpec:
 
 def _o1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-O1: observability env — Q2-shaped config with a SHORT queueTimeout
-    (8s, so the choreography yields timeout-attribution samples), debug log
+    (7s, so the choreography yields timeout-attribution samples), debug log
     on, and FLEXLB_MONITOR_MODE=all.
+
+    [EV-1-FIXED] queueTimeout 7s (was 8s, flipped at intake3
+    PendingPlacementCoordinator 6ad0315f10): under the pull model the
+    wave's third release slot lands at t=9s, which sat INSIDE the 8s
+    deadline of the 4th submitter (70a, deadline ~8.7-9.0s) — a race
+    between the coordinator pull and the expiry check.  7s puts every
+    non-dispatched deadline (7.1-8.35s) strictly before the t=9 slot,
+    making the client shape deterministic: ph + 30a (first parker) + 90
+    dispatch and complete, the remaining seven expire 8511.
 
     Implementation-period corrections over the design's env sketch: the
     critical-only metrics filter (the default) does not expose auto_tpm.*,
@@ -827,7 +868,7 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
     return _spec(
         ctx,
         "atpm_o1",
-        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=8_000),
+        config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
         master_debug_log=True,
         extra_env={"FLEXLB_MONITOR_MODE": "all"},
     )
@@ -838,9 +879,10 @@ def _q3_spec(ctx: CaseContext) -> EnvSpec:
     config plus FLEXLB_MONITOR_MODE=all.  auto_tpm.request.count{priority=..}
     is counted at the schedule RPC entry for EVERY request regardless of
     outcome (FlexlbServiceImpl:723), which keeps the proto-vs-header
-    channel discrimination observable even under the EV-1 single-park
-    baseline; the shared ENV-P0/Q1/F1 specs cannot serve it because the
-    default critical-only metrics filter hides auto_tpm.*."""
+    channel discrimination observable even while capacity-blocked
+    submitters park in the intake3 coordinator; the shared ENV-P0/Q1/F1
+    specs cannot serve it because the default critical-only metrics
+    filter hides auto_tpm.*."""
     return _spec(
         ctx,
         "prio_q3",
@@ -1034,8 +1076,13 @@ def prio_order_basic(ctx: CaseContext):
     window).  A priority=50 placeholder parks the inflight lease, then a
     mixed ladder is submitted LOW-first (30a, 30b, 50a, 50b, 70a, 70b,
     0.15s apart, 7 concurrent ≤ maxWaiting 8 — no route failure, no
-    preemption).  The master queue reorders by priority, so the dispatch
-    order must be [ph, 70a, 70b, 50a, 50b, 30a, 30b].
+    preemption).  [EV-1-FIXED] Under the intake3 pull-based coordinator
+    (PendingPlacementCoordinator, 6ad0315f10) the whole wave parks and
+    settles code=200; the design-final dispatch order is [ph, 30a (the
+    wave's first submitter legitimately wins the FIRST release slot),
+    70a, 70b, 50a, 50b, 30b] — every later release follows strict
+    priority desc + same-level FIFO (probe evidence 2026-08-31, gaps
+    ~3015ms, zero route-reject).
 
     Observation (design §3.3): engine request_lifecycle.running_ms
     ascending == dispatch order (the mock cluster is one JVM, clocks
@@ -1084,70 +1131,75 @@ def prio_order_basic(ctx: CaseContext):
 
         order = _dispatch_order(ops, fires)
         order_tags = [tag_of.get(r, str(r)) for r in order]
-        # EV-1 baseline: the ideal multi-parker reorder [ph,70a,70b,50a,50b,
-        # 30a,30b] is NOT constructible — the queue holds at most one parked
-        # entry (see _single_park_pattern docstring). Observable form: the
-        # wave's first submitter (30a) parks and dispatches after ph; the
-        # other five are route-rejected 8402. PR1/PR2 are therefore asserted
-        # on the dispatched subset only (ph + 30a), where priority causes no
-        # inversion; the multi-parker form is a Java-side behaviour finding
-        # (EV-1) pending owner decision.
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the whole wave parks (pull-based WaitBucket, priority
+        # desc + FIFO tiebreak) and every request settles code=200 — zero
+        # route-reject.  Design-final dispatch shape: [ph, 30a (the wave's
+        # first submitter legitimately wins the FIRST release slot), 70a,
+        # 70b, 50a, 50b, 30b].  PR1 scores the REAL dispatch order
+        # (running_ms asc + settle-rank arbitration) with the first parker
+        # AND the pre-wave running placeholder excluded — the exclusion is
+        # the designed pull-model behaviour, not an inversion amnesty.
         m = _outcome_map(outcomes)
         wave_rids = [rids[t] for t in tags]
-        parked_rid, ev1_ok = _single_park_pattern(m, wave_rids)
-        dispatched = [
-            fr.rid for fr in fires if _prefill_lifecycle(ops, fr.rid) is not None
-        ]
-        dispatched_tags = [tag_of.get(r, str(r)) for r in dispatched]
+        first_parker, shape_ok, wave_order = _design_final_pattern(
+            ops, fires, wave_rids, priorities
+        )
+        wave_order_tags = [tag_of.get(r, str(r)) for r in wave_order]
+        all_ok = m[ph][0] and all(m[rids[t]][0] for t in tags)
 
         report.check(
             "PR1",
-            _inversion_ratio(dispatched, priorities),
-            context="basic_order_ev1",
+            _inversion_ratio(order, priorities, exclude={ph, first_parker}),
+            context="basic_order",
             detail=(
-                f"[EV-1] dispatched={dispatched_tags} (EV-1 single park slot: "
-                f"reorder unobservable, wave rejections="
-                f"{[m[rids[t]][1] for t in tags[1:]]})"
+                f"[EV-1-FIXED] dispatch={order_tags} (design-final: first "
+                f"parker 30a then priority desc; first parker and pre-wave "
+                f"placeholder excluded from PR1 scoring)"
             ),
         )
         report.invariant(
             "PR2",
-            _group_order_ok(dispatched, [ph, rids["50a"], rids["50b"]])
-            and _group_order_ok(dispatched, [rids["70a"], rids["70b"]])
-            and _group_order_ok(dispatched, [rids["30a"], rids["30b"]]),
-            context="same_priority_fifo_ev1",
-            detail=f"[EV-1] dispatched={dispatched_tags}",
+            shape_ok
+            and _group_order_ok(order, [rids["70a"], rids["70b"]])
+            and _group_order_ok(order, [rids["50a"], rids["50b"]])
+            and _group_order_ok(order, [rids["30a"], rids["30b"]]),
+            context="same_priority_fifo",
+            detail=(
+                f"[EV-1-FIXED] dispatch={order_tags} (shape covers "
+                f"same-level FIFO inside every priority group)"
+            ),
         )
         report.invariant(
             "PR6",
-            ev1_ok
-            and m[ph][0]
-            and parked_rid is not None
-            and m[parked_rid][0]
-            and all(m[rids[t]][1] in ROUTE_REJECT_FAMILY for t in tags[1:]),
-            context="single_park_slot_ev1",
+            shape_ok
+            and all_ok
+            and all(m[rids[t]][1] == CODE_OK for t in tags)
+            and m[ph][1] == CODE_OK,
+            context="design_final_dispatch",
             detail=(
-                f"[EV-1] parked={tag_of.get(parked_rid, parked_rid)} completed, "
-                f"later submitters route-rejected (EV-1), "
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): wave="
+                f"{wave_order_tags} (first parker="
+                f"{tag_of.get(first_parker, first_parker)} then priority "
+                f"desc + same-level FIFO), all code=200 (zero route-reject), "
                 f"codes={[(t, m[rids[t]][1]) for t in tags]}"
             ),
         )
-        unfinished = [
-            o for o in outcomes if not o[1] and o[2] not in ROUTE_REJECT_FAMILY
-        ]
+        unfinished = [o for o in outcomes if not o[1]]
         clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         report.invariant(
             "P6",
             not unfinished and clean_ok,
             detail=(
-                f"drained (non-reject) {len(outcomes) - len(unfinished)}/7, "
-                f"unexpected-unfinished={unfinished[:3] if unfinished else 'none'}, "
+                f"[EV-1-FIXED] issued=terminal no-loss: "
+                f"{len(outcomes) - len(unfinished)}/7 completed, "
+                f"unfinished={unfinished[:3] if unfinished else 'none'}, "
                 f"inflight={'ok' if clean_ok else clean_detail}"
             ),
         )
         return report.finish(
-            f"dispatched={dispatched_tags}, EV-1 rejects=5, "
-            f"grades: {report.summary()}"
+            f"dispatched={order_tags} [EV-1-FIXED], grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -1193,58 +1245,42 @@ def prio_same_level_fifo(ctx: CaseContext):
 
         outcomes = _drain(ops, fires)
         order = _dispatch_order(ops, fires)
-        # EV-1 baseline, NO-placeholder shape (behaviour finding, probes
-        # E8/E8b/E8c/E10 — second-round calibration): this case has no
-        # parked placeholder, so the submit sequence hits the queue in
-        # three regimes — rids[0] submits against an EMPTY queue and
-        # dispatches directly; rids[1] is the FIRST submitter to meet the
-        # capacity-blocked head and parks (the single probe slot);
-        # rids[2:] all route-reject 8402.  The strict
-        # "dispatch == submit" equality on seven FIFO peers is not
-        # constructible — the queue never holds two entries (see
-        # _single_park_pattern docstring).
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): all seven same-priority peers park in the pull-based
+        # coordinator and dispatch in pure submit order (enqueueSeq
+        # tie-break, design §3.4 row 5) — rids[0] direct-dispatches against
+        # the empty queue, rids[1] is the wave's first parker, and the
+        # "dispatch == submit" equality on seven FIFO peers is now a REAL
+        # observation object (was EV-1: only the first parker survived,
+        # the rest route-rejected).
         m = _outcome_map(outcomes)
-        first_dispatched = m[rids[0]][0]
-        parked_rid = rids[1] if m[rids[1]][1] not in ROUTE_REJECT_FAMILY else None
-        rest_rejected = all(m[rid][1] in ROUTE_REJECT_FAMILY for rid in rids[2:])
-        dispatched = [
-            fr.rid for fr in fires if _prefill_lifecycle(ops, fr.rid) is not None
-        ]
-        fifo_ok = dispatched == rids[: len(dispatched)]
-        ev1_shape_ok = (
-            first_dispatched
-            and parked_rid is not None
-            and m[parked_rid][0]
-            and rest_rejected
-        )
+        all_ok = all(m[rid][0] for rid in rids)
+        fifo_ok = order == rids and all_ok
         report.invariant(
             "PR2",
-            ev1_shape_ok and fifo_ok,
-            context="same_priority_fifo_ev1",
+            fifo_ok,
+            context="same_priority_fifo",
             detail=(
-                f"[EV-1] EV-1 no-placeholder shape: dispatched="
-                f"{[r % 1_000_000 for r in dispatched]} (prefix order), "
-                f"rids[0] direct dispatch ok={first_dispatched}, "
-                f"rids[1] parked (single probe slot) ok="
-                f"{m[parked_rid][0] if parked_rid else False}, "
-                f"rest rejected 8402={rest_rejected}"
+                f"[EV-1-FIXED] dispatch==submit:{order == rids}, "
+                f"all 7 code=200={all_ok}, "
+                f"dispatch={[r % 1_000_000 for r in order]}"
             ),
         )
-        unfinished = [
-            o for o in outcomes if not o[1] and o[2] not in ROUTE_REJECT_FAMILY
-        ]
+        unfinished = [o for o in outcomes if not o[1]]
         clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         report.invariant(
             "P6",
             not unfinished and clean_ok,
             detail=(
-                f"drained (non-reject) {len(outcomes) - len(unfinished)}/7, "
-                f"unexpected-unfinished={unfinished[:3] if unfinished else 'none'}, "
+                f"[EV-1-FIXED] issued=terminal no-loss: "
+                f"{len(outcomes) - len(unfinished)}/7 completed, "
+                f"unfinished={unfinished[:3] if unfinished else 'none'}, "
                 f"inflight={'ok' if clean_ok else clean_detail}"
             ),
         )
         return report.finish(
-            f"fifo_ev1_shape={ev1_shape_ok}, grades: {report.summary()}"
+            f"fifo dispatch==submit:{order == rids} [EV-1-FIXED], "
+            f"grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -1286,20 +1322,26 @@ def prio_normalize(ctx: CaseContext):
     Segment 2 (window env — Q1 on the priority profile, F1 on the four
     FIFO profiles): placeholder(no input) + C(no input → 50) + A(proto 70,
     header 30 — proto must win) + B(proto unset, header 70 — header must
-    take effect) + G(explicit 70).  Priority env expects [ph, A, B, G, C]
-    (A/B/G one 70-group in submit order, C last); FIFO env expects
-    [ph, C, A, B, G] (pure arrival — normalization with zero behavioural
+    take effect) + G(explicit 70).  [EV-1-FIXED] Under the intake3
+    pull-based coordinator the wave parks whole and dispatches
+    [ph, C, A, B, G] under BOTH profile kinds — under PRIORITY, C (the
+    wave's first submitter) legitimately wins the first release slot,
+    then the 70-group A/B/G follows in submit order (a failed channel
+    reorders the tail and flips the assertion); under FIFO the same
+    sequence is pure arrival order (normalization with zero behavioural
     footprint).  Implementation-period note: design §2.2 sketched this
     segment on ENV-P0, but without maxInflightRequestsPerPrefillWorker
     there is no backlog window and no observable queue-jumping — the
     window env keeps the choreography and makes it observable.
 
     Segment 3 (ENV-N1, priority profile only — avoids four redundant
-    per-profile envs): defaultPriority=30 — D(no input) ties with
-    X(explicit 30) and both dispatch after Y(explicit 50): expected
-    [ph, Y, D, X].  A failed default (D=50) would give [ph, D, Y, X] —
-    the two outcomes are distinguishable, so the assertion really pins
-    the third channel.
+    per-profile envs): defaultPriority=30.  [EV-1-FIXED] submit order
+    adapted for the design-final baseline: Y(50) leads (first parker),
+    then D(no input), then a Z(40) reference, then X(explicit 30).
+    Expected dispatch [ph, Y, Z, D, X] — D (default 30) ties X inside
+    the 30-group FIFO behind Z(40); a failed default (D=50) would give
+    [ph, Y, D, Z, X] — the two outcomes stay distinguishable, so the
+    assertion really pins the third channel.
 
     Segment 4 (ENV-Q3, all five profiles — A5, Mark P1-3/PR3
     strengthening): channel discrimination observed through the METRIC
@@ -1378,36 +1420,36 @@ def prio_normalize(ctx: CaseContext):
         s2_fires.extend(_fire_batch(ops2, s2_specs))
         s2_outcomes = _drain(ops2, s2_fires)
         s2_order = _dispatch_order(ops2, s2_fires)
-        # EV-1 baseline: the ideal reorder ([ph,A,B,G,C] on priority,
-        # [ph,C,A,B,G] on FIFO) is not constructible — only the first
-        # submitter parks (single park slot, see _single_park_pattern).
-        # Observable form: C (no input -> default) parks and completes;
-        # A/B/G are route-rejected 8402 on BOTH profile kinds, so the
-        # proto-vs-header-vs-default ordering has no observable object.
-        # The normalization channels themselves stay covered by segment 1
-        # (same-weight merge, weak arrival form) — the multi-parker
-        # discrimination is a Java-side behaviour finding (EV-1).
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the four-request wave parks whole and dispatches
+        # [ph, C, A, B, G] under BOTH profile kinds — under PRIORITY, C (no
+        # input -> default 50) is the wave's first submitter and wins the
+        # first release slot, then the 70-group A/B/G follows in submit
+        # order (proto won for A, header took effect for B — a failed
+        # channel reorders the tail and flips the assertion); under FIFO
+        # the same sequence is pure arrival order (normalization has zero
+        # behavioural footprint).  All four settle code=200.
         s2_m = _outcome_map(s2_outcomes)
         s2_wave = [c_rid, a_rid, b_rid, g_rid]
-        _s2_parked, s2_ev1 = _single_park_pattern(s2_m, s2_wave)
-        s2_dispatched = [
-            fr.rid for fr in s2_fires if _prefill_lifecycle(ops2, fr.rid) is not None
-        ]
+        s2_expected = [ph2, c_rid, a_rid, b_rid, g_rid]
         s2_ok = (
-            s2_ev1 and s2_dispatched == [ph2, c_rid] and s2_m[ph2][0] and s2_m[c_rid][0]
+            s2_order == s2_expected
+            and s2_m[ph2][0]
+            and all(s2_m[r][0] for r in s2_wave)
         )
         segments.append(
             (
-                "proto_header_default_ev1",
+                "proto_header_default_ev1_fixed",
                 s2_ok,
-                f"dispatched==[ph,C]:{s2_dispatched == [ph2, c_rid]}, "
-                f"ev1_pattern={s2_ev1}, "
-                f"codes={[(r % 1_000_000, s2_m[r][1]) for r in s2_wave]}",
+                f"[EV-1-FIXED] dispatch==[ph,C,A,B,G]:"
+                f"{s2_order == s2_expected}, "
+                f"codes={[(r % 1_000_000, s2_m[r][1]) for r in s2_wave]}, "
+                f"order={[r % 1_000_000 for r in s2_order]}",
             )
         )
         hygiene.append((ops2, s2_fires, p2_names))
         clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops2), 30.0)
-        p6_flags.append(s2_m[ph2][0] and s2_m[c_rid][0] and clean_ok)
+        p6_flags.append(s2_m[ph2][0] and all(s2_m[r][0] for r in s2_wave) and clean_ok)
 
         # -- segment 3: defaultPriority=30 (priority profile only) ------
         if prio_profile:
@@ -1426,42 +1468,51 @@ def prio_normalize(ctx: CaseContext):
             if not _poll_engine_pending(ops3, p3_names[0], 1):
                 return False, "segment3 placeholder never dispatched"
 
-            d_rid = ops3.next_request_id(base)
             y_rid = ops3.next_request_id(base)
+            d_rid = ops3.next_request_id(base)
+            z_rid = ops3.next_request_id(base)
             x_rid = ops3.next_request_id(base)
+            # [EV-1-FIXED] submit order adapted for the design-final
+            # baseline (intake3 PendingPlacementCoordinator, 6ad0315f10):
+            # the wave's FIRST submitter now legitimately wins the first
+            # release slot, so the default-channel probe D must NOT sit in
+            # first position (there it is order-invariant and the
+            # assertion goes vacuous).  Y(50) leads as the first parker;
+            # the Z(40) reference between D and X keeps the outcomes
+            # distinguishable: default=30 gives [ph, Y, Z, D, X] (D ties X
+            # at 30, FIFO inside the group, both behind Z), a failed
+            # default (D=50) gives [ph, Y, D, Z, X].
             s3_specs = [
-                (d_rid, {"input_len": 2048, "output_len": 2}),
                 (y_rid, {"priority": 50, "input_len": 2048, "output_len": 2}),
+                (d_rid, {"input_len": 2048, "output_len": 2}),
+                (z_rid, {"priority": 40, "input_len": 2048, "output_len": 2}),
                 (x_rid, {"priority": 30, "input_len": 2048, "output_len": 2}),
             ]
             s3_fires.extend(_fire_batch(ops3, s3_specs))
             s3_outcomes = _drain(ops3, s3_fires)
             s3_order = _dispatch_order(ops3, s3_fires)
-            # EV-1 baseline: [ph,Y,D,X] reorder not constructible (single
-            # park slot). D (no input -> defaultPriority=30) parks and
-            # completes; X/Y are route-rejected 8402 — the
-            # default-vs-explicit tie cannot be observed through dispatch
-            # order (Java behaviour finding EV-1).
+            # [EV-1-FIXED] baseline flipped at intake3
+            # PendingPlacementCoordinator (6ad0315f10): the four-request
+            # wave parks whole and dispatches [ph, Y (first parker), Z,
+            # D, X] — D (no input -> defaultPriority=30) ties X inside the
+            # 30-group FIFO behind the Z(40) reference; a failed default
+            # (D=50) would give [ph, Y, D, Z, X].  The third channel
+            # (defaultPriority) is pinned through D's dispatch position.
             s3_m = _outcome_map(s3_outcomes)
-            s3_wave = [d_rid, y_rid, x_rid]
-            _s3_parked, s3_ev1 = _single_park_pattern(s3_m, s3_wave)
-            s3_dispatched = [
-                fr.rid
-                for fr in s3_fires
-                if _prefill_lifecycle(ops3, fr.rid) is not None
-            ]
+            s3_wave = [y_rid, d_rid, z_rid, x_rid]
+            s3_expected = [ph3, y_rid, z_rid, d_rid, x_rid]
             s3_ok = (
-                s3_ev1
-                and s3_dispatched == [ph3, d_rid]
+                s3_order == s3_expected
                 and s3_m[ph3][0]
-                and s3_m[d_rid][0]
+                and all(s3_m[r][0] for r in s3_wave)
             )
             segments.append(
                 (
-                    "default_priority_30_ev1",
+                    "default_priority_30_ev1_fixed",
                     s3_ok,
-                    f"dispatched==[ph,D]:{s3_dispatched == [ph3, d_rid]}, "
-                    f"ev1_pattern={s3_ev1}, "
+                    f"[EV-1-FIXED] dispatch==[ph,Y,Z,D,X]:"
+                    f"{s3_order == s3_expected} (D=default30 ties X behind "
+                    f"Z(40); failed default would give [ph,Y,D,Z,X]), "
                     f"codes={[(r % 1_000_000, s3_m[r][1]) for r in s3_wave]}",
                 )
             )
@@ -1469,7 +1520,9 @@ def prio_normalize(ctx: CaseContext):
             clean_ok, clean_detail = AssertUtils.inflight_clean(
                 _master_http(ops3), 30.0
             )
-            p6_flags.append(s3_m[ph3][0] and s3_m[d_rid][0] and clean_ok)
+            p6_flags.append(
+                s3_m[ph3][0] and all(s3_m[r][0] for r in s3_wave) and clean_ok
+            )
 
         # -- segment 4 (A5): channel discrimination, metric plane -------
         # Needs its own env (FLEXLB_MONITOR_MODE=all): the shared P0/Q1/
@@ -1676,26 +1729,25 @@ def prio_queue_timeout_terminal(ctx: CaseContext):
     inflight cap 1.
 
     Choreography (calibrated from the design's 70x3x4s sketch): 70a
-    placeholder (4800ms) parks the lease; then 30a, 30b, 30c, 70b submit
-    in one batch — 70b parks at the queue head by priority and
-    dispatches at the first lease release (t≈4.8s, well inside its own
-    deadline), while the three 30s sit behind 70b and expire at
-    enqueuedAt+8s ≈ 8.2-8.5s (the expiry check inspects the queue head).
-    The design sketch (70x3, ~12s pressure) would push the 30s'
-    terminals to ~12s → ratio ≈1.55, outside the normal band — the
-    70x2x4800ms form lands the ratio in ≈1.0-1.3 (strict/normal
-    boundary).  This is an implementation-period calibration, reported
-    for the record, not a design change.
+    placeholder (10000ms) holds the lease; then 30a, 30b, 30c, 70b submit
+    in one batch.  [EV-1-FIXED] Under the intake3 pull-based coordinator
+    (PendingPlacementCoordinator, 6ad0315f10) the whole wave parks — and
+    with prefill 10s > queueTimeout 8s > submit window ~0.7s, EVERY wave
+    request's absolute deadline fires before the first lease release:
+    all four settle 8511 BATCH_SLO_EXPIRED at enqueue+8s (30a ≈8.01s,
+    70b ≈8.7s), zero route-reject.  The E10 calibration form (prefill
+    deliberately beyond the deadline so the parked head provably expires
+    AT its absolute deadline) carries over to every parked request.
 
-    Assertions: PR8 band = max low-priority terminal wall-time / 8000ms;
-    low terminals typed in the plain-timeout family {8511, 8402, 8430}
-    (implementation-period correction: the design's {8503, 8402, 8430}
-    assumed QUEUE_TIMEOUT 8503 is the plain-path code, but 8503 is dead
-    code in the master — the ordinary queued-expiry terminal is
-    BATCH_SLO_EXPIRED 8511, RequestSlot.deadlineErrorType configured at
-    registration; 8430 would be a calibration surprise — recorded, the
-    design notes it cannot arise without priorityAdmission); both 70s
-    succeed; P6 every request reaches a terminal (no suspension).
+    Assertions: PR8 band = max low-priority terminal wall-time / 8000ms
+    (strict 1.25 — the latest submitter's deadline lands ≈1.07, the
+    absolute-deadline proof: no suspension, no extension); low terminals
+    all typed 8511 (implementation-period correction: the design's
+    {8503, 8402, 8430} assumed QUEUE_TIMEOUT 8503 is the plain-path
+    code, but 8503 is dead code in the master — the ordinary
+    queued-expiry terminal is BATCH_SLO_EXPIRED 8511,
+    RequestSlot.deadlineErrorType configured at registration); 70a
+    succeeds; P6 every request reaches a terminal (no suspension).
     """
     env = ctx.env_manager.ensure(_t1_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -1705,11 +1757,12 @@ def prio_queue_timeout_terminal(ctx: CaseContext):
     prefill_names: list = []
     try:
         prefill_names = _prefill_names(ops)
-        # E10 calibration: prefill 10s > queueTimeout 8s so the ONE parked
-        # low-priority head provably expires at its absolute deadline
-        # (probe E10: 8511 at wall=8.01s). Under the EV-1 single park slot
-        # the wave reduces to: 30a parks and hits 8511 at ~8s, 30b/30c/70b
-        # are route-rejected 8402 immediately (blocked head), 70a completes.
+        # E10 calibration: prefill 10s > queueTimeout 8s so every parked
+        # request provably expires at its absolute deadline (probe E10:
+        # 8511 at wall=8.01s).  [EV-1-FIXED] under the pull model the whole
+        # wave parks: 30a/30b/30c and 70b all settle 8511 at their own
+        # enqueue+8s deadlines before the t=10s lease release; 70a
+        # (dispatched t=0) completes.
         for name in prefill_names:
             ops.set_perf(name, prefill_fixed_ms=10_000.0)
         time.sleep(PERF_SETTLE_S)
@@ -1737,48 +1790,45 @@ def prio_queue_timeout_terminal(ctx: CaseContext):
         outcomes = _drain(ops, fires)
         by_rid = {rid: (ok, code) for (rid, ok, code, _detail) in outcomes}
 
-        # EV-1/E10 baseline: 30a (first submitter) parks behind the
-        # capacity-blocked head and expires 8511 at its absolute deadline;
-        # 30b/30c and even the higher-priority 70b are route-rejected 8402.
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the whole wave parks (pull-based) and, with prefill
+        # 10s > queueTimeout 8s > submit window ~0.7s, EVERY wave request's
+        # absolute deadline fires before the first lease release — all
+        # four settle 8511 BATCH_SLO_EXPIRED at enqueue+8s (30a ≈8.01s,
+        # 70b ≈8.7s), none suspended past its deadline, zero route-reject.
         h1_ok = by_rid[h1][0]
         low_codes = [by_rid[rid][1] for rid in low_rids]
-        # A9-② (Ryan P3-3): low_family_ok was computed but never read —
-        # folded into the P6 detail below as the low-wave family shape.
-        low_family_ok = all(
-            code in (CODE_SLO_EXPIRED, CODE_NO_PREFILL, CODE_ADMISSION_TIMEOUT)
-            for code in low_codes
+        wave_all_expired = (
+            all(code == CODE_SLO_EXPIRED for code in low_codes)
+            and by_rid[h2][1] == CODE_SLO_EXPIRED
         )
-        head_expired = low_codes[0] == CODE_SLO_EXPIRED
-        later_rejected = all(code in ROUTE_REJECT_FAMILY for code in low_codes[1:])
-        h2_rejected = by_rid[h2][1] in ROUTE_REJECT_FAMILY
-        max_low_s = max(fr.settled_s - fr.submitted_s for fr in low_fires[:1])
+        max_low_s = max(fr.settled_s - fr.submitted_s for fr in low_fires)
         ratio = max_low_s / 8.0
         report.check(
             "PR8",
             ratio,
             context="queue_timeout_terminal",
             detail=(
-                f"parked head 30a terminal={low_codes[0]} at "
-                f"{max_low_s * 1000:.0f}ms / 8000ms (absolute deadline), "
+                f"[EV-1-FIXED] all three 30s settle 8511 at their own "
+                f"enqueue+8s deadlines (max wall {max_low_s * 1000:.0f}ms "
+                f"/ 8000ms, absolute — no suspension, no extension), "
                 f"wave codes="
                 f"{[(rid % 1_000_000, c) for rid, c in zip(low_rids, low_codes)]}, "
-                f"70b={by_rid[h2][1]}"
+                f"70b={by_rid[h2][1]} (parked; deadline before first release)"
             ),
         )
         report.invariant(
             "P6",
-            h1_ok and head_expired and later_rejected and h2_rejected,
+            h1_ok and wave_all_expired,
             detail=(
-                f"[EV-1] 70a ok={h1_ok}, parked 30a=8511@deadline="
-                f"{head_expired}, 30b/30c route-rejected={later_rejected}, "
-                f"70b route-rejected={h2_rejected} (EV-1 single park slot), "
-                f"low_family_ok={low_family_ok}, "
-                f"no suspension (queueTimeout absolute)"
+                f"[EV-1-FIXED] 70a ok={h1_ok}, whole wave 8511="
+                f"{wave_all_expired} (park-to-deadline terminals, zero "
+                f"route-reject), no suspension (queueTimeout absolute)"
             ),
         )
         return report.finish(
-            f"ratio={ratio:.2f}, low codes={low_codes}, 70b={by_rid[h2][1]}, "
-            f"grades: {report.summary()}"
+            f"ratio={ratio:.2f}, low codes={low_codes}, 70b={by_rid[h2][1]} "
+            f"[EV-1-FIXED], grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -1829,43 +1879,37 @@ def _code_of(fr) -> object:
     suite="chaos",
 )
 def atpm_preempt_prefill_queued(ctx: CaseContext):
-    """PREFILL_QUEUED queue replacement (PR10 replacement exactness + PR5
-    victim determinism + PR6 yielded-8400 terminal + PR4 strict-low-priority
-    victims), plus the infeasible/no-partial-eviction half.
+    """PREFILL_QUEUED preemption choreography under the intake3 pull model
+    (PR10 + PR5 + PR6 + PR4, [EV-1-FIXED] design-final form).
 
     ENV-Q2: preemption allows PREFILL_QUEUED only, queueTimeout 60s,
     maxWaiting 8, inflight cap 1, single prefill.
 
-    Wave 1 (victim selection + deficit exactness): a priority=50
-    placeholder parks the lease, then EIGHT requests queue up (the Java
-    capacity check is waiting-only — queue.size() excludes the in-flight
-    placeholder, EvictionManager settlePrefillVictim / WorkerBatcher
-    replaceQueued), filling maxWaiting exactly: 30a, 30b, 40a, 40b, 30c,
-    30d, 30e, 30f.  The incoming 70 then fails the ordinary enqueue →
-    AdmissionFallback → queue replacement with deficit = size+1-limit = 1:
-    exactly one victim, selected by (priority asc, enqueuedAtMs desc) =
-    30f — the newest arrival inside the lowest group.  Victim terminal
-    8400 (never dispatched, retryable); every other queued request
-    survives; the 70 itself completes.
+    [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+    (6ad0315f10): capacity blocking parks EVERY submitter (pull-based
+    WaitBucket, priority desc + FIFO tiebreak), so the queue-replacement
+    choreography (a failed enqueue feeding AdmissionFallback → evict
+    exactly one 30f → 8400) has no trigger — maxWaiting's
+    enqueueUnderLock cap is a BATCH-path check the NON_BATCH pull model
+    never reaches, no enqueue ever fails, and the eviction fallback
+    never runs (zero victims across both waves; the deficit==1
+    replacement exactness and multi-victim events migrate to the
+    BATCH-profile white-box handover, design §2.5 row 11).
 
-    Wave 2 (infeasible → zero eviction): after the drain, the queue fills
-    with 70x8 (+ a 70 placeholder); the incoming 90 finds no strictly
-    lower-priority candidate → DECLINED → no eviction at all (all-or-
-    nothing, EvictionPlanner deficit semantics), the 90 receives the
-    plain route-reject family {8402, 8510}.
+    Wave 1: a priority=50 placeholder parks the lease, then EIGHT
+    requests + the incoming 70 queue up: 30a, 30b, 40a, 40b, 30c, 30d,
+    30e, 30f, 70.  All nine park and complete 200; the dispatch order
+    (design-final) is [30a (first parker — the wave's first submitter
+    legitimately wins the first release slot), 70, 40a, 40b, 30b, 30c,
+    30d, 30e, 30f] — after the first parker, strict priority desc +
+    same-level FIFO.
 
-    Capacity-calibre note (implementation period): design §2.3 sketched
-    the wave-1 queue as "size=7, 30e makes it 8" counting the in-flight
-    placeholder inside the limit; the Java check counts waiting entries
-    only (WorkerBatcher.replaceQueued: queue.size()+1-maximumQueueSize),
-    so the choreography queues eight and the expected victim is 30f —
-    same selection rule, one slot shifted.
-
-    deficit>1 (multi-victim single event) is NOT constructible from a
-    single submitter: the enqueue cap keeps size ≤ limit, so every
-    replacement sees deficit exactly 1 — the multi-victim assertion is a
-    white-box handover (design §2.5 row 11); this case pins deficit==1
-    exactness (PR10).
+    Wave 2 (same-priority infeasible shape): after the drain, a 70
+    placeholder parks the lease; 70x8 + the incoming 90 all park.  The
+    "no strictly-lower candidate → DECLINED" branch stays what the
+    (never-triggered) fallback would see; zero victims holds trivially,
+    and all nine complete 200 with the 90 dispatching FIRST among the
+    wave (priority desc; first parker 70a keeps slot one).
     """
     env = ctx.env_manager.ensure(_q2_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -1904,87 +1948,93 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
 
         outcomes1 = _drain(ops, [ph_fire] + wave1)
         m1 = _outcome_map(outcomes1)
-        # EV-1 baseline: the queue-full replacement choreography (eight
-        # queued + incoming 70 -> evict exactly 30f -> 8400) is NOT
-        # constructible. The queue never fills past one entry: the wave's
-        # first submitter (30a) parks; 30b..30f, 40a, 40b AND the
-        # higher-priority incoming 70 are all route-rejected 8402 — the
-        # eviction fallback's second route (preparePrefillEviction) hits the
-        # same capacity-blocked head and returns null (NO_CANONICAL_ROUTE)
-        # before any planning happens. Probes E8/E8b/E8c; code chain in
-        # _single_park_pattern's docstring. Zero victims is asserted via
-        # outcomes (no 8400/8429 anywhere) — the ideal replacement form is
-        # a Java-side behaviour finding (EV-1) pending owner decision.
-        yielded = sorted(tag for tag in rids if m1[rids[tag]][1] == CODE_YIELDED)
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the whole wave parks — no enqueue ever fails, the
+        # eviction fallback never runs, zero victims.  Design-final shape:
+        # all nine settle 200 and the dispatch order is [30a (first
+        # parker), 70, 40a, 40b, 30b..30f] (first submitter + priority
+        # desc + same-level FIFO after it).
         zero_eviction_w1 = all(
             m1[rids[tag]][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
             for tag in tags
         ) and m1[incoming][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
         wave1_rids = [rids[t] for t in tags] + [incoming]
-        parked1, ev1_w1 = _single_park_pattern(m1, wave1_rids)
+        prio1 = {rids[t]: int(t[:-1]) for t in tags}
+        prio1[incoming] = 70
+        first1, shape1, order1 = _design_final_pattern(
+            ops, [ph_fire] + wave1, wave1_rids, prio1
+        )
+        all1_ok = all(m1[rids[t]][0] for t in tags) and m1[incoming][0]
         ph1_ok = m1[ph][0]
 
         report.invariant(
             "PR10",
-            ev1_w1 and zero_eviction_w1 and ph1_ok,
-            context="deficit_exact_one_ev1",
+            shape1 and zero_eviction_w1 and ph1_ok,
+            context="deficit_exact_one_design_final",
             detail=(
-                f"[EV-1] ev1_pattern={ev1_w1} (single park slot, queue never "
-                f"fills -> deficit planning unreachable), "
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): no enqueue ever "
+                f"fails (maxWaiting is a BATCH-path cap under the NON_BATCH "
+                f"pull model), the queue-full replacement has no trigger "
+                f"and zero victims holds; dispatch shape ok={shape1}, "
                 f"zero 8400/8429={zero_eviction_w1}, "
-                f"parked=30a ok={m1[parked1][0] if parked1 else False}, "
                 f"codes={[(t, m1[rids[t]][1]) for t in tags]}, "
-                f"incoming70={m1[incoming][1]} (EV-1)"
+                f"incoming70={m1[incoming][1]}, "
+                f"dispatch={[r % 1_000_000 for r in order1]}"
             ),
         )
         report.invariant(
             "PR5",
-            ev1_w1 and zero_eviction_w1,
-            context="victim_determinism_ev1",
+            zero_eviction_w1 and shape1,
+            context="victim_determinism_design_final",
             detail=(
-                "[EV-1] victim selection unobservable: no eviction ever runs "
-                "(EV-1); zero victims across the whole wave is the "
-                "assertable form"
+                "[EV-1-FIXED] baseline flipped at intake3 "
+                "PendingPlacementCoordinator (6ad0315f10): eviction never "
+                "triggers (no failed enqueue feeds the fallback) — zero "
+                "victims across the wave; victim-selection determinism "
+                "stays a white-box handover, the design-final dispatch "
+                "shape carries the ordering evidence"
             ),
         )
         report.invariant(
             "PR6",
-            ev1_w1
-            and all(m1[rids[t]][1] in ROUTE_REJECT_FAMILY for t in tags[1:])
-            and m1[incoming][1] in ROUTE_REJECT_FAMILY,
-            context="prefill_queued_terminal_ev1",
+            all1_ok and shape1,
+            context="prefill_queued_terminal_design_final",
             detail=(
-                f"[EV-1] later submitters + incoming70 all route-rejected "
-                f"(EV-1), incoming70={m1[incoming][1]}, "
-                f"detail={m1[incoming][2]}"
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): every parked "
+                f"submitter (not just the first) is re-pulled on capacity "
+                f"release — all wave codes 200, zero route-reject; "
+                f"codes={[(t, m1[rids[t]][1]) for t in tags]}, "
+                f"incoming70={m1[incoming][1]}, "
+                f"dispatch={[r % 1_000_000 for r in order1]}"
             ),
         )
         report.invariant(
             "PR4",
-            ev1_w1
-            and zero_eviction_w1
-            and ph1_ok
-            and (parked1 is not None and m1[parked1][0]),
-            context="strict_low_priority_victims_ev1",
+            zero_eviction_w1 and ph1_ok and shape1 and all1_ok,
+            context="strict_low_priority_victims_design_final",
             detail=(
-                "[EV-1] strictly-lower-priority victim selection unobservable "
-                "(no eviction, EV-1); parked first submitter completes "
-                "untouched, zero victims"
+                "[EV-1-FIXED] baseline flipped at intake3 "
+                "PendingPlacementCoordinator (6ad0315f10): strictly-lower-"
+                "priority victim selection stays white-box (the eviction "
+                "fallback has no trigger under the pull model); the "
+                "design-final form is zero victims + every queued request "
+                "completing untouched in priority-desc dispatch order"
             ),
         )
         clean1_ok, clean1_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         report.invariant(
             "P6",
-            ev1_w1 and ph1_ok and parked1 is not None and m1[parked1][0] and clean1_ok,
+            shape1 and all1_ok and ph1_ok and clean1_ok,
             detail=(
-                f"[EV-1] wave1: ph+parked drained, later submitters "
-                f"route-rejected (EV-1), "
+                f"[EV-1-FIXED] wave1: all nine requests dispatched from the "
+                f"park bucket and completed 200 (first parker 30a, then "
+                f"priority desc + FIFO), "
                 f"inflight={'ok' if clean1_ok else clean1_detail}"
             ),
         )
-        if not (
-            ev1_w1 and ph1_ok and parked1 is not None and m1[parked1][0] and clean1_ok
-        ):
+        if not (shape1 and all1_ok and ph1_ok and clean1_ok):
             return report.finish(f"wave1 incomplete, grades: {report.summary()}")
 
         # ---- wave 2: infeasible → zero eviction -------------------------
@@ -2008,43 +2058,50 @@ def atpm_preempt_prefill_queued(ctx: CaseContext):
 
         outcomes2 = _drain(ops, [ph2_fire] + wave2)
         m2 = _outcome_map(outcomes2)
-        # EV-1 baseline (wave2): same single park slot — the first of the
-        # eight 70s parks; the other seven AND the 90 are route-rejected.
-        # The "no strictly-lower candidate -> DECLINED" branch is still
-        # exercised (same-priority wave), and zero victims holds trivially;
-        # the ideal all-nine-complete form is not constructible (EV-1).
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the same-priority wave parks all eight 70s AND the
+        # incoming 90 — the "no strictly-lower candidate -> DECLINED"
+        # branch is what the (never-triggered) fallback would still see,
+        # zero victims holds trivially, and the design-final form is all
+        # nine completing 200 with the 90 dispatching FIRST among the wave
+        # (priority desc; first parker 70a keeps slot one).
         zero_eviction = all(
             m2[rid][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
-            for rid in w2_rids + [ph2]
+            for rid in w2_rids + [ph2, inc90]
         )
-        inc90_family = m2[inc90][1] in ROUTE_REJECT_FAMILY
-        parked2, ev1_w2 = _single_park_pattern(m2, w2_rids)
+        prio2 = {rid: 70 for rid in w2_rids}
+        prio2[inc90] = 90
+        first2, shape2, order2 = _design_final_pattern(
+            ops, [ph2_fire] + wave2, w2_rids + [inc90], prio2
+        )
+        all2_ok = all(m2[rid][0] for rid in w2_rids) and m2[inc90][0]
         ph2_ok = m2[ph2][0]
         report.invariant(
             "PR10",
-            zero_eviction and inc90_family and ev1_w2 and ph2_ok,
-            context="infeasible_no_partial_eviction_ev1",
+            zero_eviction and shape2 and all2_ok and ph2_ok,
+            context="infeasible_no_partial_eviction_design_final",
             detail=(
-                f"[EV-1] zero eviction={zero_eviction} (no strictly-lower candidate "
-                f"for the 90 → DECLINED, all-or-nothing), "
-                f"90 terminal={m2[inc90][1]} "
-                f"(family {list(ROUTE_REJECT_FAMILY)}), "
-                f"ev1_pattern={ev1_w2} (first 70 parks, "
-                f"rest+90 route-rejected), ph ok={ph2_ok}"
+                f"[EV-1-FIXED] zero eviction={zero_eviction} (no "
+                f"strictly-lower candidate for the 90 — all-or-nothing, and "
+                f"the fallback never triggers anyway), "
+                f"90 terminal={m2[inc90][1]} (dispatched first among the "
+                f"wave, priority desc), shape ok={shape2}, "
+                f"dispatch={[r % 1_000_000 for r in order2]}, ph ok={ph2_ok}"
             ),
         )
         clean2_ok, clean2_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         report.invariant(
             "P6",
-            ev1_w2 and ph2_ok and parked2 is not None and m2[parked2][0] and clean2_ok,
+            shape2 and all2_ok and ph2_ok and clean2_ok,
             detail=(
-                f"[EV-1] wave2: ph+first 70 drained, rest+90 route-rejected "
-                f"(EV-1); inflight={'ok' if clean2_ok else clean2_detail}"
+                f"[EV-1-FIXED] wave2: all nine requests completed 200 (the "
+                f"90 first among the wave by priority), "
+                f"inflight={'ok' if clean2_ok else clean2_detail}"
             ),
         )
         return report.finish(
-            f"wave1 ev1={ev1_w1} zero-victims, wave2 zero-eviction="
-            f"{zero_eviction}, grades: {report.summary()}"
+            f"wave1 shape={shape1} all-200 zero-victims, wave2 shape={shape2} "
+            f"zero-eviction={zero_eviction}, grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -2366,16 +2423,17 @@ def atpm_preempt_decode_engine_owned(ctx: CaseContext):
     suite="chaos",
 )
 def atpm_same_priority_zero_eviction(ctx: CaseContext):
-    """Same-priority never evicts (PR4 core + AT3): the queue fills with
-    eight explicit priority=50 requests (Python-side per-request
+    """Same-priority never evicts (PR4 core + AT3, [EV-1-FIXED] design-final
+    form): eight explicit priority=50 requests (Python-side per-request
     priority — the FORCE_PRIORITY semantics without the Java load
-    client), the incoming 50 (the ninth) fails the ordinary enqueue,
-    passes the AdmissionFallback preconditions (hasPriority ✓ preemption
-    ✓) but the strictly-lower-priority candidate filter comes up empty →
-    DECLINED → the incoming receives the SAME route-reject family
-    {8402, 8510} it would see with preemption absent, and ZERO victims
-    are taken (no 8400/8429 anywhere; the eight queued 50s all
-    complete).  ENV-Q2 is shared with atpm_preempt_prefill_queued (same
+    client) plus the incoming 50 (the ninth) ALL park in the intake3
+    PendingPlacementCoordinator (pull-based, priority desc + FIFO
+    tiebreak — baseline flipped at 6ad0315f10); the (never-triggered)
+    eviction fallback's strictly-lower-priority candidate filter would
+    come up empty for a same-priority incoming, so ZERO victims are
+    taken (no 8400/8429 anywhere) and the design-final shape is all
+    nine completing 200 in pure submit FIFO order.
+    ENV-Q2 is shared with atpm_preempt_prefill_queued (same
     fingerprint → same run, sequential order + finally hygiene)."""
     env = ctx.env_manager.ensure(_q2_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -2409,51 +2467,57 @@ def atpm_same_priority_zero_eviction(ctx: CaseContext):
 
         outcomes = _drain(ops, [ph_fire] + wave)
         m = _outcome_map(outcomes)
-        # EV-1 baseline: only the first of the eight queued 50s parks and
-        # completes; the other seven AND the incoming 50 are route-rejected
-        # 8402 (single park slot — the queue never holds two entries, so
-        # "same priority never evicts" degenerates to "nothing ever
-        # evicts"; the core zero-eviction assertion is unaffected).
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): every submitter parks — the incoming 50 no longer
+        # receives the route-reject family, it completes like the rest; the
+        # same-priority FIFO dispatch shape (pure submit order) is the
+        # design-final observation object for "same priority never evicts".
         zero_eviction = all(
             m[rid][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
-            for rid in queued_rids
+            for rid in queued_rids + [inc]
         )
-        inc_family = m[inc][1] in ROUTE_REJECT_FAMILY
-        parked, ev1_ok = _single_park_pattern(m, queued_rids)
-        queued_ok = ev1_ok and parked is not None and m[parked][0]
+        prio = {rid: 50 for rid in queued_rids + [inc]}
+        _first_sp, shape_sp, order_sp = _design_final_pattern(
+            ops, [ph_fire] + wave, queued_rids + [inc], prio
+        )
+        all_ok = all(m[rid][0] for rid in queued_rids) and m[inc][0]
         report.invariant(
             "PR4",
-            zero_eviction and queued_ok,
-            context="same_priority_zero_eviction_ev1",
+            zero_eviction and shape_sp and all_ok,
+            context="same_priority_zero_eviction_design_final",
             detail=(
-                f"[EV-1] zero 8400/8429={zero_eviction}, first 50 completed="
-                f"{parked is not None and m[parked][0]}, later 50s "
-                f"route-rejected (EV-1 single park slot) — same priority "
-                f"never evicts"
+                f"[EV-1-FIXED] zero 8400/8429={zero_eviction}, all nine 50s "
+                f"completed={all_ok}, dispatch FIFO shape ok={shape_sp} "
+                f"(pure submit order), "
+                f"dispatch={[r % 1_000_000 for r in order_sp]}"
             ),
         )
         report.invariant(
             "AT3",
-            inc_family,
-            context="single_qos_incoming_original_error",
+            m[inc][1] == CODE_OK,
+            context="single_qos_incoming_design_final",
             detail=(
-                f"incoming 50 terminal={m[inc][1]} "
-                f"({REASON_NAMES.get(0, '')}family {list(ROUTE_REJECT_FAMILY)}), "
-                f"reason={m[inc][2]}"
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): the same-priority "
+                f"incoming parks and completes 200 like every queued peer — "
+                f"the original-error passthrough "
+                f"({list(ROUTE_REJECT_FAMILY)}) is no longer reachable for "
+                f"a capacity-blocked same-priority submitter, incoming 50 "
+                f"terminal={m[inc][1]}"
             ),
         )
         clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
         report.invariant(
             "P6",
-            queued_ok and clean_ok,
+            shape_sp and all_ok and clean_ok,
             detail=(
-                f"[EV-1] ph+first queued drained, later queued route-rejected "
-                f"(EV-1); inflight={'ok' if clean_ok else clean_detail}"
+                f"[EV-1-FIXED] all nine 50s + ph dispatched and completed "
+                f"(FIFO), inflight={'ok' if clean_ok else clean_detail}"
             ),
         )
         return report.finish(
             f"zero-eviction={zero_eviction}, incoming code={m[inc][1]}, "
-            f"grades: {report.summary()}"
+            f"fifo shape={shape_sp}, grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -2471,11 +2535,15 @@ def atpm_preemption_disabled_zero_eviction(ctx: CaseContext):
     """Omitting the preemption block disables preemption entirely (AT2):
     PRIORITY ordering but no preemption config → EvictionManager's
     precondition rejects before any planning.  Two rounds: a saturated
-    low-priority queue whose incoming 70 is NOT exempt from capacity
-    rejection (and no fallback fires — 8402 family, no 8400/8429/8430),
-    then a saturated high-priority queue with an incoming 90 — the same
-    rejection (high priority does not bypass capacity; the anti-overload
-    mechanism under PRIORITY is plain rejection, analysis report §3.7).
+    low-priority queue whose incoming 70 parks in the intake3
+    PendingPlacementCoordinator ([EV-1-FIXED] baseline flipped at
+    6ad0315f10 — the anti-overload mechanism under PRIORITY is now
+    parking, not plain rejection; no fallback fires because no
+    preemption config exists — zero 8400/8429/8430), then a saturated
+    high-priority queue with an incoming 90 — the same park (high
+    priority does not bypass capacity either; both incomings complete
+    200 once capacity releases, or expire 8511 inside the queueTimeout
+    window).
 
     ENV-T1 is shared with prio_queue_timeout_terminal (identical
     fingerprint): sequential execution + per-case finally hygiene.
@@ -2525,14 +2593,19 @@ def atpm_preemption_disabled_zero_eviction(ctx: CaseContext):
                 not in (CODE_YIELDED, CODE_ENGINE_CANCELLED, CODE_ADMISSION_TIMEOUT)
                 for rid in queued + [ph]
             )
-            inc_family = m[inc][1] in ROUTE_REJECT_FAMILY
+            # [EV-1-FIXED] baseline flipped at intake3
+            # PendingPlacementCoordinator (6ad0315f10): the incoming parks
+            # (no preemption fallback exists to fire — config omitted) and
+            # completes 200 once capacity releases; an 8511 park expiry
+            # inside the queueTimeout window is equally legal.
+            inc_ok = m[inc][1] in (CODE_OK, CODE_SLO_EXPIRED)
             round_reports.append(
                 (
                     label,
-                    zero_preempt and inc_family,
+                    zero_preempt and inc_ok,
                     f"{label}: zero 8400/8429/8430={zero_preempt}, "
                     f"incoming{inc_prio} code={m[inc][1]} "
-                    f"(family {list(ROUTE_REJECT_FAMILY)})",
+                    f"(park → 200 or 8511 expiry, [EV-1-FIXED])",
                 )
             )
             clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
@@ -2574,58 +2647,36 @@ def atpm_preemption_disabled_zero_eviction(ctx: CaseContext):
     suite="chaos",
 )
 def atpm_timeout_attribution(ctx: CaseContext):
-    """Admission-timeout attribution consistency (PR7): a
-    priority-ADMITTED request (it entered the queue by evicting a
-    victim) that then times out must terminal as 8430 with an
-    admission_reject_reason consistent with its queue prefix at the
-    timeout decision snapshot (RequestLifecycleCoordinator →
-    AdmissionFailureClassifier: higher > same > unattributed > resource).
+    """Admission-timeout expiry uniformity (PR7, [EV-1-FIXED] design-final
+    form): under the intake3 PendingPlacementCoordinator (6ad0315f10) a
+    capacity-blocked submitter parks with the schedule() RPC blocking
+    until its queueTimeoutMs deadline, then terminals as plain 8511
+    BATCH_SLO_EXPIRED with admission_reject_reason=UNSPECIFIED(0) — the
+    attributed form (8430 + HIGHER_PRIORITY_AHEAD / 8431 +
+    RESOURCE_EXHAUSTED) needs the AdmissionFailureClassifier to run at
+    the queued-expiry decision, and that classifier has ZERO call sites
+    in the intake3 master (Java-side observation gap — filed, not fixed
+    here); every queued expiry rides the plain deadlineErrorType path
+    (RequestLifecycleCoordinator.timeoutEntry fallback).
 
     ENV-A1: PREFILL_QUEUED preemption, queueTimeout 7s, maxWaiting 8.
 
-    Wave 1 (HIGHER, strict): 90a placeholder (12s prefill) parks the
-    lease; eight 30s fill the queue; the incoming 70 evicts 30h and is
-    priority-admitted; 90b then 90c each evict one more 30 and queue
-    AHEAD of the 70 (higher priority, later admission → later expiry —
-    the deadline listener fires for the 70 first while 90b/90c are still
-    queued).  At the 70's expiry the snapshot prefix is {90b, 90c} →
-    8430 + HIGHER_PRIORITY_AHEAD.  The victim terminals (30f/30g/30h)
-    are 8400; the remaining 30s take plain 8511 BATCH_SLO_EXPIRED
-    timeouts (implementation-period finding: QUEUE_TIMEOUT 8503 is dead
-    code — the ordinary queued-expiry terminal is deadlineErrorType
-    BATCH_SLO_EXPIRED).
-    Design §2.3 sketched the 90s queued BEFORE the 70 — under the
-    snapshot semantics their earlier deadlines would expire them out of
-    the prefix first (classifier would then see an empty prefix → 8431),
-    so the construction queues them after; the choreography intent
-    (prefix contains a higher priority) is preserved.
+    Wave 1 (mixed priorities): a 90a placeholder (12s prefill) parks the
+    lease; eight 30s, the incoming 70, then 90b/90c all park.  Every
+    queued member expires 8511/UNSPECIFIED at its own deadline inside
+    the 12s window; 90a completes.  Zero 8400 victims (the eviction
+    fallback never triggers — no failed enqueue under the pull model).
 
-    Wave 2 (SAME not black-box constructible → weak form): the
-    classifier reads the prefix at the timeout snapshot; any same-
-    priority predecessor queued earlier has an earlier deadline, so it
-    is terminated (and leaves the queue) strictly before the request
-    under test — the SAME branch cannot be produced from a single
-    client.  Wave 2 therefore constructs the attributed-timeout shape
-    (70_early placeholder inflight, eight 30s, incoming 70_late evicts
-    30h, times out with only lower-priority predecessors ahead) and
-    weakly asserts code ∈ {8430, 8431} + reason ∈ {SAME, RESOURCE},
-    recording the actual pair for first-run calibration; SAME-branch
-    precision is a white-box handover (AdmissionFailureClassifier unit
-    tests).
+    Wave 2 (same shape, single client): a 70_early placeholder (10s
+    prefill — it must OUTLAST the 70_late's ~8s deadline, the deadline
+    cancels at delivery ACK), eight 30s, incoming 70_late — the 70_late
+    expires 8511/UNSPECIFIED, 70_early completes.
 
-    Implementation-period timing correction: the placeholder's prefill
-    must OUTLAST the incoming 70_late's deadline — the request deadline
-    is CANCELLED at delivery ACK (publishDelivery → expiration().cancel,
-    RequestLifecycleCoordinator.java:2034-2036), so if the lease frees
-    before the deadline the queue-head 70_late would dispatch, lose its
-    deadline and COMPLETE (no attributed timeout at all).  The design
-    sketched 8s placeholder prefill against a ~8.5s deadline — a ~0.5s
-    race the wrong way; wave 2 uses 10s.
-
-    Deadline-no-extension (PR8 second use): the 70's terminal wall-time
-    / queueTimeoutMs(7000) must stay ~1 — the re-admission after
-    preemption never restarted its expiresAtMs (doc:171-172 active
-    half)."""
+    Deadline-no-extension (PR8, raw recording): the 70_late's terminal
+    wall-time / queueTimeoutMs(7000) must stay ~1 — the park never
+    restarts expiresAtMs (A9-③ keeps prio_queue_timeout_terminal as
+    PR8's ONLY band consumer; the raw value rides the case finish
+    detail)."""
     env = ctx.env_manager.ensure(_a1_spec(ctx))
     ops = ctx.engine_ops(env)
     report = GradeReport(run_grade=ctx.grade)
@@ -2671,35 +2722,33 @@ def atpm_timeout_attribution(ctx: CaseContext):
         if inc70_fire.resp is not None:
             inc70_reason = int(inc70_fire.resp.admission_reject_reason)
         victims8400 = [rid for rid in low_rids if m1[rid][1] == CODE_YIELDED]
-        # EV-1 baseline (behaviour finding, probes E8/E8b/E8c/E10): the
-        # ideal shape (70 priority-admitted by evicting a 30, 90b/90c
-        # queued ahead, 8430 + HIGHER_PRIORITY_AHEAD at expiry) is not
-        # constructible — prefill eviction never admits anyone, so only
-        # the FIRST wave submitter (30a) parks and every later submitter
-        # (30b..30h, the 70, 90b, 90c) route-rejects 8402.  The
-        # attribution classifier therefore has no observation object.
-        # Observable form asserted below: single-park pattern + zero
-        # 8400 victims + the 70 inside the route-reject family.
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): every wave submitter parks; the attributed form
+        # (8430 + HIGHER_PRIORITY_AHEAD) needs the AdmissionFailureClassifier
+        # at the queued-expiry decision, which has ZERO call sites in the
+        # intake3 master (Java-side observation gap, filed).  Observable
+        # design-final form: every parked expiry is uniform plain
+        # 8511 + UNSPECIFIED, zero 8400 victims, the placeholder completes.
         w1_wave = low_rids + [inc70, q90b, q90c]
-        _parked1, w1_ev1 = _single_park_pattern(m1, w1_wave)
-        w1_ok = (
-            inc70_code in ROUTE_REJECT_FAMILY
-            and victims8400 == []
-            and w1_ev1
-            and m1[ph90][0]
+        w1_expired = all(m1[rid][1] == CODE_SLO_EXPIRED for rid in w1_wave)
+        w1_reasons_unspec = all(
+            fr.reason == REASON_UNSPECIFIED for fr in wave1 if fr.resp is not None
         )
+        w1_ok = w1_expired and w1_reasons_unspec and victims8400 == [] and m1[ph90][0]
         report.invariant(
             "PR7",
             w1_ok,
-            context="higher_priority_ahead_ev1",
+            context="higher_priority_ahead_design_final",
             detail=(
-                f"[EV-1] incoming70 terminal={inc70_code} "
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): incoming70 "
+                f"terminal={inc70_code} "
                 f"reason={REASON_NAMES.get(inc70_reason, inc70_reason)} "
-                f"(EV-1: 8430 + HIGHER_PRIORITY_AHEAD unobservable — the 70 "
-                f"is never admission-evicted, it route-rejects like every "
-                f"later submitter; prefix 90b,90c never queue), "
-                f"ev1_pattern={w1_ev1}, "
-                f"victims8400={len(victims8400)} (eviction unreachable), "
+                f"(park-expiry uniform: the 8430 attribution classifier has "
+                f"zero call sites in the intake3 master — Java gap, filed), "
+                f"all-wave expired 8511={w1_expired}, "
+                f"reasons UNSPECIFIED={w1_reasons_unspec}, "
+                f"victims8400={len(victims8400)}, "
                 f"90b={m1[q90b][1]}/{q90b_fire.reason}, "
                 f"90c={m1[q90c][1]}/{q90c_fire.reason}, "
                 f"90a completed={m1[ph90][0]}"
@@ -2754,28 +2803,29 @@ def atpm_timeout_attribution(ctx: CaseContext):
             else None
         )
         victims2 = [rid for rid in low2_rids if m2[rid][1] == CODE_YIELDED]
-        # EV-1 baseline (see wave 1): the weak SAME/RESOURCE form is
-        # equally unobservable — the 70_late route-rejects 8402 instead
-        # of being admission-evicted, and only 30a parks.
+        # [EV-1-FIXED] (see wave 1): the SAME/RESOURCE attribution branches
+        # share the classifier's zero-call-site gap; the design-final
+        # observable is the same uniform 8511/UNSPECIFIED park expiry.
         w2_wave = low2_rids + [inc70l]
-        _parked2, w2_ev1 = _single_park_pattern(m2, w2_wave)
-        w2_ok = (
-            inc70l_code in ROUTE_REJECT_FAMILY
-            and victims2 == []
-            and w2_ev1
-            and m2[ph70][0]
+        w2_expired = all(m2[rid][1] == CODE_SLO_EXPIRED for rid in w2_wave)
+        w2_reasons_unspec = all(
+            fr.reason == REASON_UNSPECIFIED for fr in wave2 if fr.resp is not None
         )
+        w2_ok = w2_expired and w2_reasons_unspec and victims2 == [] and m2[ph70][0]
         report.invariant(
             "PR7",
             w2_ok,
-            context="same_or_resource_weak_form_ev1",
+            context="same_or_resource_weak_form_design_final",
             detail=(
-                f"[EV-1] incoming70_late terminal={inc70l_code} "
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): incoming70_late "
+                f"terminal={inc70l_code} "
                 f"reason={REASON_NAMES.get(inc70l_reason, inc70l_reason)} "
-                f"(EV-1: the weak SAME/RESOURCE form has no object — no "
-                f"admission-evicted 70 exists to attribute a timeout to), "
-                f"ev1_pattern={w2_ev1}, "
-                f"victim8400={len(victims2)} (eviction unreachable), "
+                f"(uniform park expiry — the SAME/RESOURCE attribution "
+                f"branches share the classifier's zero-call-site gap, "
+                f"Java-side, filed), all-wave expired 8511={w2_expired}, "
+                f"reasons UNSPECIFIED={w2_reasons_unspec}, "
+                f"victim8400={len(victims2)}, "
                 f"70_early completed={m2[ph70][0]}"
             ),
         )
@@ -2788,15 +2838,16 @@ def atpm_timeout_attribution(ctx: CaseContext):
             and victims8400 == []
             and victims2 == [],
             detail=(
-                f"[EV-1] placeholders completed, zero eviction victims (EV-1), "
+                f"[EV-1-FIXED] placeholders completed, every parked wave "
+                f"member expired 8511 (uniform), zero eviction victims, "
                 f"inflight={'ok' if clean2_ok else clean2_detail}"
             ),
         )
         return report.finish(
             f"wave1 70={inc70_code}/{REASON_NAMES.get(inc70_reason)}, "
             f"wave2 70={inc70l_code}/{REASON_NAMES.get(inc70l_reason)}, "
-            f"[EV-1] inc70 fast-reject wall={inc70_wall_ms:.0f}ms "
-            f"(raw, no deadline object), "
+            f"[EV-1-FIXED] inc70 park-expiry wall={inc70_wall_ms:.0f}ms "
+            f"(deadline held, no extension — PR8 raw), "
             f"grades: {report.summary()}"
         )
     except Exception as exc:
@@ -2832,7 +2883,12 @@ def atpm_comparator_frozen_weak(ctx: CaseContext):
     priorities do NOT jump under FIFO.
 
     Both halves assert both directions (the design's bidirectional
-    contrast); running_ms comes from the single-JVM engine clocks."""
+    contrast); running_ms comes from the single-JVM engine clocks.
+    [EV-1-FIXED] the design-final contrast was restored at intake3
+    (PendingPlacementCoordinator 6ad0315f10): every wave submitter parks
+    and dispatches, so the ORDERING contrast is observable black-box
+    again (the EV-1 downgrade had reduced both halves to the identical
+    single-park shape)."""
     report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "priority")
     hygiene: list = []
@@ -2867,25 +2923,26 @@ def atpm_comparator_frozen_weak(ctx: CaseContext):
         m = _outcome_map(outcomes)
         hygiene.append((ops, half_fires, names))
 
-        # EV-1 baseline (behaviour finding, probes E8/E8c): the intended
-        # contrast — under PRIORITY min(70 running) < max(30 running),
-        # under FIFO the reverse — needs at least two wave requests
-        # simultaneously queued, which the single park slot makes
-        # unconstructible: the FIRST wave submitter (low_1) parks, the
-        # remaining four (low_2 + 70x3) route-reject 8402 under BOTH
-        # orderings.  Observable form per half: single-park pattern,
-        # placeholder completes, parked first-submitter reaches a
-        # non-family terminal, inflight clean.  The ordering contrast
-        # itself is a Java-side behaviour gap (EV-1).
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the dispatch-order contrast is observable again —
+        # under PRIORITY the wave dispatches [low_1 (first parker), 70a,
+        # 70b, 70c, low_2] (priority desc + FIFO after the first parker),
+        # under FIFO pure submit order [low_1, low_2, 70a, 70b, 70c].  The
+        # same construction-time ORDERING config still governs both halves
+        # (the comparator-freeze contract's black-box weak form).
         wave_rids = low_rids + high_rids
-        parked, ev1_ok = _single_park_pattern(m, wave_rids)
+        prio = {rid: 30 for rid in low_rids}
+        prio.update({rid: 70 for rid in high_rids})
+        _first_p, shape_ok, order = _design_final_pattern(
+            ops, half_fires, wave_rids, prio, fifo=(label == "fifo_half")
+        )
+        all_ok = all(m[rid][0] for rid in wave_rids)
         ph_ok = m[ph][0]
-        parked_terminal = parked is not None and m[parked][1] not in ROUTE_REJECT_FAMILY
         clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
-        half_ok = ev1_ok and ph_ok and parked_terminal and clean_ok
-        return (ev1_ok, ph_ok, parked_terminal, clean_ok), (
-            f"{label}: ev1_pattern={ev1_ok}, parked="
-            f"{parked % 1_000_000 if parked else None}, "
+        half_ok = shape_ok and all_ok and ph_ok and clean_ok
+        return (shape_ok, all_ok, ph_ok, clean_ok), (
+            f"{label}: shape ok={shape_ok}, "
+            f"dispatch={[r % 1_000_000 for r in order]}, "
             f"placeholder completed={ph_ok}, "
             f"codes={[(r % 1_000_000, m[r][1]) for r in wave_rids]}, "
             f"clean={'ok' if clean_ok else clean_detail}"
@@ -2895,40 +2952,40 @@ def atpm_comparator_frozen_weak(ctx: CaseContext):
         prio_result = run_half(_q2_spec, "priority_half")
         if prio_result[0] is None:
             return False, prio_result[1]
-        (p_ev1, p_ph_ok, p_parked_ok, p_clean), p_note = prio_result
+        (p_shape, p_all_ok, p_ph_ok, p_clean), p_note = prio_result
         fifo_result = run_half(_f1_spec, "fifo_half")
         if fifo_result[0] is None:
             return False, fifo_result[1]
-        (f_ev1, f_ph_ok, f_parked_ok, f_clean), f_note = fifo_result
+        (f_shape, f_all_ok, f_ph_ok, f_clean), f_note = fifo_result
 
-        prio_half_ok = p_ev1 and p_ph_ok and p_parked_ok and p_clean
-        fifo_half_ok = f_ev1 and f_ph_ok and f_parked_ok and f_clean
+        prio_half_ok = p_shape and p_all_ok and p_ph_ok and p_clean
+        fifo_half_ok = f_shape and f_all_ok and f_ph_ok and f_clean
         report.invariant(
             "PR9",
             prio_half_ok and fifo_half_ok,
-            context="comparator_frozen_weak_ev1",
+            context="comparator_frozen_weak_design_final",
             detail=(
-                f"[EV-1] EV-1: the dispatch-order contrast (70s before 30s under "
-                f"PRIORITY vs arrival order under FIFO) has no observation "
-                f"object — only the first submitter parks, later submitters "
-                f"route-reject 8402 under BOTH orderings; both halves "
-                f"reproduce the identical single-park shape ({p_note}; "
-                f"{f_note}). Comparator-freeze itself stays white-box "
-                f"(runtime reload unavailable); the black-box contrast is "
-                f"a Java-side behaviour gap (EV-1)."
+                f"[EV-1-FIXED] baseline flipped at intake3 "
+                f"PendingPlacementCoordinator (6ad0315f10): the dispatch-"
+                f"order contrast is live — under PRIORITY the 70s dispatch "
+                f"before the remaining 30 (first parker exempt), under "
+                f"FIFO pure arrival order ({p_note}; {f_note}).  "
+                f"Comparator-freeze itself stays white-box (runtime "
+                f"reload unavailable); the construction-time ORDERING "
+                f"config is the black-box weak form."
             ),
         )
         report.invariant(
             "P6",
             prio_half_ok and fifo_half_ok,
             detail=(
-                f"both halves drained to terminals with inflight clean "
+                f"both halves drained all-five-200 with inflight clean "
                 f"(priority half={prio_half_ok}, fifo half={fifo_half_ok})"
             ),
         )
         return report.finish(
-            f"priority-half ev1={p_ev1}, fifo-half ev1={f_ev1} "
-            f"(EV-1 baseline), grades: {report.summary()}"
+            f"priority-half shape={p_shape}, fifo-half shape={f_shape} "
+            f"(design-final contrast), grades: {report.summary()}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -2976,25 +3033,26 @@ def atpm_error_code_family(ctx: CaseContext):
     path).  After the placeholders drain, a sequential request succeeds
     (exact permit release).
 
-    Segment 2 (route-reject family, ENV-Q2 shared): a 70 placeholder
-    parks the inflight lease, eight 70s fill maxWaiting exactly; the
-    incoming 90 fails the ordinary enqueue, the PREFILL_QUEUED fallback
-    finds no strictly-lower candidate → DECLINED → the ORIGINAL
-    queue-full rejection {8402, 8510} (code-level expectation: 8510
-    BATCH_DISPATCH_FAILED via the tryFallback path).  Zero victims, all
-    nine 70s complete.
+    Segment 2 (capacity park, ENV-Q2 shared; [EV-1-FIXED] flipped at
+    intake3 PendingPlacementCoordinator 6ad0315f10): a 70 placeholder
+    parks the inflight lease, eight 70s + the incoming 90 ALL park —
+    the {8402, 8510} route-reject family lost its capacity-blocked
+    trigger (maxWaiting's enqueueUnderLock cap is a BATCH-path check
+    the NON_BATCH pull model never reaches, so no enqueue ever fails
+    and the tryFallback path to 8510 never runs).  Zero victims, all
+    nine complete 200 with the 90 dispatching first among the wave
+    (priority desc; first parker 70a keeps slot one); the explicit-cap
+    rejection observation lives in segment 1's 8502.
 
-    Segment 3 (8431 RESOURCE_EXHAUSTED + reason 3, ENV-A1 shared): a
-    70_early placeholder (10s prefill — it must OUTLAST every queue
-    deadline, the deadline-cancels-at-dispatch finding) parks the lease;
-    30a..30h fill the queue; the incoming 90 evicts 30h and is
-    priority-admitted (deadline = enqueue + 7s).  The 30s expire as
-    plain 8511 BATCH_SLO_EXPIRED (QUEUE_TIMEOUT 8503 is dead code); by
-    the 90's own expiry every 30 has left the queue (their earlier
-    deadlines) → the classifier sees an EMPTY prefix →
-    resourceExhausted → 8431 + RESOURCE_EXHAUSTED(3), strictly asserted
-    (both paths to resource — empty prefix and all-lower prefix — are
-    deterministic under this choreography).  The 70_early completes (its
+    Segment 3 (expiry uniformity, ENV-A1 shared; [EV-1-FIXED] flipped
+    at intake3): a 70_early placeholder (10s prefill — it must OUTLAST
+    every queue deadline, the deadline-cancels-at-dispatch finding)
+    parks the lease; 30a..30h + the incoming 90 all park and every one
+    expires at its own 7s deadline as plain 8511 BATCH_SLO_EXPIRED +
+    UNSPECIFIED (QUEUE_TIMEOUT 8503 is dead code; the 8431 +
+    RESOURCE_EXHAUSTED attributed form needs the expiry-time
+    classifier, which has zero call sites in the intake3 master —
+    Java-side observation gap, filed).  The 70_early completes (its
     deadline cancelled at delivery ACK).
 
     Segment 4 (A4, Mark P1-2, SKELETON — BATCH dispatcher family,
@@ -3142,18 +3200,25 @@ def atpm_error_code_family(ctx: CaseContext):
         m2 = _outcome_map(_drain(ops2, [ph2_fire] + wave2))
         inc90_code = m2[inc90][1]
         zero_eviction = all(
-            m2[rid][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED) for rid in high_rids
+            m2[rid][1] not in (CODE_YIELDED, CODE_ENGINE_CANCELLED)
+            for rid in high_rids + [inc90]
         )
-        # EV-1 baseline (behaviour finding, probes E8/E8c/E10): the
-        # queue-full tryFallback path to 8510 is unobservable — maxWaiting
-        # (8) is never reached because only the FIRST wave submitter
-        # (70a) parks; every later submitter including the 90
-        # route-rejects 8402 before any queue-capacity check.  Observable
-        # form: single-park pattern, the parked head completes after the
-        # placeholder's lease release, zero evictions.
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the route-reject family {8402, 8510} has no
+        # capacity-blocked trigger left — every submitter parks, so the 90
+        # completes 200 after the wave (priority desc; first parker 70a
+        # keeps slot one).  The tryFallback path to 8510 needs a failed
+        # enqueue, which the NON_BATCH pull model never produces
+        # (maxWaiting is a BATCH-path cap — the equivalent explicit-cap
+        # rejection observation lives in segment 1's 8502).  Zero
+        # evictions; all nine complete.
         s2_wave = high_rids + [inc90]
-        s2_parked, s2_ev1 = _single_park_pattern(m2, s2_wave)
-        high_head_ok = s2_parked is not None and m2[s2_parked][0] and m2[ph2][0]
+        prio2 = {rid: 70 for rid in high_rids}
+        prio2[inc90] = 90
+        _s2_first, s2_shape, s2_order = _design_final_pattern(
+            ops2, [ph2_fire] + wave2, s2_wave, prio2
+        )
+        s2_all_ok = all(m2[rid][0] for rid in high_rids) and m2[inc90][0]
         isolated2 = all(
             m2[rid][1]
             not in (
@@ -3164,26 +3229,30 @@ def atpm_error_code_family(ctx: CaseContext):
                 CODE_ENGINE_CANCELLED,
                 CODE_SLO_EXPIRED,
             )
-            for rid in high_rids + [ph2]
+            for rid in high_rids + [ph2, inc90]
         )
         clean2_ok, clean2_detail = AssertUtils.inflight_clean(_master_http(ops2), 30.0)
         segs.append(
             (
-                "s2_route_reject_family_ev1",
-                inc90_code in ROUTE_REJECT_FAMILY
+                "s2_capacity_park_design_final",
+                inc90_code == CODE_OK
                 and zero_eviction
-                and s2_ev1
-                and high_head_ok
+                and s2_shape
+                and s2_all_ok
+                and m2[ph2][0]
                 and isolated2
                 and clean2_ok,
                 (
-                    f"incoming90 terminal={inc90_code} "
-                    f"(family {list(ROUTE_REJECT_FAMILY)}; EV-1: 8510 via "
-                    f"queue-full tryFallback unobservable — the queue never "
-                    f"fills, the 90 route-rejects like every later "
-                    f"submitter), ev1_pattern={s2_ev1}, "
+                    f"[EV-1-FIXED] incoming90 terminal={inc90_code} "
+                    f"(parks and completes — the "
+                    f"{list(ROUTE_REJECT_FAMILY)} route-reject family lost "
+                    f"its capacity-blocked trigger at intake3 "
+                    f"PendingPlacementCoordinator 6ad0315f10; the explicit-"
+                    f"cap rejection observation lives in s1's 8502), "
+                    f"shape ok={s2_shape}, "
+                    f"dispatch={[r % 1_000_000 for r in s2_order]}, "
                     f"zero 8400/8429={zero_eviction}, "
-                    f"head 70a completed={m2[s2_parked][0] if s2_parked else False}, "
+                    f"all nine completed={s2_all_ok}, "
                     f"placeholder completed={m2[ph2][0]}, "
                     f"isolated={isolated2}, "
                     f"inflight={'ok' if clean2_ok else clean2_detail}"
@@ -3235,16 +3304,15 @@ def atpm_error_code_family(ctx: CaseContext):
         victims8400 = [rid for rid in low_rids if m3[rid][1] == CODE_YIELDED]
         plain8511 = [rid for rid in low_rids if m3[rid][1] == CODE_SLO_EXPIRED]
         ph70_ok = m3[ph70][0]
-        # EV-1 baseline (behaviour finding, probes E8/E8c/E10): 8431 +
-        # RESOURCE_EXHAUSTED is unobservable — the 90 is never
-        # admission-evicted (eviction unreachable), it route-rejects 8402
-        # like every later submitter, and the classifier's empty-prefix
-        # resource branch has no object.  Observable form: single-park
-        # pattern (30a parks, the remaining seven 30s + the 90
-        # route-reject), the parked 30a expires at its own 7s deadline
-        # (8511 — 8503 stays dead code), zero 8400.
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the 90 parks (rather than route-rejecting) and
+        # expires at its own 7s deadline — 8511 + UNSPECIFIED, the same
+        # uniform park-expiry terminal as every 30.  The 8431 +
+        # RESOURCE_EXHAUSTED attributed form needs the expiry-time
+        # classifier, which has zero call sites in the intake3 master
+        # (Java-side observation gap, filed); 8503 stays dead code.
         s3_wave = low_rids + [inc90b]
-        s3_parked, s3_ev1 = _single_park_pattern(m3, s3_wave)
+        s3_expired = all(m3[rid][1] == CODE_SLO_EXPIRED for rid in s3_wave)
         isolated3 = all(
             m3[rid][1]
             not in (
@@ -3258,22 +3326,23 @@ def atpm_error_code_family(ctx: CaseContext):
         clean3_ok, clean3_detail = AssertUtils.inflight_clean(_master_http(ops3), 30.0)
         segs.append(
             (
-                "s3_8431_resource_exhausted_ev1",
-                inc90b_code in ROUTE_REJECT_FAMILY
+                "s3_expiry_uniformity_design_final",
+                inc90b_code == CODE_SLO_EXPIRED
+                and s3_expired
                 and victims8400 == []
-                and s3_ev1
                 and ph70_ok
                 and isolated3
                 and clean3_ok,
                 (
-                    f"incoming90 terminal={inc90b_code} "
+                    f"[EV-1-FIXED] incoming90 terminal={inc90b_code} "
                     f"reason={REASON_NAMES.get(inc90b_reason, inc90b_reason)} "
-                    f"(EV-1: 8431 + RESOURCE_EXHAUSTED unobservable — the 90 "
-                    f"never enters the queue, no admission to attribute), "
-                    f"ev1_pattern={s3_ev1}, "
-                    f"victim8400={len(victims8400)} (eviction unreachable), "
-                    f"plain8511={len(plain8511)} (the parked 30a's own "
-                    f"deadline; 8503 is dead code), "
+                    f"(park expiry at its own 7s deadline — the 8431 + "
+                    f"RESOURCE_EXHAUSTED attributed form needs the expiry-"
+                    f"time classifier, zero call sites in the intake3 "
+                    f"master, Java gap filed), all-wave expired 8511="
+                    f"{s3_expired}, "
+                    f"victim8400={len(victims8400)}, "
+                    f"plain8511={len(plain8511)} (8503 stays dead code), "
                     f"70_early completed={ph70_ok}, isolated={isolated3}, "
                     f"inflight={'ok' if clean3_ok else clean3_detail}"
                 ),
@@ -3613,18 +3682,30 @@ def atpm_decode_reservation_priority(ctx: CaseContext):
         w2_occupants_ok = all(m2[rid][0] for rid in w2_rids)
         now2_victim = _metric_sum(_scrape_master_metrics(ops), "auto_tpm_victim", {})
         w2_delta = (now2_victim or 0.0) - (base2_victim or 0.0)
+        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
+        # (6ad0315f10): the decode-role-blocked incoming 50 no longer
+        # surfaces its original routing rejection (8403) — it parks in the
+        # pull-based coordinator with schedule() blocking until the 60s
+        # queueTimeout deadline, then terminals as plain 8511
+        # BATCH_SLO_EXPIRED (observed).  EV-2 (decode eviction never
+        # fires) is unchanged: zero victims, occupants complete, metric
+        # flat.
         w2_family = (CODE_NO_DECODE,) + ROUTE_REJECT_FAMILY + (CODE_RESOURCE_EXHAUSTED,)
+        w2_legal = (CODE_OK, CODE_SLO_EXPIRED) + w2_family
         wave_reports.append(
             (
                 "w2_same_priority_zero_eviction",
-                w2_inc_code in w2_family
+                w2_inc_code in w2_legal
                 and w2_zero_eviction
                 and w2_occupants_ok
                 and w2_delta == 0.0,
                 (
-                    f"incoming50 terminal={w2_inc_code} (family "
-                    f"{list(w2_family)}; code-level expectation 8403 — the "
-                    f"original DECODE-role routing rejection), "
+                    f"[EV-1-FIXED] incoming50 terminal={w2_inc_code} "
+                    f"(design-final legal set {list(w2_legal)}: the decode-"
+                    f"blocked submitter parks — schedule() blocks to the 60s "
+                    f"queueTimeout deadline → 8511 park expiry observed; "
+                    f"8403 and the reject family remain legal under other "
+                    f"timings), "
                     f"zero 8400/8429={w2_zero_eviction}, occupants completed="
                     f"{w2_occupants_ok}, victim.count delta={w2_delta} "
                     f"(expected 0.0)"
@@ -3742,25 +3823,33 @@ def atpm_observability_integrity(ctx: CaseContext):
     > debug log) carries the priority/TPM facts on ONE composite
     choreography.
 
-    ENV-O1: Q2-shaped config (PREFILL_QUEUED preemption, queueTimeout 8s
-    so the load yields timeout-attribution samples) + master debug log +
-    FLEXLB_MONITOR_MODE=all.  Implementation-period corrections over the
-    design's env sketch: the DEFAULT critical-only metrics filter hides
-    auto_tpm.* (application.yml flexlb.monitor.mode), so the env-level
-    switch is required; FLEXLB_PV_LOG is a load-client-line knob with no
-    consumer on the harness line — the pvLogger writes at INFO by
-    default, so the pv.log plane needs no extra knob.  The master_env +
-    debug-log differences give O1 its own fingerprint (exclusive env —
-    the metric counters start from zero).
+    ENV-O1: Q2-shaped config (PREFILL_QUEUED preemption, queueTimeout 7s
+    — [EV-1-FIXED] flipped from 8s at intake3
+    PendingPlacementCoordinator 6ad0315f10: under the pull model the
+    wave's third release slot lands at t=9s, which raced the 8s deadline
+    of the 4th submitter (70a); 7s puts every non-dispatched deadline
+    strictly before the third slot, making the client shape
+    deterministic) + master debug log + FLEXLB_MONITOR_MODE=all.
+    Implementation-period corrections over the design's env sketch: the
+    DEFAULT critical-only metrics filter hides auto_tpm.*
+    (application.yml flexlb.monitor.mode), so the env-level switch is
+    required; FLEXLB_PV_LOG is a load-client-line knob with no consumer
+    on the harness line — the pvLogger writes at INFO by default, so
+    the pv.log plane needs no extra knob.  The master_env + debug-log
+    differences give O1 its own fingerprint (exclusive env — the metric
+    counters start from zero).
 
     Choreography (the atpm_preempt_prefill_queued wave-1 shape with
-    mixed priorities for bucket coverage): a 50 placeholder parks the
-    inflight lease; 30a/30b/50a/50b/70a/70b/30c/30d fill maxWaiting
-    exactly; the 90 evicts 30d and is priority-admitted.  Prefill is
-    slowed to 3s: the 90 and 70a dispatch inside their deadlines
-    (complete); 70b and everything behind it expire as plain 8511
-    BATCH_SLO_EXPIRED (the low-priority-suppression sample); 30d
-    terminals 8400 (the preemption sample).
+    mixed priorities for bucket coverage), [EV-1-FIXED] design-final
+    form: a 50 placeholder parks the inflight lease; 30a/30b/50a/50b/
+    70a/70b/30c/30d + the 90 ALL park in the pull-based coordinator.
+    Prefill is slowed to 3s: ph completes at t=3, the first parker 30a
+    takes slot two (t=3-6), the 90 (highest priority) takes slot three
+    (t=6-9) — both complete inside their deadlines.  The remaining
+    seven (30b, 30c, 30d, 50a, 50b, 70a, 70b) expire at their own 7s
+    deadlines as plain 8511 BATCH_SLO_EXPIRED (the low-priority-
+    suppression sample; 30d is no longer evicted — no eviction ever
+    fires under the pull model, the victim counter stays flat).
 
     Per-plane assertions:
       * auto_tpm.request.count{priority=30|50|70|90} == the injected
@@ -3847,29 +3936,29 @@ def atpm_observability_integrity(ctx: CaseContext):
         outcomes = _drain(ops, [ph_fire] + wave)
         m = _outcome_map(outcomes)
 
-        # Client-plane expectations — EV-1 baseline (behaviour finding,
-        # probes E8/E8b/E8c/E10): the design's terminal shape (90 and
-        # 70a complete, six plain 8511 expiries, 30d evicted 8400) is
-        # not constructible — only the FIRST ladder submitter (30a)
-        # parks and completes after the placeholder's lease release;
-        # the remaining eight (30b/30c/30d, 50a/50b, 70a/70b, 90)
-        # route-reject 8402, and no eviction ever fires.
+        # Client-plane expectations — [EV-1-FIXED] baseline flipped at
+        # intake3 PendingPlacementCoordinator (6ad0315f10): every ladder
+        # submitter parks; with queueTimeout 7s the deterministic shape
+        # is ph + the first parker 30a + the 90 (highest priority, third
+        # release slot) completing 200, the remaining seven expiring
+        # 8511 at their own deadlines, zero route-reject and zero
+        # eviction (no 8400 — the preemption sample retired with the
+        # enqueue-failure trigger).
         wave_tags = [t for t, _p in ladder]
-        # _single_park_pattern returns the escaped RID (first submitter),
-        # not its ladder tag — keep both directions explicit to avoid
-        # indexing rids{} by a rid (the round-2 KeyError bug).
-        parked_rid, ev1_ok = _single_park_pattern(m, [rids[t] for t in wave_tags])
         tag_by_rid = {rids[t]: t for t in wave_tags}
-        parked_tag = tag_by_rid.get(parked_rid) if parked_rid is not None else None
-        completed = ["ph"] + ([parked_tag] if parked_tag else [])
+        completed = ["ph"] + [t for t in wave_tags if m[rids[t]][0]]
         rejected8402 = [t for t in wave_tags if m[rids[t]][1] in ROUTE_REJECT_FAMILY]
         expired8511 = [t for t in wave_tags if m[rids[t]][1] == CODE_SLO_EXPIRED]
         ph_ok = m[rids["ph"]][0]
-        parked_terminal = (
-            parked_rid is not None and m[parked_rid][1] not in ROUTE_REJECT_FAMILY
-        )
+        d_order = _dispatch_order(ops, [ph_fire] + wave)
+        d_pos = {r: i for i, r in enumerate(d_order)}
+        dispatch_pair_ok = d_pos[rids["30a"]] < d_pos[rids["90"]]
         client_shape_ok = (
-            ev1_ok and ph_ok and parked_terminal and len(rejected8402) == 8
+            completed == ["ph", "30a", "90"]
+            and len(expired8511) == 7
+            and rejected8402 == []
+            and ph_ok
+            and dispatch_pair_ok
         )
 
         # ---- metric plane (management port /prometheus) -----------------
@@ -3887,8 +3976,9 @@ def atpm_observability_integrity(ctx: CaseContext):
             samples, "auto_tpm_schedule", {"result": "success"}
         )
         latency_ok = latency_success is not None
-        # EV-1: no eviction ever fires, so the victim counter must stay
-        # at zero — matching the client-side zero-8400 count exactly
+        # [EV-1-FIXED]: no eviction ever fires under the pull model (no
+        # failed enqueue feeds the fallback), so the victim counter must
+        # stay at zero — matching the client-side zero-8400 count exactly
         # (exclusive env, absolute value).
         victim_total = _metric_sum(samples, "auto_tpm_victim", {})
         victim_ok = (victim_total or 0.0) == 0.0
@@ -3913,16 +4003,18 @@ def atpm_observability_integrity(ctx: CaseContext):
             and victim_ok
             and sched_log_ok
             and pv_field_ok,
-            context="observability_integrity_ev1",
+            context="observability_integrity_design_final",
             detail=(
-                f"[EV-1] client shape (EV-1): completed={completed}, "
-                f"rejected8402={len(rejected8402)}/8, expired8511="
-                f"{len(expired8511)}, ev1_pattern={ev1_ok}; "
+                f"[EV-1-FIXED] client shape (design-final): completed="
+                f"{completed}, expired8511={len(expired8511)}/7, "
+                f"rejected8402={len(rejected8402)}/0, "
+                f"30a-before-90 dispatch={dispatch_pair_ok}; "
                 f"request.count buckets={ {p: buckets[p] for p in buckets} } "
                 f"(expected {expected_buckets}); "
                 f"schedule.latency success={'present' if latency_ok else 'MISSING'}; "
-                f"victim.count total={victim_total} (expected 0.0 under "
-                f"EV-1 — no eviction, matches zero client-side 8400); "
+                f"victim.count total={victim_total} (expected 0.0 — no "
+                f"eviction under the pull model, matches zero client-side "
+                f"8400); "
                 f"[priority-scheduler] log={'present' if sched_log_ok else 'MISSING'}; "
                 f"pv.log admissionRejectReason field="
                 f"{'present' if pv_field_ok else 'MISSING'}"
@@ -3938,8 +4030,8 @@ def atpm_observability_integrity(ctx: CaseContext):
             "P6",
             client_shape_ok and clean_ok,
             detail=(
-                f"[EV-1] every request reached a terminal: 2 completed "
-                f"[ph, {parked_tag}], 8 route-rejected, "
+                f"[EV-1-FIXED] every request reached a terminal: 3 "
+                f"completed [ph, 30a, 90], 7 expired 8511, "
                 f"inflight={'ok' if clean_ok else clean_detail}"
             ),
         )
@@ -3955,14 +4047,14 @@ def atpm_observability_integrity(ctx: CaseContext):
             dup_rejected and client_shape_ok and clean_ok,
             context="blackbox_aggregate_dup_p6_inflight",
             detail=(
-                f"[EV-1] duplicate-rid rejection (INVALID_REQUEST "
+                f"[EV-1-FIXED] duplicate-rid rejection (INVALID_REQUEST "
                 f"{CODE_INVALID_REQUEST}): {dup_note}, "
-                f"client shape (EV-1)={client_shape_ok}, "
+                f"client shape (design-final)={client_shape_ok}, "
                 f"inflight={'ok' if clean_ok else clean_detail}"
             ),
         )
         return report.finish(
-            f"planes: client(EV-1)={client_shape_ok} metrics="
+            f"planes: client(design-final)={client_shape_ok} metrics="
             f"{buckets_ok and latency_ok and victim_ok} log={sched_log_ok} "
             f"pv={pv_field_ok}, grades: {report.summary()}"
         )
