@@ -303,8 +303,15 @@ def set_parallelism_config(
     parallelism_config.tp_rank = (
         parallelism_config.world_rank % parallelism_config.tp_size
     )
+    # PP-outermost layout (world_rank = pp_rank*(dp*tp) + dp_rank*tp + tp_rank):
+    # "% dp_size" strips the pp component; with pp_size == 1 this reduces to
+    # the historical (world_rank // tp_size). Same convention as
+    # engine_config._update_worker_addrs and collective_torch.
     parallelism_config.dp_rank = (
         parallelism_config.world_rank // parallelism_config.tp_size
+    ) % max(parallelism_config.dp_size, 1)
+    parallelism_config.pp_rank = parallelism_config.world_rank // (
+        max(parallelism_config.dp_size, 1) * parallelism_config.tp_size
     )
     parallelism_config.ep_rank = (
         parallelism_config.world_rank % parallelism_config.ep_size

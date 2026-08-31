@@ -48,8 +48,11 @@ struct LayerKVCache {
         tag(std::move(tag)) {}
 };
 
-// Whole-model KV cache holding tensors for all layers.
-// Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
+// Whole-model KV cache holding tensors for all layers owned by this rank.
+// Layer ids are model-local (0..layerCount()-1): under pipeline parallelism
+// each rank's layout is projected to its own stage layers, so a layer's local
+// id may differ from its global id. Call getLayerCache(local_layer_id) to
+// obtain a per-layer LayerKVCache.
 class KVCache {
 public:
     KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout, const rtp_llm::CacheConfig& config):
@@ -362,6 +365,11 @@ struct PyMultimodalInputs {
 
 using AttnInputsByGroup = std::map<std::string, PyAttentionInputs>;
 
+// PP stage-boundary tensors, carried verbatim from PPIntermediateTensors.
+// Keys are model-defined; fused-residual models use "hidden_states" +
+// "residual", naive-add models use a single key.
+using PPIntermediates = std::map<std::string, torch::Tensor>;
+
 struct PyModelInputs {
     torch::Tensor      input_ids;
     torch::Tensor      input_hiddens;
@@ -373,10 +381,21 @@ struct PyModelInputs {
     PyAttentionInputs   attention_inputs;
     AttnInputsByGroup   attention_inputs_by_group;
     BertEmbeddingInputs bert_embedding_inputs;
+    // PP: stage-boundary tensors received from the upstream stage; empty
+    // under pp_size=1.
+    PPIntermediates pp_intermediates;
 };
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Optional in-model DSpARK proposal: [batch, gamma] tokens. Rejection
+    // sampling consumes these as an implicit point mass, so no per-vocab
+    // draft probabilities cross this boundary.
+    torch::Tensor draft_tokens;
+    // PP: non-last stages return their stage-boundary tensors here;
+    // PyWrappedModel::forwardPP packs them for transport. Empty under
+    // pp_size=1 and on the last stage.
+    PPIntermediates pp_intermediates;
 
     PyModelOutputs() = default;
 

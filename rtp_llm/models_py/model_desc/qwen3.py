@@ -101,9 +101,17 @@ class Qwen3Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
 
-        self.embed_tokens = Embedding(
-            config, parallelism_config, weights.get_global_weight(W.embedding)
+        self.embed_tokens = (
+            Embedding(
+                config, parallelism_config, weights.get_global_weight(W.embedding)
+            )
+            if self.pp_has_embedding
+            else None
         )
+        # PP : only build this stage's layers; keep global layer ids so
+        # kv-cache / fmha lookups below stay global. pp_size=1 builds every
+        # layer exactly as before.
+        self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(
@@ -114,28 +122,56 @@ class Qwen3Model(GptModelBase):
                     quant_config,
                     py_hw_kernel_config,
                 )
-                for idx in range(self.layer_num)
+                for idx in self.pp_layer_ids_list
             ]
         )
-        self.norm = RMSNorm(
-            weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+        self.norm = (
+            RMSNorm(
+                weights.get_global_weight(W.final_ln_gamma), eps=config.layernorm_eps
+            )
+            if self.pp_has_lm_head
+            else None
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        input_ids: torch.Tensor = inputs.input_ids
-        inputs_embeds = self.embed_tokens(input_ids)
-        hidden_states = inputs_embeds
+        # First stage embeds token ids; later PP stages continue from the
+        # upstream stage's activations in pp_intermediates; input_hiddens
+        # stays as the legacy/MTP fallback channel.
+        if self.embed_tokens is not None:
+            hidden_states = self.embed_tokens(inputs.input_ids)
+        else:
+            upstream_hidden = (
+                inputs.pp_intermediates.get("hidden_states")
+                if inputs.pp_intermediates
+                else None
+            )
+            hidden_states = (
+                upstream_hidden if upstream_hidden is not None else inputs.input_hiddens
+            )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+        # Cache surfaces are indexed by model-local layer ids (under PP the
+        # C++ layout is projected to this stage's layers).
+        for local_idx, decoder_layer in enumerate(self.layers):
+            layer_fmha_impl = select_fmha_impl_for_layer(
+                fmha_impl, self.kv_cache, local_idx
+            )
             hidden_states = decoder_layer(
                 hidden_states,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=(
+                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                ),
             )
-        hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states)
+        if self.norm is not None:
+            hidden_states = self.norm(hidden_states)
+            return PyModelOutputs(hidden_states)
+        # Non-last PP stage: emit the combined stream. Naive add-norm models
+        # carry a single boundary tensor (fused-residual models emit both
+        # hidden_states and residual, see qwen3_next).
+        outputs = PyModelOutputs(hidden_states)
+        outputs.pp_intermediates = {"hidden_states": hidden_states}
+        return outputs
 
 
 __all__ = [

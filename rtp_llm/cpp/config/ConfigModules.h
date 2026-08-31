@@ -70,6 +70,7 @@ struct ParallelismConfig {
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
+    int64_t pp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
@@ -80,6 +81,14 @@ struct ParallelismConfig {
     // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
+
+    // Materialized PP layer partition: layer count of every stage in rank
+    // order (e.g. {17,16,16,16}), decided once on the Python side and
+    // shipped as data so C++ never re-derives the partition rule. Empty
+    // means "no materialized partition" and falls back to the even-split
+    // formula (pp_size=1, stale pickles and legacy test fixtures only; the
+    // Python write-back point always materializes for pp_size>1).
+    std::vector<int64_t> pp_stage_layer_counts;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 

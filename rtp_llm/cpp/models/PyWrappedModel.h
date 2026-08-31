@@ -67,6 +67,13 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
+    // PP: thin transport adapter — unpacks upstream PPIntermediateTensors
+    // into PyModelInputs.pp_intermediates, delegates to forward() (the only
+    // compute path), and packs the model-emitted intermediates for the
+    // downstream stage.
+    GptModelOutputs forwardPP(const GptModelInputs&        inputs,
+                              const PPIntermediateTensors* input_tensors,
+                              PPIntermediateTensors*       output_tensors) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
@@ -127,6 +134,7 @@ private:
     const DSparkModelRole                           dspark_model_role_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
+    const int64_t                                   pp_size_;
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::optional<int>                              mtp_cache_config_index_;
@@ -185,6 +193,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     dspark_model_role_(dspark_model_role),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
+    pp_size_(std::max<int64_t>(1, params.parallelism_config.pp_size)),
     description_(params.description),
     cache_manager_(params.cache_manager),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),

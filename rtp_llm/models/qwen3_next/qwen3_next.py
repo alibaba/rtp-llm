@@ -41,6 +41,9 @@ class Qwen3NextBase(BaseModel):
     def support_cuda_graph(self) -> bool:
         return True
 
+    def support_pp(self) -> bool:
+        return True
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config_path = os.path.join(ckpt_path, "config.json")

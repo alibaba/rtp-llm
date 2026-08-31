@@ -12,6 +12,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/PPLayout.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_utils/MlaConfig.h"
@@ -98,11 +99,11 @@ private:
     void                            advanceSamplingStates(const PPSamplingData& sampling, PPSampleResult& result);
 
     bool isFirstStage() const {
-        return pp_rank_ == 0;
+        return pp_layout_.hasEmbedding();
     }
 
     bool isLastStage() const {
-        return pp_rank_ + 1 == parallelism_config_.pp_size;
+        return pp_layout_.hasLmHead();
     }
 
     bool isStageRoot() const {
@@ -120,9 +121,12 @@ private:
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
-    bool                                              enable_detail_log_ = false;
-    const ParallelismConfig                           parallelism_config_;
-    const int64_t                                     pp_rank_;
+    bool                    enable_detail_log_ = false;
+    const ParallelismConfig parallelism_config_;
+    // Single source of stage-role truth (hasEmbedding/hasLmHead) and the
+    // materialized layer partition, shared with cache creation and the
+    // Python loader/model mirrors.
+    const PPLayout                                    pp_layout_;
     std::unique_ptr<PPTransport>                      transport_;
     std::function<void()>                             profile_step_start_;
     std::function<void()>                             profile_step_finish_;

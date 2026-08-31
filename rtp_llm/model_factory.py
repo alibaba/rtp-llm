@@ -13,6 +13,7 @@ from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
+from rtp_llm.config.pp_layout import resolve_pp_partition
 from rtp_llm.config.py_config_modules import (
     EmbeddingConfig,
     GenerateEnvConfig,
@@ -399,6 +400,29 @@ class ModelFactory:
 
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
+
+        # Materialize the PP layer partition once (model_config.num_layers is
+        # final here) and ship it as data on ParallelismConfig: every
+        # downstream consumer — weight loading, model construction, C++
+        # cache geometry — reads the counts instead of re-deriving the
+        # partition rule. pp_size=1 stays untouched (zero behavior change).
+        parallelism_config = engine_config.parallelism_config
+        if (
+            parallelism_config.pp_size > 1
+            and not parallelism_config.pp_stage_layer_counts
+        ):
+            counts = resolve_pp_partition(
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                model_config,
+            )
+            parallelism_config.pp_stage_layer_counts = counts
+            logging.info(
+                "PP layer partition materialized: num_layers=%d pp_size=%d counts=%s",
+                model_config.num_layers,
+                parallelism_config.pp_size,
+                counts,
+            )
 
     @staticmethod
     def create_propose_model_config(
