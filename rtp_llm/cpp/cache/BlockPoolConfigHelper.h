@@ -69,10 +69,14 @@ public:
             // its indexer cache is not represented by MLAKVCacheSpec (whose
             // scale size is zero), so SingleConfigCreator records that
             // physical stride on CacheConfig instead.
-            const auto         mtp_kv_stride_bytes    = mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid);
-            const auto         mtp_scale_stride_bytes = mtp_sub_config->is_sparse ?
-                                                            mtp_sub_config->kv_scale_stride_bytes :
-                                                            mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid);
+            const auto mtp_kv_stride_bytes = mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid);
+            // Prefer the selected group's physical scale layout.  Older
+            // sparse-MLA producers only populated the config-level stride, so
+            // retain that value as a compatibility fallback.
+            const auto group_scale_stride_bytes = mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid);
+            const auto mtp_scale_stride_bytes   = group_scale_stride_bytes != 0 ?
+                                                      group_scale_stride_bytes :
+                                                      (mtp_sub_config->is_sparse ? mtp_sub_config->kv_scale_stride_bytes : 0);
             // TP synchronization updates the shared pool count on the main
             // config. Keep MTP-specific topology/stride data while sizing all
             // shared layouts with that synchronized count.

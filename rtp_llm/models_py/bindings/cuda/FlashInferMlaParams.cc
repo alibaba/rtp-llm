@@ -385,7 +385,11 @@ void FlashInferMlaAttnParams::fillParamsInternal(torch::Tensor t_prefix_lengths,
         qo_indptr_ptr[i + 1]                    = accu_q_len;
     }
 
-    input_token_num       = offset > 0 ? offset : batch_size;
+    // Token-indexed metadata only describes real queries.  The planner's
+    // padded decode slots still need batch-indexed page metadata, but must not
+    // extend batch_indice/positions or slot_mapping into uninitialized tail
+    // entries.
+    input_token_num       = prefix_lengths ? offset : input_batch_size;
     page_num              = total_page_idx;
     reuse_page_num        = reuse_page_idx;
     batch_reuse_info_size = batch_size * 4;  // 4 ints per batch entry

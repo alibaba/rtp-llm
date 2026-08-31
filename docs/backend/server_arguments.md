@@ -217,3 +217,9 @@ to force NewLoader. This capability declaration prevents an upgrade from
 silently disabling weight updates. At startup, rank 0 emits
 `py_rtp_update_weights_available` (`1` for legacy, `0` for NewLoader) and logs
 `CAPABILITY_DISABLED` at WARNING level when the selected route lacks this RPC.
+
+DeepSeek-VL2 small/full MLA checkpoints have no compatible legacy weight
+layout. Start them with `--require_weight_update false` to explicitly select
+NewLoader. `--require_weight_update true` and `--use_new_loader false` are not
+valid rollback choices for those checkpoints because their legacy layout does
+not exist.
