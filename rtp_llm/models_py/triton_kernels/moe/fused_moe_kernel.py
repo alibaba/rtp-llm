@@ -1,7 +1,6 @@
-"""
-Fused MoE triton kernel, adapted from sglang/vllm.
+"""Fused MoE Triton kernel, adapted from SGLang/vLLM.
 
-Only supports bf16/fp16 non-quantized path. Quantization paths can be added later.
+Supports the BF16/FP16 path and dynamic-activation, 128x128 block-scaled FP8.
 """
 
 from typing import Any, Dict
@@ -17,6 +16,8 @@ def fused_moe_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
+    a_scale_ptr,
+    b_scale_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
     expert_ids_ptr,
@@ -34,6 +35,14 @@ def fused_moe_kernel(
     stride_bn,
     stride_cm,
     stride_cn,
+    stride_asm,
+    stride_ask,
+    stride_bse,
+    stride_bsk,
+    stride_bsn,
+    # Block size for block-wise quantization
+    group_n: tl.constexpr,
+    group_k: tl.constexpr,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -42,6 +51,8 @@ def fused_moe_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
+    use_fp8_w8a8: tl.constexpr,
+    scale_ue8m0: tl.constexpr,
     even_Ks: tl.constexpr,
 ):
     """
@@ -90,6 +101,22 @@ def fused_moe_kernel(
         + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     )
 
+    if use_fp8_w8a8:
+        a_scale_ptrs = a_scale_ptr + (offs_token // top_k) * stride_asm
+        if scale_ue8m0:
+            # DeepGEMM expands each N-group scale over its 128 output rows
+            # before packing. Select a representative expanded row for a
+            # single-group tile, or each row when a tile spans groups.
+            if BLOCK_SIZE_N > group_n:
+                offs_bsn = offs_bn
+            else:
+                offs_bsn = pid_n * BLOCK_SIZE_N
+        elif BLOCK_SIZE_N > group_n:
+            offs_bsn = offs_bn // group_n
+        else:
+            offs_bsn = pid_n * BLOCK_SIZE_N // group_n
+        b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
+
     # Accumulate in fp32
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
@@ -108,7 +135,34 @@ def fused_moe_kernel(
         else:
             b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k_start, other=0.0)
 
-        accumulator += tl.dot(a, b)
+        if use_fp8_w8a8:
+            offs_ks = k_start // group_k
+            if scale_ue8m0:
+                scale_pack_idx = offs_ks // 4
+                scale_shift = (offs_ks % 4) * 8
+                a_scale_pack = tl.load(
+                    a_scale_ptrs + scale_pack_idx * stride_ask,
+                    mask=token_mask,
+                    other=0,
+                )
+                b_scale_pack = tl.load(b_scale_ptrs + scale_pack_idx * stride_bsk)
+                a_scale_bits = ((a_scale_pack >> scale_shift) & 0xFF) << 23
+                b_scale_bits = ((b_scale_pack >> scale_shift) & 0xFF) << 23
+                a_scale = a_scale_bits.to(tl.float32, bitcast=True)
+                b_scale = b_scale_bits.to(tl.float32, bitcast=True)
+            else:
+                a_scale = tl.load(
+                    a_scale_ptrs + offs_ks * stride_ask,
+                    mask=token_mask,
+                    other=0.0,
+                )
+                b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
+            if BLOCK_SIZE_N > group_n:
+                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+            else:
+                accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
+        else:
+            accumulator += tl.dot(a, b)
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -140,6 +194,10 @@ def invoke_fused_moe_kernel(
     top_k: int,
     config: Dict[str, Any],
     compute_type: tl.dtype,
+    A_scale: torch.Tensor | None = None,
+    B_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+    scale_ue8m0: bool = False,
 ) -> None:
     assert sorted_token_ids.stride(0) == 1
 
@@ -150,11 +208,44 @@ def invoke_fused_moe_kernel(
 
     K = B.shape[2]
     even_Ks = K % config["BLOCK_SIZE_K"] == 0
+    use_fp8_w8a8 = block_shape is not None
+    if use_fp8_w8a8:
+        assert A.dtype == torch.float8_e4m3fn
+        assert B.dtype == torch.float8_e4m3fn
+        assert A_scale is not None and B_scale is not None
+        assert len(block_shape) == 2
+        block_n, block_k = block_shape
+        kernel_block_n = config["BLOCK_SIZE_N"]
+        kernel_block_k = config["BLOCK_SIZE_K"]
+        assert kernel_block_n > block_n or block_n % kernel_block_n == 0, (
+            f"BLOCK_SIZE_N={kernel_block_n} must divide FP8 scale group_n={block_n} "
+            "unless the tile spans multiple scale groups"
+        )
+        assert (
+            kernel_block_k <= block_k and block_k % kernel_block_k == 0
+        ), f"BLOCK_SIZE_K={kernel_block_k} must divide FP8 scale group_k={block_k}"
+        assert A_scale.ndim == 2 and B_scale.ndim == 3
+        if scale_ue8m0:
+            assert A_scale.dtype == torch.int32 and B_scale.dtype == torch.int32
+            assert triton.cdiv(A.shape[-1], block_k) <= A_scale.shape[-1] * 4
+            # DeepGEMM's packed weight scale is expanded over output rows.
+            assert B.shape[-2] == B_scale.shape[-2]
+            assert triton.cdiv(B.shape[-1], block_k) <= B_scale.shape[-1] * 4
+        else:
+            assert A_scale.dtype == torch.float32 and B_scale.dtype == torch.float32
+            assert triton.cdiv(A.shape[-1], block_k) == A_scale.shape[-1]
+            assert triton.cdiv(B.shape[-2], block_n) == B_scale.shape[-2]
+            assert triton.cdiv(B.shape[-1], block_k) == B_scale.shape[-1]
+    else:
+        assert A_scale is None and B_scale is None
+        block_n, block_k = 0, 0
 
     fused_moe_kernel[grid](
         A,
         B,
         C,
+        A_scale,
+        B_scale,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -170,9 +261,18 @@ def invoke_fused_moe_kernel(
         B.stride(1),
         C.stride(-2),
         C.stride(-1),
+        A_scale.stride(0) if A_scale is not None else 0,
+        A_scale.stride(1) if A_scale is not None else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
+        B_scale.stride(2) if B_scale is not None else 0,
+        B_scale.stride(1) if B_scale is not None else 0,
+        block_n,
+        block_k,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
+        use_fp8_w8a8=use_fp8_w8a8,
+        scale_ue8m0=scale_ue8m0,
         even_Ks=even_Ks,
         **config,
     )
@@ -190,13 +290,24 @@ def moe_align_block_size_torch(
         sorted_token_ids: [max_padded] padded token indices (may be larger than needed)
         expert_ids: [max_blocks] expert id for each block
         num_tokens_post_padded: [1] scalar tensor (actual used count, on GPU)
+
+    Requires every route id to be in ``[0, num_experts)``.  EP padding
+    sentinels must be filtered or remapped by the caller before this helper.
     """
     M, top_k = topk_ids.shape
     num_valid = M * top_k
     flat_ids = topk_ids.view(-1)  # [M * top_k]
 
-    # Pre-allocate to max possible size to avoid GPU→CPU sync
-    max_padded = num_valid + num_experts * block_size
+    # Pre-allocate a static worst-case capacity to avoid a GPU→CPU sync.  If
+    # A experts are active, their first block costs A blocks and every further
+    # block needs another ``block_size`` routes.  The maximum is reached at
+    # A=min(num_valid, num_experts).  This is substantially tighter than
+    # reserving one extra block for every expert (for Qwen batch=1: 8 instead
+    # of 129 blocks), so the static Triton grid launches far fewer empty
+    # programs while remaining CUDA-graph safe for every routing distribution.
+    max_active_experts = min(num_valid, num_experts)
+    max_blocks = max_active_experts + (num_valid - max_active_experts) // block_size
+    max_padded = max_blocks * block_size
 
     # Count tokens per expert via scatter_add (CUDA-graph-safe, no CPU-GPU sync
     # unlike torch.bincount which reads GPU data on CPU to determine output size)
@@ -249,9 +360,18 @@ def moe_align_block_size_torch(
     return sorted_token_ids, expert_ids, num_tokens_post_padded
 
 
-# torch.compile with dynamic=True + assert_indirect_indexing causes spurious
-# assertion failures on valid expert IDs. Use the non-compiled version for now.
-moe_align_block_size_compiled = moe_align_block_size_torch
+# The routing shapes are static for each captured decode batch.  Compiling the
+# metadata path folds its elementwise/indexing work into a handful of kernels,
+# which keeps the CUDA graph small enough that replay launch cost does not hide
+# the routed FP8 GEMM gain on SM120.  ``dynamic=False`` also avoids the stale
+# dynamic-shape indirect-indexing assertion seen with older Torch versions.
+# The default 1-32 decode capture set has five static shapes.  Custom capture
+# lists above Dynamo's recompile limit remain correct but can fall back to eager.
+moe_align_block_size_compiled = torch.compile(
+    moe_align_block_size_torch,
+    fullgraph=True,
+    dynamic=False,
+)
 
 
 def get_default_config(

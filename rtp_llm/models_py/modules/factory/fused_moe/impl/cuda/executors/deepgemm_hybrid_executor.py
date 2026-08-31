@@ -3,10 +3,13 @@
 # Licensed under the Apache License, Version 2.0
 import logging
 import math
+import os
 from contextlib import nullcontext
+from functools import cache
 from typing import Any, Dict, Optional
 
 import torch
+import triton.language as tl
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +46,135 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_scatter_v2,
     tma_align_input_scale,
 )
+from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+    get_default_config as get_triton_moe_config,
+)
+from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+    invoke_fused_moe_kernel as invoke_triton_moe_kernel,
+)
+from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
+    moe_align_block_size_compiled,
+)
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
+_SM120_TRITON_MIN_TOKENS = 1
+_SM120_TRITON_MAX_TOKENS = 32
+_SM120_TRITON_MAX_TOKENS_ENV = "RTP_LLM_SM120_TRITON_FP8_MAX_TOKENS"
+_CUDA_GRAPH_WARMUP_FORWARD_ENV = "RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD"
+_SM120_TUNED_FP8_CONFIGS = {
+    # Qwen3-30B-A3B, TP=1. Exhaustive search over BM={8,16,32},
+    # BN={64,128,256}, BK={64,128}, warps={4,8}, and stages={2,3,4,5}.
+    (128, 1536, 2048, 8): {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 3,
+    },
+    (128, 2048, 768, 8): {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+    },
+}
+
+
+def _get_sm120_triton_max_tokens() -> int:
+    raw_max_tokens = os.environ.get(
+        _SM120_TRITON_MAX_TOKENS_ENV,
+        str(_SM120_TRITON_MAX_TOKENS),
+    )
+    try:
+        max_tokens = int(raw_max_tokens)
+    except ValueError as error:
+        raise ValueError(
+            f"{_SM120_TRITON_MAX_TOKENS_ENV} must be an integer, "
+            f"got {raw_max_tokens!r}"
+        ) from error
+    if not 0 <= max_tokens <= _SM120_TRITON_MAX_TOKENS:
+        raise ValueError(
+            f"{_SM120_TRITON_MAX_TOKENS_ENV} must be in "
+            f"[0, {_SM120_TRITON_MAX_TOKENS}], got {max_tokens}"
+        )
+    return max_tokens
+
+
+def _is_cuda_graph_warmup_or_capture() -> bool:
+    """Return whether this forward is preparing or capturing a CUDA graph.
+
+    ``enable_cuda_graph`` is an engine-level capability and is also true for
+    ordinary eager prefill forwards.  The C++ graph runner marks its eager
+    warmup with an environment flag, while PyTorch exposes the subsequent
+    capture directly.  Requiring either signal keeps short eager prefill out
+    of the static ``torch.compile(dynamic=False)`` routing path.
+    """
+    return (
+        os.environ.get(_CUDA_GRAPH_WARMUP_FORWARD_ENV) == "1"
+        or torch.cuda.is_current_stream_capturing()
+    )
+
+
+@cache
+def _log_sm120_triton_fp8_path(
+    min_tokens: int, max_tokens: int, config_source: str
+) -> None:
+    if max_tokens == 0:
+        logger.info(
+            "SM120 CUDA Graph Triton FP8 MoE is disabled by %s=0",
+            _SM120_TRITON_MAX_TOKENS_ENV,
+        )
+        return
+    logger.info(
+        "SM120 CUDA Graph MoE uses Triton FP8 for %d-%d tokens; "
+        "config source=%s; other shapes use DeepGEMM (set %s=0 to disable)",
+        min_tokens,
+        max_tokens,
+        config_source,
+        _SM120_TRITON_MAX_TOKENS_ENV,
+    )
+
 
 def align_up_math(n: int, alignment: int = 128) -> int:
     return int(math.ceil(n / alignment)) * alignment
+
+
+def get_sm120_triton_fp8_config(
+    M: int,
+    E: int,
+    N: int,
+    K: int,
+    top_k: int,
+) -> Dict[str, Any]:
+    """Return SM120 FP8 MoE configs without changing the SM90 defaults."""
+    tuned_config = _SM120_TUNED_FP8_CONFIGS.get((E, N, K, top_k))
+    if tuned_config is not None and M <= _SM120_TRITON_MAX_TOKENS:
+        return dict(tuned_config)
+
+    # Keep the SM120 override pure even if the generic selector starts caching
+    # configs in the future.
+    config = dict(get_triton_moe_config(M, E, N, K, top_k))
+    avg_tokens_per_expert = M * top_k / max(E, 1)
+    if avg_tokens_per_expert <= 2:
+        # Generic SM120 small-batch fallback from the original optimization.
+        config.update(
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 4,
+            }
+        )
+    return config
 
 
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
@@ -105,6 +228,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
         self.is_sm120 = get_sm()[0] == 12
+        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+            self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
+        else:
+            # Do not let an SM120-only rollback knob affect H20/SM100 or an
+            # executor configuration that can never enter the Triton path.
+            self.sm120_triton_max_tokens = 0
 
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
@@ -119,6 +248,21 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(0) == self.E
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
+
+        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+            gate_shape = (self.E, self.N, self.K, self.top_k)
+            down_shape = (self.E, self.K, self.N // 2, self.top_k)
+            config_source = (
+                "tuned"
+                if gate_shape in _SM120_TUNED_FP8_CONFIGS
+                and down_shape in _SM120_TUNED_FP8_CONFIGS
+                else "generic"
+            )
+            _log_sm120_triton_fp8_path(
+                _SM120_TRITON_MIN_TOKENS,
+                self.sm120_triton_max_tokens,
+                config_source,
+            )
 
         self.w13_weight_fp8 = (
             self.w13_weight,
@@ -142,6 +286,25 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         token_num = payload.expert_x.shape[0]
+        # This local routed path neither remaps partitioned expert ids nor
+        # participates in an EP dispatch/combine collective.  expert_map=None
+        # alone does not imply that the payload follows the non-EP contract.
+        if (
+            self.is_sm120
+            and self.enable_cuda_graph
+            and self.ep_size == 1
+            and _is_cuda_graph_warmup_or_capture()
+            and token_num >= _SM120_TRITON_MIN_TOKENS
+            and token_num <= self.sm120_triton_max_tokens
+            and expert_map is None
+            and activation == "SiGLU"
+            and not apply_router_weight_on_input
+        ):
+            return self.execute_triton_fp8(
+                payload,
+                activation,
+                apply_router_weight_on_input,
+            )
         # The contiguous path uses a shape-derived fixed workspace and performs
         # all routing metadata work on GPU, so it is safe to capture/replay.
         # It avoids the E * padded_M masked layout that dominates small decode
@@ -164,6 +327,121 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 apply_router_weight_on_input,
                 extra_expert_args,
             )
+
+    def execute_triton_fp8(
+        self,
+        payload: ExpertForwardPayload,
+        activation: str,
+        apply_router_weight_on_input: bool,
+    ) -> CombineForwardPayload:
+        """Run small SM120 decode batches without per-expert 64-row padding."""
+        if not self.is_sm120:
+            raise RuntimeError("Triton FP8 MoE fast path requires SM120")
+        if self.ep_size != 1:
+            raise ValueError("Triton FP8 MoE fast path requires ep_size == 1")
+        if activation != "SiGLU":
+            raise ValueError("Triton FP8 MoE fast path only supports SiGLU")
+        if apply_router_weight_on_input:
+            raise ValueError(
+                "Triton FP8 MoE fast path does not support router weight on input"
+            )
+        if payload.expert_x is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_x")
+        if payload.expert_x_scale is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_x_scale")
+        if payload.expert_topk_ids is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_topk_ids")
+        if payload.expert_topk_weights is None:
+            raise ValueError("Triton FP8 MoE fast path requires expert_topk_weights")
+
+        hidden_states_fp8 = payload.expert_x
+        hidden_states_scale = payload.expert_x_scale
+        topk_ids = payload.expert_topk_ids
+        topk_weights = payload.expert_topk_weights
+        token_num, hidden_size = hidden_states_fp8.shape
+        topk = topk_ids.shape[1]
+        expert_num, gate_up_size, _ = self.w13_weight.shape
+        intermediate_size = gate_up_size // 2
+
+        config1 = get_sm120_triton_fp8_config(
+            token_num, expert_num, gate_up_size, hidden_size, topk
+        )
+        config2 = get_sm120_triton_fp8_config(
+            token_num, expert_num, hidden_size, intermediate_size, topk
+        )
+        block_m = min(config1["BLOCK_SIZE_M"], config2["BLOCK_SIZE_M"])
+        config1["BLOCK_SIZE_M"] = block_m
+        config2["BLOCK_SIZE_M"] = block_m
+        # The execute() gate restricts this path to EP=1, where SelectTopk
+        # produces global expert ids in [0, expert_num).  EP padding sentinels
+        # must stay on the contiguous path, which owns their remapping logic.
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size_compiled(topk_ids, block_m, expert_num)
+        )
+
+        route_num = token_num * topk
+        gate_up_output = torch.empty(
+            (route_num, gate_up_size),
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        invoke_triton_moe_kernel(
+            hidden_states_fp8,
+            self.w13_weight,
+            gate_up_output,
+            topk_weights.view(-1),
+            topk_ids.view(-1),
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            False,
+            topk,
+            config1,
+            tl.bfloat16,
+            A_scale=hidden_states_scale,
+            B_scale=self.w13_weight_scale_inv,
+            block_shape=self.DEEPGEMM_BLOCK_SHAPE,
+            scale_ue8m0=True,
+        )
+
+        down_input = torch.empty(
+            (route_num, intermediate_size),
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        silu_and_mul(down_input, gate_up_output)
+        down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
+            down_input,
+            group_size=self.BLOCK_SIZE,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        down_output = torch.empty(
+            (route_num, hidden_size),
+            device=hidden_states_fp8.device,
+            dtype=torch.bfloat16,
+        )
+        invoke_triton_moe_kernel(
+            down_input_fp8,
+            self.w2_weight,
+            down_output,
+            topk_weights.view(-1),
+            topk_ids.view(-1),
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            True,
+            1,
+            config2,
+            tl.bfloat16,
+            A_scale=down_input_scale,
+            B_scale=self.w2_weight_scale_inv,
+            block_shape=self.DEEPGEMM_BLOCK_SHAPE,
+            scale_ue8m0=True,
+        )
+        output = down_output.view(token_num, topk, hidden_size).sum(dim=1)
+        return CombineForwardPayload(fused_expert_output=output)
 
     def execute_masked(
         self,

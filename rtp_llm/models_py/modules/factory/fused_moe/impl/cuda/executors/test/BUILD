@@ -54,6 +54,34 @@ py_test (
 )
 
 py_test (
+    name = "triton_fp8_block_moe_sm120_test",
+    srcs = ["triton_fp8_block_moe_sm120_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    # Intentionally runs in open-source CI: this is the SM120 correctness gate
+    # for the production path, including packed UE8M0 and CUDA Graph replay.
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {'gpu':'RTX_5000_PRO', 'gpu_count':'1'},
+)
+
+py_test (
+    name = "triton_fp8_block_moe_sm120_benchmark",
+    srcs = ["triton_fp8_block_moe_sm120_benchmark.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["manual", "open_skip", "RTX_5000_PRO"],
+    exec_properties = {'gpu':'RTX_5000_PRO', 'gpu_count':'1'},
+)
+
+py_test (
     name = "deepep_normal_executor_test",
     srcs = ["deepep_normal_executor_test.py"],
     deps = [
