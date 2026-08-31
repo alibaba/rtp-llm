@@ -90,6 +90,64 @@ class FusedBiasGeluTest(unittest.TestCase):
         torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
         torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
 
+    def test_fused_quant_float_scale_matches_separate_path(self):
+        torch.manual_seed(20260831)
+        value = torch.randn((17, 3072), device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(3072, device="cuda", dtype=torch.bfloat16)
+        activated = value.clone()
+        rtp_llm_ops.fused_bias_gelu(activated, bias)
+        expected_q, expected_s = sgl_per_token_group_quant_fp8(
+            activated,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+        )
+        actual_q = torch.empty_like(value, dtype=torch.float8_e4m3fn)
+        actual_s = torch.empty_strided(
+            expected_s.shape,
+            expected_s.stride(),
+            dtype=torch.float32,
+            device=value.device,
+        )
+        rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, actual_q, actual_s)
+        torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
+        torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
+
+    def test_fused_quant_float_scale_can_skip_bias(self):
+        torch.manual_seed(20260831)
+        value = torch.randn((17, 3072), device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(3072, device="cuda", dtype=torch.bfloat16)
+        expected_q, expected_s = sgl_per_token_group_quant_fp8(
+            F.gelu(value),
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+        )
+        actual_q = torch.empty_like(value, dtype=torch.float8_e4m3fn)
+        actual_s = torch.empty_strided(
+            expected_s.shape,
+            expected_s.stride(),
+            dtype=torch.float32,
+            device=value.device,
+        )
+        rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, actual_q, actual_s, False)
+        torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
+        torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
+
+    def test_fused_quant_float_scale_rejects_overlapping_layout(self):
+        value = torch.randn((17, 256), device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(256, device="cuda", dtype=torch.bfloat16)
+        output = torch.empty_like(value, dtype=torch.float8_e4m3fn)
+        scales = torch.empty_strided(
+            (17, 2), (1, 1), dtype=torch.float32, device=value.device
+        )
+        with self.assertRaisesRegex(RuntimeError, "stride"):
+            rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, output, scales, False)
+
 
 if __name__ == "__main__":
     unittest.main()

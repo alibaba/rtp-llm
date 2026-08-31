@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.config.quant_config import init_quant_config
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_vllm_blockwise_sm120_linear import (
     CudaFp8VllmBlockwiseLinear,
     _get_cutlass_scaled_mm_blockwise_sm120_fp8,
@@ -113,6 +114,36 @@ class CudaFp8VllmBlockwiseLinearNumericalTest(unittest.TestCase):
         for M in [1, 65, 257]:
             with self.subTest(M=M):
                 self._run(M, K=256, N=256, with_bias=True, use_gelu=True)
+
+    def test_prequantized_and_fused_exact_gelu_path(self):
+        M, K, N = 17, 256, 256
+        self._make_weight(K, N)
+        bias = torch.randn(N, dtype=torch.bfloat16, device=self.device) * 0.01
+        up = CudaFp8VllmBlockwiseLinear(
+            weight=self.weight_fp8,
+            weight_scales=self.weight_scales,
+            bias=bias,
+            quant_config=self.quant_config,
+        )
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=self.device) * 0.1
+        quantized, scales = up.forward_with_bias_gelu_quantized(x)
+        separate = up.forward_with_bias_gelu(x)
+        expected_q, expected_s = sgl_per_token_group_quant_fp8(
+            separate,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=False,
+            scale_ue8m0=False,
+        )
+        torch.testing.assert_close(
+            quantized.float(), expected_q.float(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(scales, expected_s, rtol=0, atol=0)
+
+        fused_down = up.forward_quantized(quantized, scales, apply_bias=False)
+        separate_down = up.forward_without_bias(separate)
+        torch.testing.assert_close(fused_down, separate_down, rtol=0.02, atol=0.02)
 
     def test_reject_fp16_input(self):
         K, N = self.test_shapes[0]

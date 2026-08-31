@@ -138,6 +138,64 @@ __global__ void addBiasGeluQuantFp8Kernel(const T* __restrict__ input,
 }
 
 template<typename T>
+__global__ void addBiasGeluQuantFp8FloatScaleKernel(const T* __restrict__ input,
+                                                    const T* __restrict__ bias,
+                                                    __nv_fp8_e4m3* __restrict__ output,
+                                                    float* __restrict__ scales,
+                                                    size_t group_count,
+                                                    size_t hidden_size,
+                                                    size_t scale_stride,
+                                                    bool   add_bias) {
+    constexpr int    group_size        = 128;
+    constexpr int    threads_per_group = 8;
+    constexpr int    groups_per_block  = 32;
+    __shared__ float group_scales[groups_per_block];
+
+    const size_t groups_per_row = hidden_size / group_size;
+    const int    local_group_id = threadIdx.x / threads_per_group;
+    const int    lane_id        = threadIdx.x % threads_per_group;
+    const size_t group_id       = blockIdx.x * groups_per_block + local_group_id;
+    const bool   active         = group_id < group_count;
+    const size_t row            = group_id / groups_per_row;
+    const size_t group_col      = group_id % groups_per_row;
+    const size_t offset         = row * hidden_size + group_col * group_size;
+
+    float local_values[group_size / threads_per_group];
+    float local_absmax = 1e-4f;
+#pragma unroll
+    for (int item = 0; item < group_size / threads_per_group; ++item) {
+        const int i = lane_id + item * threads_per_group;
+        if (active) {
+            const float value         = exactGelu(static_cast<float>(input[offset + i])
+                                          + (add_bias ? static_cast<float>(bias[group_col * group_size + i]) : 0.0f));
+            const T     rounded_value = static_cast<T>(value);
+            local_values[item]        = static_cast<float>(rounded_value);
+            local_absmax              = fmaxf(local_absmax, fabsf(local_values[item]));
+        }
+    }
+    const unsigned subwarp_mask = 0xffu << (threadIdx.x & 24);
+#pragma unroll
+    for (int delta = 4; delta > 0; delta >>= 1) {
+        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(subwarp_mask, local_absmax, delta));
+    }
+    if (lane_id == 0 && active) {
+        const float scale                      = local_absmax / 448.0f;
+        group_scales[local_group_id]           = scale;
+        scales[group_col * scale_stride + row] = scale;
+    }
+    __syncthreads();
+    if (!active) {
+        return;
+    }
+    const float group_scale = group_scales[local_group_id];
+#pragma unroll
+    for (int item = 0; item < group_size / threads_per_group; ++item) {
+        const int i        = lane_id + item * threads_per_group;
+        output[offset + i] = __nv_fp8_e4m3(fminf(fmaxf(local_values[item] / group_scale, -448.0f), 448.0f));
+    }
+}
+
+template<typename T>
 void invokeAddBiasGeluQuantFp8(const T*     input,
                                const T*     bias,
                                void*        output,
@@ -157,6 +215,28 @@ void invokeAddBiasGeluQuantFp8(const T*     input,
     const size_t  block_count       = (group_count + groups_per_block - 1) / groups_per_block;
     addBiasGeluQuantFp8Kernel<<<block_count, groups_per_block * threads_per_group, 0, stream>>>(
         input, bias, static_cast<__nv_fp8_e4m3*>(output), scales, group_count, hidden_size, scale_stride);
+}
+
+template<typename T>
+void invokeAddBiasGeluQuantFp8FloatScale(const T*     input,
+                                         const T*     bias,
+                                         void*        output,
+                                         float*       scales,
+                                         size_t       rows,
+                                         size_t       hidden_size,
+                                         size_t       scale_stride,
+                                         bool         add_bias,
+                                         cudaStream_t stream) {
+    constexpr size_t group_size = 128;
+    if (rows == 0) {
+        return;
+    }
+    const size_t  group_count       = rows * (hidden_size / group_size);
+    constexpr int groups_per_block  = 32;
+    constexpr int threads_per_group = 8;
+    const size_t  block_count       = (group_count + groups_per_block - 1) / groups_per_block;
+    addBiasGeluQuantFp8FloatScaleKernel<<<block_count, groups_per_block * threads_per_group, 0, stream>>>(
+        input, bias, static_cast<__nv_fp8_e4m3*>(output), scales, group_count, hidden_size, scale_stride, add_bias);
 }
 
 template<typename T>
@@ -328,6 +408,24 @@ template void invokeAddBiasGeluQuantFp8(const __nv_bfloat16* input,
                                         size_t               hidden_size,
                                         size_t               scale_stride,
                                         cudaStream_t         stream);
+template void invokeAddBiasGeluQuantFp8FloatScale(const half*  input,
+                                                  const half*  bias,
+                                                  void*        output,
+                                                  float*       scales,
+                                                  size_t       rows,
+                                                  size_t       hidden_size,
+                                                  size_t       scale_stride,
+                                                  bool         add_bias,
+                                                  cudaStream_t stream);
+template void invokeAddBiasGeluQuantFp8FloatScale(const __nv_bfloat16* input,
+                                                  const __nv_bfloat16* bias,
+                                                  void*                output,
+                                                  float*               scales,
+                                                  size_t               rows,
+                                                  size_t               hidden_size,
+                                                  size_t               scale_stride,
+                                                  bool                 add_bias,
+                                                  cudaStream_t         stream);
 #endif
 
 template void invokeAddBiasSoftMax(half*        logits,

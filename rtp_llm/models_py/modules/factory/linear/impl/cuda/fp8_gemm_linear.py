@@ -23,6 +23,7 @@ class CudaFp8GEMMLinear(LinearBase):
     supports_deferred_bias = True
     supports_fused_bias_gelu_quant = True
     supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
 
     @classmethod
     def _is_fp8_per_block_candidate(
