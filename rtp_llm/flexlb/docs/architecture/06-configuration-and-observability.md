@@ -48,8 +48,24 @@ tagged union 的 `type` 变化会替换整个分支。v1 文档 `{"schemaVersion
 运行时读取失败或非法更新不会替换当前 last-known-good 快照，后续更新恢复正常后
 继续应用；合法更新原子替换 `FlexlbConfig`，随后通知监听器。
 
-配置来源层不区分“热生效”与“重启生效”：它只发布最新有效快照。业务组件每次读取快照，
-就可以热生效；在 Bean 初始化时缓存的值，则在重启后生效。
+配置来源层发布最新有效快照。业务组件每次读取快照，就可以热生效；在 Bean 初始化时
+缓存的值，则在重启后生效。需要更新已有运行对象的字段可通过
+`ConfigService.addUpdateListener(projection, applier)` 订阅不可变投影。订阅立即回放当前值，
+后续仅在投影值变化时应用；原单参数 listener 接口仍接收每次有效更新。
+
+Local Standby 的 `cacheMatching.localStandby.maximumEntries`、`capacityMultiplier`、
+`ttlMs`、`minimumTtlMs` 和 `ttlReductionStartRatio` 支持运行时更新。容量更新作用于已有
+索引，TTL 同时作用于索引和比较结果缓存，已有记录继续按原写入时间计算年龄。
+`autoSwitch`、`blockSize`、hash/异步队列与线程数仍需重启。切换为 `LOCAL_SYNC` 时不投影
+Local Standby 设置，不阻塞无关配置更新；缓存匹配组件拓扑仍需重启才能切换。
+
+启动及更新统一通过 `FlexlbConfigMerger` / `FlexlbConfigValidator` 校验完整候选配置，
+包括 Local Standby 的动态与静态字段。所有投影计算成功后才提交快照；校验或投影异常
+保留 last-known-good。`notificationLock` 串行化注册回放与更新通知，`updateLock` 保护快照
+和订阅列表，两锁同时使用时先取前者。applier 在快照锁外执行，失败不回滚已提交快照、
+不阻断其他订阅，也不推进最后成功投影值；下一次仍不同于成功值的更新会重试。
+这些规则适用于 Nacos 和 UniConfig，继续保留来源层的 v0/v1 归一化、严格 null 校验和
+独立 `MODEL_SERVICE_CONFIG` 拓扑契约。
 
 旧的字段级行为变量 `BLOCK_HASH_STRATEGY`、`FLEXLB_LOG_LEVEL`、
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认

@@ -28,6 +28,19 @@ class LocalStandbyCacheIndexTest {
     }
 
     @Test
+    void appliesUpdatedTtlToExistingMappings() {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(300_000, 100_000, 0.8, 10);
+        cacheIndex.addWorkerBlockMappings("10.0.0.1:8080", List.of(11L));
+
+        cacheIndex.updateExpirationSettings(1, 1, 0.8);
+
+        assertNull(cacheIndex.getUnexpiredEnginesForBlock(
+                11L, System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2)));
+        assertEquals(0, cacheIndex.mappingCount());
+        cacheIndex.shutdown();
+    }
+
+    @Test
     void concurrentRefreshOfExistingMappingKeepsSingleEntry() {
         LocalStandbyCacheIndex cacheIndex = cacheIndex(60_000, 20_000, 0.8, 10);
         cacheIndex.addWorkerBlockMappings("10.0.0.1:8080", List.of(11L));

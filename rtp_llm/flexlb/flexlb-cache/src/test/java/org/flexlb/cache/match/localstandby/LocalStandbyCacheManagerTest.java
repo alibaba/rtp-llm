@@ -1,8 +1,15 @@
 package org.flexlb.cache.match.localstandby;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.LocalStandbyConfig;
+import org.flexlb.config.LocalStandbyRuntimeSettings;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -12,14 +19,23 @@ import org.flexlb.dao.route.GroupRoleEndPoint;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -145,6 +161,66 @@ class LocalStandbyCacheManagerTest {
     }
 
     @Test
+    @DisplayName("HBM 容量估算异常时记录告警且保留已有缓存容量")
+    void warnsAndKeepsCapacityWhenHbmBlockCapacityCannotBeEstimated() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                configuration(300_000, 2_000, 10.0),
+                workerStatusProvider,
+                mock(CacheMetricsReporter.class));
+        Logger logger = (Logger) LoggerFactory.getLogger(LocalStandbyCacheManager.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+
+        try {
+            manager.refreshCapacityLimits();
+
+            assertEquals(2_000, manager.maximumEntryCount());
+            assertTrue(appender.list.stream()
+                    .anyMatch(event -> event.getFormattedMessage()
+                            .contains("estimated HBM block capacity is not positive")));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    @DisplayName("热更新容量配置，缺失 KVCM 时保留已有运行时状态")
+    void refreshesCapacityWhenRuntimeConfigChangesMaximumEntriesAndMultiplier() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        WorkerStatus worker = workerWithCacheCapacity("10.0.0.1", 8080, 10_000, 100);
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
+                .thenReturn(List.of(worker));
+        CacheMatchConfiguration configuration = configuration(300_000, 2_000, 10.0);
+        FlexlbConfig initialConfig = runtimeConfig(configuration.getLocalStandbyConfig());
+        AtomicReference<Consumer<FlexlbConfig>> configUpdateListener = new AtomicReference<>();
+        ConfigService configService = mock(ConfigService.class);
+        doAnswer(invocation -> {
+            Function<FlexlbConfig, Optional<LocalStandbyRuntimeSettings>> projection = invocation.getArgument(0);
+            Consumer<Optional<LocalStandbyRuntimeSettings>> listener = invocation.getArgument(1);
+            configUpdateListener.set(config -> listener.accept(projection.apply(config)));
+            listener.accept(projection.apply(initialConfig));
+            return null;
+        }).when(configService).addUpdateListener(any(), any());
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                configuration, workerStatusProvider, mock(CacheMetricsReporter.class), configService);
+
+        assertEquals(1_000, manager.maximumEntryCount());
+
+        FlexlbConfig updatedConfig = runtimeConfig(
+                configuration(300_000, 250, 2.0).getLocalStandbyConfig());
+        configUpdateListener.get().accept(updatedConfig);
+
+        assertEquals(200, manager.maximumEntryCount());
+        configUpdateListener.get().accept(new FlexlbConfig());
+        assertEquals(200, manager.maximumEntryCount());
+        manager.shutdown();
+    }
+
+    @Test
     void usesConfiguredStandbyBlockSizeToDeriveMaximumEntries() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         WorkerStatus worker = worker("10.0.0.1", 8080);
@@ -221,6 +297,14 @@ class LocalStandbyCacheManagerTest {
                 .blockSize(blockSize)
                 .build());
         return workerStatus;
+    }
+
+    private FlexlbConfig runtimeConfig(LocalStandbyConfig standby) {
+        KvcmCacheMatchingConfig kvcmConfig = new KvcmCacheMatchingConfig();
+        kvcmConfig.setLocalStandby(standby);
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCacheMatching(kvcmConfig);
+        return config;
     }
 
     private CacheMatchConfiguration configuration(long expirationMs) {

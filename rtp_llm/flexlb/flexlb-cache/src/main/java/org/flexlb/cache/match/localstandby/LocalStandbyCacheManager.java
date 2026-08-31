@@ -4,11 +4,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.LocalStandbyConfig;
+import org.flexlb.config.LocalStandbyRuntimeSettings;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -19,6 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -38,8 +42,7 @@ public class LocalStandbyCacheManager {
     private final WorkerStatusProvider workerStatusProvider;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final Collection<ServiceRoute> serviceRoutes;
-    private final long configuredMaximumEntries;
-    private final double capacityMultiplier;
+    private volatile LocalStandbyRuntimeSettings runtimeSettings;
     private final long configuredBlockSize;
     private final LocalStandbyCacheIndex cacheIndex;
     private volatile long nextCapacityWarningNanos;
@@ -47,33 +50,39 @@ public class LocalStandbyCacheManager {
     public LocalStandbyCacheManager(CacheMatchConfiguration configuration,
                                     WorkerStatusProvider workerStatusProvider,
                                     CacheMetricsReporter cacheMetricsReporter) {
+        this(configuration, workerStatusProvider, cacheMetricsReporter, null);
+    }
+
+    @Autowired
+    public LocalStandbyCacheManager(CacheMatchConfiguration configuration,
+                                    WorkerStatusProvider workerStatusProvider,
+                                    CacheMetricsReporter cacheMetricsReporter,
+                                    ConfigService configService) {
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
         this.workerStatusProvider = workerStatusProvider;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.serviceRoutes = configuration.getServiceRoutes();
-        this.configuredMaximumEntries = enabled
-                ? config.getMaximumEntries()
-                : LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES;
-        this.capacityMultiplier = enabled
-                ? config.getCapacityMultiplier()
-                : LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER;
+        this.runtimeSettings = enabled
+                ? LocalStandbyRuntimeSettings.from(config)
+                : new LocalStandbyRuntimeSettings(
+                        LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES,
+                        LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER,
+                        LocalStandbyConfig.DEFAULT_TTL_MS,
+                        LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS,
+                        LocalStandbyConfig.DEFAULT_TTL_REDUCTION_START_RATIO);
         this.configuredBlockSize = enabled ? config.getBlockSize() : 0;
-        long ttlMs = enabled
-                ? config.getTtlMs()
-                : LocalStandbyConfig.DEFAULT_TTL_MS;
-        long minimumTtlMs = enabled
-                ? config.getMinimumTtlMs()
-                : LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS;
-        double ttlReductionStartRatio = enabled
-                ? config.getTtlReductionStartRatio()
-                : LocalStandbyConfig.DEFAULT_TTL_REDUCTION_START_RATIO;
         this.cacheIndex = new LocalStandbyCacheIndex(
-                ttlMs,
-                minimumTtlMs,
-                ttlReductionStartRatio,
-                configuredMaximumEntries,
+                runtimeSettings.ttlMs(),
+                runtimeSettings.minimumTtlMs(),
+                runtimeSettings.ttlReductionStartRatio(),
+                runtimeSettings.maximumEntries(),
                 enabled);
+        if (enabled && configService != null) {
+            configService.addUpdateListener(
+                    LocalStandbyRuntimeSettings::fromFlexlbConfig,
+                    this::updateRuntimeSettings);
+        }
     }
 
     public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group) {
@@ -201,10 +210,13 @@ public class LocalStandbyCacheManager {
         try {
             long estimatedHbmBlockCapacity = estimateHbmBlockCapacity();
             if (estimatedHbmBlockCapacity <= 0) {
+                log.warn("Skipped Local Standby cache capacity refresh because estimated HBM block capacity is not positive: {}",
+                        estimatedHbmBlockCapacity);
                 return;
             }
 
-            long newMaximumEntries = calculateMaximumEntries(estimatedHbmBlockCapacity);
+            LocalStandbyRuntimeSettings settings = runtimeSettings;
+            long newMaximumEntries = calculateMaximumEntries(estimatedHbmBlockCapacity, settings);
             long previousMaximum = cacheIndex.maximumEntryCount();
             cacheIndex.updateMaximumEntries(newMaximumEntries);
             if (newMaximumEntries != previousMaximum) {
@@ -213,8 +225,8 @@ public class LocalStandbyCacheManager {
                         previousMaximum,
                         newMaximumEntries,
                         estimatedHbmBlockCapacity,
-                        capacityMultiplier,
-                        configuredMaximumEntries);
+                        settings.capacityMultiplier(),
+                        settings.maximumEntries());
             }
         } catch (RuntimeException e) {
             log.warn("Failed to update local standby cache capacity; keeping {} entries", cacheIndex.maximumEntryCount(), e);
@@ -253,12 +265,23 @@ public class LocalStandbyCacheManager {
         return roleCapacity;
     }
 
-    private long calculateMaximumEntries(long estimatedHbmBlockCapacity) {
+    private void updateRuntimeSettings(Optional<LocalStandbyRuntimeSettings> optionalSettings) {
+        optionalSettings.ifPresent(this::applyRuntimeSettings);
+    }
+
+    private void applyRuntimeSettings(LocalStandbyRuntimeSettings settings) {
+        runtimeSettings = settings;
+        cacheIndex.updateExpirationSettings(
+                settings.ttlMs(), settings.minimumTtlMs(), settings.ttlReductionStartRatio());
+        refreshCapacityLimits();
+    }
+
+    private long calculateMaximumEntries(long estimatedHbmBlockCapacity, LocalStandbyRuntimeSettings settings) {
         // KVS can retain substantially more metadata than HBM. The multiplier adds that
         // headroom without claiming to model the engine's actual multi-tier eviction policy.
-        double capacityWithHeadroom = estimatedHbmBlockCapacity * capacityMultiplier;
-        return capacityWithHeadroom >= configuredMaximumEntries
-                ? configuredMaximumEntries
+        double capacityWithHeadroom = estimatedHbmBlockCapacity * settings.capacityMultiplier();
+        return capacityWithHeadroom >= settings.maximumEntries()
+                ? settings.maximumEntries()
                 : (long) Math.ceil(capacityWithHeadroom);
     }
 

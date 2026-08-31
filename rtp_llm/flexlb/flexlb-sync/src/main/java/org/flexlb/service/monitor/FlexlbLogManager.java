@@ -30,10 +30,10 @@ public class FlexlbLogManager {
         this.loggerGroup = Objects.requireNonNull(
                 loggerGroups.get(LOG_GROUP_NAME), "Logging group 'flexlb' is not configured");
         this.stdoutController = stdoutController;
-        configService.addUpdateListener(config -> {
-            setLogLevel(config.getObservability().getLogging().getLevel());
-            setStdoutLogEnabled(config.getObservability().getLogging().isStdoutEnabled());
-        });
+        configService.addUpdateListener(config -> config.getObservability().getLogging().getLevel(),
+                this::setLogLevel);
+        configService.addUpdateListener(config -> config.getObservability().getLogging().isStdoutEnabled(),
+                this::setStdoutLogEnabled);
     }
 
     public LogLevel setLogLevel(LogLevel logLevel) {
