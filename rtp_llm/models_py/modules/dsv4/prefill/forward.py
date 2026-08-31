@@ -334,6 +334,21 @@ def forward_layers(
     owned KV regions are registered with the PD-disagg cache_store immediately
     after that layer's forward.
     """
+    profile_cprr_memory = (
+        os.environ.get("RTP_DSV4_CPRR_MEMORY_PROFILE") == "1"
+        and int(input_ids.numel()) == 262144
+    )
+    profile_cprr_baseline = 0
+    if profile_cprr_memory:
+        from rtp_llm.utils.oom_diag import dump_oom_diagnostics
+
+        torch.cuda.synchronize(input_ids.device)
+        torch.cuda.reset_peak_memory_stats(input_ids.device)
+        profile_cprr_baseline = torch.cuda.memory_allocated(input_ids.device)
+        dump_oom_diagnostics(
+            exception=("CP4 CPRR 1M prefill start: " f"active={profile_cprr_baseline}")
+        )
+
     # Allocate the max-sized workspace before CP metadata, embedding, or any
     # other forward-local CUDA tensor.  If embedding lands in the cached block
     # first, it can split the only contiguous region large enough for this
@@ -681,6 +696,18 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
+    if profile_cprr_memory:
+        torch.cuda.synchronize(input_ids.device)
+        profile_cprr_active = torch.cuda.memory_allocated(input_ids.device)
+        profile_cprr_peak = torch.cuda.max_memory_allocated(input_ids.device)
+        dump_oom_diagnostics(
+            exception=(
+                "CP4 CPRR 1M prefill end: "
+                f"baseline={profile_cprr_baseline} "
+                f"active={profile_cprr_active} peak={profile_cprr_peak} "
+                f"peak_growth={profile_cprr_peak - profile_cprr_baseline}"
+            )
+        )
     return h  # [T, dim]
 
 
