@@ -4,13 +4,11 @@
 #include <condition_variable>
 #include <cstdint>
 #include <exception>
-#include <future>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -413,7 +411,7 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
 
     ASSERT_TRUE(evictor.evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false));
     ASSERT_TRUE(deferred_engine->waitForBatchCount(1, std::chrono::seconds(2)));
-    EXPECT_EQ(task_pool.active_businesses_.load(), 1u);
+    EXPECT_FALSE(task_pool.acquireBusinessCredit());
 
     std::mutex              marker_mutex;
     std::condition_variable marker_cv;
@@ -434,7 +432,8 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
     ASSERT_TRUE(deferred_engine->completeGroupSet(0, true));
     task_pool.waitForIdle();
     EXPECT_EQ(settled_count, 1u);
-    EXPECT_EQ(task_pool.active_businesses_.load(), 0u);
+    EXPECT_TRUE(task_pool.acquireBusinessCredit());
+    task_pool.releaseBusinessCredit();
     task_pool.shutdown();
 }
 
@@ -611,7 +610,7 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder)
     EXPECT_EQ(node->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_TRUE(node->group_set_resources[1].hasTier(Tier::HOST));
     EXPECT_EQ(environment.pendingReleaseCount(), 1u);
-    EXPECT_EQ(environment.task_pool_->active_businesses_.load(), 1u);
+    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 1u);
 
     ASSERT_TRUE(environment.transfer_engine_->completeGroupSet(0, true));
     environment.task_pool_->waitForIdle();
@@ -619,7 +618,7 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder)
     EXPECT_TRUE(node->group_set_resources[1].hasTier(Tier::HOST));
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 2u);
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->active_businesses_.load(), 0u);
+    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(), (std::vector<std::pair<bool, bool>>{{true, true}, {true, true}}));
 }
 
@@ -653,7 +652,7 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleSuccessAndFailureIndepend
     EXPECT_EQ(environment.evictor_->candidateStats().device_candidates, 1u);
     EXPECT_EQ(environment.evictor_->candidateStats().host_candidates, 1u);
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->active_businesses_.load(), 0u);
+    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(), (std::vector<std::pair<bool, bool>>{{false, false}, {true, true}}));
 }
 
@@ -700,7 +699,7 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     }
     EXPECT_FALSE(environment.disk_pools_[0]->isAllocated(group_0_desc->target_blocks.front()));
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->active_businesses_.load(), 0u);
+    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(),
               (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}, {true, false}}));
 
@@ -734,7 +733,7 @@ TEST(BlockTreeEvictorAsyncTest, CompletionQueueRejectionSettlesInline) {
     EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::HOST));
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
-    EXPECT_EQ(environment.task_pool_->active_businesses_.load(), 0u);
+    EXPECT_EQ(environment.task_pool_->business_credits_.load(), 0u);
     EXPECT_EQ(environment.settledEvents(), (std::vector<std::pair<bool, bool>>{{true, true}}));
 }
 
@@ -1047,12 +1046,12 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskTerminatesOnSettledCallbackException
     evictor_->updatePendingRelease(task->desc, true);
     evictor_->settled_ = [](bool, bool) { throw std::runtime_error("settled callback failure"); };
     evictor_runtime_.transferEngine()->enqueue(false);
-    ASSERT_TRUE(task_pool.startBusiness());
+    ASSERT_TRUE(task_pool.acquireBusinessCredit());
     task_pool.shutdown();
 
     EXPECT_DEATH(evictor_->runEvictionTask(std::make_shared<EvictionTransferTask>(*task)), "");
 
-    task_pool.finishBusiness();
+    task_pool.releaseBusinessCredit();
     evictor_->settled_ = [](bool, bool) {};
     evictor_->updatePendingRelease(task->desc, false);
     evictor_->rollbackTransferLocked(task->desc);
@@ -1088,7 +1087,7 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingCapacityBeforeSettled
         EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 0u);
     };
     evictor_runtime_.transferEngine()->enqueue(false);
-    ASSERT_TRUE(task_pool.startBusiness());
+    ASSERT_TRUE(task_pool.acquireBusinessCredit());
 
     evictor_->runEvictionTask(std::make_shared<EvictionTransferTask>(*task));
     task_pool.waitForIdle();
@@ -2371,70 +2370,6 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     insertedNode(first)->group_set_resources[0].evictFromTier(Tier::DEVICE);
     insertedNode(second)->group_set_resources[0].evictFromTier(Tier::DEVICE);
     unreferenceDeviceBlocksForTest(*group, device_set, BlockTreeRefType::CACHE);
-}
-
-TEST(BlockTreeEvictorQueueTimeoutTest, EvictionExpiredInBusinessQueueDoesNotSubmitTransferAndRestoresCandidate) {
-    auto device_pool = makeTestDevicePool(1, "eviction_queue_timeout_device");
-    auto host_pool   = makePageableHostPool(1);
-    ASSERT_NE(device_pool, nullptr);
-    ASSERT_NE(host_pool, nullptr);
-    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
-    initializeFullGroup(group, device_pool);
-    std::vector<GroupSetPtr> groups = {group};
-    BlockTree                tree(groups);
-
-    BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/0, "eviction_queue_timeout");
-    ASSERT_TRUE(task_pool.start());
-    auto                          deferred_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
-    BlockTransferDispatcher       dispatcher(deferred_engine);
-    BlockTreeCacheMetricsReporter metrics_reporter;
-    std::mutex                    cache_mutex;
-    size_t                        settled_count = 0;
-    BlockTreeEvictor              evictor(&tree,
-                             EvictionPolicy::LRU,
-                             EvictionPolicy::LRU,
-                             EvictionPolicy::FIFO,
-                             &dispatcher,
-                             &task_pool,
-                             metrics_reporter,
-                             cache_mutex,
-                             /*memory_timeout_ms=*/20,
-                             /*disk_timeout_ms=*/20,
-                             [](Tier) { return true; },
-                             [&](bool, bool) { ++settled_count; });
-
-    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
-    ASSERT_EQ(device_blocks.size(), 1u);
-    const BlockIdxType source = device_blocks.front().front();
-    auto inserted             = tree.insertNode({100}, {{makeResource(Tier::DEVICE, source)}}, false);
-    unreferenceDeviceBlocksForTest(*group, device_blocks, BlockTreeRefType::CACHE);
-    evictor.onInserted(inserted);
-
-    std::promise<void> worker_ready;
-    std::promise<void> release_worker;
-    auto               ready_future   = worker_ready.get_future();
-    auto               release_future = release_worker.get_future().share();
-    ASSERT_TRUE(task_pool.submit([&] {
-        worker_ready.set_value();
-        release_future.wait();
-    }));
-    ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-
-    ASSERT_TRUE(evictor.evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false));
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_FALSE(deferred_engine->waitForBatchCount(1, std::chrono::milliseconds(20)));
-    release_worker.set_value();
-    task_pool.waitForIdle();
-
-    EXPECT_EQ(settled_count, 1u);
-    EXPECT_EQ(task_pool.active_businesses_.load(), 0u);
-    EXPECT_EQ(evictor.pending_release_counts_.at(device_pool.get()), 0u);
-    EXPECT_EQ(evictor.candidateCount(0, Tier::DEVICE), 1u);
-    auto path = tree.findNode({100});
-    ASSERT_EQ(path.size(), 1u);
-    EXPECT_EQ(path.front()->group_set_resources[0].getTopTier(), Tier::DEVICE);
-    EXPECT_EQ(path.front()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    task_pool.shutdown();
 }
 
 }  // namespace

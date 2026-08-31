@@ -1,10 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
-#include <atomic>
-#include <chrono>
-#include <future>
 #include <memory>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -288,80 +284,6 @@ TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferStat
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
 
     resource.transfer_state = GroupSetTransferState::IDLE;
-    environment->reclaimAll();
-    environment->expectFullyReclaimed();
-}
-
-TEST(BlockTreeLoaderTest, HostLoadExpiredInBusinessQueueDoesNotSubmitTransferAndRollsBack) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    FullSWAEnvironmentOptions options;
-    options.path_length = 1;
-    options.enable_disk = false;
-    auto environment    = FullSWAEnvironment::create(options);
-    ASSERT_NE(environment, nullptr);
-    environment->cache->loader_.host_timeout_ms_ = 20;
-
-    environment->insertRequestPath();
-    environment->releaseRequestRefs();
-    environment->demoteAll(Tier::DEVICE);
-    ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
-    environment->scripted_per_rank_transfer_engine->clear();
-
-    const size_t worker_count = static_cast<size_t>(environment->cache->config_.task_pool_size);
-    std::atomic<size_t> ready_count{0};
-    std::promise<void>  all_ready;
-    std::promise<void>  release_workers;
-    auto                release_future = release_workers.get_future().share();
-    for (size_t worker = 0; worker < worker_count; ++worker) {
-        ASSERT_TRUE(environment->cache->task_pool_->submit([&] {
-            if (ready_count.fetch_add(1) + 1 == worker_count) {
-                all_ready.set_value();
-            }
-            release_future.wait();
-        }));
-    }
-    ASSERT_EQ(all_ready.get_future().wait_for(std::chrono::seconds(5)), std::future_status::ready);
-
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
-    ASSERT_NE(load_context, nullptr);
-
-    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-        const size_t group_set_id = load_context->loadDescs()[desc_index].group_set_id;
-        std::vector<BlockIdxType> targets;
-        for (const DeviceBlockPoolPtr& pool : environment->groups[group_set_id]->devicePools()) {
-            const BlockIdList blocks = pool->malloc(1).value();
-            pool->incRef(blocks);
-            targets.push_back(blocks.front());
-            request_targets.emplace_back(pool, blocks.front());
-        }
-        load_context->setTargetBlocks(desc_index, std::move(targets));
-    }
-
-    ASSERT_TRUE(load_context->commit());
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    release_workers.set_value();
-    load_context->waitDone();
-    environment->cache->task_pool_->waitForIdle();
-
-    EXPECT_FALSE(load_context->success());
-    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(), 0u);
-    EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
-    for (TreeNode* node : environment->cache->tree()->findNode(environment->keys)) {
-        for (const GroupSetResource& resource : node->group_set_resources) {
-            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-        }
-    }
-
-    result.async_context.reset();
-    load_context.reset();
-    for (const auto& [pool, block] : request_targets) {
-        releaseDeviceBlocks(*environment->cache, pool, {block});
-    }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }

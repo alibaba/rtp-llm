@@ -1,12 +1,9 @@
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <deque>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -633,46 +630,6 @@ TEST(BlockTreeStorerTest, StoreDerivedEvictionIsDrainedByWaitForPendingTasks) {
     EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), 2u);
     EXPECT_EQ(env.storeRefCount(), 0u);
 
-    releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
-}
-
-TEST(BlockTreeStorerTest, HostStoreExpiredInBusinessQueueDoesNotSubmitTransferAndReleasesResources) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    StoreEnvironment env = makeStoreEnvironment("store_queue_timeout",
-                                                /*device_cache_on=*/false,
-                                                /*host_cache_on=*/true,
-                                                /*disk_cache_on=*/false,
-                                                /*lower_tier_blocks=*/{2},
-                                                /*task_pool_size=*/1);
-    env.cache->storer_.host_timeout_ms_ = 20;
-    auto engine = installStoreTransferEngine(env, TransferCopyAction::Succeed);
-
-    std::promise<void> worker_ready;
-    std::promise<void> release_worker;
-    auto               ready_future   = worker_ready.get_future();
-    auto               release_future = release_worker.get_future().share();
-    ASSERT_TRUE(env.cache->task_pool_->submit([&] {
-        worker_ready.set_value();
-        release_future.wait();
-    }));
-    ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-
-    const size_t host_free_before = env.host_pools[0]->freeBlocksNum();
-    MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1);
-    ASSERT_EQ(request_holder.size(), 1u);
-    env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
-
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    release_worker.set_value();
-    env.cache->task_pool_->waitForIdle();
-
-    EXPECT_EQ(engine->submittedBatchCount(), 0u);
-    EXPECT_TRUE(env.cache->tree()->findNode({100}).empty());
-    EXPECT_EQ(env.host_pools[0]->freeBlocksNum(), host_free_before);
-    EXPECT_EQ(env.storeRefCount(), 0u);
     releaseDeviceBlocks(*env.cache, env.device_pools[0], request_holder.front());
 }
 

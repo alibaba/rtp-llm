@@ -443,7 +443,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
     auto task_pool =
-        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 0, "BlockTreeCacheTaskPool");
+        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
     auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(config),
@@ -617,10 +617,10 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
 
 int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
     // Async load/store queue work can finish before its transfer callback
-    // settles. The active-business count spans that whole lifecycle, while a
-    // queue task and business lifecycle overlap during dispatch, so use the larger count.
+    // settles. The business credit spans that whole lifecycle, while a queue
+    // task and its credit overlap during dispatch, so use the larger count.
     return std::max(cache.task_pool_->pending_tasks_.load(),
-                    static_cast<int>(cache.task_pool_->active_businesses_.load()));
+                    static_cast<int>(cache.task_pool_->business_credits_.load()));
 }
 
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
@@ -640,7 +640,7 @@ bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
 bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& cache) {
     try {
         auto replacement = std::make_unique<BlockTreeTaskPool>(
-            static_cast<size_t>(cache.config_.task_pool_size), 0, "BlockTreeCacheTaskPool");
+            static_cast<size_t>(cache.config_.task_pool_size), 1000, "BlockTreeCacheTaskPool");
         if (!replacement->start()) {
             ADD_FAILURE() << "queue-rejection guard failed to start replacement task pool";
             cache.task_pool_.reset();
