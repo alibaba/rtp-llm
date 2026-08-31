@@ -45,9 +45,18 @@ public class FlexlbConfig {
     private LBConsistencyConfig flexlbSyncConsistencyConfig = new LBConsistencyConfig();
 
     /**
-     * Block hash strategy used for cache matching.
+     * @deprecated Use {@link BlockHashConfig#type}. This value is read only when
+     * {@link #blockHashConfig} or its type is absent.
      */
+    @Deprecated
     private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
+
+    /**
+     * Configurable block hash algorithm parameters. This does not contain the block size or
+     * lookahead tokens, which are obtained from worker status as
+     * {@code org.flexlb.cache.domain.WorkerBlockHashConfig}.
+     */
+    private BlockHashConfig blockHashConfig;
 
     /**
      * Load balancing strategy

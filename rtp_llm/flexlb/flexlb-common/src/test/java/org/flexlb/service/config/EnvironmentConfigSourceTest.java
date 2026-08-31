@@ -15,12 +15,12 @@ class EnvironmentConfigSourceTest {
     @Test
     void registersAndLoadsFullConfigThenAppliesIndividualEnvironmentOverrides() throws Exception {
         Map<String, String> environment = Map.of(
-                "FLEXLB_CONFIG", "{\"maxRetryCount\":3,\"enableQueueing\":false}",
+                "FLEXLB_CONFIG",
+                "{\"maxRetryCount\":3,\"enableQueueing\":false,\"blockHashConfig\":{\"type\":\"VLLM\",\"hashSeed\":\"configured-seed\"}}",
                 "FLEXLB_LOG_LEVEL", "DEBUG",
                 "FLEXLB_SYNC_CONSISTENCY_CONFIG",
                 "{\"needConsistency\":true,\"zookeeperConfig\":{\"zkHost\":\"zk:2181\",\"zkTimeoutMs\":10000}}",
-                "MODEL_SERVICE_CONFIG",
-                "{\"service_id\":\"test-service\",\"role_endpoints\":[]}",
+                "MODEL_SERVICE_CONFIG", "{\"service_id\":\"test-service\",\"role_endpoints\":[]}",
                 "MAX_RETRY_COUNT", "4",
                 "ENABLE_QUEUEING", "true");
         EnvironmentConfigSource source = new EnvironmentVariables(environment).execute(() -> {
@@ -43,6 +43,7 @@ class EnvironmentConfigSourceTest {
         assertThat(config.getFlexlbSyncConsistencyConfig().getZookeeperConfig().getZkHost()).isEqualTo("zk:2181");
         assertThat(config.getFlexlbSyncConsistencyConfig().getZookeeperConfig().getZkTimeoutMs()).isEqualTo(10000);
         assertThat(config.getModelServiceConfig().getServiceId()).isEqualTo("test-service");
+        assertThat(config.getBlockHashConfig().getHashSeed()).isEqualTo("configured-seed");
         configService.close();
     }
 }

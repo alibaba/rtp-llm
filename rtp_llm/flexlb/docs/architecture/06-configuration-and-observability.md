@@ -57,7 +57,9 @@ Nacos DataId 必须存在，内容必须是非空 JSON object。可识别的 `Fl
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `modelServiceConfig` | 无（缺失则启动失败） | 模型路由、服务发现、KVCM 与 Optimizer 配置；可由 `MODEL_SERVICE_CONFIG` 覆盖，更新后重启生效 |
-| `blockHashStrategy` | `VLLM` | cache block hash 策略：`VLLM` / `SGLANG`；可由 `BLOCK_HASH_STRATEGY` 覆盖 |
+| `blockHashConfig.type` | 未设置 | 优先的 cache block hash 策略：`VLLM` / `SGLANG`；策略 bean 在启动时创建，变更需重启 |
+| `blockHashConfig.hashSeed` | `"0"` | vLLM `sha256_cbor` seed；`ConfigService` 更新时运行中的 VLLM 策略会使用新值 |
+| `blockHashStrategy` | `VLLM` | 已废弃；仅在 `blockHashConfig.type` 缺失时回退使用，可由 `BLOCK_HASH_STRATEGY` 覆盖 |
 | `loadBalanceStrategy` | `SHORTEST_TTFT` | PDFUSION/PREFILL 策略 |
 | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | DECODE 策略 |
 | `vitLoadBalanceStrategy` | `RANDOM` | VIT 策略 |

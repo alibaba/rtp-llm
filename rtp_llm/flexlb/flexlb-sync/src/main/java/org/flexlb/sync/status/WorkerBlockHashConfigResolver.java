@@ -1,7 +1,7 @@
 package org.flexlb.sync.status;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.BlockHashConfig;
+import org.flexlb.cache.domain.WorkerBlockHashConfig;
 import org.flexlb.cache.hash.BlockHashConfigResolver;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -18,11 +18,16 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Resolves the block hash configuration reported by alive Prefill workers.
+ * Resolves worker-status-derived block shape parameters for request cache-key calculation.
  *
- * <p>PD Fusion workers are used only when no alive Prefill worker reports a valid
- * configuration. The last valid configuration remains available while workers are
- * temporarily unavailable or report inconsistent values.
+ * <p>For every alive worker, {@code CacheStatus.blockSize} supplies the block size and
+ * {@code WorkerStatus.blockHashLookaheadTokens} supplies lookahead. PD Fusion workers are used
+ * only when no alive Prefill worker reports a valid and consistent pair. The last valid pair
+ * remains available while workers are temporarily unavailable or report inconsistent values.
+ *
+ * <p>This resolver does not read the configurable algorithm type or vLLM hash seed. Those values
+ * belong to {@link org.flexlb.config.BlockHashConfig}; only its seed is hot-updated by the active
+ * vLLM strategy.
  */
 @Slf4j
 @Component
@@ -34,7 +39,7 @@ public class WorkerBlockHashConfigResolver implements BlockHashConfigResolver {
     private final WorkerStatusProvider workerStatusProvider;
     private final ScheduledExecutorService refreshExecutor;
 
-    private volatile BlockHashConfig cachedConfig;
+    private volatile WorkerBlockHashConfig cachedConfig;
     private long nextUnavailableWarningNanos;
     private long nextInconsistentErrorNanos;
 
@@ -53,8 +58,8 @@ public class WorkerBlockHashConfigResolver implements BlockHashConfigResolver {
     }
 
     @Override
-    public BlockHashConfig resolve() {
-        BlockHashConfig config = cachedConfig;
+    public WorkerBlockHashConfig resolve() {
+        WorkerBlockHashConfig config = cachedConfig;
         if (config == null) {
             refresh();
             config = cachedConfig;
@@ -74,10 +79,10 @@ public class WorkerBlockHashConfigResolver implements BlockHashConfigResolver {
     }
 
     private synchronized void refreshCachedConfig() {
-        Set<BlockHashConfig> detectedConfigs = findPreferredBlockHashConfigs();
+        Set<WorkerBlockHashConfig> detectedConfigs = findPreferredBlockHashConfigs();
 
         if (detectedConfigs.isEmpty()) {
-            BlockHashConfig currentConfig = cachedConfig;
+            WorkerBlockHashConfig currentConfig = cachedConfig;
             if (currentConfig == null && shouldLogUnavailableWarning()) {
                 log.warn("No block hash configuration available from alive Prefill or PD Fusion workers yet");
             } else {
@@ -99,15 +104,15 @@ public class WorkerBlockHashConfigResolver implements BlockHashConfigResolver {
         updateCachedConfig(detectedConfigs.iterator().next());
     }
 
-    private Set<BlockHashConfig> findPreferredBlockHashConfigs() {
-        Set<BlockHashConfig> prefillConfigs = findBlockHashConfigsFromAliveWorkers(RoleType.PREFILL);
+    private Set<WorkerBlockHashConfig> findPreferredBlockHashConfigs() {
+        Set<WorkerBlockHashConfig> prefillConfigs = findBlockHashConfigsFromAliveWorkers(RoleType.PREFILL);
         return prefillConfigs.isEmpty()
                 ? findBlockHashConfigsFromAliveWorkers(RoleType.PDFUSION)
                 : prefillConfigs;
     }
 
-    private Set<BlockHashConfig> findBlockHashConfigsFromAliveWorkers(RoleType roleType) {
-        Set<BlockHashConfig> configs = new HashSet<>();
+    private Set<WorkerBlockHashConfig> findBlockHashConfigsFromAliveWorkers(RoleType roleType) {
+        Set<WorkerBlockHashConfig> configs = new HashSet<>();
         for (WorkerStatus workerStatus : workerStatusProvider.getWorkerStatuses(roleType, null)) {
             if (workerStatus == null || !workerStatus.isAlive()) {
                 continue;
@@ -116,13 +121,13 @@ public class WorkerBlockHashConfigResolver implements BlockHashConfigResolver {
             if (cacheStatus == null || cacheStatus.getBlockSize() <= 0) {
                 continue;
             }
-            configs.add(new BlockHashConfig(cacheStatus.getBlockSize(), workerStatus.getBlockHashLookaheadTokens()));
+            configs.add(new WorkerBlockHashConfig(cacheStatus.getBlockSize(), workerStatus.getBlockHashLookaheadTokens()));
         }
         return configs;
     }
 
-    private void updateCachedConfig(BlockHashConfig detectedConfig) {
-        BlockHashConfig previousConfig = cachedConfig;
+    private void updateCachedConfig(WorkerBlockHashConfig detectedConfig) {
+        WorkerBlockHashConfig previousConfig = cachedConfig;
         cachedConfig = detectedConfig;
         nextUnavailableWarningNanos = 0L;
         nextInconsistentErrorNanos = 0L;
