@@ -266,31 +266,40 @@ class FaultInjectionE2ETest {
 
     @Test
     @Timeout(30)
-    void c09_crash_after_n_requests_yields_missing_ack_and_other_engine_survives() throws Exception {
+    void c09_crash_after_n_requests_fences_missing_ack_and_isolates_healthy_engine() throws Exception {
+        // Port note (intake3-rebuild): the first EnqueueBatch crashes the engine
+        // and returns an EMPTY ack. The request may already be past the send
+        // boundary, so the scheduler must retain the future and the endpoint
+        // batch ledger until the engine provides an authoritative terminal —
+        // a missing ACK stays fenced (incomplete) instead of failing fast.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 80, 2, 1, "5", 1.0, false)) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder()
-                    .crashAfterNRequests(2)
+                    .crashAfterNRequests(1)
                     .build());
 
-            Response first = submitTo(h, 0, 9901);
-            assertTrue(first.isSuccess(), "requests before the crash threshold succeed");
+            h.prefillSelector = ctx -> 0;
+            CompletableFuture<Response> crashed = h.scheduler.submit(h.context(9902, 50));
+            CountDownLatch crashedTerminal = new CountDownLatch(1);
+            crashed.whenComplete((ignored, error) -> crashedTerminal.countDown());
 
-            // 第 2 个 enqueue 触发 crash：空响应（无 ack）→ 8510 missing ack
-            Response crashed = submitTo(h, 0, 9902);
-            assertFalse(crashed.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), crashed.getCode());
-            assertTrue(crashed.getErrorMessage().contains("missing ack"), crashed.getErrorMessage());
-            assertTrue(prefill.isStopped(), "engine is down after the crash threshold");
+            AutoTpmE2EHarness.await(prefill::isStopped, 2_000,
+                    "the first enqueue must trigger the configured engine crash");
+            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 1
+                            && h.prefillEndpoint(0).getInflightBatchCount() == 1,
+                    2_000, "missing ACK must retain scheduler and Prefill accounting");
 
-            // crash 后的请求继续明确失败（调度器不崩溃、不挂起）
-            Response afterCrash = submitTo(h, 0, 9903);
-            assertFalse(afterCrash.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), afterCrash.getCode());
+            assertFalse(crashedTerminal.await(250, TimeUnit.MILLISECONDS),
+                    "missing ACK without an authoritative Engine terminal must stay fenced");
+            assertFalse(crashed.isDone(), "the fenced request must remain incomplete");
 
+            // 一个请求处于不确定性 fence 时，不得阻塞同集群的健康 Prefill。
             Response healthy = submitTo(h, 1, 9904);
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
+            assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated fence");
+            assertEquals(1, h.prefillEndpoint(0).getInflightBatchCount(),
+                    "the fenced batch ledger must survive the healthy delivery");
         }
     }
 
