@@ -53,6 +53,15 @@ class MiniMaxM3MTPWeight(MiniMaxM3Weight):
             self._mtp_root
             + "transformer_layer.block_sparse_moe.e_score_correction_bias",
         )
+        self._native_mxfp4_routed = self._contains(
+            weight_keys,
+            self._mtp_root
+            + "transformer_layer.block_sparse_moe.experts.w13_weight",
+        ) and self._contains(
+            weight_keys,
+            self._mtp_root
+            + "transformer_layer.block_sparse_moe.experts.w2_weight",
+        )
 
     def _should_load_msa_index(self, layer_id: int) -> bool:
         # The trained MTP block is always sparse and must never silently fall

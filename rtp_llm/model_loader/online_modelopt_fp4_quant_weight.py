@@ -747,6 +747,8 @@ def is_mega_moe_strategy() -> bool:
         "mega_moe",
         "mega_moe_se",
         "mega_moe_fused",
+        "mega_moe_fp8",
+        "mega_moe_fp8_se",
     }
 
 

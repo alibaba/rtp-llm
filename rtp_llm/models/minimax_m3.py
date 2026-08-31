@@ -159,6 +159,10 @@ def _should_load_raw_mxfp8_idx() -> bool:
     return _env_flag("M3_MSA_RAW_IDX_MXFP8")
 
 
+def _router_dtype() -> Any:
+    return None if _env_flag("M3_ROUTER_BF16") else torch.float32
+
+
 def stack_native_mxfp4_w13(ts: List[torch.Tensor]) -> torch.Tensor:
     """Convert native interleaved MXFP4 W13 to RTP's ``[up | gate]`` layout.
 
@@ -573,11 +577,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                             W.moe_gate,
                             [CkptWeightInfo(moe_root + "gate.weight", identity)],
                             transpose,
-                            # MiniMax-M3 stores and evaluates the router in
-                            # FP32.  Preserving only the checkpoint dtype is
-                            # not enough: GenericMoeLayer also upcasts the
-                            # router input when it sees this FP32 weight.
-                            data_type=torch.float32,
+                            data_type=_router_dtype(),
                             config=moe_config,
                         ),
                         MoeAtomicWeight(
