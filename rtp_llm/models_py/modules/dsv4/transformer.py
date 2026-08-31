@@ -244,6 +244,10 @@ class V4Transformer(nn.Module):
                         layer.enable_mega_hca(
                             self._mega_csa_runtime, mw.weights[layer_id]
                         )
+                    # MoE-front is a Mega decode feature, not a replacement for
+                    # the ordinary attention + MoE path. Its strategy gate keeps
+                    # DSV4_USE_MEGA_MOE_SE=0 on the existing Mega route.
+                    layer.enable_mega_front()
 
         # LM head — plain weight matrix [vocab_size, dim].  Accept either
         # BF16 (ckpt-native, used when ``enable_fp32_lm_head=False``) or

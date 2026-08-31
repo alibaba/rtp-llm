@@ -444,6 +444,16 @@ class MegaMoEStrategySE(MegaMoEStrategy):
         self._launch(y, tokens, x.device)
         return y
 
+    def forward_prepacked(self, tokens: int, device: torch.device) -> torch.Tensor:
+        """Run MegaMoE-SE after the CUDA extension populated its input buffer."""
+        tokens = int(tokens)
+        self._validate_capacity(tokens)
+        y = self._mega_y[:tokens]
+        # A zero-token rank still enters the collective launch. This is
+        # required when EP/DP routing leaves a rank with no local tokens.
+        self._launch(y, tokens, device)
+        return y
+
     def forward_with_gate_pack(self, x, gate, input_ids):
         kernels = _get_mega_se_gate_pack_kernels()
         if kernels is None:

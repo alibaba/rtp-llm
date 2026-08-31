@@ -183,6 +183,15 @@ py_test(
 )
 
 py_test(
+    name = "test_mega_moe_front_adapter",
+    srcs = ["test_mega_moe_front_adapter.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_chunked_moe",
     srcs = ["test_chunked_moe.py"],
     deps = [
