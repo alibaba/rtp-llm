@@ -121,7 +121,10 @@ PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector, double
 
 // Applies the validated logical (min) block counts to this stage's
 // CacheConfig: every local group is paired with its canonical entry by tag
-// and capped at the entry's cross-stage min (never raised). The top-level
+// and sized to the entry's cross-stage min. A local count below the
+// canonical min violates the startup invariant (the min includes this
+// stage's own snapshot) and aborts startup instead of silently building an
+// undersized pool. The top-level
 // block_num is capped at the min over the budget-following paged pools
 // only; explicitly sized pools are decoupled from it. Must run after
 // finalizeBlockNums and before KVCacheManager::init(): pools are physically
