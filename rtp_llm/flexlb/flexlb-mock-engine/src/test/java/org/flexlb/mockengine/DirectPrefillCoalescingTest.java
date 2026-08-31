@@ -1,6 +1,8 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
@@ -146,6 +148,14 @@ class DirectPrefillCoalescingTest {
         Throwable rejected = generateAsync(prefill, input(3004, 10))
                 .get(5, TimeUnit.SECONDS);
         assertNotNull(rejected, "4th request should hit the request-level cap");
+        // Direct-path backpressure rides gRPC Status.RESOURCE_EXHAUSTED (the
+        // 8431 domain contract mapped onto the streaming error channel — the
+        // same wire convention production engines use), not a bare UNKNOWN.
+        assertTrue(rejected instanceof StatusRuntimeException,
+                "rejection must be a StatusRuntimeException, got: " + rejected.getClass());
+        assertEquals(Status.Code.RESOURCE_EXHAUSTED,
+                ((StatusRuntimeException) rejected).getStatus().getCode(),
+                "rejection must carry gRPC RESOURCE_EXHAUSTED");
         assertTrue(rejected.getMessage().contains("prefill waiting queue full"),
                 "rejection must carry the backpressure message, got: " + rejected);
         assertTrue(rejected.getMessage().contains("cap=2"),

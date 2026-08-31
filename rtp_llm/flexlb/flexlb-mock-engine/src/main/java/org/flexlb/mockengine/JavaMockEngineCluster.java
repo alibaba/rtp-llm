@@ -2,6 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
+import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.ChannelOption;
@@ -665,6 +666,17 @@ public final class JavaMockEngineCluster {
         private static final long CANCELLED_MARKER_TTL_SECONDS = 600;
         /** Public error contract for a victim canceled by priority preemption. */
         private static final long PRIORITY_PREEMPTED_ERROR_CODE = 8429;
+        /**
+         * Public error contract for admission backpressure (waiting-queue cap):
+         * mirrors master-side StrategyErrorType.RESOURCE_EXHAUSTED (8431), whose
+         * contract explicitly covers "dispatch/engine-admission backpressure".
+         * Delivered on both rejection paths — the EnqueueBatch error path carries
+         * it in ErrorDetailsPB.error_code (same field 8429 uses), while the direct
+         * generate_stream path maps it onto gRPC Status.RESOURCE_EXHAUSTED, the
+         * wire convention production engines use for a saturated admission queue
+         * (see PrefillBatchRpcServer.cc).
+         */
+        private static final long RESOURCE_EXHAUSTED_ERROR_CODE = 8431;
 
         /** rid -> insertion time (System.nanoTime); consumed by completion callbacks. */
         private final Map<Long, Long> cancelledRequests = new ConcurrentHashMap<>();
@@ -681,6 +693,17 @@ public final class JavaMockEngineCluster {
         private final AtomicLong acceptedCount = new AtomicLong();
         private final AtomicLong completedCount = new AtomicLong();
         private final AtomicLong cancelledCount = new AtomicLong();
+        /**
+         * Cumulative prefill batches EXECUTED by this engine — the per-engine
+         * twin of the cluster-wide ClusterStats.prefillBatches counter. Feeds
+         * the mock_engine_prefill_batches_total per-engine Prometheus series,
+         * the per-engine observability source for online capacity estimation
+         * (aggregate_canvas_run.py capacity_ts.per_engine prices μ_batches
+         * as Δ per second, EMA-smoothed; the java_mock_stats line only carries
+         * the cluster aggregate, so per-engine μ needs this counter). Decode
+         * engines never run prefill batches and keep it at 0.
+         */
+        private final AtomicLong prefillBatchesCompleted = new AtomicLong();
         private final ExecutorService responseExecutor;
         /**
          * Per-frame poll timeout for this engine's response pump. Overrides via
@@ -819,6 +842,7 @@ public final class JavaMockEngineCluster {
                             response.addErrorsBuilder()
                                     .setRequestId(requestId)
                                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                            .setErrorCode(RESOURCE_EXHAUSTED_ERROR_CODE)
                                             .setErrorMessage(message)
                                             .build());
                         }
@@ -959,12 +983,17 @@ public final class JavaMockEngineCluster {
                     // Backpressure: direct waiting-queue cap hit — reject so the
                     // caller (client/master) perceives prefill overload. Clean up
                     // the per-request state set up above; the cap check rejects
-                    // before claiming any counter.
+                    // before claiming any counter. gRPC RESOURCE_EXHAUSTED maps
+                    // the 8431 domain contract onto the streaming error channel
+                    // (production engines use the same status for a saturated
+                    // admission queue).
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
-                    observer.onError(new RuntimeException(String.format(
-                            "prefill waiting queue full (backpressure): waiting=%d cap=%d",
-                            waitingPrefillRequests.get(), directWaitingRequestCap())));
+                    observer.onError(Status.RESOURCE_EXHAUSTED
+                            .withDescription(String.format(
+                                    "prefill waiting queue full (backpressure): waiting=%d cap=%d",
+                                    waitingPrefillRequests.get(), directWaitingRequestCap()))
+                            .asRuntimeException());
                     return;
                 }
             }
@@ -1633,6 +1662,11 @@ public final class JavaMockEngineCluster {
             }
 
             stats.recordPrefillBatch(shapes.size(), executionMs);
+            // Per-engine executed-batch counter mirrors the cluster-wide record
+            // above: the batch is the execution unit, so count once per scheduled
+            // batch (promoted to the per-engine Prometheus surface in
+            // MockControlServer.appendPerEngineMetrics).
+            prefillBatchesCompleted.incrementAndGet();
             // Per-engine prefill busy: one executionMs per scheduled batch (the
             // execution duration is known at schedule time in the mock model).
             busyMs.addAndGet(executionMs);
@@ -2645,6 +2679,11 @@ public final class JavaMockEngineCluster {
             // cap observation). Requests-vs-batches: "waiting" above counts requests.
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
                 snap.put("prefill_waiting_batches", prefillPendingQueueSize());
+                // Cumulative executed prefill batches — per-engine μ_batches
+                // source (capacity_ts.per_engine); decode engines never run
+                // prefill batches, so the key is absent on the decode snapshot
+                // and the per-engine metrics emitter skips the series there.
+                snap.put("prefill_batches", prefillBatchesCompleted.get());
             }
             snap.put("accepted", acceptedCount.get());
             snap.put("completed", completedCount.get());

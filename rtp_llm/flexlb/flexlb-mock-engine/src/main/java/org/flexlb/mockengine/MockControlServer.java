@@ -627,6 +627,7 @@ final class MockControlServer {
                 {"mock_engine_accepted_total", "total accepted requests", "counter"},
                 {"mock_engine_completed_total", "total completed requests", "counter"},
                 {"mock_engine_cancelled_total", "total cancelled requests", "counter"},
+                {"mock_engine_prefill_batches_total", "total prefill batches executed (prefill engines; per-engine online-capacity source)", "counter"},
                 {"mock_engine_cache_keys", "number of cache keys", "gauge"},
                 {"mock_engine_cache_evictions_total", "total cache evictions", "counter"},
                 {"mock_engine_active_kv_tokens", "active KV cache tokens", "gauge"},
@@ -676,6 +677,15 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_accepted_total{%s} %s%n", labels, snap.get("accepted")));
             sb.append(String.format("mock_engine_completed_total{%s} %s%n", labels, snap.get("completed")));
             sb.append(String.format("mock_engine_cancelled_total{%s} %s%n", labels, snap.get("cancelled_count")));
+            // Per-engine executed prefill batches — per-engine μ_batches source
+            // for the online capacity estimate. Only prefill snapshots carry the
+            // key (decode engines never run prefill batches), so the series is
+            // absent rather than fake-zero on decode engines.
+            Object prefillBatches = snap.get("prefill_batches");
+            if (prefillBatches != null) {
+                sb.append(String.format("mock_engine_prefill_batches_total{%s} %s%n",
+                        labels, prefillBatches));
+            }
             sb.append(String.format("mock_engine_cache_keys{%s} %s%n", labels, snap.get("cache_keys")));
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %s%n", labels, snap.get("cache_evictions")));
             sb.append(String.format("mock_engine_active_kv_tokens{%s} %s%n", labels, snap.get("active_kv_tokens")));
@@ -725,6 +735,10 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_accepted_total{%s} %d%n", label, sumLong(group, "accepted")));
             sb.append(String.format("mock_engine_completed_total{%s} %d%n", label, sumLong(group, "completed")));
             sb.append(String.format("mock_engine_cancelled_total{%s} %d%n", label, sumLong(group, "cancelled_count")));
+            // Per-engine prefill batches summed per role (decode groups have no
+            // prefill_batches snapshot key, so their sum stays 0).
+            sb.append(String.format("mock_engine_prefill_batches_total{%s} %d%n",
+                    label, sumLong(group, "prefill_batches")));
             sb.append(String.format("mock_engine_cache_keys{%s} %d%n", label, sumLong(group, "cache_keys")));
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
             sb.append(String.format("mock_engine_active_kv_tokens{%s} %d%n", label, sumLong(group, "active_kv_tokens")));

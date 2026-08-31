@@ -94,6 +94,12 @@ class PrefillWaitingQueueCapTest {
                 "rejection must carry an explicit backpressure error, got: " + message);
         assertTrue(message.contains("waiting=4 cap=4"),
                 "rejection should report waiting/cap, got: " + message);
+        // Domain error code: admission backpressure reports RESOURCE_EXHAUSTED
+        // (8431, same contract the master maps dispatch/engine-admission
+        // backpressure onto); a message-only error would be indistinguishable
+        // from a generic failure on the master side.
+        assertEquals(8431L, rejected.getErrors(0).getErrorInfo().getErrorCode(),
+                "rejection must carry the RESOURCE_EXHAUSTED domain code (8431)");
 
         // No residue from the rejection: still exactly 5 admitted requests inflight.
         assertEquals(5, prefill.getInflightCount(), "rejected request must not leak pendingRequests");
@@ -107,6 +113,12 @@ class PrefillWaitingQueueCapTest {
         assertEquals(0, prefill.getRunningCount());
         assertEquals(5, prefill.getCompletedCount());
         assertFalse(prefill.isLeakDetected());
+        // Per-engine executed-batch counter: each of the 5 admitted batches
+        // counts exactly once (per-engine μ_batches source; rejected batch 6
+        // must not have incremented it).
+        assertEquals(5L,
+                ((Number) prefill.getSnapshot().get("prefill_batches")).longValue(),
+                "per-engine executed-batch counter must count each admitted batch once");
     }
 
     // ──────────── Test 2: queue drains and accepts again after rejection ────────────
