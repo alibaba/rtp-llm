@@ -430,39 +430,16 @@ def quant_weight_ue8m0(
     return out_w, out_s
 
 
-def quant_weight_ue8m0_packed(
-    weight_dequant: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Quantize source weights once to FP8 with packed UE8M0 scales.
-
-    This is the native SM100/SM120 DeepGEMM representation.  Keeping the
-    original floating-point tensor until this operation avoids the lossy
-    float-scale FP8 -> BF16 -> UE8M0 FP8 requantization path.
-    """
-    if weight_dequant.dim() != 2:
+def pack_weight_scale_ue8m0(
+    weight_scale: torch.Tensor, weight_rows: int
+) -> torch.Tensor:
+    """Pack split-local UE8M0 block scales into DeepGEMM's TMA layout."""
+    if weight_scale.dtype != torch.float32 or weight_scale.dim() != 2:
         raise ValueError(
-            "Direct packed UE8M0 weight quantization requires a 2D tensor, "
-            f"got shape {tuple(weight_dequant.shape)}"
+            "UE8M0 block scales must be a 2D float32 tensor before packing, "
+            f"got shape={tuple(weight_scale.shape)}, dtype={weight_scale.dtype}"
         )
-
-    # Limit floating-point temporaries during online loading.  Quantizing the
-    # complete matrix in one call materializes both a padded source and a
-    # scaled floating-point tensor in addition to the master weight.  Chunking
-    # on a 128-row boundary preserves exactly the same quantization blocks.
-    row_chunk_size = 1024
-    n, k = weight_dequant.shape
-    out_w = torch.empty((n, k), dtype=fp8_dtype, device=weight_dequant.device)
-    scale_chunks = []
-    for row_start in range(0, n, row_chunk_size):
-        row_end = min(row_start + row_chunk_size, n)
-        chunk_w, chunk_s = per_block_cast_to_fp8(
-            weight_dequant[row_start:row_end], use_ue8m0=True
-        )
-        out_w[row_start:row_end].copy_(chunk_w)
-        scale_chunks.append(chunk_s)
-
-    out_s = torch.cat(scale_chunks, dim=0)
-    return out_w, _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
+    return _transform_scale_ue8m0(weight_scale, mn=weight_rows)
 
 
 def requant_weight_ue8m0(

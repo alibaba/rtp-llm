@@ -1,4 +1,5 @@
 import functools
+import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -24,6 +25,8 @@ __all__ = [
     "transpose_packed_fp4",
     "tf32_hc_prenorm_gemm",
     "has_deep_gemm",
+    "has_deep_gemm_mk_alignment",
+    "normalize_paged_mqa_context_lens",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
     "configure_deep_gemm_mk_alignment",
@@ -80,6 +83,7 @@ _per_token_cast_to_fp4_impl: Callable[..., Any] | None = None
 _cast_back_from_fp4_impl: Callable[..., Any] | None = None
 _transpose_packed_fp4_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_mk_alignment_lock = threading.Lock()
 
 
 @functools.cache
@@ -89,9 +93,45 @@ def has_deep_gemm() -> bool:
 
 
 @functools.cache
+def has_deep_gemm_mk_alignment() -> bool:
+    """Whether DeepGEMM exposes the SM120 contiguous-layout tuning API."""
+    if not has_deep_gemm():
+        return False
+    import deep_gemm
+
+    return all(
+        hasattr(deep_gemm, name)
+        for name in (
+            "get_theoretical_mk_alignment_for_contiguous_layout",
+            "get_mk_alignment_for_contiguous_layout",
+            "set_mk_alignment_for_contiguous_layout",
+        )
+    )
+
+
+def normalize_paged_mqa_context_lens(context_lens: torch.Tensor) -> torch.Tensor:
+    """Adapt paged-MQA context lengths to the installed DeepGEMM contract.
+
+    DeepGEMM 2.5 uses ``[batch, queries]`` while the cuda12 DeepGEMM 2.2
+    package accepts the legacy one-dimensional decode shape. The mk-alignment
+    API is a stable capability marker introduced with the 2.5 package.
+    """
+    if has_deep_gemm_mk_alignment():
+        if context_lens.dim() == 1:
+            return context_lens.unsqueeze(-1)
+        if context_lens.dim() == 2:
+            return context_lens
+        raise ValueError(
+            "DeepGEMM 2.5 paged MQA context_lens must be 1D or 2D, "
+            f"got shape={tuple(context_lens.shape)}"
+        )
+    return context_lens
+
+
+@functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
     # Blackwell SM100 and SM120 DeepGEMM kernels consume packed UE8M0 scales.
-    # SM120 support requires the vLLM-pinned DeepGEMM build (a6b593d or newer).
+    # SM120 support is pinned in deps to DeepGEMM 2.5.0+d7d5eca.cu129.
     return torch.cuda.get_device_capability()[0] in (10, 12)
 
 
@@ -118,34 +158,51 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
 def get_theoretical_mk_alignment_for_contiguous_layout(
     expected_m: int, num_groups: int
 ) -> int:
-    """Return DeepGEMM's SM-specific BLOCK_M for a grouped call."""
+    """Return BLOCK_M for a contiguous grouped call.
+
+    ``expected_m`` is the total routed-token count. This differs from masked
+    grouped GEMM, whose similarly named argument is a per-expert estimate.
+    """
+    if not has_deep_gemm_mk_alignment():
+        raise RuntimeError(
+            "SM120 contiguous grouped GEMM requires DeepGEMM >= 2.5.0 "
+            "with mk-alignment APIs"
+        )
     import deep_gemm
 
-    try:
-        return int(
-            deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(
-                expected_m, num_groups
-            )
+    return int(
+        deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(
+            expected_m, num_groups
         )
-    except TypeError:
-        return int(
-            deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(
-                (expected_m + num_groups - 1) // num_groups
-            )
-        )
+    )
 
 
 @contextmanager
 def configure_deep_gemm_mk_alignment(alignment: int) -> Generator[None, None, None]:
     """Match DeepGEMM's scheduler BLOCK_M to contiguous workspace padding."""
+    if not has_deep_gemm_mk_alignment():
+        raise RuntimeError(
+            "SM120 contiguous grouped GEMM requires DeepGEMM >= 2.5.0 "
+            "with mk-alignment APIs"
+        )
     import deep_gemm
 
-    original = deep_gemm.get_mk_alignment_for_contiguous_layout()
-    deep_gemm.set_mk_alignment_for_contiguous_layout(alignment)
-    try:
-        yield
-    finally:
-        deep_gemm.set_mk_alignment_for_contiguous_layout(original)
+    # The alignment is process-global. Serialize set/launch/restore so two
+    # concurrent forwards cannot launch with each other's scheduler setting.
+    with _mk_alignment_lock:
+        original = deep_gemm.get_mk_alignment_for_contiguous_layout()
+        deep_gemm.set_mk_alignment_for_contiguous_layout(alignment)
+        configured = deep_gemm.get_mk_alignment_for_contiguous_layout()
+        if configured != alignment:
+            deep_gemm.set_mk_alignment_for_contiguous_layout(original)
+            raise RuntimeError(
+                "DeepGEMM rejected contiguous-layout mk alignment: "
+                f"requested={alignment}, configured={configured}"
+            )
+        try:
+            yield
+        finally:
+            deep_gemm.set_mk_alignment_for_contiguous_layout(original)
 
 
 def _missing_deep_gemm() -> NoReturn:

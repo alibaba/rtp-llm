@@ -398,10 +398,20 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
         """Production kernel (fixed) + poison fill: expert_start_loc and
         m_indices must always match the golden reference."""
         num_experts = 256
-        counts = [128] * num_experts
+        counts = [1 + (i % 17) for i in range(num_experts)]
+        align_m = 128
         counts_gpu = torch.tensor(counts, dtype=torch.int32, device=self.device)
-        ref_start, ref_m = reference_scatter_1(counts_gpu)
-        all_tokens = sum(counts)
+        aligned_counts = [
+            ((count + align_m - 1) // align_m) * align_m for count in counts
+        ]
+        all_tokens = sum(aligned_counts)
+        ref_start = torch.zeros(num_experts, dtype=torch.int32)
+        ref_m = torch.full((all_tokens,), -1, dtype=torch.int32)
+        running = 0
+        for expert_id, count in enumerate(counts):
+            ref_start[expert_id] = running
+            ref_m[running : running + count] = expert_id
+            running += aligned_counts[expert_id]
 
         for round_i in range(100):
             expert_start_loc = torch.full(
@@ -419,7 +429,7 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
                 num_warps=8,
                 BLOCK_E=128,
                 BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
-                ALIGN_M=1,
+                ALIGN_M=align_m,
             )
             torch.cuda.synchronize()
             self.assertTrue(

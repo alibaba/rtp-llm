@@ -14,6 +14,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     configure_deep_gemm_mk_alignment,
     configure_deep_gemm_num_sms,
     get_theoretical_mk_alignment_for_contiguous_layout,
+    has_deep_gemm_mk_alignment,
     is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_masked,
@@ -44,7 +45,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_scatter_v2,
     tma_align_input_scale,
 )
-from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
+from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
@@ -78,6 +79,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
         checker.check(get_sm()[0] >= 9)
+        if get_sm()[0] == 12:
+            checker.check(has_deep_gemm_mk_alignment())
         checker.check(not config.enable_cuda_graph or get_sm()[0] == 12)
 
     def __init__(
@@ -105,7 +108,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
-        self.is_sm120 = get_sm()[0] == 12
+        self.is_sm120 = is_sm12x()
 
         # 权重初始化
         self.w13_weight = weights[W.moe_w1]
@@ -249,6 +252,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 output_index,
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
             )
+            dispose_tensor(hidden_states_fp8)
             upgate_output = torch.empty(
                 (self.num_experts_per_partition, alignment, self.N),
                 device=hidden_states_fp8_device,
@@ -388,6 +392,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             raise ValueError("expert_num_tokens GPU tensor is required")
 
         num_experts_local = num_recv_tokens_per_expert.shape[0]
+        if not (num_experts_local == self.num_experts_per_partition == self.E):
+            raise ValueError(
+                "Local expert metadata/weight mismatch: "
+                f"metadata={num_experts_local}, partition={self.num_experts_per_partition}, "
+                f"weights={self.E}"
+            )
         routed_tokens = hidden_states_fp8.shape[0] * topk_idx.shape[1]
         if routed_tokens == 0:
             return CombineForwardPayload(
@@ -397,29 +407,24 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     dtype=torch.bfloat16,
                 )
             )
+        expert_alignment = self.EXPERT_ALIGNMENT
         if self.is_sm120:
+            # Keep the existing 128-token workspace ceiling while allowing
+            # SM120 DeepGEMM to select a smaller compatible BLOCK_M.
             expert_alignment = min(
                 self.EXPERT_ALIGNMENT,
                 get_theoretical_mk_alignment_for_contiguous_layout(
                     routed_tokens, num_experts_local
                 ),
             )
+        num_recv_tokens_per_expert_cpu: Optional[list[int]] = None
+        if self.enable_cuda_graph:
             max_active_experts = min(routed_tokens, num_experts_local)
             all_tokens = align_up_math(
                 routed_tokens + max_active_experts * (expert_alignment - 1),
                 expert_alignment,
             )
         else:
-            # Preserve the pre-upgrade SM9x/SM100x layout: fixed 128-token
-            # expert alignment and CPU-padded metadata.
-            expert_alignment = self.EXPERT_ALIGNMENT
-            max_active_experts = min(routed_tokens, num_experts_local)
-            all_tokens = align_up_math(
-                routed_tokens + max_active_experts * (expert_alignment - 1),
-                expert_alignment,
-            )
-
-        if not self.enable_cuda_graph:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
@@ -473,6 +478,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         scatter_num_tokens_per_expert = num_recv_tokens_per_expert
         scatter_alignment = expert_alignment
         if not self.is_sm120 and not self.enable_cuda_graph:
+            assert num_recv_tokens_per_expert_cpu is not None
             padded_num_tokens_per_expert = [
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu

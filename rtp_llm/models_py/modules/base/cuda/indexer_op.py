@@ -6,6 +6,9 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    normalize_paged_mqa_context_lens,
+)
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
@@ -385,10 +388,9 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
-        # DeepGEMM paged MQA represents the number of queries decoded together
-        # as the second dimension. RTP-LLM currently decodes one query per
-        # sequence, so expand [batch] to [batch, 1].
-        context_lens = fmha_params.kvlen_d.view(-1, 1)
+        # DeepGEMM 2.5 requires [batch, queries], while the cuda12 2.2 package
+        # retains the legacy one-dimensional decode contract.
+        context_lens = normalize_paged_mqa_context_lens(fmha_params.kvlen_d)
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
             context_lens,
             self.blocksize,

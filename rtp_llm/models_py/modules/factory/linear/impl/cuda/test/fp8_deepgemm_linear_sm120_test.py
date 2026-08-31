@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -10,8 +10,9 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    pack_weight_scale_ue8m0,
     per_block_cast_to_fp8,
-    quant_weight_ue8m0_packed,
+    quant_weight_ue8m0,
     requant_weight_ue8m0,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import block_quant_dequant
@@ -26,6 +27,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.test.fp8_linear_test imp
     init_quant_config,
 )
 from rtp_llm.models_py.utils.arch import is_sm12x
+from rtp_llm.test.utils.numeric_util import calc_diff
 
 
 class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCase):
@@ -47,9 +49,10 @@ class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCas
         torch.manual_seed(20260811)
         weight = torch.randn((768, 768), device="cuda", dtype=torch.float32)
 
-        direct_weight, direct_scale = quant_weight_ue8m0_packed(weight)
+        direct_weight, direct_unpacked_scale = quant_weight_ue8m0(weight, [128, 128])
+        direct_scale = pack_weight_scale_ue8m0(direct_unpacked_scale, weight.shape[0])
         float_weight, float_scale = per_block_cast_to_fp8(weight, use_ue8m0=False)
-        requant_weight, requant_scale = requant_weight_ue8m0(float_weight, float_scale)
+        _, requant_scale = requant_weight_ue8m0(float_weight, float_scale)
 
         self.assertEqual(direct_weight.dtype, torch.float8_e4m3fn)
         self.assertEqual(direct_scale.dtype, torch.int32)
@@ -77,20 +80,9 @@ class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCas
         self.assertLess(direct_error, requant_error)
         self.assertTrue(torch.equal(direct_weight, direct_unpacked))
 
-    def test_chunked_direct_quantization_matches_full_matrix(self):
-        torch.manual_seed(20260811)
-        weight = torch.randn((1152, 384), device="cuda", dtype=torch.float32)
-
-        chunked_weight, _ = quant_weight_ue8m0_packed(weight)
-        expected_weight, _ = per_block_cast_to_fp8(weight, use_ue8m0=True)
-
-        # 1152 rows cross the 1024-row chunk boundary while keeping every
-        # boundary aligned to the 128-row quantization block.
-        self.assertTrue(torch.equal(chunked_weight, expected_weight))
-
     def test_online_loader_quantizes_non_square_weight_in_kernel_orientation(self):
         torch.manual_seed(20260811)
-        source_weight = torch.randn((256, 384), dtype=torch.float32)
+        source_weight = torch.randn((256, 512), dtype=torch.float32)
 
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
         loader.group_size = 128
@@ -107,15 +99,58 @@ class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCas
             device="cuda",
             load_config=Mock(),
         )
-        expected_weight, expected_scale = quant_weight_ue8m0_packed(
-            source_weight.T.contiguous().cuda()
+        expected_weight, expected_scale = quant_weight_ue8m0(
+            source_weight.T.contiguous().cuda(), [128, 128]
         )
 
-        self.assertEqual(tuple(loaded[loader.kernel.name].shape), (384, 256))
+        self.assertEqual(tuple(loaded[loader.kernel.name].shape), (512, 256))
         self.assertTrue(torch.equal(loaded[loader.kernel.name], expected_weight))
-        self.assertEqual(loaded[loader.scale.name].dtype, torch.int32)
-        self.assertEqual(loaded[loader.scale.name].stride(-2), 1)
+        self.assertEqual(loaded[loader.scale.name].dtype, torch.float32)
+        self.assertTrue(loaded[loader.scale.name].is_contiguous())
         self.assertTrue(torch.equal(loaded[loader.scale.name], expected_scale))
+
+    def test_online_loader_packs_ue8m0_scale_after_tp_split(self):
+        torch.manual_seed(20260811)
+        source_weight = torch.randn((256, 512), dtype=torch.float32)
+
+        loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.group_size = 128
+        loader.kernel = Mock()
+        loader.kernel.name = "test_dense_weight"
+        loader.kernel._load_raw_tensor.return_value = {
+            loader.kernel.name: source_weight
+        }
+        loader.scale = Mock()
+        loader.scale.name = "test_dense_scale"
+        raw = loader._load_raw_tensor(Mock(), 0, "cuda", Mock())
+        # Model TP splits N and its matching scale rows before _postprocess.
+        local_weight = raw[loader.kernel.name][:256]
+        local_scale = raw[loader.scale.name][:2]
+        exported_device = SimpleNamespace(
+            maybe_rewrite_weight_by_key=lambda _, tensor: tensor
+        )
+
+        with patch(
+            "rtp_llm.model_loader.weight_module.CompositeWeight._postprocess",
+            return_value={
+                loader.kernel.name: local_weight,
+                loader.scale.name: local_scale,
+            },
+        ):
+            processed = loader._postprocess(
+                {
+                    loader.kernel.name: local_weight,
+                    loader.scale.name: local_scale,
+                },
+                "cuda",
+                SimpleNamespace(exported_device=exported_device),
+            )
+        expected_scale = pack_weight_scale_ue8m0(local_scale, 256)
+
+        self.assertTrue(torch.equal(processed[loader.kernel.name], local_weight))
+        self.assertEqual(processed[loader.scale.name].dtype, torch.int32)
+        self.assertEqual(processed[loader.scale.name].stride(-2), 1)
+        self.assertTrue(torch.equal(processed[loader.scale.name], expected_scale))
 
     def test_online_loader_rejects_non_128_group_size(self):
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
@@ -139,14 +174,29 @@ class CudaFp8DeepGEMMLinearSM120Test(CudaFp8GEMMLinearTestBase, unittest.TestCas
         torch.manual_seed(20260811)
         weight = torch.randn((768, 768), device="cuda", dtype=torch.bfloat16)
         inputs = torch.randn((93, 768), device="cuda", dtype=torch.bfloat16)
-        weight_fp8, weight_scale = quant_weight_ue8m0_packed(weight)
+        weight_fp8, unpacked_scale = quant_weight_ue8m0(weight, [128, 128])
+        weight_scale = pack_weight_scale_ue8m0(unpacked_scale, weight.shape[0])
         linear = CudaFp8DeepGEMMLinear(weight_fp8, weight_scale)
         actual = linear(inputs)
         expected = (inputs.float() @ weight.float().T).bfloat16()
-        relative_l2 = (
-            actual.float() - expected.float()
-        ).norm() / expected.float().norm()
-        self.assertLess(relative_l2, 0.06)
+        self.assertLess(calc_diff(actual, expected), 0.0011)
+
+    def test_non_square_direct_and_legacy_weight_gemm_are_close(self):
+        torch.manual_seed(20260901)
+        weight = torch.randn((256, 512), device="cuda", dtype=torch.bfloat16)
+        inputs = torch.randn((93, 512), device="cuda", dtype=torch.bfloat16)
+
+        direct_weight, direct_unpacked_scale = quant_weight_ue8m0(weight, [128, 128])
+        direct_scale = pack_weight_scale_ue8m0(direct_unpacked_scale, weight.shape[0])
+        float_weight, float_scale = per_block_cast_to_fp8(weight, use_ue8m0=False)
+        legacy_weight, legacy_scale = requant_weight_ue8m0(float_weight, float_scale)
+
+        direct_output = CudaFp8DeepGEMMLinear(direct_weight, direct_scale)(inputs)
+        legacy_output = CudaFp8DeepGEMMLinear(legacy_weight, legacy_scale)(inputs)
+        reference = (inputs.float() @ weight.float().T).bfloat16()
+
+        self.assertLess(calc_diff(direct_output, legacy_output), 0.0011)
+        self.assertLess(calc_diff(direct_output, reference), 0.0011)
 
 
 if __name__ == "__main__":

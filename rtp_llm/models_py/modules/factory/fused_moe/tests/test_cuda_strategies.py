@@ -309,13 +309,20 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.has_deep_gemm_mk_alignment"
+    )
+    @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm"
     )
     def test_can_handle_cuda_graph(
-        self, mock_get_sm: Any, mock_has_deep_gemm: Any
+        self,
+        mock_get_sm: Any,
+        mock_has_mk_alignment: Any,
+        mock_has_deep_gemm: Any,
     ) -> None:
         """Only SM120 enables the continuous DeepGEMM CUDA Graph path."""
         mock_has_deep_gemm.return_value = True
+        mock_has_mk_alignment.return_value = True
         mock_get_sm.return_value = (9, 0)
 
         config = create_moe_config_adapter(
@@ -337,6 +344,8 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertFalse(strategy.can_handle(config))
         mock_get_sm.return_value = (12, 0)
         self.assertTrue(strategy.can_handle(config))
+        mock_has_mk_alignment.return_value = False
+        self.assertFalse(strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
@@ -407,43 +416,30 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock EP Normal strategy"""
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    @patch("rtp_llm.models_py.utils.arch.get_sm")
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm"
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.get_sm"
+    )
     @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     def test_can_handle_ep_enabled(
-        self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
+        self,
+        mock_supported: Any,
+        mock_router_get_sm: Any,
+        mock_executor_get_sm: Any,
+        mock_has_deep_gemm: Any,
     ) -> None:
         """Test EP enabled case"""
         mock_has_deep_gemm.return_value = True
-        mock_get_sm.return_value = (9, 0)  # SM 9.0 (Hopper)
+        mock_router_get_sm.return_value = (9, 0)  # SM 9.0 (Hopper)
+        mock_executor_get_sm.return_value = (9, 0)
         mock_supported.return_value = True
 
         config = create_moe_config_adapter(
             model_config=create_model_config_with_fp8_block_quant(),
             parallelism_config=create_parallelism_config(
                 ep_size=2, tp_size=1, dp_size=1
-            ),
-            moe_config=create_moe_config(use_deepep_low_latency=False),
-            enable_cuda_graph=False,
-        )
-
-        strategy = CudaFp8PerBlockEpNormalStrategy()
-        self.assertTrue(strategy.can_handle(config))
-
-    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    @patch("rtp_llm.models_py.utils.arch.get_sm")
-    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
-    def test_can_handle_tp_dp_ep(
-        self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
-    ) -> None:
-        """Test case with TP, DP, and EP"""
-        mock_has_deep_gemm.return_value = True
-        mock_get_sm.return_value = (9, 0)
-        mock_supported.return_value = True
-
-        config = create_moe_config_adapter(
-            model_config=create_model_config_with_fp8_block_quant(),
-            parallelism_config=create_parallelism_config(
-                ep_size=4, tp_size=2, dp_size=2
             ),
             moe_config=create_moe_config(use_deepep_low_latency=False),
             enable_cuda_graph=False,
@@ -460,15 +456,53 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.get_sm"
     )
     @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
-    def test_can_handle_cuda_graph(
+    def test_can_handle_tp_dp_ep(
         self,
         mock_supported: Any,
         mock_router_get_sm: Any,
         mock_executor_get_sm: Any,
         mock_has_deep_gemm: Any,
     ) -> None:
+        """Test case with TP, DP, and EP"""
+        mock_has_deep_gemm.return_value = True
+        mock_router_get_sm.return_value = (9, 0)
+        mock_executor_get_sm.return_value = (9, 0)
+        mock_supported.return_value = True
+
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(
+                ep_size=4, tp_size=2, dp_size=2
+            ),
+            moe_config=create_moe_config(use_deepep_low_latency=False),
+            enable_cuda_graph=False,
+        )
+
+        strategy = CudaFp8PerBlockEpNormalStrategy()
+        self.assertTrue(strategy.can_handle(config))
+
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.has_deep_gemm_mk_alignment"
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm"
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.get_sm"
+    )
+    @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
+    def test_can_handle_cuda_graph(
+        self,
+        mock_supported: Any,
+        mock_router_get_sm: Any,
+        mock_executor_get_sm: Any,
+        mock_has_mk_alignment: Any,
+        mock_has_deep_gemm: Any,
+    ) -> None:
         """Only SM120 enables the continuous DeepGEMM CUDA Graph path."""
         mock_has_deep_gemm.return_value = True
+        mock_has_mk_alignment.return_value = True
         mock_supported.return_value = True
         mock_router_get_sm.return_value = (9, 0)
         mock_executor_get_sm.return_value = (9, 0)
@@ -494,20 +528,21 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         mock_executor_get_sm.return_value = (10, 0)
         self.assertFalse(strategy.can_handle(config))
 
-        # SM120 selects the graph-safe continuous executor path.
+        # The SM120 executor itself is graph-safe, but DeepEP normal routing
+        # has dynamic output shapes and therefore rejects full-MoE capture.
         mock_router_get_sm.return_value = (12, 0)
         mock_executor_get_sm.return_value = (12, 0)
-        self.assertTrue(strategy.can_handle(config))
+        self.assertFalse(strategy.can_handle(config))
+        mock_has_mk_alignment.return_value = False
+        self.assertFalse(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    @patch("rtp_llm.models_py.utils.arch.get_sm")
     @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
     def test_can_handle_false_low_latency(
-        self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
+        self, mock_supported: Any, mock_has_deep_gemm: Any
     ) -> None:
         """Test case when low latency is enabled (should fail for normal mode)"""
         mock_has_deep_gemm.return_value = True
-        mock_get_sm.return_value = (9, 0)
         mock_supported.return_value = True
 
         moe_config = create_moe_config(use_deepep_low_latency=True)
@@ -526,14 +561,9 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    @patch("rtp_llm.models_py.utils.arch.get_sm")
-    def test_can_handle_false_ep_not_enabled(
-        self, mock_get_sm: Any, mock_has_deep_gemm: Any
-    ) -> None:
+    def test_can_handle_false_ep_not_enabled(self, mock_has_deep_gemm: Any) -> None:
         """Test case when EP is not enabled (should fail)"""
         mock_has_deep_gemm.return_value = True
-        mock_get_sm.return_value = (9, 0)
-
         config = create_moe_config_adapter(
             model_config=create_model_config_with_fp8_block_quant(),
             parallelism_config=create_parallelism_config(

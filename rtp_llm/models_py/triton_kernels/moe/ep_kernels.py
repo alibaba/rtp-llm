@@ -56,7 +56,12 @@ def _fwd_kernel_ep_scatter_1(
     tokens_per_expert = ((tokens_per_expert + ALIGN_M - 1) // ALIGN_M) * ALIGN_M
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
-    cur_expert_start = tl.load(expert_start_loc + cur_expert).to(tl.int64)
+    # Keep the prefix sum in registers. Reading expert_start_loc immediately
+    # after the vector store is a cross-warp global-memory dependency without
+    # a CTA barrier and can observe stale data.
+    cur_expert_start = tl.sum(
+        tl.where(offset_cumsum == cur_expert, cumsum, 0), axis=0
+    ).to(tl.int64)
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
@@ -67,6 +72,7 @@ def _fwd_kernel_ep_scatter_1(
             m_indices_start_ptr + offs,
             cur_expert.to(tl.int32),
             mask=(offs < cur_expert_token_num)
+            & (cur_expert_start + offs >= 0)
             & (cur_expert_start + offs < m_indices_size),
         )
 
