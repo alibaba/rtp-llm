@@ -509,6 +509,7 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
         fast_path: FusedSharedExpertFastPath | None = None,
     ) -> None:
         self._active_stream: torch.cuda.Stream | None = None
+        self._input: torch.Tensor | None = None
         self._out: torch.Tensor | None = None
         self._fast_path = fast_path
 
@@ -538,23 +539,23 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
     def start(self, shared_experts: nn.Module, x: torch.Tensor) -> None:
         if not self._can_overlap(x):
             self._active_stream = None
+            self._input = None
             with record_function_range("dsv4.moe.shared_expert"):
                 self._out = _run_shared_expert(shared_experts, x, self._fast_path)
             return
-        capturing = torch.cuda.is_current_stream_capturing()
-        stream = _get_shared_expert_stream(x.device, allow_create=not capturing)
-        if not capturing:
-            x.record_stream(stream)
+        stream = _get_shared_expert_stream(x.device, allow_create=True)
         stream.wait_stream(torch.cuda.current_stream(x.device))
+        self._active_stream = stream
+        self._input = x
         with torch.cuda.stream(stream):
             with record_function_range("dsv4.moe.shared_expert"):
                 self._out = _run_shared_expert(shared_experts, x, self._fast_path)
-        self._active_stream = stream
 
     def finish(self) -> torch.Tensor:
         out: torch.Tensor = self._out  # type: ignore[assignment]
         if self._active_stream is not None:
             torch.cuda.current_stream(out.device).wait_stream(self._active_stream)
+        self._input = None
         self._out = None
         self._active_stream = None
         return out
