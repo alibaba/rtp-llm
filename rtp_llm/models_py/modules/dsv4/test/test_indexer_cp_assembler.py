@@ -332,6 +332,8 @@ def test_async_indexer_k_waits_each_work_once_before_restore_enqueue():
         work_s=work_s,
         completion_event=None,
         stream=None,
+        local_k_quant=torch.empty((0, 1), dtype=torch.uint8),
+        local_k_scale=torch.empty((0, 1), dtype=torch.uint8),
         out_k_quant=torch.empty((0, 1), dtype=torch.uint8),
         out_k_scale=torch.empty((0, 1), dtype=torch.uint8),
     )
