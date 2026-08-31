@@ -1105,6 +1105,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            del q, weights, q_for_quant, w_for_quant
 
             if T == 0:
                 # Cold-start prefill before any compressed tokens — no K
@@ -1310,6 +1311,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            del q, weights, q_for_quant, w_for_quant
 
             if T == 0:
                 return torch.full(empty_shape, -1, dtype=torch.int32, device=x.device)
