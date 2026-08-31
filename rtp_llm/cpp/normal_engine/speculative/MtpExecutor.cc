@@ -866,11 +866,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // restored full view to every rank for the draft pass).
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
+    // Under prefix reuse handleInputs also *replaces* combo_position_ids with
+    // a rank-local absolute vector; the draft pass divides that count by the
+    // global token count, so it has to go back to its pre-target state too
+    // (usually undefined, which lets handleInputs rebuild it).
+    torch::Tensor saved_combo_position_ids;
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens       = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths      = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_position_ids = model_input.combo_position_ids;
     }
 
     // target model prefill
@@ -908,8 +914,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // the contiguous full sequence; the tpSync below then publishes the
         // restored view to every draft rank (fake/warmup streams included).
         if (cp_enabled) {
-            model_input.combo_tokens  = saved_combo_tokens;
-            model_input.input_lengths = saved_input_lengths;
+            model_input.combo_tokens       = saved_combo_tokens;
+            model_input.input_lengths      = saved_input_lengths;
+            model_input.combo_position_ids = saved_combo_position_ids;
         }
         if (!is_dspark_ && model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;
