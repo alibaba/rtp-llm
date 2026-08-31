@@ -492,31 +492,42 @@ TEST(PPStageCacheConfig, applyLogicalBlockNumsCapsByTagNotGid) {
     EXPECT_EQ(config.block_num, 60);
 }
 
-TEST(PPStageCacheConfig, applyLogicalBlockNumsCapsAtCanonicalMinAndNeverRaises) {
+TEST(PPStageCacheConfig, applyLogicalBlockNumsCapsAtCanonicalMin) {
     const auto mc     = makeSingleModelConfig(8);
     auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 1), false, 0);
     config.finalizeBlockNums(50, RuntimeConfig{});
     ASSERT_EQ(config.groupNums(), 1);
     const auto tag = config.tagForGroup(0);
 
-    // A LARGER canonical count (a richer owner elsewhere) is never applied
-    // upward: the entry carries the cross-stage min by construction.
+    // A SMALLER canonical count (a poorer owner elsewhere) caps this stage.
     PPValidationResult validation;
     validation.ok = true;
     CanonicalGroupEntry entry;
     entry.tag               = tag;
-    entry.logical_block_num = 90;
+    entry.logical_block_num = 30;
     validation.canonical_groups.push_back(entry);
-    applyPPLogicalBlockNums(config, validation);
-    EXPECT_EQ(config.blockNumForGroup(0), 50u);
-    EXPECT_EQ(config.block_num, 50);
-
-    // A SMALLER canonical count (a poorer owner elsewhere) caps this stage.
-    config.finalizeBlockNums(50, RuntimeConfig{});
-    validation.canonical_groups[0].logical_block_num = 30;
     applyPPLogicalBlockNums(config, validation);
     EXPECT_EQ(config.blockNumForGroup(0), 30u);
     EXPECT_EQ(config.block_num, 30);
+}
+
+TEST(PPStageCacheConfig, applyLogicalBlockNumsRejectsLocalBelowCanonicalMin) {
+    // The canonical min includes this stage's own snapshot value, so a local
+    // count below it means the local capacity changed after the startup
+    // snapshot exchange. That must abort startup instead of silently
+    // building a pool smaller than the id space the leading stage may issue.
+    const auto mc     = makeSingleModelConfig(8);
+    auto       config = CacheConfigCreator::createBasicConfig(mc, makePpConfig(8, 2, 1), false, 0);
+    config.finalizeBlockNums(50, RuntimeConfig{});
+    ASSERT_EQ(config.groupNums(), 1);
+
+    PPValidationResult validation;
+    validation.ok = true;
+    CanonicalGroupEntry entry;
+    entry.tag               = config.tagForGroup(0);
+    entry.logical_block_num = 90;  // larger than the local 50 -> invariant broken
+    validation.canonical_groups.push_back(entry);
+    EXPECT_THROW(applyPPLogicalBlockNums(config, validation), std::exception);
 }
 
 TEST(PPStageCacheConfig, applyLogicalBlockNumsRejectsTagMissingFromCanonicalTable) {

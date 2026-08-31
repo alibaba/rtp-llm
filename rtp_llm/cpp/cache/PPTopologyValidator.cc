@@ -437,9 +437,21 @@ void applyPPLogicalBlockNums(CacheConfig& config, const PPValidationResult& vali
         RTP_LLM_CHECK_WITH_INFO(it != logical_blocks.end(),
                                 "local group [%s] is missing from the PP canonical group table",
                                 group.tag.c_str());
-        // Cap only: entries carry the cross-stage min, but never raise a
-        // locally smaller count.
-        block_nums.push_back(std::min(group.block_num, it->second));
+        // The canonical min includes this stage's own snapshot value, so the
+        // local count can never fall below it; a violation means the local
+        // block count was lowered after the startup snapshot exchange. Fail
+        // fast instead of silently building a pool smaller than the id space
+        // the leading stage may issue (runtime out-of-range writes).
+        RTP_LLM_CHECK_WITH_INFO(group.block_num >= it->second,
+                                "local group [%s] block_num %u is below the PP canonical logical min %u; "
+                                "local capacity changed after the startup snapshot exchange",
+                                group.tag.c_str(),
+                                group.block_num,
+                                it->second);
+        // After the check, min(local, canonical) == canonical: pools are
+        // sized exactly to the cross-stage agreed logical capacity, leaving
+        // the richer stage's surplus VRAM unallocated.
+        block_nums.push_back(it->second);
         kv_strides.push_back(group.kv_block_stride_bytes);
         scale_strides.push_back(group.kv_scale_stride_bytes);
     }
