@@ -30,6 +30,19 @@ cc_library(
     copts = copts(),
 )
 
+# PP stage layout helper (consumes the materialized partition from
+# ParallelismConfig; see rtp_llm/config/pp_layout.py for the Python side).
+cc_library(
+    name = "pp_layout",
+    hdrs = ["PPLayout.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":config_modules",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
 cc_library(
     name = "eplb_config",
     hdrs = ["EplbConfig.h"],

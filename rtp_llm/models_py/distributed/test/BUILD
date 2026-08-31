@@ -39,6 +39,17 @@ py_test(
     exec_properties = {'gpu':'H20', 'gpu_count':'4'},
 )
 
+# PP-aware process group topology: CPU-only gloo, no GPU.
+py_test(
+    name = "pp_group_topology_test",
+    srcs = ["pp_group_topology_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = 'moderate',
+)
+
 py_test(
     name = "collective_torch_hipgraph_unit_test",
     srcs = ["collective_torch_hipgraph_unit_test.py"],

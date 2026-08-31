@@ -1,4 +1,18 @@
+load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+
+# Header-only PP wire types so consumers outside normal_engine (e.g. the
+# models lib building the PyWrappedModel::forwardPP adapter) can depend on
+# them without dragging in the whole executor.
+cc_library(
+    name = "pipeline_types",
+    hdrs = ["pipeline/PPTypes.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/core:op_data",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "normal_engine",
@@ -9,18 +23,21 @@ cc_library(
         "pipeline/PPExecutor.h",
         "pipeline/PPSerialization.h",
         "pipeline/PPTransport.h",
-        "pipeline/PPTypes.h",
     ],
     srcs = glob([
         "*.cc",
         "speculative/*.cc",
     ]) + [
         "pipeline/PPExecutor.cc",
+        "pipeline/PPSerialization.cc",
         "pipeline/PPTransport.cc",
     ],
     deps = [
+        ":pipeline_types",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:pp_topology_validator",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:pp_layout",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base:executor",

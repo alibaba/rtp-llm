@@ -145,8 +145,8 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
 
     for (size_t gid = 0; gid < new_groups.size(); ++gid) {
         auto& group = new_groups[gid];
-        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
         RTP_LLM_CHECK_WITH_INFO(!group.tag.empty(), "CacheConfig::setTopology requires tag for group %zu", gid);
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
         RTP_LLM_CHECK_WITH_INFO(group.spec->tag == group.tag,
                                 "CacheConfig::setTopology tag=%s does not match spec tag=%s",
                                 group.tag.c_str(),

@@ -259,12 +259,24 @@ void KVCacheAllocator::blockBatchCopy(const torch::Tensor& copy_mapping) {
     const auto*                    mappings = reinterpret_cast<const GroupBlockIdPair*>(copy_mapping.data_ptr());
     std::vector<TaggedBlockIdPair> tagged_mappings;
     tagged_mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
+    const auto& groups = config_.topology().groups();
     for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
         RTP_LLM_CHECK_WITH_INFO(
             mappings[i].group_id >= 0, "cache block copy mapping has invalid group_id=%d", mappings[i].group_id);
-        tagged_mappings.push_back({config_.topology().groupById(static_cast<size_t>(mappings[i].group_id)).tag,
-                                   mappings[i].src,
-                                   mappings[i].dst});
+        // Wire group_id is a canonical index. Resolve it to the local group
+        // via canonical_idx; copies for groups absent from this stage have
+        // nothing to apply locally and are skipped.
+        const GroupBase* local = nullptr;
+        for (const auto& group : groups) {
+            if (group.canonical_idx == static_cast<size_t>(mappings[i].group_id)) {
+                local = &group;
+                break;
+            }
+        }
+        if (local == nullptr) {
+            continue;
+        }
+        tagged_mappings.push_back({local->tag, mappings[i].src, mappings[i].dst});
     }
     blockBatchCopyByTag(tagged_mappings);
 }

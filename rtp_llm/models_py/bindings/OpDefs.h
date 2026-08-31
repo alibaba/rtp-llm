@@ -51,8 +51,11 @@ struct LayerKVCache {
         tag(std::move(tag)) {}
 };
 
-// Whole-model KV cache holding tensors for all layers.
-// Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
+// Whole-model KV cache holding tensors for all layers owned by this rank.
+// Layer ids are model-local (0..layerCount()-1): under pipeline parallelism
+// each rank's layout is projected to its own stage layers, so a layer's local
+// id may differ from its global id. Call getLayerCache(local_layer_id) to
+// obtain a per-layer LayerKVCache.
 class KVCache {
 public:
     explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
@@ -348,6 +351,11 @@ struct PyMultimodalInputs {
 
 using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
 
+// PP stage-boundary tensors, carried verbatim from PPIntermediateTensors.
+// Keys are model-defined; fused-residual models use "hidden_states" +
+// "residual", naive-add models use a single key.
+using PPIntermediates = std::map<std::string, torch::Tensor>;
+
 struct PyModelInputs {
     torch::Tensor      input_ids;
     torch::Tensor      input_hiddens;
@@ -360,9 +368,13 @@ struct PyModelInputs {
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
     // Only interpreted by a DSpARK draft model. All other models leave NONE.
-    // Kept last so PyModelInputs stays an aggregate: existing brace-init sites
-    // that pass 8 members keep compiling and may append a 9th value.
+    // Kept second-to-last so PyModelInputs stays an aggregate: existing
+    // brace-init sites that pass 8/9 members keep compiling and may append a
+    // 10th value.
     rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
+    // PP: stage-boundary tensors received from the upstream stage; empty
+    // under pp_size=1.
+    PPIntermediates pp_intermediates;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -375,6 +387,10 @@ struct PyModelOutputs {
     // sampling consumes these as an implicit point mass, so no per-vocab
     // draft probabilities cross this boundary.
     torch::Tensor draft_tokens;
+    // PP: non-last stages return their stage-boundary tensors here;
+    // PyWrappedModel::forwardPP packs them for transport. Empty under
+    // pp_size=1 and on the last stage.
+    PPIntermediates pp_intermediates;
 
     PyModelOutputs() = default;
 

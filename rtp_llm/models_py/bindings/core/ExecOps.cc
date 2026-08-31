@@ -614,11 +614,12 @@ namespace {
 std::mutex g_comm_mutex;
 
 // Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn = nullptr;
-py::function* g_allreduce_fn = nullptr;
-py::function* g_allgather_fn = nullptr;
-py::function* g_isend_fn     = nullptr;
-py::function* g_irecv_fn     = nullptr;
+py::function* g_broadcast_fn            = nullptr;
+py::function* g_allreduce_fn            = nullptr;
+py::function* g_allgather_fn            = nullptr;
+py::function* g_isend_fn                = nullptr;
+py::function* g_irecv_fn                = nullptr;
+py::function* g_pp_snapshot_exchange_fn = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
@@ -641,9 +642,12 @@ void clearCommOpsUnlocked() {
     }
 }
 
-void clearP2POpsUnlocked() {
+// PP callbacks (P2P tensor transport + startup snapshot exchange) share one
+// lifecycle: registered together via register_pp_ops, cleared via clear_pp_ops.
+void clearPPOpsUnlocked() {
     py::function isend_fn;
     py::function irecv_fn;
+    py::function pp_snapshot_exchange_fn;
     if (g_isend_fn != nullptr) {
         isend_fn = std::move(*g_isend_fn);
         delete g_isend_fn;
@@ -653,6 +657,11 @@ void clearP2POpsUnlocked() {
         irecv_fn = std::move(*g_irecv_fn);
         delete g_irecv_fn;
         g_irecv_fn = nullptr;
+    }
+    if (g_pp_snapshot_exchange_fn != nullptr) {
+        pp_snapshot_exchange_fn = std::move(*g_pp_snapshot_exchange_fn);
+        delete g_pp_snapshot_exchange_fn;
+        g_pp_snapshot_exchange_fn = nullptr;
     }
 }
 
@@ -690,7 +699,7 @@ runP2PCallback(const torch::Tensor& tensor, int global_peer, py::function** call
         }
     }
     RTP_LLM_CHECK_WITH_INFO(
-        static_cast<bool>(fn), "%s called but its callback is not registered via register_p2p_ops", callback_name);
+        static_cast<bool>(fn), "%s called but its callback is not registered via register_pp_ops", callback_name);
     py::object work = fn(tensor, global_peer);
     RTP_LLM_CHECK_WITH_INFO(!work.is_none(), "%s callback returned None", callback_name);
     RTP_LLM_CHECK_WITH_INFO(py::hasattr(work, "wait"), "%s callback returned an object without wait()", callback_name);
@@ -788,6 +797,22 @@ std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int global_peer)
 
 std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int global_peer) {
     return runP2PCallback(tensor, global_peer, &g_irecv_fn, "execIRecv");
+}
+
+std::vector<std::string> execPPSnapshotExchange(const std::string& local_snapshot) {
+    py::function           fn;
+    py::gil_scoped_acquire gil;
+    {
+        std::lock_guard<std::mutex> lock(g_comm_mutex);
+        if (g_pp_snapshot_exchange_fn != nullptr) {
+            fn = *g_pp_snapshot_exchange_fn;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(fn),
+                            "execPPSnapshotExchange called but PP snapshot callback not registered via "
+                            "register_pp_ops (collective_torch registers it when pp_size > 1)");
+    py::object result = fn(py::bytes(local_snapshot));
+    return result.cast<std::vector<std::string>>();
 }
 
 void execSyncCommunication(bool timeout) {
@@ -898,15 +923,19 @@ void registerExecCtxOps(pybind11::module& m) {
         "Register Python callbacks for C++ communication ops.");
 
     m.def(
-        "register_p2p_ops",
-        [](py::function isend_fn, py::function irecv_fn) {
+        "register_pp_ops",
+        [](py::function isend_fn, py::function irecv_fn, py::function pp_snapshot_exchange_fn) {
             std::lock_guard<std::mutex> lock(g_comm_mutex);
-            clearP2POpsUnlocked();
-            g_isend_fn = new py::function(std::move(isend_fn));
-            g_irecv_fn = new py::function(std::move(irecv_fn));
+            clearPPOpsUnlocked();
+            g_isend_fn                = new py::function(std::move(isend_fn));
+            g_irecv_fn                = new py::function(std::move(irecv_fn));
+            g_pp_snapshot_exchange_fn = new py::function(std::move(pp_snapshot_exchange_fn));
         },
         py::arg("isend_fn"),
-        py::arg("irecv_fn"));
+        py::arg("irecv_fn"),
+        py::arg("pp_snapshot_exchange_fn"),
+        "Register all PP communication callbacks: P2P tensor transport "
+        "(isend/irecv) and the startup snapshot exchange.");
 
     m.def(
         "clear_comm_ops",
@@ -916,10 +945,13 @@ void registerExecCtxOps(pybind11::module& m) {
         },
         "Clear registered Python communication callbacks.");
 
-    m.def("clear_p2p_ops", []() {
-        std::lock_guard<std::mutex> lock(g_comm_mutex);
-        clearP2POpsUnlocked();
-    });
+    m.def(
+        "clear_pp_ops",
+        []() {
+            std::lock_guard<std::mutex> lock(g_comm_mutex);
+            clearPPOpsUnlocked();
+        },
+        "Clear registered PP communication callbacks.");
 
     m.def(
         "init_cpu_tp_broadcaster",

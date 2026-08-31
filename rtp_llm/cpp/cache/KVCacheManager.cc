@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -160,16 +161,17 @@ bool cacheStatusSnapshotEnabled() {
 
 }  // namespace
 
-KVCacheManager::KVCacheManager(const CacheConfig&                 config,
-                               bool                               warmup,
-                               const kmonitor::MetricsReporterPtr metrics_reporter,
-                               const KVCacheConfig&               kv_cache_config,
-                               const ParallelismConfig&           parallelism_config,
-                               const RuntimeConfig&               runtime_config,
-                               const SpeculativeExecutionConfig&  sp_config,
-                               const PDSepConfig&                 pd_sep_config,
-                               const CacheStoreConfig&            cache_store_config,
-                               bool                               use_cuda_malloc_block_pool):
+KVCacheManager::KVCacheManager(const CacheConfig&                       config,
+                               bool                                     warmup,
+                               const kmonitor::MetricsReporterPtr       metrics_reporter,
+                               const KVCacheConfig&                     kv_cache_config,
+                               const ParallelismConfig&                 parallelism_config,
+                               const RuntimeConfig&                     runtime_config,
+                               const SpeculativeExecutionConfig&        sp_config,
+                               const PDSepConfig&                       pd_sep_config,
+                               const CacheStoreConfig&                  cache_store_config,
+                               bool                                     use_cuda_malloc_block_pool,
+                               const std::optional<PPValidationResult>& pp_logical_capacity):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -178,11 +180,24 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
-    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool),
+    pp_logical_capacity_(pp_logical_capacity) {
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
         allocateAndSync();
+        // PP: cap each group's logical block count at the cross-stage min,
+        // after finalizeBlockNums and before init() builds the pools.
+        if (parallelism_config_.pp_size > 1) {
+            RTP_LLM_CHECK_WITH_INFO(pp_logical_capacity.has_value(),
+                                    "pp_size=%ld requires the PP logical capacity (validator result); "
+                                    "construct KVCacheManager with the initPPCacheGeometry outcome",
+                                    parallelism_config_.pp_size);
+            RTP_LLM_CHECK_WITH_INFO(
+                pp_logical_capacity->ok, "pp logical capacity is invalid: %s", pp_logical_capacity->error.c_str());
+            applyPPCanonicalIndices(config_, *pp_logical_capacity);
+            applyPPLogicalBlockNums(config_, *pp_logical_capacity);
+        }
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
@@ -663,7 +678,12 @@ void KVCacheManager::initConnectorCoordinator() {
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    if (world_size > 1) {
+    // PP: the allgather below sizes its buffer for tp*dp ranks, but the
+    // DP_AND_TP group spans every stage under pp_size>1 (out-of-bounds
+    // writes). Cross-stage capacity is agreed by the PP topology validator
+    // instead (per-tag min), so keep the locally measured block count here.
+    const bool pp_active = parallelism_config_.pp_size > 1;
+    if (world_size > 1 && !pp_active) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
         auto   block_num_ptr = block_num_t.data_ptr<int>();

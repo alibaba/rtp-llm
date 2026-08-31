@@ -35,7 +35,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -70,6 +70,7 @@ struct ParallelismConfig {
     int64_t tp_rank          = 0;
     int64_t ep_rank          = 0;
     int64_t dp_rank          = 0;
+    int64_t pp_rank          = 0;
     int64_t ffn_tp_size      = 1;
     int64_t ffn_tp_rank      = 0;
     bool    enable_sp        = false;
@@ -80,6 +81,14 @@ struct ParallelismConfig {
     // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
+
+    // Materialized PP layer partition: layer count of every stage in rank
+    // order (e.g. {17,16,16,16}), decided once on the Python side and
+    // shipped as data so C++ never re-derives the partition rule. Empty
+    // means "no materialized partition" and falls back to the even-split
+    // formula (pp_size=1, stale pickles and legacy test fixtures only; the
+    // Python write-back point always materializes for pp_size>1).
+    std::vector<int64_t> pp_stage_layer_counts;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration
 
@@ -189,7 +198,6 @@ struct KVCacheConfig {
     bool    enable_independent_group_eviction       = false;
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
-
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -394,7 +402,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -404,9 +412,9 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
+    bool        terminate_without_stop_token = false;
+    int         num_workers                  = 8;
+    std::string tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;

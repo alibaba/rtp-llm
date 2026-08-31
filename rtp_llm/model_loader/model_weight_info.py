@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.pp_layout import derive_pp_rank
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -213,6 +214,24 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
+        # Canonical pp_rank lives on ParallelismConfig (derived once in
+        # collective_torch._normalize_parallelism_ranks, PP outermost layout,
+        # matching NormalEngine::pp_step); the derive_pp_rank fallback covers
+        # fake configs (test mocks) that only carry sizes.
+        self.pp_size = max(int(getattr(parallelism_config, "pp_size", 1)), 1)
+        pp_rank = getattr(parallelism_config, "pp_rank", None)
+        if pp_rank is None:
+            pp_rank = derive_pp_rank(
+                getattr(parallelism_config, "world_rank", 0),
+                getattr(parallelism_config, "dp_size", 1),
+                getattr(parallelism_config, "tp_size", 1),
+            )
+        self.pp_rank = int(pp_rank)
+        # Materialized layer partition (decided once at startup by
+        # config/pp_layout.resolve_pp_partition). Empty/absent only on
+        # pp_size=1 or fake configs; pp>1 without it is a startup error.
+        pp_counts = getattr(parallelism_config, "pp_stage_layer_counts", None)
+        self.pp_stage_layer_counts = list(pp_counts) if pp_counts else None
         self.num_nodes: int = (
             parallelism_config.world_size // parallelism_config.local_world_size
         )
@@ -786,6 +805,10 @@ class ModelDeployWeightInfo:
             ep_rank=self.ep_rank,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
+            # PP stage identity from ParallelismConfig (see __init__).
+            pp_size=getattr(self, "pp_size", 1),
+            pp_rank=getattr(self, "pp_rank", 0),
+            pp_stage_layer_counts=getattr(self, "pp_stage_layer_counts", None),
             lm_head_tp_rank=self.lm_head_tp_rank,
             lm_head_tp_size=self.lm_head_tp_size,
             num_nodes=self.num_nodes,
