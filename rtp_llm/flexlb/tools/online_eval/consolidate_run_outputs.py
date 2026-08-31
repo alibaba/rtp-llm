@@ -27,9 +27,11 @@ Target layout (run root), one JSON + one log per component:
   master.log                 flexlb_logs/application.log (verbatim prefix) with
                              flexlb.log / sync.log / sync_consistency.log and the
                              run-root flexlb.log (master stdout) appended
-  client.json                load_client/summary.json base merged with
-                             server_latency.json + slo_batch_analysis.json +
-                             per-second aggregated timeline
+  client.json                server_latency.json + slo_batch_analysis.json
+                             embedded, plus per_request_source metadata
+                             (Phase B: no summary base — the load client
+                             records raw rows only and aggregate_canvas_run.py
+                             is the single derived-statistics source)
   client.log                 client_shard_*.stdout merged with shard headers
   per_request.jsonl(.gz)     merged per-request streams (plain when the total is
                              under PER_REQUEST_PLAIN_LIMIT_BYTES, gzip at
@@ -38,9 +40,9 @@ Target layout (run root), one JSON + one log per component:
 Kept in place (skill / tooling contract):
   endpoints.json, flexlb_env.txt, client_env.json,
   mock_per_engine_timeseries.json.gz (A-split target),
-  load_client/summary.json (flexlb-online-eval skill do_result reads it),
-  load_client/server_latency.json (the skill's fetch_server_latency reads it),
-  load_client/report.md, flexlb_logs/pv.log (only produced with FLEXLB_PV_LOG=on).
+  load_client/server_latency.json (aggregate validity input; the skill's
+  fetch_server_latency also reads it),
+  flexlb_logs/pv.log (only produced with FLEXLB_PV_LOG=on).
 
 Deleted after being merged: mock_engine.log, mock_engine_gc.log*,
 master_info_before.json, master_info_after.json, master_prometheus_after.prom,
@@ -50,7 +52,7 @@ process_usage_timeseries.txt, client_shard_*.stdout, client.stdout,
 flexlb.log (run root), flexlb_logs/ (minus pv.log), load_client/shard_*/,
 load_client/per_request.jsonl, slo_batch_analysis.stdout.
 load_client/slo_batch_analysis.json is deleted only once its content is
-embedded in client.json — a broken load_client/summary.json keeps it in place.
+embedded in client.json.
 
 Every artifact is written to a ``.tmp`` sibling first and then os.replace()d
 onto the final name, so an interrupted consolidation (kill, OOM, timeout)
@@ -75,7 +77,6 @@ import re
 import shutil
 import sys
 import urllib.request
-from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -93,9 +94,6 @@ PROMETHEUS_SAMPLE_RE = re.compile(
 )
 # flexlb_env.txt lines look like:   'DOMAIN_ADDRESS:mock.prefill.hosts.address=host:1,host:2' \
 ENV_FILE_LINE_RE = re.compile(r"^\s*'?([^=']+=[^']*)'?\s*\\?\s*$")
-# Pass-1 per-request scan: extract send_start_epoch_ms without json.loads so
-# the streaming aggregation can anchor its second buckets on the true minimum.
-SEND_START_RE = re.compile(r'"send_start_epoch_ms"\s*:\s*(-?\d+)')
 # Separator comment the per-second pollers prefix each sample with.
 PROM_GROUP_TS_RE = re.compile(r"^#\s*ts=(\d+)\s*$")
 # process_usage_timeseries.txt lines look like:
@@ -388,159 +386,22 @@ def endpoints_summary(endpoints: dict) -> dict:
     }
 
 
-# ---- shared impl（Phase A）：从 aggregate_canvas_run.py 切块复用统一口径 ----
-# is_ok 谓词 / classify_error 17 桶错误分类 / nearest-rank 分位等统计原语
-# 的唯一实现在 aggregate_canvas_run.py 的 shared-impl 段（sentinel 注释
-# 划界）。本文件原先自带一份 6+1 桶的重复实现（桶缺 11 个、谓词内联、
-# epoch0 把无时间戳行当 0.0 入桶），与 aggregate 口径漂移；现改为 exec
-# 切块复用同一份——不直接 import（aggregate 是脚本式顶层执行，import
-# 即跑一次完整聚合）。切块失败（文件缺失 / sentinel 漂移）直接 raise：
-# 两份口径静默漂移比立即失败更糟。
-SHARED_IMPL_BEGIN = "# ---- shared-impl-begin:"
-SHARED_IMPL_END = "# ---- shared-impl-end:"
+def count_jsonl_rows(paths: list[Path]) -> int:
+    """Non-blank line count across JSONL sources (per_request_source metadata).
 
-
-def load_shared_impl() -> dict:
-    """Exec the shared-impl block of aggregate_canvas_run.py into a namespace."""
-    src_path = Path(__file__).with_name("aggregate_canvas_run.py")
-    source = src_path.read_text(encoding="utf-8")
-    begin = source.index(SHARED_IMPL_BEGIN)
-    end = source.index(SHARED_IMPL_END)
-    namespace = {"re": re, "Counter": Counter}
-    exec(compile(source[begin:end], str(src_path), "exec"), namespace)
-    return namespace
-
-
-_SHARED = load_shared_impl()
-is_ok = _SHARED["is_ok"]
-classify_error = _SHARED["classify_error"]
-percentile_nr = _SHARED["percentile_nr"]
-
-
-class PerSecondAggregator:
-    """Streaming per-second aggregation over per-request JSONL rows.
-
-    Rows are parsed one at a time and reduced to per-second counters plus the
-    schedule_ms scalars needed for the p50/p95/p99 percentiles, so peak memory
-    stays bounded by the per-second scalar arrays instead of holding every row
-    dict (a ~500MB per_request stream would otherwise OOM the process).
-    Output shape matches the canvas per_second aggregation: the shared is_ok
-    predicate, the 17-bucket classify_error taxonomy and the nearest-rank
-    percentiles all come from aggregate_canvas_run.py's shared-impl block
-    (Phase A: replaces the local 6+1-bucket duplicate; the epoch0 anchoring is
-    likewise unified to skip unstamped rows instead of counting them as 0.0).
+    Phase B: replaces the streaming PerSecondAggregator — client.json's
+    per_second timeline had no consumers left (aggregate_canvas_run.py
+    recomputes per_second from the run-root per_request.jsonl itself, and
+    analyze_eval_run.py / the canvas report both read the aggregate), so
+    only the cheap row-count metadata survives. Counts lines without
+    json.loads: a single pass, no per-row parsing.
     """
-
-    ERROR_BUCKETS = (
-        "err_no_decode",
-        "err_no_prefill",
-        "err_queue_full",
-        "err_deadline",
-        "err_priority",
-        "err_preempted",
-        "err_yielded",
-        "err_backpressure",
-        "err_queue_timeout",
-        "err_rst_stream",
-        "err_goaway",
-        "err_unavailable",
-        "err_cancelled",
-        "err_internal",
-        "err_empty_response",
-        "err_duplicate_rid",
-        "err_other",
-    )
-
-    def __init__(self) -> None:
-        self.epoch0: float | None = None
-        self.row_count = 0
-        self.unstamped = 0
-        self._buckets: dict[int, dict] = {}
-
-    def scan_start_floor(self, path: Path) -> None:
-        """First pass: regex-scan the send_start_epoch_ms floor.
-
-        Runs without json.loads (a regex per line is cheap). Lines without the
-        field — or carrying 0, as synthesized timeout/exception rows do — are
-        SKIPPED: the floor is the min over rows that actually carry a truthy
-        send_start_epoch_ms (aggregate's epoch0 anchoring, Phase A unified).
-        """
+    total = 0
+    for path in paths:
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rt", encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                match = SEND_START_RE.search(line)
-                if not match:
-                    continue
-                value = float(match.group(1))
-                if not value:
-                    continue
-                if self.epoch0 is None or value < self.epoch0:
-                    self.epoch0 = value
-
-    def add_rows_from(self, path: Path) -> None:
-        """Second pass: parse rows one at a time and aggregate immediately."""
-        opener = gzip.open if path.suffix == ".gz" else open
-        with opener(path, "rt", encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(row, dict):
-                    self.add_row(row)
-
-    def add_row(self, row: dict) -> None:
-        started = row.get("send_start_epoch_ms")
-        self.row_count += 1
-        if not started:
-            # Skip-unstamped anchoring (aggregate parity): rows without a
-            # usable send timestamp cannot be placed on the time axis; they
-            # are counted separately instead of landing in a huge-negative
-            # second bucket.
-            self.unstamped += 1
-            return
-        started = float(started)
-        if self.epoch0 is None:
-            self.epoch0 = started
-        second = int((started - self.epoch0) // 1000)
-        bucket = self._buckets.setdefault(
-            second,
-            {
-                "arrivals": 0,
-                "success": 0,
-                "errors": 0,
-                **{key: 0 for key in self.ERROR_BUCKETS},
-                "sched": [],
-            },
-        )
-        bucket["arrivals"] += 1
-        if is_ok(row):
-            bucket["success"] += 1
-            bucket["sched"].append(float(row.get("schedule_ms", 0) or 0))
-        else:
-            bucket["errors"] += 1
-            bucket[classify_error(row.get("status", ""), row.get("error") or "")] += 1
-
-    def timeline(self) -> list[dict]:
-        buckets: list[dict] = []
-        for second in sorted(self._buckets):
-            bucket = self._buckets[second]
-            buckets.append(
-                {
-                    "t": second,
-                    "arrivals": bucket["arrivals"],
-                    "success": bucket["success"],
-                    "errors": bucket["errors"],
-                    **{key: bucket[key] for key in self.ERROR_BUCKETS},
-                    "sched_p50": percentile_nr(bucket["sched"], 0.5),
-                    "sched_p95": percentile_nr(bucket["sched"], 0.95),
-                    "sched_p99": percentile_nr(bucket["sched"], 0.99),
-                }
-            )
-        return buckets
+            total += sum(1 for line in stream if line.strip())
+    return total
 
 
 def copy_stream(source: Path, sink) -> None:
@@ -869,13 +730,11 @@ def consolidate(
 
     # ---- per_request merge (before shard cleanup, feeds client.json) -------
     per_request_sources = collect_per_request_sources(run_dir, load_client)
-    aggregator = PerSecondAggregator()
+    row_count = 0
     if per_request_sources:
         total_bytes = sum(path.stat().st_size for path in per_request_sources)
         plain = total_bytes < PER_REQUEST_PLAIN_LIMIT_BYTES
         target = run_dir / ("per_request.jsonl" if plain else "per_request.jsonl.gz")
-        for path in per_request_sources:
-            aggregator.scan_start_floor(path)
         tmp = target.with_name(target.name + ".tmp")
 
         def fill_per_request(sink) -> None:
@@ -894,67 +753,48 @@ def consolidate(
         alternate = run_dir / ("per_request.jsonl.gz" if plain else "per_request.jsonl")
         if alternate.is_file():
             alternate.unlink()
-        for path in per_request_sources:
-            aggregator.add_rows_from(path)
+        row_count = count_jsonl_rows([target])
         report["created"].append(target.name)
     else:
-        # Re-run on a consolidated dir: recover the rows from the run-root
-        # merged file (read-only) so per_second can be rebuilt.
+        # Re-run on a consolidated dir: the merged run-root file is the only
+        # row source left (read-only) — recover the row count from it.
         for name in ("per_request.jsonl", "per_request.jsonl.gz"):
             path = run_dir / name
             if path.is_file():
-                aggregator.scan_start_floor(path)
-                aggregator.add_rows_from(path)
+                row_count = count_jsonl_rows([path])
                 break
 
     # ---- client.json / client.log -------------------------------------------
-    summary_path = load_client / "summary.json"
-    summary: dict = {}
-    if summary_path.is_file():
-        try:
-            payload = json.loads(summary_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("summary.json is not a JSON object")
-            summary = payload
-        except (OSError, ValueError) as exc:
-            warn(
-                f"load_client/summary.json is unreadable ({exc}); client.json "
-                f"not rewritten and slo_batch_analysis.json kept in place"
-            )
-            summary = {}
-
-    if summary:
-        # Start from the existing client.json (re-run case) so merged-away
-        # sources (server_latency / slo / per_second) survive a re-run; the
-        # fresh summary then overrides its own keys.
-        client_payload = dict(load_json(run_dir / "client.json"))
-        client_payload.update(summary)
-        # server_latency.json is kept in place (the skill reads that exact
-        # path) but is still merged into client.json for single-file readers.
-        server_latency = load_json(load_client / "server_latency.json")
-        if server_latency:
-            client_payload["server_latency"] = server_latency
-        elif not isinstance(client_payload.get("server_latency"), dict):
-            client_payload["server_latency"] = {}
-        if slo:
-            client_payload["slo_batch_analysis"] = slo
-        per_second = aggregator.timeline()
-        if per_second:
-            client_payload["per_second"] = per_second
-        if per_request_sources:
-            client_payload["per_request_source"] = {
-                "shard_count": len(per_request_sources),
-                "row_count": aggregator.row_count,
-            }
-        elif "per_request_source" not in client_payload:
-            # Re-run recovery mode (no legacy sources left): the previous
-            # shard_count is the only record of the original worker layout.
-            client_payload["per_request_source"] = {
-                "shard_count": 0,
-                "row_count": aggregator.row_count,
-            }
-        write_json_atomic(run_dir / "client.json", client_payload)
-        report["created"].append("client.json")
+    # Phase B: load_client/summary.json no longer exists (the Java client
+    # records raw rows only; aggregate_canvas_run.py is the single derived-
+    # statistics source). client.json is now a small embedding document —
+    # server_latency + slo_batch_analysis + per_request_source — seeded from
+    # the existing client.json (re-run case) so merged-away sources survive.
+    client_payload = dict(load_json(run_dir / "client.json"))
+    # server_latency.json is kept in place (aggregate validity input; the
+    # skill's fetch_server_latency reads that exact path) but is still
+    # embedded into client.json for single-file readers.
+    server_latency = load_json(load_client / "server_latency.json")
+    if server_latency:
+        client_payload["server_latency"] = server_latency
+    elif not isinstance(client_payload.get("server_latency"), dict):
+        client_payload["server_latency"] = {}
+    if slo:
+        client_payload["slo_batch_analysis"] = slo
+    if per_request_sources:
+        client_payload["per_request_source"] = {
+            "shard_count": len(per_request_sources),
+            "row_count": row_count,
+        }
+    elif "per_request_source" not in client_payload:
+        # Re-run recovery mode (no legacy sources left): the previous
+        # shard_count is the only record of the original worker layout.
+        client_payload["per_request_source"] = {
+            "shard_count": 0,
+            "row_count": row_count,
+        }
+    write_json_atomic(run_dir / "client.json", client_payload)
+    report["created"].append("client.json")
 
     shard_stdouts = sorted(run_dir.glob("client_shard_*.stdout"))
     single_stdout = run_dir / "client.stdout"
@@ -978,9 +818,9 @@ def consolidate(
 
     # ---- cleanup of merged sources -----------------------------------------
     # Deletion is bound to successful merges: slo_batch_analysis.json is only
-    # removed once its content is embedded in client.json (which requires a
-    # readable summary — see the WARNING above). server_latency.json stays
-    # in place entirely (skill fetch_server_latency contract).
+    # removed once its content is embedded in client.json. server_latency.json
+    # stays in place entirely (aggregate validity input + skill
+    # fetch_server_latency contract).
     for name in (
         "master_info_before.json",
         "master_info_after.json",
@@ -994,7 +834,7 @@ def consolidate(
         path = run_dir / name
         if path.is_file():
             deleted.append(path)
-    if summary and slo:
+    if slo:
         deleted.append(slo_path)
     slo_stdout = run_dir / "slo_batch_analysis.stdout"
     if slo_stdout.is_file():
@@ -1020,9 +860,7 @@ def consolidate(
             "flexlb_env.txt",
             "client_env.json",
             "mock_per_engine_timeseries.json.gz",
-            "load_client/summary.json",
             "load_client/server_latency.json",
-            "load_client/report.md",
             "flexlb_profile.jfr",
         ]
     )

@@ -248,13 +248,13 @@ def latency_summary(values, nd=1):
 
 
 # ---- inputs: consolidated run-root layout (the only supported form) ----
-# 当前格式（consolidate 后）：client.json（summary 源：SH 合并段标量键 +
-# server_latency / slo 嵌入）+ run 根 per_request.jsonl(.gz) + master.json +
-# mock.json。legacy load_client/summary.json 双源切换与 shard_* 布局读取链
-# 已删（no-backward-compat，旧 run 不再是支持对象）；summary.json 文件
-# 本身仍由 SH 合并段产出、skill do_result 直读，aggregate 不再从它读指标
-# ——仅从 client.json 直读个别不可自算的元数据（sent_task_count /
-# load_client_workers，Phase B 后自然消失为 None）。
+# 当前格式（consolidate 后）：client.json（server_latency / slo 嵌入）+
+# run 根 per_request.jsonl(.gz) + master.json + mock.json。legacy
+# load_client/summary.json 双源切换与 shard_* 布局读取链已删
+# （no-backward-compat，旧 run 不再是支持对象）；summary.json 文件随
+# Phase B 一并消失（client 只记原始 rows），aggregate 的全部派生统计
+# 自 rows 计算，元数据键（sent_task_count / load_client_workers）同样
+# rows / client.json 自算，不再从任何 client 侧 summary 透传。
 client_json = load_json("client.json") or {}
 summary = client_json
 slo = client_json.get("slo_batch_analysis") or {}
@@ -566,9 +566,22 @@ if full_e2e_all:
 _have_rows = bool(rows)
 _actual_rpc_start_count = len(rpc_start_ms)  # sh: sum(shard actual_sent_count)
 _recorded_result_count = len(rows)  # sh: sum(shard recorded_result_count)
-# sent_task_count 无 row 级来源（未发出的任务不留行）→ 从 client.json
-# 单键直读（元数据，非指标回退；Phase B 后 SH 合并段删除、该键自然为 None）。
-_sent_task_count = summary.get("sent_task_count")
+# sent_task_count = rows 自算（Phase B）：JavaLoadClient 每个 dispatch 的
+# 任务终态必落一行（handleRequest 全路径返回 result，
+# collectOutstandingResults 为 outstanding future 合成行），len(rows)
+# 即发送循环 dispatch 总数（旧 SH 段 sum(sent_count) 的等价口径）。
+_sent_task_count = len(rows)
+# load_client_workers = rows 布局自算（Phase B）：consolidate 在 client.json
+# 的 per_request_source.shard_count 记录实际分片数（单 worker 文件 = 1，
+# 多 worker = shard 目录数，与旧 worker_count 同口径）；re-run 恢复模式
+# （=0）回落 run_meta params 的配置值。
+_prs = client_json.get("per_request_source") or {}
+_shard_count = _prs.get("shard_count")
+_load_client_workers = (
+    _shard_count
+    if isinstance(_shard_count, int) and _shard_count > 0
+    else run_meta.get("params", {}).get("load_client_workers")
+)
 _error_count_calc = len(rows) - ok_count  # 与 error_breakdown 同口径（全量行）
 _success_count_calc = ok_count
 # pacing 分布：sh distribution 的 round 3 精度（p99 与 limit 比较保真）。
@@ -1928,8 +1941,8 @@ out = {
         # 错误构成（具名子桶细分，含无时间戳行，与 error_count 同口径；
         # rows 缺失时空 dict（无数据，非透传）。
         "error_breakdown": dict(error_breakdown),
-        "sent_task_count": _sent_task_count,
-        "load_client_workers": summary.get("load_client_workers"),
+        "sent_task_count": _sent_task_count if _have_rows else None,
+        "load_client_workers": _load_client_workers,
         "actual_rpc_start_count": _actual_rpc_start_count if _have_rows else None,
         "recorded_result_count": _recorded_result_count if _have_rows else None,
         "completed_count": completed_count if _have_rows else None,

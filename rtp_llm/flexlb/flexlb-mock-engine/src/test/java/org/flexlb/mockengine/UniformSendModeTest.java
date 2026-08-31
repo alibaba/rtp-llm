@@ -138,12 +138,11 @@ class UniformSendModeTest {
                     "non-uniform interval at index " + i);
         }
 
-        // Summary carries the uniform send-mode fields for reporting.
-        JsonNode summary = MAPPER.readTree(outDir.resolve("summary.json").toFile());
-        assertEquals("uniform", summary.get("send_mode").asText());
-        assertEquals(50.0, summary.get("target_qps").asDouble(), 1e-9);
-        assertEquals(50.0, summary.get("per_shard_qps").asDouble(), 1e-9);
-        assertEquals(20.0, summary.get("uniform_interval_ms").asDouble(), 1e-9);
+        // The client records raw rows only (no summary.json): the achieved
+        // send rate is recovered from send_due_epoch_ms itself.
+        double spanS = (dues.get(dues.size() - 1) - dues.get(0)) / 1000.0;
+        double achievedQps = (dues.size() - 1) / Math.max(spanS, 1e-9);
+        assertEquals(50.0, achievedQps, 1.0, "achieved QPS far from target");
     }
 
     @Test
@@ -170,9 +169,11 @@ class UniformSendModeTest {
                     "non-uniform per-shard interval at index " + i);
         }
 
-        JsonNode summary = MAPPER.readTree(outDir.resolve("summary.json").toFile());
-        assertEquals(200.0, summary.get("target_qps").asDouble(), 1e-9);
-        assertEquals(50.0, summary.get("per_shard_qps").asDouble(), 1e-9);
+        // Per-shard rate is recovered from the raw dues (20ms interval =
+        // 50 QPS on this shard; the 200 QPS total is the 4-shard sum).
+        double spanS = (dues.get(dues.size() - 1) - dues.get(0)) / 1000.0;
+        double perShardQps = (dues.size() - 1) / Math.max(spanS, 1e-9);
+        assertEquals(50.0, perShardQps, 1.0, "per-shard QPS far from target");
     }
 
     @Test
@@ -188,7 +189,7 @@ class UniformSendModeTest {
     }
 
     // ------------------------------------------------------------------
-    // Replay default path: behavior and summary format unchanged.
+    // Replay default path: behavior unchanged, raw output only.
     // ------------------------------------------------------------------
 
     @Test
@@ -211,10 +212,8 @@ class UniformSendModeTest {
             assertFalse(rid.contains("_S"), "unexpected loop suffix: " + rid);
         }
 
-        // Replay summary must not grow uniform-only fields.
-        JsonNode summary = MAPPER.readTree(outDir.resolve("summary.json").toFile());
-        assertFalse(summary.has("send_mode"));
-        assertFalse(summary.has("target_qps"));
-        assertFalse(summary.has("uniform_interval_ms"));
+        // The client writes no summary.json at all anymore: raw rows only.
+        assertFalse(Files.exists(outDir.resolve("summary.json")),
+                "client must not write summary.json");
     }
 }

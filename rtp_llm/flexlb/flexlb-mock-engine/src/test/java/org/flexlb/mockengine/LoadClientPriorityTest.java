@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -22,8 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * single-level pin (overrides both), propagation onto
  * FlexlbScheduleRequestPB.priority (field 14; 0 keeps it off the wire),
  * validation with graceful fallback (warn + default, never a hard fail),
- * and the per-priority stats view used by priority-dimension assertions
- * (synthesized and unset rows surface under "unset", never as p0 traffic).
+ * and raw per-request row serialization (synthesized rows omit the
+ * priority key entirely rather than writing a misleading 0).
  */
 class LoadClientPriorityTest {
 
@@ -144,56 +143,7 @@ class LoadClientPriorityTest {
         assertEquals(100, truncated.get(0).outputLen);
     }
 
-    // ---- per-priority stats view ----
-
-    @Test
-    void priorityBreakdownGroupsCompletedRejectedAndLatency() {
-        List<JavaLoadClient.RequestResult> rows = new ArrayList<>();
-        rows.add(result(70, "ok", 10.0));
-        rows.add(result(70, "scheduled", 20.0));
-        rows.add(result(70, "schedule_error", 5.0));
-        rows.add(result(30, "ok", 40.0));
-        rows.add(result(30, "exception", 0.0));
-        rows.add(result(0, "ok", 8.0));
-
-        ObjectNode stats = JavaLoadClient.priorityBreakdown(rows);
-
-        assertEquals(3, stats.get("70").get("total").asInt());
-        assertEquals(2, stats.get("70").get("completed").asInt());
-        assertEquals(1, stats.get("70").get("rejected").asInt());
-        assertEquals(15.0, stats.get("70").get("avg_schedule_ms").asDouble(), 1e-9);
-
-        assertEquals(2, stats.get("30").get("total").asInt());
-        assertEquals(1, stats.get("30").get("completed").asInt());
-        assertEquals(1, stats.get("30").get("rejected").asInt());
-        assertEquals(40.0, stats.get("30").get("avg_schedule_ms").asDouble(), 1e-9);
-
-        // priority=0 rows never enter the numeric buckets: they were sent
-        // unset, so they surface under "unset" for row-count reconciliation.
-        assertFalse(stats.has("0"), "unset rows must not appear as the 0 bucket");
-        assertEquals(1, stats.get("unset").get("total").asInt());
-        assertEquals(1, stats.get("unset").get("completed").asInt());
-        assertEquals(0, stats.get("unset").get("rejected").asInt());
-        assertFalse(stats.has("40"), "unobserved priorities must not appear");
-    }
-
-    @Test
-    void syntheticTimeoutRowsStayOutOfPriorityBuckets() {
-        List<JavaLoadClient.RequestResult> rows = new ArrayList<>();
-        rows.add(result(70, "ok", 10.0));
-        rows.add(syntheticResult("timeout"));
-        rows.add(syntheticResult("exception"));
-
-        ObjectNode stats = JavaLoadClient.priorityBreakdown(rows);
-
-        // Real rows keep their bucket; synthesized rows never carried a
-        // request, so they must not be counted as p0 traffic.
-        assertEquals(1, stats.get("70").get("total").asInt());
-        assertFalse(stats.has("0"), "synthetic rows must not enter the 0 bucket");
-        assertEquals(2, stats.get("unset").get("total").asInt());
-        assertEquals(0, stats.get("unset").get("completed").asInt());
-        assertEquals(2, stats.get("unset").get("rejected").asInt());
-    }
+    // ---- raw per-request row serialization ----
 
     @Test
     void syntheticRowsOmitThePriorityKey() {

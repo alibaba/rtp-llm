@@ -342,10 +342,10 @@ consolidate_run_outputs_now() {
   # see consolidate_run_outputs.py's docstring for the full keep/delete list).
   # Runs while the mock cluster and master are still alive (cleanup kills them
   # on EXIT), so the final cluster snapshot is captured from the control plane.
-  # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr,
-  # load_client/summary.json (the flexlb-online-eval skill reads that exact
-  # path), load_client/server_latency.json (skill fetch_server_latency) and
-  # load_client/report.md.
+  # Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
+  # and load_client/server_latency.json (aggregate validity input; the skill's
+  # fetch_server_latency also reads it). Phase B: the client no longer writes
+  # summary.json / report.md, so they no longer appear in the keep list.
   local trace_file_sha256 trace_file_lines
   trace_file_sha256="$(compute_file_digest "${TRACE_FILE}")"
   trace_file_lines="$(count_file_lines "${TRACE_FILE}")"
@@ -1110,7 +1110,11 @@ start_secondary_pollers
 # identical across shards except OUTPUT_DIR / SHARD_INDEX /
 # SKIP_SERVER_LATENCY, and the worker layout itself is captured by
 # LOAD_CLIENT_WORKERS). consolidate_run_outputs.py embeds it into
-# run_meta.json as client_env, sibling of flexlb_env.
+# run_meta.json as client_env, sibling of flexlb_env. Phase B also records
+# CLIENT_PACING_LAG_P99_LIMIT_MS here: not a Java env (the client never
+# reads it) but the pacing validity limit aggregate_canvas_run.py reads
+# from run_meta.client_env — the merge heredoc that used to take it as
+# argv is gone, so this snapshot is its only path into the aggregate.
 write_client_env_snapshot() {
   python3 - "${RUN_DIR}/client_env.json" "PRIORITY=" "$@" <<'PY'
 import json
@@ -1171,7 +1175,8 @@ launch_java_load_client() {
       "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
       "ENABLE_FALLBACK=${ENABLE_FALLBACK:-0}" \
       "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
-      "DRY_RUN=${DRY_RUN:-0}"
+      "DRY_RUN=${DRY_RUN:-0}" \
+      "CLIENT_PACING_LAG_P99_LIMIT_MS=${CLIENT_PACING_LAG_P99_LIMIT_MS}"
   fi
   run_java_load_client \
     "TRACE_FILE=${TRACE_FILE}" \
@@ -1232,189 +1237,38 @@ else
   for pid in "${CLIENT_PIDS[@]}"; do
     wait "${pid}" || CLIENT_EXIT=$?
   done
+fi
 
-  curl -fsS "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency" \
-    >"${RUN_DIR}/load_client/server_latency.json"
-  python3 - "${RUN_DIR}/load_client" "${LOAD_CLIENT_WORKERS}" \
-    "${CLIENT_PACING_LAG_P99_LIMIT_MS}" <<'PY'
-import collections
-import json
-import math
-import pathlib
-import sys
-
-output_dir = pathlib.Path(sys.argv[1])
-worker_count = int(sys.argv[2])
-pacing_limit_ms = float(sys.argv[3])
-shards = [
-    json.loads((output_dir / f"shard_{index}" / "summary.json").read_text())
-    for index in range(worker_count)
-]
-server = json.loads((output_dir / "server_latency.json").read_text())
-
-rpc_start_ms = []
-send_due_ms = []
-pacing_lag_ms = []
-priority_rows = []
-for index in range(worker_count):
-    request_path = output_dir / f"shard_{index}" / "per_request.jsonl"
-    with request_path.open("r", encoding="utf-8") as stream:
-        for line in stream:
-            record = json.loads(line)
-            # Java load client emits per-record priority; synthesized rows
-            # (collector timeout/exception fallbacks) omit the key entirely,
-            # so key absence already excludes them. priority=0 rows were
-            # explicitly sent unset and land in the "unset" group below. The
-            # legacy Python client does not emit the key at all.
-            if "priority" in record:
-                priority_rows.append((
-                    int(record.get("priority") or 0),
-                    str(record.get("status", "")),
-                    float(record.get("schedule_ms", 0.0) or 0.0),
-                ))
-            start_ms = float(record.get("send_start_epoch_ms", 0.0) or 0.0)
-            if start_ms <= 0:
-                continue
-            rpc_start_ms.append(start_ms)
-            send_due_ms.append(float(record.get("send_due_epoch_ms", 0.0) or 0.0))
-            pacing_lag_ms.append(float(record.get("pacing_lag_ms", 0.0) or 0.0))
-
-def percentile(values, quantile):
-    if not values:
-        return 0.0
-    ordered = sorted(values)
-    return round(ordered[max(0, math.ceil(len(ordered) * quantile) - 1)], 3)
-
-def distribution(values):
-    if not values:
-        return {"count": 0, "mean": 0.0, "p50": 0.0, "p90": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0}
-    return {
-        "count": len(values),
-        "mean": round(sum(values) / len(values), 3),
-        "p50": percentile(values, 0.50),
-        "p90": percentile(values, 0.90),
-        "p95": percentile(values, 0.95),
-        "p99": percentile(values, 0.99),
-        "max": round(max(values), 3),
-    }
-
-def rate(values):
-    if len(values) < 2:
-        return 0.0
-    first, last = min(values), max(values)
-    return round((len(values) - 1) * 1000.0 / (last - first), 3) if last > first else 0.0
-
-def peak_qps(values, window_ms):
-    buckets = collections.Counter(int(value // window_ms) for value in values)
-    return round(max(buckets.values(), default=0) * 1000.0 / window_ms, 3)
-
-actual_rpc_start_count = sum(item.get("actual_sent_count", 0) for item in shards)
-recorded_result_count = sum(item.get("recorded_result_count", item.get("total_requests", 0)) for item in shards)
-sent_task_count = sum(item.get("sent_count", 0) for item in shards)
-pacing = distribution(pacing_lag_ms)
-success_count = sum(item.get("success_count", 0) for item in shards)
-error_count = sum(item.get("error_count", 0) for item in shards)
-validity_checks = {
-    "zero_errors": error_count == 0,
-    "all_scheduled_tasks_started": sent_task_count == actual_rpc_start_count,
-    "all_started_rpcs_recorded": actual_rpc_start_count == recorded_result_count,
-    "master_arrival_matches_success": server.get("arrival_count", 0) == success_count,
-    "master_completion_matches_success": server.get("completion_count", 0) == success_count,
-    "client_pacing_p99_within_limit": pacing["p99"] <= pacing_limit_ms,
-}
-# Uniform send-mode fields are propagated from the shard summaries so the
-# aggregated report shows the arrival process (fields absent in replay mode).
-send_mode_fields = {}
-if shards and shards[0].get("send_mode") == "uniform":
-    send_mode_fields = {
-        key: shards[0].get(key)
-        for key in ("send_mode", "target_qps", "per_shard_qps", "uniform_interval_ms",
-                    "ramp_up_seconds")
-    }
-summary = {
-    "load_client_workers": worker_count,
-    **send_mode_fields,
-    "sent_task_count": sent_task_count,
-    "actual_rpc_start_count": actual_rpc_start_count,
-    "recorded_result_count": recorded_result_count,
-    "total_requests": recorded_result_count,
-    "success_count": success_count,
-    "error_count": error_count,
-    "actual_send_qps": rate(rpc_start_ms),
-    "client_pacing_lag_ms": pacing,
-    "client_send_peak_qps": {
-        f"{window_ms}ms": peak_qps(rpc_start_ms, window_ms)
-        for window_ms in (1, 10, 100, 1000)
-    },
-    "trace_due_peak_qps": {
-        f"{window_ms}ms": peak_qps(send_due_ms, window_ms)
-        for window_ms in (1, 10, 100, 1000)
-    },
-    "server_arrival_qps": server.get("arrival_qps", 0.0),
-    "server_completion_qps": server.get("completion_qps", 0.0),
-    "schedule_latency_source": "server",
-    "schedule_latency_ms": server.get("server_total_ms", {}),
-    "server_stage_latency_ms": {
-        key: server.get(key, {})
-        for key in ("grpc_queue_ms", "route_submit_ms", "batch_wait_ms", "dispatch_ack_ms", "ack_response_ms")
-    },
-    "shard_summaries": [f"shard_{index}/summary.json" for index in range(worker_count)],
-    "validity_checks": validity_checks,
-    "test_valid": all(validity_checks.values()),
-}
-summary["error_rate"] = round(
-    summary["error_count"] / summary["total_requests"], 6
-) if summary["total_requests"] else 0.0
-if priority_rows:
-    # Same layout as the Java client shard-level priority_stats:
-    # {"<priority>": {total, completed, rejected, avg_schedule_ms}} with
-    # "unset" for rows that carried no real priority (PRIORITY=0 legacy;
-    # synthesized rows omit the key outright and are skipped above by
-    # key absence, mirroring the Java unset-bucket semantics).
-    groups = {}
-    for prio, status, schedule_ms in priority_rows:
-        key = str(prio) if prio > 0 else "unset"
-        group = groups.setdefault(key, {"total": 0, "completed": 0, "rejected": 0, "sum": 0.0, "n": 0})
-        group["total"] += 1
-        if status in ("ok", "scheduled"):
-            group["completed"] += 1
-            if schedule_ms > 0:
-                group["sum"] += schedule_ms
-                group["n"] += 1
-        else:
-            group["rejected"] += 1
-    summary["priority_stats"] = {
-        prio: {
-            "total": group["total"],
-            "completed": group["completed"],
-            "rejected": group["rejected"],
-            "avg_schedule_ms": round(group["sum"] / group["n"], 3) if group["n"] else 0.0,
-        }
-        for prio, group in sorted(groups.items())
-    }
-(output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
-(output_dir / "report.md").write_text(
-    "# FlexLB multi-client performance\n\n"
-    f"- Load client workers: {worker_count}\n"
-    f"- Actual send QPS: {summary['actual_send_qps']}\n"
-    f"- Client pacing P99 (ms): {summary['client_pacing_lag_ms']['p99']}\n"
-    f"- Server arrival QPS: {summary['server_arrival_qps']}\n"
-    f"- Server completion QPS: {summary['server_completion_qps']}\n"
-    f"- Total requests: {summary['total_requests']}\n"
-    f"- Error count: {summary['error_count']}\n"
-    f"- Error rate: {summary['error_rate']}\n"
-    f"- Test valid: {summary['test_valid']} ({json.dumps(summary['validity_checks'])})\n"
-    f"- Server latency: {json.dumps(summary['schedule_latency_ms'])}\n"
-)
-print(json.dumps(summary, indent=2))
-PY
-  if [[ "${CLIENT_EXIT}" -ne 0 ]]; then
-    # R12: best-effort consolidation on the load-client failure path so a
-    # failed client still leaves a consolidated (analyzable) directory; the
-    # CONSOLIDATED sentinel keeps this to one pass per script invocation.
-    consolidate_run_outputs_now
-    exit "${CLIENT_EXIT}"
+# Phase B: the multi-worker merge heredoc (shard summary.json scan, validity
+# computation, priority_stats, merged summary.json + report.md) is gone —
+# aggregate_canvas_run.py, invoked after consolidation below, is now the
+# single derived-statistics source, fed by the consolidated per_request rows
+# and the terminal server_latency snapshot taken here. Fetched once after
+# ALL load clients have exited: multi-worker shards run with
+# SKIP_SERVER_LATENCY=1 so this is their only snapshot, while the
+# single-worker Java client already wrote its own (this refreshes it).
+# START_FLEXLB=0 skips the fetch (the endpoint belongs to the master this
+# script spawns); a failed fetch is a WARNING, never a run failure —
+# aggregation then reports the two master-side validity items as
+# data-missing. tmp+mv keeps a previously written client snapshot intact
+# when the fetch fails.
+if [[ "${START_FLEXLB}" == "1" ]]; then
+  if curl -fsS "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency" \
+      >"${RUN_DIR}/load_client/server_latency.json.tmp" 2>/dev/null; then
+    mv "${RUN_DIR}/load_client/server_latency.json.tmp" \
+      "${RUN_DIR}/load_client/server_latency.json"
+  else
+    rm -f "${RUN_DIR}/load_client/server_latency.json.tmp"
+    echo "WARNING: terminal server_latency fetch failed (master-side validity items will be data-missing)" >&2
   fi
+fi
+
+if [[ "${CLIENT_EXIT:-0}" -ne 0 ]]; then
+  # R12: best-effort consolidation on the load-client failure path so a
+  # failed client still leaves a consolidated (analyzable) directory; the
+  # CONSOLIDATED sentinel keeps this to one pass per script invocation.
+  consolidate_run_outputs_now
+  exit "${CLIENT_EXIT}"
 fi
 
 stop_master_counter_poller
@@ -1449,11 +1303,13 @@ fi
 # see consolidate_run_outputs.py's docstring for the full keep/delete list).
 # Runs while the mock cluster and master are still alive (cleanup kills them
 # on EXIT), so the final cluster snapshot is captured from the control plane.
-# Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr,
-# load_client/summary.json (the flexlb-online-eval skill reads that exact
-# path) and load_client/report.md.
+# Kept in place on purpose: endpoints.json, flexlb_env.txt, flexlb_profile.jfr
+# and load_client/server_latency.json (aggregate validity input). Phase B:
+# the client no longer writes summary.json / report.md — every derived
+# statistic lives in aggregate.json, produced by the aggregate step right
+# after consolidation below.
 
-echo "summary=${RUN_DIR}/load_client/summary.json"
+echo "aggregate=${RUN_DIR}/aggregate.json"
 echo "run_meta=${RUN_DIR}/run_meta.json"
 echo "mock=${RUN_DIR}/mock.json (${RUN_DIR}/mock.log)"
 echo "master=${RUN_DIR}/master.json (${RUN_DIR}/master.log)"
@@ -1466,26 +1322,54 @@ fi
 echo "report=${RUN_DIR}/load_client/report.md"
 echo "jfr=${JFR_FILE}"
 
-# K1: consolidate AFTER the summary= / artifact echo above and BEFORE the
+# K1: consolidate AFTER the aggregate= / artifact echo above and BEFORE the
 # test_valid verdict below. The consolidation's per_request gzip pass can
 # take tens of seconds on large runs while the flexlb-online-eval skill's
-# timeout window is only DURATION+180s — printing the summary line first
+# timeout window is only DURATION+180s — printing the aggregate line first
 # guarantees the correct exit code and artifact paths are already visible
-# even if consolidation is slow or interrupted.
+# even if consolidation (or the aggregation below) is slow or interrupted.
 consolidate_run_outputs_now
 
-SUMMARY_FILE="${RUN_DIR}/load_client/summary.json"
-if [[ -f "${SUMMARY_FILE}" ]]; then
-  TEST_VALID="$(python3 - "${SUMMARY_FILE}" <<'PY'
+# Phase B: run-level aggregation now happens inside the run itself (was the
+# skill's post-hoc step). aggregate_canvas_run.py derives every statistic
+# from the consolidated rows + server_latency + client_env snapshot and
+# writes aggregate.json — the single derived-metrics source. Same
+# best-effort semantics as consolidation: a failure is a WARNING, never a
+# run failure. Must run with the run dir as CWD (the script locates all
+# inputs relative to os.getcwd()).
+if ( cd "${RUN_DIR}" && python3 "${SCRIPT_DIR}/aggregate_canvas_run.py" \
+    >"${RUN_DIR}/aggregate.json" ); then
+  :
+else
+  echo "WARNING: aggregate_canvas_run.py failed; aggregate.json not written" >&2
+fi
+
+# TEST_VERDICT: read test_valid from the aggregate summary (the merge
+# heredoc's old summary.json verdict is gone). A missing aggregate.json or
+# an unparsable one is a WARNING only — the client exit code stays the
+# script's verdict, we never fabricate one. test_valid=null (None) means
+# data-missing: not false, no exit 1. test_valid=false keeps the INVALID
+# PERFORMANCE RUN semantics.
+AGGREGATE_FILE="${RUN_DIR}/aggregate.json"
+if [[ -f "${AGGREGATE_FILE}" ]]; then
+  TEST_VALID="$(python3 - "${AGGREGATE_FILE}" <<'PY'
 import json
 import sys
 
-value = json.load(open(sys.argv[1], encoding="utf-8")).get("test_valid")
-print("unknown" if value is None else str(bool(value)).lower())
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))["summary"]["test_valid"]
+except (OSError, ValueError, KeyError, TypeError):
+    print("parse_error")
+else:
+    print("unknown" if value is None else str(bool(value)).lower())
 PY
 )"
-  if [[ "${TEST_VALID}" == "false" ]]; then
-    echo "INVALID PERFORMANCE RUN: see validity_checks in ${SUMMARY_FILE}" >&2
+  if [[ "${TEST_VALID}" == "parse_error" ]]; then
+    echo "WARNING: could not read summary.test_valid from ${AGGREGATE_FILE}; no verdict (client exit code preserved)" >&2
+  elif [[ "${TEST_VALID}" == "false" ]]; then
+    echo "INVALID PERFORMANCE RUN: see validity_checks in ${AGGREGATE_FILE}" >&2
     exit 1
   fi
+else
+  echo "WARNING: ${AGGREGATE_FILE} missing; no test_valid verdict (client exit code preserved)" >&2
 fi

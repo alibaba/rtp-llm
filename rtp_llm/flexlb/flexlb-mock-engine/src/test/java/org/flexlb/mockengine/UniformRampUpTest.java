@@ -152,7 +152,7 @@ class UniformRampUpTest {
     }
 
     // ------------------------------------------------------------------
-    // End-to-end: run() in dry-run mode, inspect per_request.jsonl / summary.
+    // End-to-end: run() in dry-run mode, inspect per_request.jsonl.
     // ------------------------------------------------------------------
 
     @Test
@@ -186,10 +186,10 @@ class UniformRampUpTest {
                     "non-fixed interval in steady phase at index " + i);
         }
 
-        JsonNode summary = MAPPER.readTree(outDir.resolve("summary.json").toFile());
-        assertEquals("uniform", summary.get("send_mode").asText());
-        assertEquals(100.0, summary.get("target_qps").asDouble(), 1e-9);
-        assertEquals(2.0, summary.get("ramp_up_seconds").asDouble(), 1e-9);
+        // The ramp shape itself is fully recovered from the raw dues; the
+        // client writes no summary.json anymore.
+        assertFalse(Files.exists(outDir.resolve("summary.json")),
+                "client must not write summary.json");
     }
 
     @Test
@@ -210,23 +210,5 @@ class UniformRampUpTest {
             assertEquals(0.02, dues.get(i) - dues.get(i - 1), 1e-6,
                     "non-uniform interval at index " + i);
         }
-
-        JsonNode summary = MAPPER.readTree(outDir.resolve("summary.json").toFile());
-        assertEquals(0.0, summary.get("ramp_up_seconds").asDouble(), 1e-9);
-    }
-
-    @Test
-    void replaySummaryHasNoRampField() throws Exception {
-        // ramp_up_seconds lives in the uniform-only summary block; replay
-        // summaries stay byte-identical to the legacy format.
-        Path trace = writeTrace(5);
-        Path outDir = tempDir.resolve("replay_out");
-        JavaLoadClient client = new JavaLoadClient(config(trace.toString(), outDir.toString(),
-                0, 0, 1, 0, false, "replay", 0.0, 0.0));
-        client.run();
-
-        JsonNode summary = MAPPER.readTree(outDir.resolve("summary.json").toFile());
-        assertFalse(summary.has("ramp_up_seconds"));
-        assertFalse(summary.has("send_mode"));
     }
 }

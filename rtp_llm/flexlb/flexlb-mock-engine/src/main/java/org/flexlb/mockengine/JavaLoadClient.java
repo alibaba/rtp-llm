@@ -34,7 +34,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -53,8 +52,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * <p>Replays trace JSONL files against a running FlexLB master via gRPC Schedule RPC.
  * Supports multi-shard replay, configurable speed, semaphore-based concurrency control,
- * optional engine stream reading for TTFT/total latency, and generates summary.json +
- * per_request.jsonl matching the Python client format.
+ * and optional engine stream reading for TTFT/total latency. The client records raw
+ * data only — per_request.jsonl rows, the terminal server_latency.json snapshot, and
+ * pushgateway metrics; every derived statistic is computed by the run-level
+ * aggregator (aggregate_canvas_run.py), never here.
  *
  * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
  * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
@@ -391,8 +392,7 @@ public final class JavaLoadClient {
 
         JsonNode serverLatency = config.skipServerLatency ? MAPPER.createObjectNode() : fetchServerLatency();
         writePerRequestResults();
-        ObjectNode summary = writeSummary(serverLatency, elapsedS, sendDurationS, sentCount);
-        writeMarkdownReport(summary);
+        writeServerLatencySnapshot(serverLatency);
         stopPushgateway();
     }
 
@@ -1276,8 +1276,8 @@ public final class JavaLoadClient {
      * Serializes one per-request row. Synthesized rows (collector timeout /
      * dead-future exception fallbacks) omit the "priority" key entirely
      * instead of writing a misleading 0: they never carried a request, so
-     * downstream aggregation (run_online_eval.sh priority_rows) distinguishes
-     * them by key absence rather than counting them as unset p0 traffic.
+     * downstream aggregation distinguishes them by key absence rather than
+     * counting them as unset p0 traffic.
      */
     // Package-visible for per-request row serialization assertions in tests.
     static ObjectNode perRequestNode(RequestResult result) {
@@ -1307,115 +1307,20 @@ public final class JavaLoadClient {
         return node;
     }
 
-    private ObjectNode writeSummary(JsonNode serverLatency, double elapsedS, double sendDurationS, int sentCount)
-            throws IOException {
-        List<RequestResult> ok = results.stream().filter(r -> "ok".equals(r.status)).toList();
-        List<RequestResult> scheduled = results.stream()
-                .filter(r -> "ok".equals(r.status) || "scheduled".equals(r.status)).toList();
-        int errorCount = results.size() - scheduled.size();
-        int successCount = scheduled.size();
-
-        List<Double> ttft = ok.stream().filter(r -> r.ttftMs > 0).map(r -> r.ttftMs).toList();
-        List<Double> total = ok.stream().filter(r -> r.totalMs > 0).map(r -> r.totalMs).toList();
-        List<Double> schedule = results.stream().filter(r -> r.scheduleMs > 0).map(r -> r.scheduleMs).toList();
-        LatencySummary clientScheduleSummary = summarizeLatencies(schedule);
-
-        JsonNode serverScheduleSummary = serverLatency.path("server_total_ms");
-        boolean hasServerLatency = serverScheduleSummary.has("count") && serverScheduleSummary.get("count").asInt() > 0;
-
-        ObjectNode serverStageLatency = MAPPER.createObjectNode();
-        for (String stage : List.of("grpc_queue_ms", "route_submit_ms", "batch_wait_ms",
-                "dispatch_ack_ms", "ack_response_ms")) {
-            JsonNode stageNode = serverLatency.path(stage);
-            serverStageLatency.set(stage, stageNode.isMissingNode() ? MAPPER.createObjectNode() : stageNode);
-        }
-
-        int slaViolations = (int) ok.stream().filter(r -> r.ttftMs > config.slaTtftMs).count();
-
-        List<Double> sendStartTimes = new ArrayList<>();
-        List<Double> pacingLags = new ArrayList<>();
-        for (RequestResult r : results) {
-            if (r.sendStartEpochMs > 0) {
-                sendStartTimes.add(r.sendStartEpochMs);
-                pacingLags.add(r.pacingLagMs);
-            }
-        }
-        Collections.sort(sendStartTimes);
-        double actualRpcQps = 0.0;
-        if (sendStartTimes.size() > 1
-                && sendStartTimes.get(sendStartTimes.size() - 1) > sendStartTimes.get(0)) {
-            actualRpcQps = Math.round((sendStartTimes.size() - 1) * 1000.0
-                    / (sendStartTimes.get(sendStartTimes.size() - 1) - sendStartTimes.get(0)) * 1000) / 1000.0;
-        }
-
-        ObjectNode summary = MAPPER.createObjectNode();
-        summary.put("trace", config.traceFile);
-        summary.put("max_concurrency", config.maxConcurrency);
-        summary.put("elapsed_s", Math.round(elapsedS * 1000) / 1000.0);
-        summary.put("total_requests", results.size());
-        summary.put("scheduled", scheduled.size());
-        summary.put("completed", ok.size());
-        summary.put("errors", errorCount);
-        summary.put("success_count", successCount);
-        summary.put("error_count", errorCount);
-        summary.put("offered_qps", elapsedS > 0 ? Math.round(results.size() / elapsedS * 1000) / 1000.0 : 0.0);
-        summary.put("completed_qps", elapsedS > 0 ? Math.round(ok.size() / elapsedS * 1000) / 1000.0 : 0.0);
-        summary.put("success_qps", elapsedS > 0 ? Math.round(successCount / elapsedS * 1000) / 1000.0 : 0.0);
-        summary.put("error_qps", elapsedS > 0 ? Math.round(errorCount / elapsedS * 1000) / 1000.0 : 0.0);
-        summary.put("send_duration_s", Math.round(sendDurationS * 1000) / 1000.0);
-        summary.put("sent_count", sentCount);
-        summary.put("actual_sent_count", actualSentCount.get());
-        summary.put("recorded_result_count", results.size());
-        summary.put("send_qps", sendDurationS > 0
-                ? Math.round(results.size() / sendDurationS * 1000) / 1000.0 : 0.0);
-        summary.put("actual_send_qps", actualRpcQps);
-        summary.set("pacing_lag_ms", summarizeLatencies(pacingLags).toJson());
-        if (config.isUniform()) {
-            // Only emitted in uniform mode so the replay summary stays
-            // byte-identical to the pre-uniform format.
-            summary.put("send_mode", "uniform");
-            summary.put("target_qps", config.sendModeQps);
-            summary.put("per_shard_qps", config.sendModeQps / config.numShards);
-            summary.put("uniform_interval_ms",
-                    Math.round(1000.0 * config.numShards / config.sendModeQps * 1000) / 1000.0);
-            summary.put("ramp_up_seconds", config.rampUpSeconds);
-        }
-
-        ObjectNode peakQps = MAPPER.createObjectNode();
-        for (int windowMs : List.of(1, 10, 100, 1000)) {
-            peakQps.put(windowMs + "ms", peakBucketQps(sendStartTimes, windowMs));
-        }
-        summary.set("send_peak_qps", peakQps);
-        summary.put("server_arrival_qps", serverLatency.path("arrival_qps").asDouble(0.0));
-        summary.put("server_completion_qps", serverLatency.path("completion_qps").asDouble(0.0));
-        summary.put("n_channels", config.nChannels);
-        summary.put("sla_ttft_ms", config.slaTtftMs);
-        summary.put("sla_violations", slaViolations);
-        summary.put("sla_violation_rate", ok.isEmpty() ? 0.0
-                : Math.round(slaViolations / (double) ok.size() * 1_000_000) / 1_000_000.0);
-        summary.put("schedule_latency_source", hasServerLatency ? "server" : "client");
-        summary.set("schedule_latency_ms", hasServerLatency ? serverScheduleSummary : clientScheduleSummary.toJson());
-        summary.set("server_schedule_latency_ms", serverScheduleSummary.isMissingNode()
-                ? MAPPER.createObjectNode() : serverScheduleSummary);
-        summary.set("server_stage_latency_ms", serverStageLatency);
-        summary.set("client_schedule_latency_ms", clientScheduleSummary.toJson());
-        summary.set("ttft_ms", summarizeLatencies(ttft).toJson());
-        summary.set("total_ms", summarizeLatencies(total).toJson());
-        summary.set("prefill_balance", loadBalanceSummary(ok.stream().map(r -> r.prefill).toList()));
-        summary.set("decode_balance", loadBalanceSummary(ok.stream().map(r -> r.decode).toList()));
-        summary.set("status_counts", countBy(results, r -> r.status));
-        summary.set("route_path_counts", countBy(results, r -> r.routePath));
-        summary.set("priority_stats", priorityBreakdown(results));
-
-        Path summaryPath = Path.of(config.outputDir, "summary.json");
-        MAPPER.writerWithDefaultPrettyPrinter().writeValue(summaryPath.toFile(), summary);
-        System.out.println(MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(summary));
-
+    /**
+     * Persists the terminal server-side latency snapshot next to the raw
+     * per-request rows. This is raw aggregation input (master arrival and
+     * completion counters feed the run-level validity checks in
+     * aggregate_canvas_run.py), not client-derived statistics — the client
+     * computes no summaries anymore. Multi-worker shards skip this
+     * (run_online_eval.sh takes one unified final fetch after all clients
+     * exit); an empty or failed snapshot writes nothing.
+     */
+    private void writeServerLatencySnapshot(JsonNode serverLatency) throws IOException {
         if (!serverLatency.isMissingNode() && !serverLatency.isEmpty()) {
             Path serverLatencyPath = Path.of(config.outputDir, "server_latency.json");
             MAPPER.writerWithDefaultPrettyPrinter().writeValue(serverLatencyPath.toFile(), serverLatency);
         }
-        return summary;
     }
 
     // ---- Trace Filtering / Truncation (Python parity) ----
@@ -1682,241 +1587,6 @@ public final class JavaLoadClient {
             idx = sorted.size() - 1;
         }
         return sorted.get(idx);
-    }
-
-    // ---- Markdown Report ----
-
-    /**
-     * Writes a minimal report.md aligned with Python report.write_markdown_report:
-     * Overview + Latency table + Status counts + Top errors.
-     */
-    private void writeMarkdownReport(ObjectNode summary) throws IOException {
-        List<String> lines = new ArrayList<>();
-        lines.add("# FlexLB Online Evaluation Report");
-        lines.add("");
-        lines.add("## Overview");
-        lines.add("");
-        lines.add("- Trace: `" + summary.path("trace").asText("") + "`");
-        lines.add("- Total requests: " + summary.path("total_requests").asInt());
-        lines.add("- Scheduled: " + summary.path("scheduled").asInt());
-        lines.add("- Completed: " + summary.path("completed").asInt());
-        lines.add("- Errors: " + summary.path("errors").asInt());
-        lines.add("- Offered QPS: " + summary.path("offered_qps").asDouble());
-        lines.add("- Completed QPS: " + summary.path("completed_qps").asDouble());
-        lines.add("- Server arrival QPS: " + summary.path("server_arrival_qps").asDouble());
-        lines.add("- Server completion QPS: " + summary.path("server_completion_qps").asDouble());
-        lines.add("- Schedule latency source: " + summary.path("schedule_latency_source").asText("client"));
-        lines.add("- SLA TTFT: " + summary.path("sla_ttft_ms").asDouble() + " ms");
-        lines.add("- SLA violations: " + summary.path("sla_violations").asInt()
-                + " (" + summary.path("sla_violation_rate").asDouble() + ")");
-        lines.add("");
-        lines.add("## Latency");
-        lines.add("");
-        lines.add("| Metric | Count | P50 | P90 | P95 | P99 | Max | Mean |");
-        lines.add("|---|---:|---:|---:|---:|---:|---:|---:|");
-        String source = summary.path("schedule_latency_source").asText("client");
-        String scheduleLabel = "server".equals(source) ? "Schedule (server)" : "Schedule (client RTT)";
-        appendLatencyRow(lines, scheduleLabel, summary.path("schedule_latency_ms"));
-        if ("server".equals(source)) {
-            appendLatencyRow(lines, "Schedule (client RTT)", summary.path("client_schedule_latency_ms"));
-        }
-        appendLatencyRow(lines, "TTFT", summary.path("ttft_ms"));
-        appendLatencyRow(lines, "Total", summary.path("total_ms"));
-        lines.add("");
-        lines.add("## Status Counts");
-        lines.add("");
-        JsonNode statusCounts = summary.path("status_counts");
-        if (statusCounts.isMissingNode() || statusCounts.isEmpty()) {
-            lines.add("_empty_");
-        } else {
-            lines.add("| Key | Value |");
-            lines.add("|---|---:|");
-            List<String> keys = new ArrayList<>();
-            statusCounts.fieldNames().forEachRemaining(keys::add);
-            Collections.sort(keys);
-            for (String key : keys) {
-                lines.add("| `" + key + "` | " + statusCounts.get(key).asInt() + " |");
-            }
-        }
-        lines.add("");
-        lines.add("## Top Errors");
-        lines.add("");
-        Map<String, Integer> errors = new LinkedHashMap<>();
-        for (RequestResult r : results) {
-            if (!"ok".equals(r.status) && !"scheduled".equals(r.status)) {
-                String key = !r.error.isEmpty() ? r.error : (!r.status.isEmpty() ? r.status : "unknown");
-                errors.merge(key, 1, Integer::sum);
-            }
-        }
-        if (errors.isEmpty()) {
-            lines.add("_none_");
-        } else {
-            lines.add("| Error | Count |");
-            lines.add("|---|---:|");
-            errors.entrySet().stream()
-                    .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-                    .limit(10)
-                    .forEach(e -> lines.add("| `"
-                            + e.getKey().replace("\n", " ").substring(0, Math.min(240, e.getKey().length()))
-                            + "` | " + e.getValue() + " |"));
-        }
-        Path reportPath = Path.of(config.outputDir, "report.md");
-        Files.writeString(reportPath, String.join("\n", lines) + "\n");
-        System.out.println("report: " + reportPath);
-    }
-
-    private static void appendLatencyRow(List<String> lines, String name, JsonNode row) {
-        lines.add("| " + name
-                + " | " + row.path("count").asInt()
-                + " | " + row.path("p50").asDouble()
-                + " | " + row.path("p90").asDouble()
-                + " | " + row.path("p95").asDouble()
-                + " | " + row.path("p99").asDouble()
-                + " | " + row.path("max").asDouble()
-                + " | " + row.path("mean").asDouble() + " |");
-    }
-
-    // ---- Statistics Helpers ----
-
-    private static LatencySummary summarizeLatencies(List<Double> values) {
-        if (values.isEmpty()) {
-            return new LatencySummary(0, 0, 0, 0, 0, 0, 0);
-        }
-        List<Double> sorted = new ArrayList<>(values);
-        Collections.sort(sorted);
-        double sum = 0;
-        for (double v : sorted) {
-            sum += v;
-        }
-        double mean = sum / sorted.size();
-        return new LatencySummary(
-                sorted.size(),
-                percentile(sorted, 50),
-                percentile(sorted, 90),
-                percentile(sorted, 95),
-                percentile(sorted, 99),
-                sorted.get(sorted.size() - 1),
-                Math.round(mean * 1000) / 1000.0
-        );
-    }
-
-    private static double percentile(List<Double> sorted, double p) {
-        if (sorted.isEmpty()) {
-            return 0.0;
-        }
-        if (sorted.size() == 1) {
-            return sorted.get(0);
-        }
-        double rank = (sorted.size() - 1) * p / 100.0;
-        int lo = (int) Math.floor(rank);
-        int hi = (int) Math.ceil(rank);
-        if (lo == hi) {
-            return sorted.get(lo);
-        }
-        double weight = rank - lo;
-        return Math.round((sorted.get(lo) * (1.0 - weight) + sorted.get(hi) * weight) * 1000) / 1000.0;
-    }
-
-    private static double peakBucketQps(List<Double> epochMsValues, int windowMs) {
-        if (epochMsValues.isEmpty() || windowMs <= 0) {
-            return 0.0;
-        }
-        Map<Long, Integer> buckets = new HashMap<>();
-        for (double value : epochMsValues) {
-            long bucket = (long) (value / windowMs);
-            buckets.merge(bucket, 1, Integer::sum);
-        }
-        int max = buckets.values().stream().max(Integer::compare).orElse(0);
-        return Math.round(max * 1000.0 / windowMs * 1000) / 1000.0;
-    }
-
-    private static ObjectNode loadBalanceSummary(List<String> assignments) {
-        Map<String, Integer> counts = new LinkedHashMap<>();
-        for (String addr : assignments) {
-            if (addr != null && !addr.isEmpty()) {
-                counts.merge(addr, 1, Integer::sum);
-            }
-        }
-        ObjectNode node = MAPPER.createObjectNode();
-        if (counts.isEmpty()) {
-            node.set("counts", MAPPER.createObjectNode());
-            node.put("stddev", 0.0);
-            node.put("max_over_avg", 0.0);
-            return node;
-        }
-        ObjectNode countsNode = MAPPER.createObjectNode();
-        counts.forEach(countsNode::put);
-        node.set("counts", countsNode);
-        double avg = counts.values().stream().mapToInt(Integer::intValue).sum() / (double) counts.size();
-        double variance = 0;
-        for (int c : counts.values()) {
-            variance += (c - avg) * (c - avg);
-        }
-        double stddev = Math.sqrt(variance / counts.size());
-        int maxVal = counts.values().stream().max(Integer::compare).orElse(0);
-        node.put("stddev", Math.round(stddev * 1000) / 1000.0);
-        node.put("max_over_avg", avg > 0 ? Math.round(maxVal / avg * 1000) / 1000.0 : 0.0);
-        return node;
-    }
-
-    private static ObjectNode countBy(List<RequestResult> rows, java.util.function.Function<RequestResult, String> extractor) {
-        Map<String, Integer> counts = new LinkedHashMap<>();
-        for (RequestResult row : rows) {
-            String value = extractor.apply(row);
-            counts.merge(value != null ? value : "", 1, Integer::sum);
-        }
-        ObjectNode node = MAPPER.createObjectNode();
-        counts.forEach(node::put);
-        return node;
-    }
-
-    /** Sentinel bucket key for rows without a real priority (synthesized
-     *  rows, or explicitly unset on the wire); serialized as the "unset" group. */
-    private static final int UNSET_PRIORITY_BUCKET = -1;
-
-    /**
-     * Per-priority breakdown for Auto-TPM assertions: for every priority
-     * level carried on the wire (1-100) reports total/completed/rejected
-     * counts and the mean schedule latency of completed requests.
-     * "Completed" means the master accepted the schedule ("ok"/"scheduled");
-     * "rejected" is every other terminal status (schedule_error/exception/...).
-     * Rows without a real priority — synthesized timeout/exception rows that
-     * never carried a request, and rows explicitly sent unset (PRIORITY=0
-     * legacy) — stay out of the numeric buckets and surface under "unset",
-     * so per-priority totals still reconcile with the recorded row count.
-     */
-    static ObjectNode priorityBreakdown(List<RequestResult> rows) {
-        Map<Integer, int[]> counts = new java.util.TreeMap<>();
-        Map<Integer, double[]> scheduleSums = new HashMap<>();
-        for (RequestResult row : rows) {
-            boolean unset = row.synthetic
-                    || !PriorityNormalizer.hasPriority(row.priority);
-            int bucket = unset ? UNSET_PRIORITY_BUCKET : row.priority;
-            int[] c = counts.computeIfAbsent(bucket, k -> new int[3]);
-            c[0]++;
-            if ("ok".equals(row.status) || "scheduled".equals(row.status)) {
-                c[1]++;
-                if (row.scheduleMs > 0) {
-                    double[] sum = scheduleSums.computeIfAbsent(bucket, k -> new double[2]);
-                    sum[0] += row.scheduleMs;
-                    sum[1]++;
-                }
-            } else {
-                c[2]++;
-            }
-        }
-        ObjectNode node = MAPPER.createObjectNode();
-        counts.forEach((priority, c) -> {
-            ObjectNode group = node.putObject(
-                    priority == UNSET_PRIORITY_BUCKET ? "unset" : String.valueOf(priority));
-            group.put("total", c[0]);
-            group.put("completed", c[1]);
-            group.put("rejected", c[2]);
-            double[] sum = scheduleSums.get(priority);
-            group.put("avg_schedule_ms", sum != null && sum[1] > 0
-                    ? Math.round(sum[0] / sum[1] * 1000) / 1000.0 : 0.0);
-        });
-        return node;
     }
 
     // ---- Cleanup ----
@@ -2353,18 +2023,4 @@ public final class JavaLoadClient {
         boolean synthetic;
     }
 
-    record LatencySummary(int count, double p50, double p90, double p95, double p99,
-                          double max, double mean) {
-        ObjectNode toJson() {
-            ObjectNode node = MAPPER.createObjectNode();
-            node.put("count", count);
-            node.put("p50", p50);
-            node.put("p90", p90);
-            node.put("p95", p95);
-            node.put("p99", p99);
-            node.put("max", max);
-            node.put("mean", mean);
-            return node;
-        }
-    }
 }
