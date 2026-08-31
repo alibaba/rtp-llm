@@ -1117,7 +1117,7 @@ class AttentionFP8(nn.Module):
             beta_fast,
             beta_slow,
         )
-        # Phase G: plain attr (not register_buffer).  `reset_rope_cache(device)`
+        # Phase G: plain attr (not register_buffer).  `init_rope_cache(device)`
         # recomputes + moves to the real device after meta-to-device
         # materialization — that's the authoritative placement path; no
         # automatic `.to(device)` semantics needed.
@@ -1880,13 +1880,13 @@ class AttentionFP8(nn.Module):
             return None
         return torch.cat([swa_dense, cmp_dense], dim=1)
 
-    def reset_rope_cache(self, device=None):
+    def init_rope_cache(self, device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
         cached freqs as zeros. Pass ``device`` so the memoized
         ``precompute_freqs_cis`` returns the shared (params, device) tensor;
         all layers with identical rope params now point at the same object,
-        which lets the downstream cos_sin_cache dedupe by ``id()``."""
+        which lets compressors share one prebuilt cos_sin_cache."""
         freqs_cis = precompute_freqs_cis(
             self._rope_dim,
             self._rope_max_seq_len,
@@ -1899,19 +1899,12 @@ class AttentionFP8(nn.Module):
         )
         self.freqs_cis = freqs_cis
 
-        # Clear compressor / indexer bound references so they rebind on next forward.
-        def clear_compressor_rope_cache(compressor: Any) -> None:
-            compressor.freqs_cis = None
-            compressor._cos_sin_cache = None
-            compressor._cos_sin_cache_device = None
-            compressor._cos_sin_cache_key = None
-
         if self.compressor is not None:
-            clear_compressor_rope_cache(self.compressor)
+            self.compressor.init_rope_cache(freqs_cis)
         if self.indexer is not None:
-            self.indexer.freqs_cis = None
+            self.indexer.freqs_cis = freqs_cis
             if self.indexer.compressor is not None:
-                clear_compressor_rope_cache(self.indexer.compressor)
+                self.indexer.compressor.init_rope_cache(freqs_cis)
 
     def _get_fp8_decode_op(self):
         """Lazy-build the persistent ``SparseAttnV4DecodeFp8Op`` so its

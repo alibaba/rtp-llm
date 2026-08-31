@@ -17,8 +17,8 @@ import torch
 # Process-local memoization keyed by (params, device). All DSV4 compressor
 # layers compute identical freqs_cis (they share rope params), so a single
 # shared tensor replaces what was 61 distinct CPU + 61 distinct GPU copies
-# during model init. Cascade: identical id(freqs_cis) → `_ensure_cos_sin_cache`
-# in compressor.py dedupes the derived 256 MiB cos_sin_cache (91× → 1×).
+# during model init. Cascade: identical id(freqs_cis) lets compressor.py
+# prebuild and share one derived 256 MiB cos_sin_cache instead of 91 copies.
 _FREQS_CIS_CACHE: Dict[
     Tuple[int, int, int, float, float, int, int, Optional[str]], torch.Tensor
 ] = {}

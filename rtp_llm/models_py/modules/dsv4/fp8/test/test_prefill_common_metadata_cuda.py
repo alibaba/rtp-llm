@@ -209,7 +209,7 @@ class PrefillCommonMetadataCudaTest(unittest.TestCase):
         )
         self.x = torch.empty((5, 16), dtype=torch.bfloat16, device=self.device)
 
-        # Production reset_rope_cache memoizes these two tables by RoPE
+        # Production init_rope_cache memoizes these two tables by RoPE
         # parameters: all compressed layers share one object, while ratio 0
         # points at a distinct base-RoPE table.
         positions = torch.arange(64, dtype=torch.float32, device=self.device)
