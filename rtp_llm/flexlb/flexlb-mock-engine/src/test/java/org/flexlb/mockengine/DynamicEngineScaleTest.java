@@ -521,9 +521,10 @@ class DynamicEngineScaleTest {
                 "prefill", Map.of("scale", 1.0),
                 "decode", Map.of("scale", 1.0,
                         "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
-        // Local intake: MockPerformanceModel reads the prefill expression from the
-        // FLEXLB_CONFIG env (FormulaEstimatorConfig), not the upstream
-        // PREFILL_TIME_FORMULA env — use the shared test helper.
+        // Explicit formula injection via the nested FLEXLB_CONFIG estimator
+        // (highest-priority source in MockPerformanceModel.loadPrefillExpression,
+        // ahead of the PREFILL_TIME_FORMULA env and the DSV4 fallback) — use the
+        // shared test helper.
         MockMasterConfig.writeWithPrefillExpression(master, formula);
         return MockPerformanceModel.load(performance.toString(), master.toString());
     }

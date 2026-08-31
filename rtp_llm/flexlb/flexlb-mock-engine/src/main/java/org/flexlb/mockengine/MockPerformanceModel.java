@@ -256,51 +256,94 @@ final class MockPerformanceModel {
     }
 
     /**
-     * Resolve the prefill duration formula — exactly one source, never a
-     * silent hard-coded fallback:
+     * Resolve the prefill duration formula — ordered sources, never a silent
+     * hard-coded fallback:
      * <ol>
      *   <li>an explicit FORMULA estimator in the master config's FLEXLB_CONFIG
-     *       (blank expression = misconfiguration, fail fast);</li>
+     *       (schemaVersion:2 nested router.roles.prefill.executionTimeEstimator;
+     *       blank expression = misconfiguration, fail fast; a non-FORMULA type
+     *       such as LEARNING is declined — the mock cannot replay it);
+     *   <li>the PREFILL_TIME_FORMULA env in the same master config — the exact
+     *       source the master's ConfigService.applyPrefillFormulaOverride reads
+     *       for its costFormula, so mock execution time and master routing
+     *       predictions stay on the same expression on the flat-schema (main)
+     *       config path (master_fixed_window*.json);
      *   <li>otherwise {@link #DSV4_PREFILL_FIT_EXPRESSION} — the production
-     *       DSv4 fit the mock keeps as its own built-in default, and the
-     *       static approximation for a LEARNING estimator the mock cannot
-     *       replay.</li>
+     *       DSv4 fit the mock keeps as its own built-in default, and the static
+     *       approximation for a LEARNING estimator the mock cannot replay.</li>
      * </ol>
-     * This keeps mock execution time and master routing predictions on the
-     * same expression; the legacy silent fixed_ms / 300 ms fallbacks are gone
      * (an explicit performance-JSON "prefill.fixed_ms" declaration still
      * wins over the formula — see prefillMs).
      */
     private static String loadPrefillExpression(String masterConfigFile) throws IOException {
         JsonNode root = MAPPER.readTree(Path.of(masterConfigFile).toFile());
         JsonNode envs = root.path("zone_process_setting").path("process_info").path("envs");
+        String legacyFormula = null;
         for (JsonNode item : envs) {
-            if (item.isArray() && item.size() >= 2
-                    && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
-                // Schema-agnostic JSON path read: supports the schemaVersion:2
-                // nested layout (router.roles.prefill.executionTimeEstimator);
-                // main's flat-schema configs lack that node and fall through
-                // to the default expression below.
-                JsonNode estimator = MAPPER.readTree(item.get(1).asText())
-                        .path("router").path("roles").path("prefill")
-                        .path("executionTimeEstimator");
-                if (estimator.isObject()) {
-                    String expression = estimator.path("expression").asText(null);
-                    if (expression != null && !expression.isBlank()) {
-                        return expression;
-                    }
-                    if (expression != null) {
-                        throw new IllegalStateException("Master config " + masterConfigFile
-                                + ": router.roles.prefill.executionTimeEstimator is FORMULA"
-                                + " with a blank expression — set the expression explicitly or"
-                                + " omit the estimator to use the built-in DSv4 production fit"
-                                + " (MockPerformanceModel.DSV4_PREFILL_FIT_EXPRESSION)");
-                    }
+            if (!item.isArray() || item.size() < 2) {
+                continue;
+            }
+            String name = item.get(0).asText();
+            if ("FLEXLB_CONFIG".equals(name)) {
+                // ① Nested estimator read is schema-agnostic: supports the
+                // schemaVersion:2 nested layout (router.roles.prefill.
+                // executionTimeEstimator); a declined estimator (LEARNING /
+                // expression key absent / node absent on main's flat schema)
+                // keeps scanning so the PREFILL_TIME_FORMULA env below can
+                // still supply the same-source formula.
+                String resolved = resolveNestedEstimator(masterConfigFile, item.get(1).asText());
+                if (resolved != null) {
+                    return resolved;
                 }
-                break;  // LEARNING estimator / no estimator: fall through to the production-fit default
+            } else if ("PREFILL_TIME_FORMULA".equals(name) && legacyFormula == null) {
+                // ② Same-source fallback as the master's
+                // ConfigService.applyPrefillFormulaOverride.
+                legacyFormula = item.get(1).asText(null);
             }
         }
+        if (legacyFormula != null && !legacyFormula.isBlank()) {
+            return legacyFormula;
+        }
+        // ③ Built-in production DSv4 fit.
         return DSV4_PREFILL_FIT_EXPRESSION;
+    }
+
+    /**
+     * ① Nested-estimator source of {@link #loadPrefillExpression}: the
+     * FLEXLB_CONFIG env value parsed as JSON, read at
+     * router.roles.prefill.executionTimeEstimator.
+     *
+     * @return the expression to use, or {@code null} to decline and let the
+     *         caller fall through to the PREFILL_TIME_FORMULA env
+     *         (non-FORMULA estimator type such as LEARNING, expression key
+     *         absent, or no estimator node at all — e.g. main's flat schema)
+     * @throws IllegalStateException the estimator is FORMULA-typed with an
+     *         explicit blank expression (misconfiguration — fail fast)
+     */
+    private static String resolveNestedEstimator(String masterConfigFile, String flexlbConfigJson)
+            throws IOException {
+        JsonNode estimator = MAPPER.readTree(flexlbConfigJson)
+                .path("router").path("roles").path("prefill")
+                .path("executionTimeEstimator");
+        if (!estimator.isObject()) {
+            return null;
+        }
+        String type = estimator.path("type").asText(null);
+        String expression = estimator.path("expression").asText(null);
+        if (type != null && !"FORMULA".equals(type)) {
+            return null;
+        }
+        if (expression != null && !expression.isBlank()) {
+            return expression;
+        }
+        if (expression != null) {
+            throw new IllegalStateException("Master config " + masterConfigFile
+                    + ": router.roles.prefill.executionTimeEstimator is FORMULA"
+                    + " with a blank expression — set the expression explicitly or"
+                    + " omit the estimator to use the built-in DSv4 production fit"
+                    + " (MockPerformanceModel.DSV4_PREFILL_FIT_EXPRESSION)");
+        }
+        return null;
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
@@ -344,7 +387,9 @@ final class MockPerformanceModel {
             latency = configuredFixedPrefillMs;
         } else {
             // The only prefill source: the expression resolved in
-            // loadPrefillExpression (explicit FORMULA or the production fit).
+            // loadPrefillExpression (nested FORMULA estimator, or the
+            // PREFILL_TIME_FORMULA env shared with the master, or the
+            // production fit).
             double[] batchVars = new double[5];
             batchVars[0] = requests.size();
             List<double[]> itemVars = new ArrayList<>(requests.size());
