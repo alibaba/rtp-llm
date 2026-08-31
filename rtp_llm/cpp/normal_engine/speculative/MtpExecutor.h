@@ -208,7 +208,11 @@ private:
     void setPrefillChunkCacheStorePublishPlan(GptModelInputs&          chunk_input,
                                               const PrefillChunkRound& round,
                                               size_t                  seq_size_per_block,
-                                              bool                    complete_blocks_only);
+                                              bool                    complete_blocks_only,
+                                              const std::vector<int32_t>& publish_frontier);
+    void advanceDraftCacheStorePublishFrontier(const GptModelInputs&    chunk_input,
+                                               const PrefillChunkRound& round,
+                                               std::vector<int32_t>&    publish_frontier);
     void shiftRoundComboTokens(GptModelInputs&         chunk_input,
                                const GptModelInputs&   full_inputs,
                                const PrefillChunkRound& round);
@@ -223,6 +227,7 @@ private:
         size_t            total_tokens = 0;
         PrefillChunkRound terminal_round;
         std::vector<bool> terminal_seen;
+        std::vector<int32_t> draft_publish_frontier;
         int64_t*          model_forward_us = nullptr;
         size_t            round_index      = 0;
     };

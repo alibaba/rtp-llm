@@ -813,8 +813,8 @@ TEST_F(MtpExecutorTest, testRunChunkPrefillRoundInterleavesTargetShiftAndDraft) 
     EXPECT_EQ(terminal.absolute_start, 7);
     EXPECT_EQ(terminal.absolute_end, 8);
 
-    // force_disable_sp_run skips every draft pass but still records the final
-    // round and advances the cursor identically.
+    // force_disable_sp_run skips every draft pass but still records the same
+    // final round; no draft publication frontier is expected to advance.
     MtpExecutor::ChunkPrefillContext no_sp_hook;
     auto no_sp_full_inputs = full_inputs;
     no_sp_full_inputs.force_disable_sp_run = true;
@@ -914,8 +914,12 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
     terminal_prefix_round.slices = {{1, 1, 4, 3, 0, 3, false}};
     auto terminal_prefix_input =
         components.executor->makePrefillRoundInput(full_inputs, terminal_prefix_round, /*total_tokens=*/5);
-    components.executor->setPrefillChunkCacheStorePublishPlan(
-        terminal_prefix_input, terminal_prefix_round, /*seq_size_per_block=*/2, /*complete_blocks_only=*/true);
+    std::vector<int32_t> publish_frontier{0, 0};
+    components.executor->setPrefillChunkCacheStorePublishPlan(terminal_prefix_input,
+                                                              terminal_prefix_round,
+                                                              /*seq_size_per_block=*/2,
+                                                              /*complete_blocks_only=*/true,
+                                                              publish_frontier);
     EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.prefix_lengths), (std::vector<int32_t>{0}));
     EXPECT_EQ(toVec<int32_t>(terminal_prefix_input.input_lengths), (std::vector<int32_t>{3}));
     ASSERT_TRUE(terminal_prefix_input.cache_store_publish_plan.has_value());
@@ -925,9 +929,13 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
               (std::vector<int32_t>{1}));
     EXPECT_EQ(toVec<bool>(terminal_prefix_input.cache_store_publish_plan->terminal_host),
               (std::vector<bool>{false}));
+    components.executor->advanceDraftCacheStorePublishFrontier(
+        terminal_prefix_input, terminal_prefix_round, publish_frontier);
+    EXPECT_EQ(publish_frontier, (std::vector<int32_t>{0, 1}));
 
     // The final draft pass still attends at the real singleton prefixes 0 and
-    // 3, but cache store republishes the physical ranges [0, 1) and [2, 4).
+    // 3, while cache store publishes the remaining block ranges [0, 1) and
+    // [1, 2) from the two independent request frontiers.
     PrefillChunkRound terminal_round;
     terminal_round.slices = {
         {0, 0, 1, 1, 0, 1, true},
@@ -935,8 +943,11 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
     };
     auto terminal_input =
         components.executor->makePrefillRoundInput(full_inputs, terminal_round, /*total_tokens=*/5);
-    components.executor->setPrefillChunkCacheStorePublishPlan(
-        terminal_input, terminal_round, /*seq_size_per_block=*/2, /*complete_blocks_only=*/false);
+    components.executor->setPrefillChunkCacheStorePublishPlan(terminal_input,
+                                                              terminal_round,
+                                                              /*seq_size_per_block=*/2,
+                                                              /*complete_blocks_only=*/false,
+                                                              publish_frontier);
     EXPECT_EQ(toVec<int32_t>(terminal_input.prefix_lengths), (std::vector<int32_t>{0, 3}));
     EXPECT_EQ(toVec<int32_t>(terminal_input.input_lengths), (std::vector<int32_t>{1, 1}));
     ASSERT_TRUE(terminal_input.cache_store_publish_plan.has_value());
@@ -946,10 +957,14 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
               (std::vector<int32_t>{1, 2}));
     EXPECT_EQ(toVec<bool>(terminal_input.cache_store_publish_plan->terminal_host),
               (std::vector<bool>{true, true}));
+    components.executor->advanceDraftCacheStorePublishFrontier(
+        terminal_input, terminal_round, publish_frontier);
+    EXPECT_EQ(publish_frontier, (std::vector<int32_t>{1, 2}));
 
-    // Regression for full-model PD smoke's first chunked stage. The attention
-    // prefixes are input_length - 1 and therefore intentionally unaligned;
-    // only the cache-store transfer view is rounded back to 4096-token blocks.
+    // Regression for full-model PD smoke's first chunked stage. These requests
+    // enter the terminal singleton with no prior draft publication, so the
+    // transfer view must cover the reused prefix from block 0 through the
+    // terminal partial block.
     PrefillChunkRound smoke_terminal_round;
     smoke_terminal_round.slices = {
         {0, 0, 1, 1, 9651, 9652, true},
@@ -960,17 +975,61 @@ TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanDefersAndRewritesTe
     GptModelInputs smoke_terminal_input;
     smoke_terminal_input.input_lengths   = torch::tensor({1, 1, 1, 1}, torch::kInt32);
     smoke_terminal_input.prefix_lengths  = torch::tensor({9651, 16051, 22451, 28851}, torch::kInt32);
+    std::vector<int32_t> smoke_publish_frontier(4, 0);
     components.executor->setPrefillChunkCacheStorePublishPlan(smoke_terminal_input,
                                                                smoke_terminal_round,
                                                                /*seq_size_per_block=*/4096,
-                                                               /*complete_blocks_only=*/false);
+                                                              /*complete_blocks_only=*/false,
+                                                              smoke_publish_frontier);
     ASSERT_TRUE(smoke_terminal_input.cache_store_publish_plan.has_value());
     EXPECT_EQ(toVec<int32_t>(smoke_terminal_input.cache_store_publish_plan->begin_block_host),
-              (std::vector<int32_t>{2, 3, 5, 7}));
+              (std::vector<int32_t>{0, 0, 0, 0}));
     EXPECT_EQ(toVec<int32_t>(smoke_terminal_input.cache_store_publish_plan->end_block_host),
               (std::vector<int32_t>{3, 4, 6, 8}));
     EXPECT_EQ(toVec<bool>(smoke_terminal_input.cache_store_publish_plan->terminal_host),
               (std::vector<bool>{true, true, true, true}));
+}
+
+TEST_F(MtpExecutorTest, testPrefillChunkCacheStorePublishPlanPublishesReusedPrefixBeforeTerminal) {
+    auto              components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    constexpr int32_t block_size = 4096;
+
+    // Production regression: Prefill starts draft computation at block 25,
+    // while Decode still needs block 24. The first publication must cover the
+    // complete reused prefix [0, 25), even though the current draft slice lies
+    // wholly inside block 25 and produces no newly complete block.
+    PrefillChunkRound prefix_round;
+    prefix_round.slices = {{0, 0, 1957, 1957, 25 * block_size, 104357, false}};
+    GptModelInputs prefix_input;
+    prefix_input.input_lengths  = torch::tensor({1957}, torch::kInt32);
+    prefix_input.prefix_lengths = torch::tensor({25 * block_size}, torch::kInt32);
+    std::vector<int32_t> publish_frontier{0};
+    components.executor->setPrefillChunkCacheStorePublishPlan(prefix_input,
+                                                              prefix_round,
+                                                              block_size,
+                                                              /*complete_blocks_only=*/true,
+                                                              publish_frontier);
+    ASSERT_TRUE(prefix_input.cache_store_publish_plan.has_value());
+    EXPECT_EQ(toVec<int32_t>(prefix_input.cache_store_publish_plan->begin_block_host), (std::vector<int32_t>{0}));
+    EXPECT_EQ(toVec<int32_t>(prefix_input.cache_store_publish_plan->end_block_host), (std::vector<int32_t>{25}));
+    components.executor->advanceDraftCacheStorePublishFrontier(prefix_input, prefix_round, publish_frontier);
+    EXPECT_EQ(publish_frontier, (std::vector<int32_t>{25}));
+
+    PrefillChunkRound terminal_round;
+    terminal_round.slices = {{0, 1957, 1958, 1, 104357, 104358, true}};
+    GptModelInputs terminal_input;
+    terminal_input.input_lengths  = torch::tensor({1}, torch::kInt32);
+    terminal_input.prefix_lengths = torch::tensor({104357}, torch::kInt32);
+    components.executor->setPrefillChunkCacheStorePublishPlan(terminal_input,
+                                                              terminal_round,
+                                                              block_size,
+                                                              /*complete_blocks_only=*/false,
+                                                              publish_frontier);
+    ASSERT_TRUE(terminal_input.cache_store_publish_plan.has_value());
+    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->begin_block_host), (std::vector<int32_t>{25}));
+    EXPECT_EQ(toVec<int32_t>(terminal_input.cache_store_publish_plan->end_block_host), (std::vector<int32_t>{26}));
+    components.executor->advanceDraftCacheStorePublishFrontier(terminal_input, terminal_round, publish_frontier);
+    EXPECT_EQ(publish_frontier, (std::vector<int32_t>{26}));
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {

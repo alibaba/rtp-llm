@@ -346,7 +346,8 @@ GptModelInputs MtpExecutor::makePrefillRoundInput(const GptModelInputs& full_inp
 void MtpExecutor::setPrefillChunkCacheStorePublishPlan(GptModelInputs&          chunk_input,
                                                        const PrefillChunkRound& round,
                                                        size_t                  seq_size_per_block,
-                                                       bool                    complete_blocks_only) {
+                                                       bool                    complete_blocks_only,
+                                                       const std::vector<int32_t>& publish_frontier) {
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "MTP chunk cache-store block size must be positive");
     RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(chunk_input.input_lengths.numel()) == round.slices.size()
                                 && static_cast<size_t>(chunk_input.prefix_lengths.numel()) == round.slices.size(),
@@ -367,14 +368,26 @@ void MtpExecutor::setPrefillChunkCacheStorePublishPlan(GptModelInputs&          
                                 "MTP chunk cache-store received invalid absolute range [%d, %d)",
                                 slice.absolute_start,
                                 slice.absolute_end);
-        const int64_t begin_block = static_cast<int64_t>(slice.absolute_start) / block_size;
+        RTP_LLM_CHECK_WITH_INFO(slice.original_batch_idx >= 0
+                                    && static_cast<size_t>(slice.original_batch_idx) < publish_frontier.size(),
+                                "MTP chunk cache-store request index %d exceeds publish frontier size %zu",
+                                slice.original_batch_idx,
+                                publish_frontier.size());
+        // CacheStore publication is a producer/consumer frontier, not the
+        // current compute slice. Start the first draft publication at block 0
+        // so a Prefill-local prefix hit is still available to a Decode node
+        // with a shorter (or empty) prefix hit.
+        const int64_t round_start_block = static_cast<int64_t>(slice.absolute_start) / block_size;
+        const int64_t begin_block       = publish_frontier[static_cast<size_t>(slice.original_batch_idx)];
         const int64_t end_block   = complete_blocks_only ?
                                         static_cast<int64_t>(slice.absolute_end) / block_size :
                                         (static_cast<int64_t>(slice.absolute_end) + block_size - 1) / block_size;
-        RTP_LLM_CHECK_WITH_INFO(end_block >= begin_block && end_block <= std::numeric_limits<int32_t>::max(),
-                                "MTP chunk cache-store produced invalid block range [%ld, %ld)",
+        RTP_LLM_CHECK_WITH_INFO(begin_block >= 0 && begin_block <= round_start_block && end_block >= begin_block
+                                    && end_block <= std::numeric_limits<int32_t>::max(),
+                                "MTP chunk cache-store produced invalid block range [%ld, %ld) for round start %ld",
                                 begin_block,
-                                end_block);
+                                end_block,
+                                round_start_block);
         begin_blocks.push_back(static_cast<int32_t>(begin_block));
         end_blocks.push_back(static_cast<int32_t>(end_block));
         terminal.push_back(slice.terminal ? 1 : 0);
@@ -390,6 +403,17 @@ void MtpExecutor::setPrefillChunkCacheStorePublishPlan(GptModelInputs&          
     chunk_input.cache_store_publish_plan = CacheStorePublishPlan{torch::tensor(begin_blocks, host_i32),
                                                                  torch::tensor(end_blocks, host_i32),
                                                                  std::move(terminal_host)};
+}
+
+void MtpExecutor::advanceDraftCacheStorePublishFrontier(const GptModelInputs&    chunk_input,
+                                                        const PrefillChunkRound& round,
+                                                        std::vector<int32_t>&    publish_frontier) {
+    const auto& plan = chunk_input.cache_store_publish_plan.value();
+    const auto* end_data = plan.end_block_host.data_ptr<int32_t>();
+    for (size_t slice_idx = 0; slice_idx < round.slices.size(); ++slice_idx) {
+        const int request_idx = round.slices[slice_idx].original_batch_idx;
+        publish_frontier[static_cast<size_t>(request_idx)] = end_data[slice_idx];
+    }
 }
 
 void MtpExecutor::shiftRoundComboTokens(GptModelInputs&         chunk_input,
@@ -467,6 +491,10 @@ void MtpExecutor::runChunkPrefillRound(ChunkPrefillContext& hook, const PrefillC
         round.slices.size(),
         static_cast<int>(is_last));
 
+    if (hook.draft_publish_frontier.empty()) {
+        hook.draft_publish_frontier.assign(hook.terminal_seen.size(), 0);
+    }
+
     PrefillChunkRound draft_round;
     for (const auto& slice : round.slices) {
         RTP_LLM_CHECK_WITH_INFO(slice.original_batch_idx >= 0
@@ -525,14 +553,18 @@ void MtpExecutor::runChunkPrefillRound(ChunkPrefillContext& hook, const PrefillC
     chunk_input.kv_cache_group_types_host    = draft_kv_cache_group_types;
     // A terminal slice's N-1 prefix may end inside a physical block. Do not
     // publish that incomplete block before the sampled final token is written.
-    setPrefillChunkCacheStorePublishPlan(
-        chunk_input, draft_round, draft_cache_cfg.seq_size_per_block, /*complete_blocks_only=*/true);
+    setPrefillChunkCacheStorePublishPlan(chunk_input,
+                                         draft_round,
+                                         draft_cache_cfg.seq_size_per_block,
+                                         /*complete_blocks_only=*/true,
+                                         hook.draft_publish_frontier);
     maybeOverrideLastHiddenWithMtpBuffer(chunk_input, *model_);
 
     maybePrintModelInput(chunk_input, "prefill round draft model");
     int64_t draft_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
     draft_model_->forward(chunk_input);
     *hook.model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - draft_start_us;
+    advanceDraftCacheStorePublishFrontier(chunk_input, draft_round, hook.draft_publish_frontier);
 }
 
 bool MtpExecutor::isTpRank0() const {
@@ -1227,6 +1259,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         chunk_hook.full_inputs      = model_input;
         chunk_hook.total_tokens     = total_tokens;
         chunk_hook.terminal_seen.assign(static_cast<size_t>(model_input.input_lengths.numel()), false);
+        chunk_hook.draft_publish_frontier.assign(static_cast<size_t>(model_input.input_lengths.numel()), 0);
         chunk_hook.model_forward_us = &model_forward_us;
         py_model->setChunkPrefillRoundHook([this, &chunk_hook](py::object round_plan, bool is_last) {
             runChunkPrefillRound(chunk_hook, parsePyPrefillChunkRound(round_plan), is_last);
@@ -1263,7 +1296,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         setPrefillChunkCacheStorePublishPlan(final_chunk_input,
                                              chunk_hook.terminal_round,
                                              draft_cache_cfg.seq_size_per_block,
-                                             /*complete_blocks_only=*/false);
+                                             /*complete_blocks_only=*/false,
+                                             chunk_hook.draft_publish_frontier);
 
         if (isTpRank0()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
@@ -1300,6 +1334,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             int64_t draft_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
             draft_model_output     = std::move(draft_model_->forward(final_chunk_input));
             model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - draft_start_us;
+            advanceDraftCacheStorePublishFrontier(
+                final_chunk_input, chunk_hook.terminal_round, chunk_hook.draft_publish_frontier);
 
             // The terminal pass contains exactly one token per request.
             if (draft_model_output.all_hidden_states.defined() && draft_model_output.all_hidden_states.size(0) > 0) {
