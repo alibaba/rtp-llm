@@ -59,7 +59,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheFactoryTest.cc"],
     copts = pool_test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = pool_test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils",
@@ -116,7 +116,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [
         ":block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",
@@ -130,7 +130,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeCacheIntegrationTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )

@@ -39,7 +39,7 @@ cc_test(
     exec_properties = {"gpu": "A10"},
     srcs = ["FullGroupSetTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )
@@ -49,7 +49,7 @@ cc_test(
     exec_properties = {"gpu": "A10"},
     srcs = ["SWAGroupSetTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )
@@ -59,7 +59,7 @@ cc_test(
     exec_properties = {"gpu": "A10"},
     srcs = ["LinearGroupSetTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )

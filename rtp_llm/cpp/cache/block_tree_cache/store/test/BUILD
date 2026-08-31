@@ -34,7 +34,7 @@ cc_test(
     testonly = True,
     srcs = ["BlockTreeStorerTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps,
     env = {},
 )

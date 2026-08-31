@@ -51,7 +51,7 @@ cc_test(
     testonly = True,
     srcs = ["PerRankBlockTransferEngineDeviceHostTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
@@ -72,7 +72,7 @@ cc_test(
     testonly = True,
     srcs = ["PerRankBlockTransferEngineDataCorrectnessTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
@@ -92,7 +92,7 @@ cc_test(
     testonly = True,
     srcs = ["MultiRankBlockTransferEngineTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache:cache_async_context",

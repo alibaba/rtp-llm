@@ -46,7 +46,7 @@ cc_test(
     exec_properties = {"gpu": "A10"},
     srcs = ["BlockTreeEvictorTest.cc"],
     copts = test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )

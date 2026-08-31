@@ -91,7 +91,7 @@ cc_test(
     exec_properties = {"gpu": "A10"},
     srcs = ["DeviceBlockPoolTest.cc"],
     copts = pool_test_copts,
-    tags = ["exclusive"],
+    tags = ["exclusive-if-local"],
     deps = pool_test_deps,
     env = {},
 )

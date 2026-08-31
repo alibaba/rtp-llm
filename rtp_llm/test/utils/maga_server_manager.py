@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 import psutil
@@ -427,6 +428,7 @@ class MagaServerManager(object):
             )
 
         if errors:
+            self.print_process_log(max_lines=200)
             message = "unclean server shutdown: " + "; ".join(errors)
             if raise_on_error:
                 raise RuntimeError(message)
@@ -497,13 +499,17 @@ class MagaServerManager(object):
                 pass
         try:
             if os.path.exists(self._log_file):
-                with open(self._log_file, "r") as f:
+                with open(self._log_file, "r", errors="replace") as f:
                     if max_lines > 0:
-                        all_lines = f.readlines()
-                        content = "".join(all_lines[-max_lines:])
-                        if len(all_lines) > max_lines:
+                        tail = deque(maxlen=max_lines)
+                        line_count = 0
+                        for line in f:
+                            tail.append(line)
+                            line_count += 1
+                        content = "".join(tail)
+                        if line_count > max_lines:
                             content = (
-                                f"... ({len(all_lines) - max_lines} lines truncated)\n"
+                                f"... ({line_count - max_lines} lines truncated)\n"
                                 + content
                             )
                     else:
