@@ -5716,3 +5716,161 @@ class AttentionFP8(nn.Module):
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
             self.wo_b(wo_b_in, out=out)
+
+
+class CommitOnlyAttentionFP8(AttentionFP8):
+    """Minimal DSpARK attention object used by a prefill commit worker.
+
+    ``forward_commit`` never evaluates a query.  It only runs the per-layer
+    ``wkv -> RMSNorm + RoPE`` projection before writing the SWA pool.  The
+    regular :class:`AttentionFP8` constructor also materializes Q/O linears,
+    compressor/indexer state, and their associated caches; constructing those
+    objects for a prefill-only process needlessly loads several GiB of MTP
+    weights.  This subclass deliberately initializes only the attributes
+    consumed by the shared commit path and inherits the pool/CP helpers from
+    ``AttentionFP8`` so there is one implementation of cache geometry.
+
+    It is intentionally not a general attention implementation.  Proposal or
+    ordinary prefill/decode calls must use ``AttentionFP8`` (the model selects
+    this class only when ``V4Args.commit_only`` is true).
+    """
+
+    def __init__(
+        self,
+        layer_id: int,
+        dim: int,
+        n_heads: int,
+        q_lora_rank: int,
+        head_dim: int,
+        rope_head_dim: int,
+        o_lora_rank: int,
+        o_groups: int,
+        window_size: int,
+        compress_ratio: int,
+        compress_rope_theta: float,
+        rope_theta: float,
+        rope_factor: float,
+        beta_fast: int,
+        beta_slow: int,
+        original_seq_len: int,
+        max_batch_size: int,
+        max_seq_len: int,
+        index_n_heads: int,
+        index_head_dim: int,
+        index_topk: int,
+        norm_eps: float = 1e-6,
+        layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        tp_size: int = 1,
+        tp_rank: int = 0,
+    ):
+        del max_batch_size, index_topk  # no proposal/compressor state here
+        if layer_weights is None:
+            raise ValueError("commit-only DSpARK attention requires layer weights")
+        if int(compress_ratio) != 0:
+            raise ValueError(
+                "commit-only DSpARK attention supports SWA layers only, got "
+                f"compress_ratio={compress_ratio}"
+            )
+
+        # Calling nn.Module directly avoids the full AttentionFP8 constructor,
+        # while still registering ``wkv`` as a child module for lifetime and
+        # device ownership semantics.
+        nn.Module.__init__(self)
+        self.layer_id = int(layer_id)
+        self.dim = int(dim)
+        self.q_lora_rank = int(q_lora_rank)
+        self.o_lora_rank = int(o_lora_rank)
+        self.head_dim = int(head_dim)
+        self.rope_head_dim = int(rope_head_dim)
+        self.window_size = int(window_size)
+        self.compress_ratio = 0
+        self.eps = float(norm_eps)
+        self.softmax_scale = self.head_dim**-0.5
+        self.tp_size = int(tp_size)
+        self.tp_rank = int(tp_rank)
+        if self.tp_size <= 0:
+            raise ValueError(f"invalid attention tp_size={self.tp_size}")
+        if int(n_heads) % self.tp_size:
+            raise ValueError(
+                f"n_heads={n_heads} is not divisible by tp_size={self.tp_size}"
+            )
+        if int(o_groups) % self.tp_size:
+            raise ValueError(
+                f"o_groups={o_groups} is not divisible by tp_size={self.tp_size}"
+            )
+        self.n_heads = int(n_heads) // self.tp_size
+        self.n_groups = int(o_groups) // self.tp_size
+
+        from rtp_llm.utils.model_weight import W
+
+        # Commit projection is the only sizeable per-layer parameter.  The
+        # descriptor loader supplies its matching FP8 scale as a sibling key.
+        self.wkv = _v4_fp8_linear(
+            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s]
+        )
+        self.kv_norm = layer_weights[W.v4_attn_kv_norm]
+
+        # ``attn_sink`` belongs to the proposal attention kernel and is not
+        # part of the commit path.  Keep the attribute for interface
+        # compatibility, but do not require or load the proposal-only tensor.
+        self.attn_sink = None
+
+        # Explicitly mark unsupported branches as absent.  In particular,
+        # ``reset_rope_cache`` and ``_ensure_freqs_cis_bound`` inherited from
+        # AttentionFP8 safely skip these when ``compress_ratio == 0``.
+        self.wq_a = None
+        self.wq_b = None
+        self.wo_a_w = None
+        self.wo_a_s = None
+        self.wo_b = None
+        self.q_norm = None
+        self.compressor = None
+        self.indexer = None
+
+        # Runtime rope/cache state mirrors the common AttentionFP8 tail.  The
+        # rope table is recomputed on the real device by model initialization;
+        # under the meta construction context this first value is harmless.
+        self._rope_base = float(rope_theta)
+        self._rope_o_seq_len = 0
+        self._rope_factor = float(rope_factor)
+        self._rope_beta_fast = int(beta_fast)
+        self._rope_beta_slow = int(beta_slow)
+        self._rope_dim = int(rope_head_dim)
+        self._rope_max_seq_len = int(max_seq_len)
+        self.freqs_cis = precompute_freqs_cis(
+            self._rope_dim,
+            self._rope_max_seq_len,
+            self._rope_o_seq_len,
+            self._rope_base,
+            self._rope_factor,
+            self._rope_beta_fast,
+            self._rope_beta_slow,
+        )
+        self._fp8_decode_op: Optional[Any] = None
+        self._cp_ctx: Optional[CPContext] = None
+        self._prefill_meta_shared: Optional["PrefillMeta"] = None
+        self._kv_cache: Optional[Any] = None
+        self._block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None
+
+        from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+            CSA_KV,
+            CSA_STATE,
+            HCA_KV,
+            HCA_STATE,
+            INDEXER_KV,
+            INDEXER_STATE,
+            SWA_KV,
+        )
+
+        idx_hd = int(index_head_dim)
+        kv_spec = (torch.uint8, _DSV4_FP8_KV_ENTRY_BYTES)
+        indexer_kv_spec = (torch.uint8, _DSV4_FP8_INDEXER_ENTRY_BYTES)
+        self._pool_spec: Dict[str, tuple] = {
+            SWA_KV: kv_spec,
+            CSA_KV: kv_spec,
+            HCA_KV: kv_spec,
+            INDEXER_KV: indexer_kv_spec,
+            CSA_STATE: (torch.float32, 4 * self.head_dim),
+            HCA_STATE: (torch.float32, 2 * self.head_dim),
+            INDEXER_STATE: (torch.float32, 4 * idx_hd),
+        }
