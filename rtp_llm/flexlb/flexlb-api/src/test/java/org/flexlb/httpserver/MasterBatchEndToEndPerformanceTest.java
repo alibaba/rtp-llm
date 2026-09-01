@@ -17,6 +17,7 @@ import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -213,7 +214,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 engineWorkerStatus,
                 new EmptyCacheAwareService(),
                 resourceMeasureFactory,
-                mock(EngineHealthReporter.class, withSettings().stubOnly()));
+                mock(EngineHealthReporter.class, withSettings().stubOnly()),
+                new SessionPlacementStore());
         new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
         new RandomStrategy(engineWorkerStatus, configService, resourceMeasureFactory);
         return new DefaultRouter(
@@ -249,7 +251,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 configService,
                 reporter,
                 latencyRecorder,
-                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()));
+                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()),
+                new SessionPlacementStore());
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {

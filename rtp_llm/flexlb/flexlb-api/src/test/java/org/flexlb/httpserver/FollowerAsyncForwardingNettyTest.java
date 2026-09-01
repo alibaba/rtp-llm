@@ -8,6 +8,7 @@ import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -558,7 +559,8 @@ class FollowerAsyncForwardingNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    mock(PrioritySchedulerReporter.class));
+                    mock(PrioritySchedulerReporter.class),
+                    mock(SessionPlacementStore.class));
 
             requestExecutor = new ThreadPoolExecutor(
                     EXECUTOR_CORE_SIZE,

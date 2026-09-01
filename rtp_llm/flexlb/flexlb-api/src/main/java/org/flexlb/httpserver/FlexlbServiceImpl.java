@@ -4,26 +4,27 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.balance.session.SessionPlacementStore;
+import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
-import org.flexlb.dao.pv.PvLogData;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
-import org.flexlb.config.ConfigService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -50,6 +51,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final PrioritySchedulerReporter prioritySchedulerReporter;
+    private final SessionPlacementStore sessionPlacementStore;
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -58,7 +60,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
-                             PrioritySchedulerReporter prioritySchedulerReporter) {
+                             PrioritySchedulerReporter prioritySchedulerReporter,
+                             SessionPlacementStore sessionPlacementStore) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -68,6 +71,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
         this.prioritySchedulerReporter = prioritySchedulerReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
     }
 
     @Override
@@ -528,6 +532,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         try {
             observer.onNext(response);
             observer.onCompleted();
+            recordSessionPlacement(ctx, response, origin);
         } finally {
             try {
                 serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
@@ -541,6 +546,33 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             engineHealthReporter.reportBalancingService(ctx);
             reportPrioritySchedule(ctx, response);
         }
+    }
+
+    private void recordSessionPlacement(
+            BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            ScheduleOrigin origin) {
+        if (ctx == null || !response.getSuccess()
+                || origin == ScheduleOrigin.FORWARDED_TO_MASTER
+                || ctx.getConfig() == null
+                || ctx.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity() == null) {
+            return;
+        }
+        Request request = ctx.getRequest();
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()
+                || request.getInferenceSessionState() == Request.SessionState.UNSPECIFIED) {
+            return;
+        }
+        response.getServerStatusList().stream()
+                .filter(status -> RoleType.PREFILL.getCode().equals(status.getRole()))
+                .findFirst()
+                .ifPresent(status -> sessionPlacementStore.record(
+                        request.getModel(),
+                        request.getInferenceSessionId(),
+                        status.getServerIp() + ":" + status.getHttpPort(),
+                        request.getRequestId()));
     }
 
     /** Write one PV record on the node that made the scheduling decision. */

@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
@@ -139,7 +140,8 @@ class CostBasedPrefillRoutingPerformanceTest {
                 Mockito.mock(EngineHealthReporter.class, withSettings().stubOnly());
 
         return new CostBasedPrefillStrategy(
-                engineWorkerStatus, new EmptyCacheAwareService(), resourceMeasureFactory, healthReporter);
+                engineWorkerStatus, new EmptyCacheAwareService(), resourceMeasureFactory,
+                healthReporter, new SessionPlacementStore());
     }
 
     private RoundResult runRound(CostBasedPrefillStrategy strategy,

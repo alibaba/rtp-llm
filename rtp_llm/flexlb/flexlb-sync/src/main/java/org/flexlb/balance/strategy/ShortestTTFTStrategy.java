@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -59,15 +60,18 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
+    private final SessionPlacementStore sessionPlacementStore;
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory,
-                                EngineHealthReporter engineHealthReporter) {
+                                EngineHealthReporter engineHealthReporter,
+                                SessionPlacementStore sessionPlacementStore) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
@@ -169,6 +173,25 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                                                 String group,
                                                 long seqLen,
                                                 FlexlbConfig config) {
+        SessionAffinityPolicy.Decision sessionAffinity = SessionAffinityPolicy.evaluate(
+                balanceContext.getRequest(),
+                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore,
+                scoredEndpoints.size(),
+                index -> scoredEndpoints.get(index).ep().ipPort(),
+                index -> scoredEndpoints.get(index).ttft(),
+                index -> scoredEndpoints.get(index).hitCache(),
+                scoredEndpoints.getFirst().ttft());
+        if (sessionAffinity.hasPreference()) {
+            ScoredEndpoint preferred = scoredEndpoints.get(sessionAffinity.preferredIndex());
+            ScoredEndpoint selected = selectFirstWithoutConcurrentConflict(List.of(preferred));
+            if (selected != null) {
+                reportCacheAffinityDecision(
+                        roleType, selected.ep().getIp(), sessionAffinity.reason().name());
+                return selected;
+            }
+            return selectBaselineEndpoint(refreshSelectionSnapshots(scoredEndpoints), config);
+        }
         RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
                 .getPrefill().getCacheAffinity();
         if (cacheAffinity == null) {

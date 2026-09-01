@@ -129,6 +129,7 @@ class CostBasedPrefillStrategyTest {
         sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
         BalanceContext context = buildContext(1000, 101L, config);
         context.getRequest().setModel("kimi-k3");
+        context.getRequest().setSessionSchemaVersion(1);
         context.getRequest().setInferenceSessionId("session-1");
         context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
 

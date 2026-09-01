@@ -125,6 +125,7 @@ class ShortestTtftCacheAffinityTest {
         BalanceContext context = buildContext(1000, 103L, config);
         Request request = context.getRequest();
         request.setModel("kimi-k3");
+        request.setSessionSchemaVersion(1);
         request.setInferenceSessionId("session-1");
         request.setInferenceSessionState(Request.SessionState.NEW);
 
@@ -307,7 +308,8 @@ class ShortestTtftCacheAffinityTest {
                 engineWorkerStatus,
                 cacheAwareService,
                 resourceMeasureFactory,
-                engineHealthReporter) {
+                engineHealthReporter,
+                sessionPlacementStore) {
             @Override
             protected ScoredEndpoint selectBestEndpoint(
                     List<ScoredEndpoint> scoredEndpoints,
@@ -350,7 +352,8 @@ class ShortestTtftCacheAffinityTest {
                 engineWorkerStatus,
                 cacheAwareService,
                 resourceMeasureFactory,
-                engineHealthReporter) {
+                engineHealthReporter,
+                sessionPlacementStore) {
             @Override
             protected ScoredEndpoint selectBestEndpoint(
                     List<ScoredEndpoint> scoredEndpoints,
@@ -400,7 +403,8 @@ class ShortestTtftCacheAffinityTest {
                 engineWorkerStatus,
                 cacheAwareService,
                 resourceMeasureFactory,
-                engineHealthReporter) {
+                engineHealthReporter,
+                sessionPlacementStore) {
             @Override
             protected ScoredEndpoint selectFirstWithoutConcurrentConflict(
                     List<ScoredEndpoint> selectionOrder) {
@@ -443,6 +447,7 @@ class ShortestTtftCacheAffinityTest {
 
     private static void markEstablished(BalanceContext context, String model, String sessionId) {
         context.getRequest().setModel(model);
+        context.getRequest().setSessionSchemaVersion(1);
         context.getRequest().setInferenceSessionId(sessionId);
         context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
     }

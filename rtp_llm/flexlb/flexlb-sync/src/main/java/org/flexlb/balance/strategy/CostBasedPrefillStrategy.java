@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -34,17 +35,20 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
+    private final SessionPlacementStore sessionPlacementStore;
     private final ThreadLocal<CandidateSet> candidateSets =
             ThreadLocal.withInitial(CandidateSet::new);
 
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
-                                    EngineHealthReporter engineHealthReporter) {
+                                    EngineHealthReporter engineHealthReporter,
+                                    SessionPlacementStore sessionPlacementStore) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
 
@@ -137,6 +141,23 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                       FlexlbConfig config) {
         if (survivors.size() == 0) {
             return -1;
+        }
+
+        SessionAffinityPolicy.Decision sessionAffinity = SessionAffinityPolicy.evaluate(
+                balanceContext.getRequest(),
+                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore,
+                survivors.size(),
+                index -> survivors.endpoint(index).ipPort(),
+                survivors::score,
+                survivors::cacheHit,
+                minScore);
+        if (sessionAffinity.hasPreference()) {
+            int selectedIndex = sessionAffinity.preferredIndex();
+            reportCacheAffinityDecision(roleType,
+                    survivors.endpoint(selectedIndex).getIp(),
+                    sessionAffinity.reason().name());
+            return selectedIndex;
         }
 
         RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()

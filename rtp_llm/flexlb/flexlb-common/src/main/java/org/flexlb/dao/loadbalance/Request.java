@@ -15,6 +15,7 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Request {
     public static final long DEFAULT_GENERATE_TIMEOUT_MS = 60L * 60L * 1000L;
+    public static final int SESSION_SCHEMA_VERSION = 1;
 
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
