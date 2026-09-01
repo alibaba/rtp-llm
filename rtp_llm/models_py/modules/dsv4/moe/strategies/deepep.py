@@ -25,6 +25,14 @@ _DIAG_CT = [0]
 # decode-round commit geometry bounds n identically on every rank (see the
 # selector comment); rank-invariant padding keeps the collectives matching.
 _EAGER_FIXED_EP_BOUND = int(os.environ.get("DSV4_SM120_EAGER_FIXED_EP", "0"))
+# Lever 1 (Sep 1): real deep_ep intranode dispatch/combine for the eager
+# prefill MoE — direct P2P kernels replace the NCCL-emulated a2a (NCCL runs
+# every collective over host SHM on this box; see DSV4_NCCL_AB_20260901.md).
+# 0 = off (canonical NCCL emulation).
+_DEEPEP_REAL = int(os.environ.get("DSV4_DEEPEP_REAL", "0"))
+_DEEPEP_REAL_MAX_TOKENS = int(os.environ.get("DSV4_DEEPEP_MAX_TOKENS", "8192"))
+_DEEPEP_BUFFER = None
+_DIAG_DE = [0]
 _DIAG_ATA = [0]
 _SERVE_PATH_CT = {"__total": 0}
 _DIAG_FE = [0]
@@ -59,6 +67,26 @@ _DEEPEP_SUPPORTED_TOPK = (2, 4, 8, 16)
 
 def _sm120_uses_replicated_tp_tokens(cfg: MoeCfg, world: int) -> bool:
     return cfg.tp_size > 1 and cfg.tp_size == cfg.ep_size == world
+
+def _get_deep_ep_buffer(world: int, hidden: int, topk_pad: int):
+    """Process-wide deep_ep intranode Buffer (one per engine — all 43 layer
+    strategies share the WORLD EP group). Sized for
+    world x max_tokens x topk x hidden bf16 + 25% routing-imbalance slack;
+    the validated 24/24 run used the same magnitude (2e9 for 4x8192x8x7168)."""
+    global _DEEPEP_BUFFER
+    if _DEEPEP_BUFFER is None:
+        import deep_ep
+        num_nvl_bytes = int(world * _DEEPEP_REAL_MAX_TOKENS * topk_pad * hidden * 2 * 1.25)
+        if os.environ.get("DSV4_DIAG"):
+            import sys
+            print("[DIAGDE] rank=%d creating deep_ep Buffer num_nvl_bytes=%d" % (
+                torch.distributed.get_rank(torch.distributed.group.WORLD)
+                if torch.distributed.is_initialized() else -1,
+                num_nvl_bytes), file=sys.stderr, flush=True)
+        _DEEPEP_BUFFER = deep_ep.Buffer(
+            torch.distributed.group.WORLD, num_nvl_bytes=num_nvl_bytes)
+    return _DEEPEP_BUFFER
+
 
 @register_strategy
 class DeepEPStrategy(RoutedExpertsStrategy):
@@ -219,6 +247,17 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                     return self._forward_sm120_fixed_ep(
                         x, weights, indices, pad_floor=_eager_fixed_bound
                     )
+            if (
+                _DEEPEP_REAL > 0
+                and not _capturing
+                and not _symbolic
+                and not replicated_tp_tokens
+                and self._sm120_grouped is not None
+                and 0 <= _diag_x0 <= _DEEPEP_REAL_MAX_TOKENS
+            ):
+                # Real deep_ep intranode kernels (prefill engine, flag ON).
+                # Oversized calls fall through to the NCCL emulation below.
+                return self._forward_sm120_deepep_real(x, weights, indices)
             if (
                 not _capturing
                 and not _symbolic
@@ -391,6 +430,72 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 chunk_x, cw, cli).to(x.dtype).contiguous()
         dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
         return partial.view(world, n_pad, d)[rank][:n].float()
+
+    def _forward_sm120_deepep_real(self, x, weights, indices) -> torch.Tensor:
+        """Real deep_ep intranode dispatch + grouped FP4 compute + combine.
+
+        DSV4_DEEPEP_REAL=1 (prefill engine only): replaces the NCCL-emulated
+        single-round a2a with deep_ep's intranode kernels — direct P2P
+        transport (vs NCCL-over-SHM), device-side layout computation, and no
+        host count exchange (the emulation's count-AG + .cpu().tolist() drain
+        disappears). Mirrors the H100 path's DeepEP semantics (recv indices in
+        LOCAL space with -1 pads) with the SM120 grouped-FP4 local compute.
+        """
+        dist = torch.distributed
+        cfg = self.cfg
+        world = dist.get_world_size(dist.group.WORLD)
+        n, d = x.shape
+        n_act = int(indices.size(-1))
+        topk_pad = next(
+            (k for k in _DEEPEP_SUPPORTED_TOPK if k >= n_act),
+            _DEEPEP_SUPPORTED_TOPK[-1],
+        )
+        buf = _get_deep_ep_buffer(world, int(d), topk_pad)
+        if os.environ.get("DSV4_DIAG") and _DIAG_DE[0] < 40:
+            _DIAG_DE[0] += 1
+            import sys
+            print("[DIAGDE] rank=%d x0=%d deep_ep=real path=dispatch" % (
+                dist.get_rank(dist.group.WORLD), n), file=sys.stderr, flush=True)
+        # Pad topk 6 -> 8 (intranode dispatch kernel supports {2,4,8,16});
+        # the -1 padding slots are dropped by the dispatch.
+        indices_p, weights_p = self._pad_topk_for_deepep(indices, weights)
+        (
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            num_tokens_per_expert,
+            is_token_in_rank,
+            _,
+        ) = buf.get_dispatch_layout(indices_p, cfg.n_routed_experts)
+        recv_x, recv_topk_idx, recv_topk_weights, _per_expert, handle, _ev = buf.dispatch(
+            x.contiguous(),
+            None,
+            num_tokens_per_rank,
+            num_tokens_per_rdma_rank,
+            is_token_in_rank,
+            num_tokens_per_expert,
+            indices_p,
+            weights_p,
+            expert_alignment=1,
+        )
+        M = int(recv_x.size(0))
+        # recv_topk_idx is LOCAL index space ([0, n_local_experts), -1 = not
+        # local) — same contract the H100 path documents. Mask + clamp so the
+        # grouped GEMM sees exactly the emulation's post-recv contract.
+        local_i = recv_topk_idx.to(torch.int64).contiguous()
+        valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
+        local_w = recv_topk_weights * valid.to(recv_topk_weights.dtype)
+        local_i = torch.where(valid, local_i, torch.zeros_like(local_i))
+        recv_output = torch.empty((M, d), dtype=x.dtype, device=x.device)
+        chunk_tokens = int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "4096"))
+        for begin in range(0, M, chunk_tokens):
+            end = min(begin + chunk_tokens, M)
+            recv_output[begin:end] = self._sm120_grouped._forward_sm120(
+                recv_x[begin:end].contiguous(), local_w[begin:end],
+                local_i[begin:end]).to(x.dtype)
+        del recv_x, local_w, local_i, valid
+        y_combined, _, _ = buf.combine(recv_output.contiguous(), handle)
+        return y_combined.to(x.dtype)
+
     def _forward_sm120_all_to_all(self, x, weights, indices) -> torch.Tensor:
         try:
             return self._forward_sm120_all_to_all_impl(x, weights, indices)
