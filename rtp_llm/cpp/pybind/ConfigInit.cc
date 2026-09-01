@@ -94,6 +94,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
     registerMultimodal(m);
+    m.attr("DSV4_HCA_STATE_TAG") = py::str(std::string(DSV4_HCA_STATE_TAG));
 
     // Register enums
     py::enum_<RoleType>(m, "RoleType")
@@ -646,7 +647,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 57) {
                         // DSV4 fixed-pool knobs.
                         c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
-                        c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
+                        c.dsv4_hca_state_pool_blocks = t[55].cast<int64_t>();
                         c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
                     }
                 } catch (const std::exception& e) {

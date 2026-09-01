@@ -1,10 +1,10 @@
 import functools
+import os
 
 import torch
 
 from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
-from rtp_llm.models_py.utils.arch import mhc_pre_gemm_backend
 
 
 def _ceil_div(x: int, y: int) -> int:
@@ -22,7 +22,24 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
 
 
 def _requested_backend(device: torch.device | None = None) -> str:
-    return mhc_pre_gemm_backend(device)
+    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
+    aliases = {
+        "dg": "deepgemm",
+        "tilelang": "tilelang_single",
+        "single": "tilelang_single",
+    }
+    if requested not in ("", "auto"):
+        return aliases.get(requested, requested)
+
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    if device.type != "cuda":
+        return "deepgemm"
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    major, _ = torch.cuda.get_device_capability(device_index)
+    return "tilelang_single" if major == 12 else "deepgemm"
 
 
 def _run_tilelang_single_gemm(

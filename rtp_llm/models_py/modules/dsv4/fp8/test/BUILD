@@ -88,6 +88,18 @@ py_test(
 )
 
 py_test(
+    name = "test_sm120_sparse_mla_hardware",
+    srcs = ["test_sm120_sparse_mla_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "1",
+    },
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_pool_slot_mapping_split",
     srcs = ["test_pool_slot_mapping_split.py"],
     deps = _DSV4_FP8_TEST_DEPS,

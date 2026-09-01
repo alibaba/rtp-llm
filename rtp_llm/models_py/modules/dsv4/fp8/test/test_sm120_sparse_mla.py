@@ -5,7 +5,10 @@ import torch
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     _fp8_paged_indexer_score_sm120,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import canonical_topk
+from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+    SM120_EXTRA_TOPK_WIDTHS,
+    canonical_topk,
+)
 
 
 class Sm120SparseMlaCanonicalTest(unittest.TestCase):
@@ -44,6 +47,23 @@ class Sm120SparseMlaCanonicalTest(unittest.TestCase):
     def test_width_overflow_fails_with_actionable_error(self):
         with self.assertRaisesRegex(RuntimeError, "exceeds the largest"):
             canonical_topk(torch.zeros(1, 9, dtype=torch.int32), None, (4, 8))
+
+    def test_hca_long_context_widths_cover_one_million_tokens(self):
+        for source_width, expected_width in ((2049, 4096), (4097, 8192), (8192, 8192)):
+            with self.subTest(source_width=source_width):
+                indices = torch.arange(source_width, dtype=torch.int32).view(1, -1)
+                canonical, lengths = canonical_topk(
+                    indices, None, SM120_EXTRA_TOPK_WIDTHS
+                )
+                self.assertEqual(canonical.shape, (1, expected_width))
+                self.assertEqual(lengths.tolist(), [source_width])
+
+        with self.assertRaisesRegex(RuntimeError, "exceeds the largest"):
+            canonical_topk(
+                torch.zeros(1, 8193, dtype=torch.int32),
+                None,
+                SM120_EXTRA_TOPK_WIDTHS,
+            )
 
 
 class Sm120IndexerFallbackTest(unittest.TestCase):

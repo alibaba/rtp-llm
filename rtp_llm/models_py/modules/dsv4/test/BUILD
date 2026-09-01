@@ -218,6 +218,21 @@ py_test(
 )
 
 py_test(
+    name = "test_sm120_collective_hardware",
+    srcs = ["test_sm120_collective_hardware.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {
+        "gpu": "RTX_5000_PRO",
+        "gpu_count": "2",
+    },
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_indexer_topk_backend",
     srcs = ["test_indexer_topk_backend.py"],
     deps = [

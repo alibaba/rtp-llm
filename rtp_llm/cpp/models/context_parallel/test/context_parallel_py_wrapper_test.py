@@ -287,6 +287,43 @@ class TestContextParallelProcessor(unittest.TestCase):
         self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
         self.assertEqual(position_ids.tolist(), [4, 5, 10, 11])
 
+    def test_prefix_reuse_replaces_stale_one_axis_position_ids(self):
+        _, _, _, position_ids, _ = cp_test.remap_multimodal_inputs(
+            torch.arange(8, dtype=torch.int32),
+            torch.arange(100, 108, dtype=torch.int32),
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+        )
+
+        self.assertEqual(position_ids.tolist(), [4, 5, 10, 11])
+
+    def test_prefix_reuse_preserves_multi_axis_position_ids(self):
+        explicit_position_ids = torch.arange(24, dtype=torch.int32).reshape(8, 3)
+        _, _, _, position_ids, shuffle_indices = cp_test.remap_multimodal_inputs(
+            torch.arange(8, dtype=torch.int32),
+            explicit_position_ids.flatten(),
+            [],
+            [],
+            torch.empty(0, dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+        )
+
+        self.assertEqual(shuffle_indices.cpu().tolist(), [0, 1, 6, 7])
+        torch.testing.assert_close(
+            position_ids.reshape(4, 3),
+            explicit_position_ids[[0, 1, 6, 7]],
+        )
+
     def test_prefix_reuse_zeros_padding_position_ids(self):
         _, _, _, position_ids, shuffle_indices = cp_test.remap_multimodal_inputs(
             torch.arange(7, dtype=torch.int32),

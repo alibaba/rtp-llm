@@ -17,7 +17,7 @@ from typing import Any, Dict, Iterable, Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.utils.arch import is_sm12x, mhc_pre_gemm_backend
+from rtp_llm.models_py.utils.arch import is_sm120, mhc_pre_gemm_backend
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 _DENSE_GEMM_FALLBACK_M_GRID = [
@@ -1422,7 +1422,9 @@ def _generate_dense_gemm_warmup_m_grid(
     return tuple(sorted(reps_by_signature.values()))
 
 
-def _mhc_prenorm_deepgemm_backend_enabled(device: Optional[torch.device] = None) -> bool:
+def _mhc_prenorm_deepgemm_backend_enabled(
+    device: Optional[torch.device] = None,
+) -> bool:
     return mhc_pre_gemm_backend(device) == "deepgemm"
 
 
@@ -1585,7 +1587,7 @@ def warmup_batched_fp8_einsum_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if is_sm12x(device):
+    if is_sm120(device):
         return
     _assert_not_capturing()
 
@@ -1791,9 +1793,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -1829,13 +1829,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 
@@ -1852,7 +1848,7 @@ def warmup_fp8_mqa_logits_jit(
     device = torch.device(device)
     if not _is_cuda_device(device) or not shapes:
         return
-    if is_sm12x(device):
+    if is_sm120(device):
         return
     if not _fp8_mqa_logits_available():
         return

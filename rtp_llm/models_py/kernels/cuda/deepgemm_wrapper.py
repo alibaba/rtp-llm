@@ -88,7 +88,10 @@ def has_deep_gemm() -> bool:
 
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
-    return torch.cuda.get_device_capability()[0] in [10, 12]
+    # SM12x uses the float-scale CUTLASS/FlashInfer paths. Keep this predicate
+    # aligned with weight loading so every downstream router/executor consumes
+    # the same scale layout that was materialized.
+    return torch.cuda.get_device_capability()[0] == 10
 
 
 @contextmanager

@@ -10,7 +10,7 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--disable_pdl",
         env_name="DISABLE_PDL",
-        bind_to=(misc_config.misc_config, 'disable_pdl'),
+        bind_to=(misc_config.misc_config, "disable_pdl"),
         type=str2bool,
         default=True,
         help="是否禁用PDL",
@@ -19,16 +19,25 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--aux_string",
         env_name="AUX_STRING",
-        bind_to=(misc_config.misc_config, 'aux_string'),
+        bind_to=(misc_config.misc_config, "aux_string"),
         type=str,
         default="",
         help="管控环境变量字符串",
     )
 
     misc_group.add_argument(
+        "--dsv4_startup_real_warmup",
+        env_name="DSV4_STARTUP_REAL_WARMUP",
+        bind_to=(misc_config, "dsv4_startup_real_warmup"),
+        type=str2bool,
+        default=True,
+        help="Run the real-request DeepSeek-V4 startup warmup",
+    )
+
+    misc_group.add_argument(
         "--oss_endpoint",
         env_name="OSS_ENDPOINT",
-        bind_to=(misc_config, 'oss_endpoint'),
+        bind_to=(misc_config, "oss_endpoint"),
         type=str,
         default=None,
         help="OSS端点",
@@ -36,7 +45,7 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--dashscope_api_key",
         env_name="DASHSCOPE_API_KEY",
-        bind_to=(misc_config, 'dashscope_api_key'),
+        bind_to=(misc_config, "dashscope_api_key"),
         type=str,
         default="EMPTY",
         help="Dashscope API Key",
@@ -44,7 +53,7 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--dashscope_http_url",
         env_name="DASHSCOPE_HTTP_URL",
-        bind_to=(misc_config, 'dashscope_http_url'),
+        bind_to=(misc_config, "dashscope_http_url"),
         type=str,
         default=None,
         help="Dashscope HTTP URL",
@@ -52,7 +61,7 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--dashscope_websocket_url",
         env_name="DASHSCOPE_WEBSOCKET_URL",
-        bind_to=(misc_config, 'dashscope_websocket_url'),
+        bind_to=(misc_config, "dashscope_websocket_url"),
         type=str,
         default=None,
         help="Dashscope WebSocket URL",
@@ -60,7 +69,7 @@ def init_misc_group_args(parser, misc_config):
     misc_group.add_argument(
         "--openai_api_key",
         env_name="OPENAI_API_KEY",
-        bind_to=(misc_config, 'openai_api_key'),
+        bind_to=(misc_config, "openai_api_key"),
         type=str,
         default="EMPTY",
         help="OpenAI API Key",

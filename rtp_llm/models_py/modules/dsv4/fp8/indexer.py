@@ -27,7 +27,6 @@ from typing import Any, Callable, Dict, NamedTuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from rtp_llm.models_py.utils.arch import is_sm120
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
@@ -56,8 +55,13 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorMeta,
     _CompressorPending,
 )
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    IndexerTopKBackendName,
+    parse_indexer_topk_backend_name,
+)
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -91,11 +95,7 @@ def _topk_v3_enabled() -> bool:
 def _fp8_prefill_fast_topk_enabled(logits: torch.Tensor | None = None) -> bool:
     if not _FAST_PREFILL_TOPK_OK:
         return False
-    if (
-        logits is not None
-        and logits.is_cuda
-        and is_sm120(logits.device)
-    ):
+    if logits is not None and logits.is_cuda and is_sm120(logits.device):
         return False
     return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
 
@@ -105,15 +105,15 @@ def _fp8_prefill_topk_force_radix_sort() -> bool:
 
 
 def _fp8_prefill_topk_use_torch(logits: torch.Tensor | None = None) -> bool:
-    backend = os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
-    if backend == "torch":
-        return True
-    if backend not in ("auto", "cuda"):
-        raise ValueError(
-            "DSV4_INDEXER_TOPK_BACKEND must be one of auto|cuda|torch, "
-            f"got {backend!r}"
-        )
-    return False
+    backend = parse_indexer_topk_backend_name()
+    # Persistent decode Top-K and experimental HISA do not implement the
+    # variable-row prefill ABI.  They remain valid global selections, but this
+    # phase deliberately falls back to the exact torch implementation.
+    return backend in (
+        IndexerTopKBackendName.TORCH,
+        IndexerTopKBackendName.PERSISTENT,
+        IndexerTopKBackendName.HISA,
+    )
 
 
 def _fp8_prefill_topk_canonicalize() -> bool:
@@ -123,14 +123,14 @@ def _fp8_prefill_topk_canonicalize() -> bool:
         "yes",
         "on",
     )
+
+
 def _canonicalize_prefill_topk_out(out: torch.Tensor) -> None:
     sentinel = torch.iinfo(torch.int32).max
     sortable = torch.where(out >= 0, out, torch.full_like(out, sentinel))
     sorted_idx = torch.sort(sortable, dim=-1).values
     out.copy_(
-        torch.where(
-            sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx
-        )
+        torch.where(sorted_idx == sentinel, torch.full_like(sorted_idx, -1), sorted_idx)
     )
 
 
@@ -218,9 +218,7 @@ def _fp8_prefill_score_chunk_rows() -> int:
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _topk_v3_workspace_cache.get(device)
     if ws is None:
-        ws = torch.empty(
-            _TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
+        ws = torch.empty(_TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         _topk_v3_workspace_cache[device] = ws
     return ws
 

@@ -131,6 +131,7 @@ try:
         CpBlockSliceMode,
         CpPrefillSliceLayout,
         DashScGrpcConfig,
+        DSV4_HCA_STATE_TAG,
         KVCacheSpecType,
         OpaqueBlockEntryCountMode,
         ConcurrencyConfig,

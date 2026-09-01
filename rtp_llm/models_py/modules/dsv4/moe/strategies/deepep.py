@@ -11,10 +11,10 @@ from typing import Dict, Tuple
 
 import torch
 
-from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from .local_loop import LocalLoopStrategy
 from rtp_llm.models_py.utils.arch import is_sm12x
 
+from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
+from .local_loop import LocalLoopStrategy
 
 # ACCL-EP's intranode dispatch kernel has a compile-time switch over
 # ``num_topk`` that only covers {2, 4, 8, 16}. V4-Flash uses topk=6, so pad
@@ -135,7 +135,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 global_topk_idx,
                 global_topk_idx + cfg.local_expert_start,
             )
-            y_local = self._local._forward_into_buf(
+            y_local = self._local.forward_local_range(
                 recv_x.contiguous(),
                 recv_topk_weights.contiguous(),
                 global_topk_idx,

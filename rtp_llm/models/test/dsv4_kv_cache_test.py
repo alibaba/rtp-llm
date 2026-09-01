@@ -1,13 +1,15 @@
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models.deepseek_v4 import DeepSeekV4
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.models.deepseek_v4 import DeepSeekV4, DeepSeekV4DSpark
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
     DSV4_FP8_INDEXER_ENTRY_BYTES,
     DSV4_FP8_KV_ENTRY_BYTES,
     DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES,
+    DSV4_HCA_STATE_POOL_BLOCKS,
     DSV4_SWA_WINDOW_ENTRIES,
     DSV4_TOKENS_PER_BLOCK,
     HCA_KV_TAG,
@@ -19,6 +21,7 @@ from rtp_llm.models.dsv4_kv_cache import (
     build_dsv4_kv_cache_spec_descs,
 )
 from rtp_llm.ops import (
+    DSV4_HCA_STATE_TAG,
     CacheEvictPolicy,
     CacheMemoryPlacement,
     CpBlockSliceMode,
@@ -39,6 +42,15 @@ FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
 
 
 class Dsv4KvCacheSpecTest(TestCase):
+    def test_dspark_model_type_routes_to_production_wrapper(self):
+        self.assertIs(
+            ModelFactory.get_model_cls("deepseek_v4_dspark"),
+            DeepSeekV4DSpark,
+        )
+
+    def test_hca_tag_matches_cpp_contract(self):
+        self.assertEqual(HCA_STATE_TAG, DSV4_HCA_STATE_TAG)
+
     def _build(self, fp8_kv=True, fixed_pool_use_host_memory=False):
         return build_dsv4_kv_cache_spec_descs(
             layer_num=len(LAYER_COMPRESS_RATIOS),
@@ -211,10 +223,11 @@ class Dsv4KvCacheSpecTest(TestCase):
     def test_hca_state_capacity_reuse_and_tail(self):
         by_tag = self._by_tag(self._build())
         hca_state = by_tag[HCA_STATE_TAG]
-        # HCA's ring policy is special. Runtime capacity is injected by the
-        # C++ creator from KVCacheConfig rather than encoded in this model
-        # descriptor.
-        self.assertIsNone(hca_state.capacity)
+        self.assertIsNotNone(hca_state.capacity)
+        self.assertEqual(
+            hca_state.capacity.explicit_block_num, DSV4_HCA_STATE_POOL_BLOCKS
+        )
+        self.assertTrue(hca_state.capacity.charge_to_paged_budget)
         self.assertFalse(hca_state.reuse.enable_prefix_reuse)
         self.assertIsNotNone(hca_state.tail)
         self.assertEqual(hca_state.tail.active_tail_blocks, 1)
@@ -245,8 +258,12 @@ class Dsv4KvCacheSpecTest(TestCase):
             )
             self.assertIsNotNone(desc.capacity, tag)
             self.assertFalse(desc.capacity.charge_to_paged_budget, tag)
-        # Host placement must not synthesize a block count.
-        self.assertIsNone(by_tag[HCA_STATE_TAG].capacity.explicit_block_num)
+        # Host placement preserves descriptor sizing while excluding it from
+        # the HBM budget.
+        self.assertEqual(
+            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
+            DSV4_HCA_STATE_POOL_BLOCKS,
+        )
         # Compressed pools stay on device.
         for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
             self.assertIsNone(by_tag[tag].memory, tag)

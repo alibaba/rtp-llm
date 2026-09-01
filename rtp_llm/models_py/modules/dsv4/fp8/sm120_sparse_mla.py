@@ -12,6 +12,13 @@ _REMAP_CACHE: dict[tuple, torch.Tensor] = {}
 _LOOKUP_CACHE: dict[tuple, torch.Tensor] = {}
 _NEGATIVE_MASK_CACHE: dict[tuple, torch.Tensor] = {}
 
+# FlashInfer's DSV4 sparse-decode dispatcher specializes on the static index
+# width.  HCA compresses one entry per 128 input tokens, so a 1M context needs
+# an 8192-wide extra sparse table.  Keep the complete production width set in
+# one place so eager and CUDA-graph preparation cannot diverge.
+SM120_SWA_TOPK_WIDTHS = (128, 512, 1024)
+SM120_EXTRA_TOPK_WIDTHS = (2, 128, 512, 1024, 2048, 4096, 8192)
+
 
 def _cached_buffer(
     cache: dict[tuple, torch.Tensor],
@@ -278,7 +285,14 @@ def run(
     extra_indices: Optional[torch.Tensor] = None,
     extra_lens: Optional[torch.Tensor] = None,
 ) -> None:
-    from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
+        _sm120_sparse_mla,
+    )
+
+    if _sm120_sparse_mla is None:
+        raise RuntimeError(
+            "SM120 sparse MLA kernel was unavailable during model initialization"
+        )
 
     kernel_query = query.contiguous()
     kernel_sinks = sinks.float()
@@ -288,7 +302,7 @@ def run(
         kernel_query = torch.cat((kernel_query, torch.zeros_like(kernel_query)), dim=-2)
         kernel_sinks = torch.cat((kernel_sinks, torch.zeros_like(kernel_sinks)), dim=-1)
         kernel_out = torch.empty_like(kernel_query)
-    trtllm_batch_decode_sparse_mla_dsv4(
+    _sm120_sparse_mla(
         query=kernel_query,
         swa_kv_cache=swa_cache.unsqueeze(-2),
         workspace_buffer=workspace(query.device),
