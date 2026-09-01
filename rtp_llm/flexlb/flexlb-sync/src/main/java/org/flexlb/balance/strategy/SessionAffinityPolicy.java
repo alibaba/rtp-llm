@@ -30,7 +30,9 @@ final class SessionAffinityPolicy {
         if (state == Request.SessionState.NEW) {
             synchronized (request) {
                 if (request.getSessionPlacementEpoch() < 0) {
-                    request.setSessionPlacementEpoch(store.reset(model, sessionId));
+                    request.setSessionPlacementEpoch(config == null
+                            ? store.resetIfPresent(model, sessionId)
+                            : store.reset(model, sessionId));
                 }
             }
             return Decision.none(Reason.NEW_SESSION);

@@ -78,6 +78,15 @@ public final class SessionPlacementStore {
         return state.epoch();
     }
 
+    public long resetIfPresent(String model, String sessionId) {
+        if (!valid(sessionId)) {
+            return -1L;
+        }
+        State state = placements.asMap().computeIfPresent(
+                new Key(model, sessionId), (ignored, current) -> new State(nextEpoch(), null));
+        return state == null ? -1L : state.epoch();
+    }
+
     long estimatedSize() {
         return placements.estimatedSize();
     }
