@@ -655,6 +655,10 @@ final class MockControlServer {
         List<Map<String, Object>> snaps = new ArrayList<>();
         List<JavaMockEngineCluster.FastRpcService> engineServices = orderedServices();
         for (JavaMockEngineCluster.FastRpcService service : engineServices) {
+            // rtp_llm_* TPS series: settle the per-scrape window BEFORE reading
+            // the snapshot so this scrape reads exactly its own token sums
+            // (window = scrape interval; the G1 poller is 1s -> tokens/s).
+            service.drainTpsWindows();
             snaps.add(service.getSnapshot());
         }
 
@@ -701,6 +705,13 @@ final class MockControlServer {
                 {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_count", "number of decode samples", "gauge"},
+                // Production-caliber TPS series (pure accounting on completion
+                // events; window = scrape interval, 1s under the G1 poller).
+                // Same metric names as the real engine (RtpLLMMetrics) so mock
+                // dashboards read like the production ones.
+                {"rtp_llm_context_tps", "computed context tokens (input minus cache hits) per scrape window", "gauge"},
+                {"rtp_llm_context_tps_with_cache", "context tokens per scrape window including cache hits", "gauge"},
+                {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
         };
         for (String[] m : meta) {
             sb.append("# HELP ").append(m[0]).append(' ').append(m[1]).append('\n');
@@ -747,6 +758,12 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
             sb.append(String.format("mock_engine_decode_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_p99"))));
             sb.append(String.format("mock_engine_decode_ms_count{%s} %s%n", labels, snap.get("decode_ms_count")));
+            // Production-caliber TPS (PD-split roles: prefill engines carry
+            // the context series, decode engines the generate series; the
+            // off-role series stay 0 so every engine reports the full set).
+            sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
+            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
+            sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
         }
     }
 
@@ -784,6 +801,13 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
             sb.append(String.format("mock_engine_active_kv_tokens{%s} %d%n", label, sumLong(group, "active_kv_tokens")));
             sb.append(String.format("mock_engine_available_kv_tokens{%s} %d%n", label, sumLong(group, "available_kv_tokens")));
+            // Production-caliber TPS, role-summed (rate series add across
+            // engines; each engine's off-role series are 0 by design, so the
+            // prefill bucket carries the context pair and the decode bucket
+            // the generate series).
+            sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
+            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
+            sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
 
             Map<String, Long> rpcTotals = new TreeMap<>();
             for (Map<String, Object> e : group) {

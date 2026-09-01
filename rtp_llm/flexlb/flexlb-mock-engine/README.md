@@ -115,6 +115,28 @@ for per-engine series). Configure exactly one scrape target
 (`<host>:<baseGrpcPort - 1>`). The Python-era shard aggregation port formula
 (`base + n_prefill + n_decode + 100 + shard_id`) no longer exists.
 
+**Production-caliber TPS series (`rtp_llm_*`, 20260901)**: `/metrics` reports
+three series under the production metric names so mock dashboards read like
+the real engine's — `rtp_llm_context_tps` (computed context tokens = input −
+cache hits), `rtp_llm_context_tps_with_cache` (input tokens including cache
+hits, the DeepSeek-style "input tokens/s incl. cache hits" caliber) and
+`rtp_llm_generate_tps` (generated output tokens). They are **pure accounting
+on completion events** (prefill completions feed the context pair, decode
+completions feed generate; cancelled completions are excluded — only tokens
+actually accepted and generated count, matching production semantics) and
+every scrape settles the window first, so the window = scrape interval (the
+eval G1 poller is 1s → the value is tokens/s by construction). PD split:
+prefill engines carry the context pair, decode engines the generate series
+(off-role series stay 0). Caliber note: the mock's execution time is itself a
+formula product, so unlike production there is no execute/wall dual
+denominator — the fixed 1s window is the whole denominator. These are
+**accounting-style simulation readings that measure scheduling organization
+efficiency, not GPU compute**: do not compare absolute values against
+production dashboards directly (the caliber semantics map one-to-one, the
+physics does not). `/snapshot` exposes the cumulative `hit_tokens_total`
+per engine (never drained — the `cache_saved_tokens` source via
+`final_snapshot`).
+
 **Engine addressing**: POST bodies accept either `{"engine": "prefill-0"}` (engine
 name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 
@@ -132,7 +154,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 - `/metrics`: aggregated by role by default; append `?per_engine=true` for
   per-engine labels (`engine_name`/`role`/`grpc_port`/`engine_ip`).
 
-## Test Suite (223 test methods)
+## Test Suite (226 test methods)
 
 | Test | Methods | Description |
 |------|---------|-------------|
@@ -152,6 +174,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | InflightTtlExpiryTest | 1 | TTL cleanup mechanism |
 | MatrixSweepTest | 1 | P/D config × concurrency sweep |
 | MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
+| TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
 | RealisticTimingTest | 1 | Real timing verification |
 
 ## JavaLoadClient

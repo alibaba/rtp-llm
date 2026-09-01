@@ -41,7 +41,15 @@ After completion, the important outputs are (see the **Run output layout**
 section below for the full table):
 
 - `aggregate.json` (run-level derived metrics incl. `summary.test_valid`,
-  the run-validity verdict; written by the in-run aggregate step)
+  the run-validity verdict; written by the in-run aggregate step; since
+  20260901 also carries the client-side token throughput fields
+  `summary.input_token_tps` / `output_token_tps` (completed-request caliber)
+  and `summary.cache_saved_tokens` (cumulative engine-side cache-reuse
+  tokens), the per-second arrival-caliber `input_tokens` / `output_tokens`
+  columns, and the mock self-reported production-caliber TPS timeline
+  `mock_tps_ts` — the report generator's 2.3 reconciliation panels consume
+  these; mock TPS values are accounting-style simulation readings over a
+  fixed 1s window, not GPU compute)
 - `run_meta.json`, `mock.json` / `mock.log`, `master.json` / `master.log`,
   `client.json` / `client.log` (one JSON + one log per component)
 - `per_request.jsonl` (or `per_request.jsonl.gz` for larger runs)

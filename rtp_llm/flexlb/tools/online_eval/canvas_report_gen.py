@@ -629,6 +629,7 @@ def main():
     batcher_ts_by_role = agg.get("batcher_ts_by_role") or []
     batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
     queue_top_bottom_ts = agg.get("queue_top_bottom_ts") or {}
+    mock_tps_rows = agg.get("mock_tps_ts") or []
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
     cancel_ts = agg.get("cancel_qps_ts") or []
@@ -781,6 +782,10 @@ def main():
     # 旧 aggregate 无 input_len_n 键时保持 None -> 2.2 节整体省略。
     input_len_p50 = input_len_p95 = None
     output_len_p50 = output_len_p95 = None
+    # mock 自报 TPS / client token 序列（20260901）：2.3 节对账图；
+    # 旧 aggregate 无 mock_tps_ts / input_tokens 键时保持 None -> 省略。
+    mock_ctx_tps = mock_ctx_cache_tps = mock_gen_tps = None
+    client_in_tok = client_out_tok = None
     if per_second:
         ps_by_t = {int(p.get("t", 0) or 0): p for p in per_second}
         tsec_vals = rel_ts
@@ -846,6 +851,71 @@ def main():
                 "outputLenP95",
                 num_arr(
                     [(ps_by_t.get(t) or {}).get("output_len_p95", 0) for t in tsec_vals]
+                ),
+            )
+        # mock 自报生产口径 TPS（20260901）：rtp_llm_* 集群级行序列
+        # （aggregate mock_tps_ts，完成事件记账，1s scrape 窗口）桶化到
+        # 整秒（桶内均值，与 master arrivals 差分同规则）画上 TSEC——
+        # 与 client 到达口径 token 序列同轴对账。全零序列不注册（与
+        # 2.2 节 input_len_n 的「非零才画」同规则，区分无键/全零）。
+        _mtps_bucket = {}
+        for r in mock_tps_rows:
+            try:
+                _t = float(r.get("t", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if _t < 0:
+                continue
+            for _col in ("context_tps", "context_tps_with_cache", "generate_tps"):
+                _v = r.get(_col)
+                if _v is None:
+                    continue
+                _mtps_bucket.setdefault(int(_t), {}).setdefault(_col, []).append(
+                    float(_v)
+                )
+        _mtps_by_t = {
+            _b: {c: round(sum(vs) / len(vs), 1) for c, vs in _cols.items()}
+            for _b, _cols in _mtps_bucket.items()
+        }
+        if any(v for _cols in _mtps_by_t.values() for v in _cols.values()):
+            mock_ctx_tps = const(
+                "mockCtxTps",
+                num_arr(
+                    [(_mtps_by_t.get(t) or {}).get("context_tps", 0) for t in tsec_vals]
+                ),
+            )
+            mock_ctx_cache_tps = const(
+                "mockCtxCacheTps",
+                num_arr(
+                    [
+                        (_mtps_by_t.get(t) or {}).get("context_tps_with_cache", 0)
+                        for t in tsec_vals
+                    ]
+                ),
+            )
+            mock_gen_tps = const(
+                "mockGenTps",
+                num_arr(
+                    [
+                        (_mtps_by_t.get(t) or {}).get("generate_tps", 0)
+                        for t in tsec_vals
+                    ]
+                ),
+            )
+        # client 到达口径 token 序列（per_second.input_tokens/output_tokens，
+        # 出生秒分桶全部带时间戳行）：2.3 节对账参考线；非零才注册。
+        if any((p.get("input_tokens") or 0) for p in per_second):
+            client_in_tok = const(
+                "clientInTok",
+                num_arr(
+                    [(ps_by_t.get(t) or {}).get("input_tokens", 0) for t in tsec_vals]
+                ),
+            )
+        if any((p.get("output_tokens") or 0) for p in per_second):
+            client_out_tok = const(
+                "clientOutTok",
+                num_arr(
+                    [(ps_by_t.get(t) or {}).get("output_tokens", 0) for t in tsec_vals]
                 ),
             )
 
@@ -2341,6 +2411,126 @@ def main():
         lines.extend(emit_grid(tok_containers))
         lines.append("")
 
+    # 2.3 TPS 对账（20260901）：mock 自报生产口径 TPS（rtp_llm_*，完成
+    # 事件记账，1s scrape 窗口）双视角对账——① context with/without
+    # cache 双曲线：差值 = cache 复用等效吞吐（KV 容量对齐任务的收益
+    # 面）；② mock vs client：mock 完成口径 vs client 到达口径（出生秒
+    # 分桶，含失败行），差值 = 调度链路损耗（排队/传输/拒绝吃掉的
+    # 部分）。两口径不同是有意的：稳态吞吐守恒两线重合，差值即损耗
+    # 读数。口径提醒：mock TPS 是记账式模拟读数（分母固定 1s 窗口），
+    # 衡量调度组织效率而非 GPU 算力，不可与生产数值直接对表（口径
+    # 语义一一对应）。
+    tps_containers = []
+    tps_recon_in = mock_ctx_cache_tps is not None and client_in_tok is not None
+    tps_recon_out = mock_gen_tps is not None and client_out_tok is not None
+    if mock_ctx_tps is not None:
+        _ctx_cap = max((p.get("context_tps_with_cache", 0) or 0) for p in mock_tps_rows)
+        tps_containers.append(
+            emit_container(
+                "context TPS：with cache vs compute（cache 复用等效吞吐）",
+                "x = 压测时间（s，1s 窗口）；y = context token/s（集群 = 生产同名指标 "
+                "rtp_llm_context_tps* 跨引擎求和，完成事件记账：compute = "
+                "Σ(il−hit)，with cache = Σil）；两线差值 = cache 复用等效吞吐"
+                + (
+                    "；累计复用 cache_saved_tokens = "
+                    + fmt_int_trunc(sm.get("cache_saved_tokens"))
+                    + " tokens（final_snapshot 累计口径）"
+                    if sm.get("cache_saved_tokens") is not None
+                    else ""
+                ),
+                emit_chart(
+                    "LineChart",
+                    TSEC,
+                    230,
+                    [
+                        (
+                            "mcc",
+                            "with cache（Σil）",
+                            mock_ctx_cache_tps,
+                            "success",
+                        ),
+                        ("mct", "compute（Σil−hit）", mock_ctx_tps, "info"),
+                    ],
+                    suffix=" tok/s",
+                    domain="[0, " + num(nice_max(_ctx_cap * 1.15)) + "]",
+                ),
+            )
+        )
+    if tps_recon_in:
+        _in_cap = max(
+            max((p.get("input_tokens") or 0) for p in per_second),
+            max((p.get("context_tps_with_cache", 0) or 0) for p in mock_tps_rows),
+        )
+        tps_containers.append(
+            emit_container(
+                "input 侧对账：mock 实算+复用 vs client 到达",
+                "x = 压测时间（s）；y = token/s。mock 线 = rtp_llm_context_tps_with_cache"
+                "（完成事件记账，1s 窗口，引擎实算+cache 复用）；client 线 = 每秒到达"
+                " Σinput_len（出生秒分桶，含失败行）；两线差值 = 调度链路损耗"
+                "（排队/传输/拒绝吃掉的部分；稳态吞吐守恒两线重合）"
+                + (
+                    "；client 全程均值 input_token_tps = "
+                    + fmt_int_trunc(sm.get("input_token_tps"))
+                    + " tok/s（完成请求口径）"
+                    if sm.get("input_token_tps") is not None
+                    else ""
+                ),
+                emit_chart(
+                    "LineChart",
+                    TSEC,
+                    230,
+                    [
+                        ("cit", "client 到达 Σil", client_in_tok, "neutral"),
+                        (
+                            "mcc",
+                            "mock with cache",
+                            mock_ctx_cache_tps,
+                            "success",
+                        ),
+                    ],
+                    suffix=" tok/s",
+                    domain="[0, " + num(nice_max(_in_cap * 1.15)) + "]",
+                ),
+            )
+        )
+    if tps_recon_out:
+        _out_cap = max(
+            max((p.get("output_tokens") or 0) for p in per_second),
+            max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows),
+        )
+        tps_containers.append(
+            emit_container(
+                "output 侧对账：mock 产出 vs client 期望",
+                "x = 压测时间（s）；y = token/s。mock 线 = rtp_llm_generate_tps"
+                "（完成事件记账，1s 窗口，Σol）；client 线 = 每秒到达 Σoutput_len"
+                "（出生秒分桶，失败行按 0 计）；两线差值 = 调度链路损耗"
+                + (
+                    "；client 全程均值 output_token_tps = "
+                    + fmt_int_trunc(sm.get("output_token_tps"))
+                    + " tok/s（完成请求口径）"
+                    if sm.get("output_token_tps") is not None
+                    else ""
+                ),
+                emit_chart(
+                    "LineChart",
+                    TSEC,
+                    230,
+                    [
+                        ("cot", "client 期望 Σol", client_out_tok, "neutral"),
+                        ("mgt", "mock 产出 Σol", mock_gen_tps, "success"),
+                    ],
+                    suffix=" tok/s",
+                    domain="[0, " + num(nice_max(_out_cap * 1.15)) + "]",
+                ),
+            )
+        )
+    if tps_containers:
+        lines.append("      <Divider />")
+        lines.append("")
+        lines.append("      <H2>2.3 TPS 对账：mock 自报（生产口径）vs client 观测</H2>")
+        lines.extend(emit_grid(tps_containers))
+        lines.append("")
+
     # 3. 调度均衡性（窗口 Gini，仅当 engine_dist 有数据）
     if p_wg_pts or d_wg_pts:
         gini_containers = []
@@ -3467,6 +3657,28 @@ def main():
             TAG + " route_submit survivor-scope annotation missing from HTML"
         )
 
+    # 8) TPS 对账口径（20260901）：mock 自报 rtp_llm_* 线存在时，HTML 必
+    #    含记账式口径标注（完成事件记账 + 1s 窗口——防止读者把 mock
+    #    记账值当 GPU 算力直接对表）；cache 复用对存在时必含复用语义
+    #    标注；mock-vs-client 对账线存在时必含链路损耗语义标注。
+    if mock_ctx_tps is not None or mock_gen_tps is not None:
+        assert "完成事件记账" in html_out, (
+            TAG + " mock TPS series present but accounting-scope annotation missing"
+        )
+        assert "1s 窗口" in html_out, (
+            TAG + " mock TPS series present but window-scope annotation missing"
+        )
+    if mock_ctx_tps is not None:
+        assert "cache 复用等效吞吐" in html_out, (
+            TAG + " context TPS pair present but cache-reuse annotation missing"
+        )
+    if tps_recon_in or tps_recon_out:
+        assert "调度链路损耗" in html_out, (
+            TAG
+            + " mock-vs-client TPS reconciliation present but "
+            + "link-loss annotation missing"
+        )
+
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -3477,6 +3689,8 @@ def main():
     sections = ["qps"] if per_second else []
     if latency_containers:
         sections.append("latency")
+    if tps_containers:
+        sections.append("tps-recon")
     if queue_ts:
         sections.append("queue")
     if (

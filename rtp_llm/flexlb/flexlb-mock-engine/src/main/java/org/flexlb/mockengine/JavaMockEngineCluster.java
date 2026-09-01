@@ -717,6 +717,24 @@ public final class JavaMockEngineCluster {
         private final AtomicLong acceptedCount = new AtomicLong();
         private final AtomicLong completedCount = new AtomicLong();
         private final AtomicLong cancelledCount = new AtomicLong();
+        // ── Production-caliber TPS observation (rtp_llm_* /metrics series) ──
+        // Pure accounting on completion events: token sums accumulate into
+        // the *Tokens counters and every /metrics scrape drains them into the
+        // lastWindow* values (window = scrape interval, 1s for the G1 poller
+        // — the value IS tokens-per-second because the window is 1s). Caliber
+        // note: the mock's execution time is itself a formula product, so
+        // unlike production there is no execute/wall dual denominator — the
+        // fixed 1s window is the whole denominator. Only NON-cancelled
+        // completions count (production semantics: tokens actually accepted
+        // and generated). hit_tokens_total is cumulative and never drained
+        // (the cache_saved_tokens source via final_snapshot).
+        private final AtomicLong contextComputeTokens = new AtomicLong();
+        private final AtomicLong contextWithCacheTokens = new AtomicLong();
+        private final AtomicLong generateTokens = new AtomicLong();
+        private final AtomicLong hitTokensTotal = new AtomicLong();
+        private final AtomicLong lastWindowContextCompute = new AtomicLong();
+        private final AtomicLong lastWindowContextCache = new AtomicLong();
+        private final AtomicLong lastWindowGenerate = new AtomicLong();
         private final ExecutorService responseExecutor;
         /**
          * Per-frame poll timeout for this engine's response pump. Overrides via
@@ -2142,6 +2160,19 @@ public final class JavaMockEngineCluster {
                             "mock_prefill_done rid=%d ts_epoch_ms=%d exec_ms=%d input_len=%d cancelled=%b%n",
                             requestId, doneTsMs, executionMs,
                             shape.inputLen(), alreadyCancelled);
+                    if (!alreadyCancelled) {
+                        // rtp_llm_context_tps accounting (production caliber):
+                        // compute = il - hit (actually-computed context tokens,
+                        // the rtp_llm_context_tps numerator — cache reuse is
+                        // excluded), with_cache = il (the
+                        // rtp_llm_context_tps_with_cache numerator, the
+                        // DeepSeek-style "input tokens/s incl. cache hits").
+                        long inputLen = shape.inputLen();
+                        long hitTokens = shape.hitTokens();
+                        contextComputeTokens.addAndGet(Math.max(0L, inputLen - hitTokens));
+                        contextWithCacheTokens.addAndGet(inputLen);
+                        hitTokensTotal.addAndGet(hitTokens);
+                    }
                     // Python marks the prefill-side lifecycle entry finished when the
                     // prefill phase ends, even though decode may continue elsewhere.
                     recordLifecycleEnd(requestId, alreadyCancelled);
@@ -2631,6 +2662,10 @@ public final class JavaMockEngineCluster {
             if (!alreadyCancelled) {
                 completedCount.incrementAndGet();
                 requestStates.put(requestId, "completed");
+                // rtp_llm_generate_tps accounting (production caliber): the
+                // numerator is the stream's accepted output token count
+                // (the MTP fold), not the decode batch size.
+                generateTokens.addAndGet(shape.outputLen());
             }
             // Python compat (_run_decode): no_respond on the decode engine only
             // suppresses the intermediate first-step output; the finished output
@@ -3274,6 +3309,20 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        /**
+         * Settle the per-scrape TPS windows (rtp_llm_* series): the /metrics
+         * handler calls this on EVERY scrape before reading snapshots, so a
+         * window = one scrape interval (1s for the G1 poller — the drained
+         * value is tokens-per-second by construction). Events landing
+         * between this drain and the snapshot read roll into the next
+         * window via the pending counters added back in getSnapshot().
+         */
+        void drainTpsWindows() {
+            lastWindowContextCompute.set(contextComputeTokens.getAndSet(0));
+            lastWindowContextCache.set(contextWithCacheTokens.getAndSet(0));
+            lastWindowGenerate.set(generateTokens.getAndSet(0));
+        }
+
         int getInflightCount() {
             // pendingRequests already counts both prefill and decode requests
             // (incremented in schedulePrefillCompletion and scheduleDecodeCompletion).
@@ -3371,6 +3420,19 @@ public final class JavaMockEngineCluster {
             // Cumulative per-engine busy time (ms): prefill batches (resp. decode
             // requests) executed by this engine — see busyMs field comment.
             snap.put("busy_ms", busyMs.get());
+            // Production-caliber TPS observation: the rtp_llm_* /metrics
+            // series read these. Window value = last settled scrape window +
+            // events since (the /metrics handler drains first, so a scrape
+            // reads exactly its own window; /snapshot sees the in-progress
+            // window too). hit_tokens_total is cumulative cache-reuse
+            // accounting (the cache_saved_tokens source).
+            snap.put("context_tps",
+                    lastWindowContextCompute.get() + contextComputeTokens.get());
+            snap.put("context_tps_with_cache",
+                    lastWindowContextCache.get() + contextWithCacheTokens.get());
+            snap.put("generate_tps",
+                    lastWindowGenerate.get() + generateTokens.get());
+            snap.put("hit_tokens_total", hitTokensTotal.get());
             snap.put("inflight", getInflightCount());
             snap.put("leak_detected", leakDetected.get());
             snap.put("kv_tokens_used", effectiveActiveKv);

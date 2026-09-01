@@ -39,10 +39,16 @@ import threading
 import time
 import urllib.request
 
-# G1 C whitelist — the two analyzer-consumed mock per-engine series.
+# G1 C whitelist — the analyzer-consumed mock per-engine series: the
+# running/waiting pair (queue depth curves) plus the production-caliber
+# TPS trio (rtp_llm_*, completion-event accounting in 1s scrape windows;
+# consumed by aggregate mock_tps_ts and the report-layer 2.3 对账图).
 MOCK_KEEP_SERIES = {
     "mock_engine_running",
     "mock_engine_waiting",
+    "rtp_llm_context_tps",
+    "rtp_llm_context_tps_with_cache",
+    "rtp_llm_generate_tps",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,
@@ -100,7 +106,7 @@ def run_master_counter_poller(http_addr, out_path, interval_s):
 def run_mock_per_engine_poller(port, out_path, interval_s):
     """G1 (was: start_mock_per_engine_poller heredoc).
 
-    GET http://127.0.0.1:{port}/metrics?per_engine=true, keep only the two
+    GET http://127.0.0.1:{port}/metrics?per_engine=true, keep only the
     analyzer-consumed series, one "# ts=" grouped block per round."""
     keep = MOCK_KEEP_SERIES
     url = f"http://127.0.0.1:{port}/metrics?per_engine=true"
@@ -110,8 +116,8 @@ def run_mock_per_engine_poller(port, out_path, interval_s):
             try:
                 with urllib.request.urlopen(url, timeout=2) as response:
                     body = response.read().decode("utf-8", "replace")
-                # C: keep only the two analyzer-consumed series — the raw
-                # endpoint still emits the full ~22-per-engine surface (server
+                # C: keep only the analyzer-consumed series — the raw
+                # endpoint still emits the full ~25-per-engine surface (server
                 # cost unchanged), but the appended bytes drop to a small
                 # fraction of it.
                 kept = [

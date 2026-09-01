@@ -310,6 +310,8 @@ e2e_samples = []  # is_ok 行 total_ms>0
 sched_client_samples = []  # is_ok 行 schedule_ms（schedule 双源的 client 口径）
 ok_count = 0  # is_ok 行数（success_count 自算口径）
 completed_count = 0  # is_ok 行数（completed 口径；Java 成功态 "scheduled" / 旧 "ok"）
+ok_input_tokens = 0  # is_ok 行 Σinput_len（input_token_tps 分子，完成请求口径）
+ok_output_tokens = 0  # is_ok 行 Σoutput_len（output_token_tps 分子，同口径）
 wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 
 # ---- engine per-rid terminal lines: full_e2e + birth-axis exec join ----
@@ -395,6 +397,8 @@ per_sec = defaultdict(
         "decode_exec": [],
         "input_len": [],
         "output_len": [],
+        "input_tokens": 0,
+        "output_tokens": 0,
     }
 )
 for d in rows:
@@ -409,6 +413,11 @@ for d in rows:
         # Phase A 全程样本（全量口径，与 error_breakdown 同级：含无时间戳
         # is_ok 行）。schedule_ms 缺省 0 与 per_second 桶化同规则。
         ok_count += 1
+        # 完成 token 口径（20260901）：input/output_token_tps 的分子，
+        # 与 mock 自报 TPS 的未取消完成事件语义对齐（被拒/取消请求的
+        # token 不进完成吞吐）。
+        ok_input_tokens += d.get("input_len") or 0
+        ok_output_tokens += d.get("output_len") or 0
         # Bug #2 修复：completed 与 is_ok 成功口径对齐。原判 status=="ok"
         # 只覆盖 sh 合并段的旧形态；Java load client 成功态写 "scheduled"
         # （无 error 键），旧判使 completed_count/completed_qps 恒 0。此处
@@ -440,6 +449,12 @@ for d in rows:
         b["input_len"].append(d["input_len"])
     if d.get("output_len") is not None:
         b["output_len"].append(d["output_len"])
+    # token 吞吐时序（20260901，出生秒分桶，全部带时间戳行）：client
+    # 到达口径 Σil/Σol，报告层与 mock 自报 rtp_llm_*（完成事件记账）
+    # 对账，差值 = 排队/拒绝吃掉的部分；错误行 output_len 缺省按 0
+    # 累加（未产出的 token 不计入到达流量）。
+    b["input_tokens"] += d.get("input_len") or 0
+    b["output_tokens"] += d.get("output_len") or 0
     if _bucket_key is None:
         b["success"] += 1
         b["sched"].append(d.get("schedule_ms", 0))
@@ -551,6 +566,12 @@ for t in sorted(per_sec):
             "output_len_n": len(b["output_len"]),
             "output_len_p50": pct(b["output_len"], 0.5),
             "output_len_p95": pct(b["output_len"], 0.95),
+            # token 吞吐时序（20260901，出生秒分桶，全部带时间戳行）：
+            # client 到达口径 Σil/Σol，报告层与 mock 自报 rtp_llm_*
+            # 完成口径对账（差值 = 调度链路损耗）；与 input_len 分位
+            # 同数据源不同聚合（求和 vs 分位）。
+            "input_tokens": b["input_tokens"],
+            "output_tokens": b["output_tokens"],
         }
     )
 
@@ -688,6 +709,15 @@ if _have_rows:
     completed_qps_calc = (
         round(completed_count / _es, 3) if completed_count and _es else 0.0
     )
+    # client 侧 token 吞吐（完成请求口径，20260901）：ok 行 Σil/Σol ÷
+    # elapsed——与 mock 自报 rtp_llm_*（未取消完成事件记账）语义对齐，
+    # 是「TPS 容量用带 cache 口径评估」的 client 侧读数。
+    input_token_tps_calc = (
+        round(ok_input_tokens / _es, 3) if ok_input_tokens and _es else 0.0
+    )
+    output_token_tps_calc = (
+        round(ok_output_tokens / _es, 3) if ok_output_tokens and _es else 0.0
+    )
     # error_rate：sh L1363-1365 同式（round 6；分母 recorded 口径）。
     error_rate_calc = (
         round(_error_count_calc / _recorded_result_count, 6)
@@ -699,10 +729,32 @@ else:
     success_qps_calc = None
     error_qps_calc = None
     completed_qps_calc = None
+    input_token_tps_calc = None
+    output_token_tps_calc = None
     error_rate_calc = None
 
 # ---- queue_timeseries from java_mock_stats (legacy log first, mock.json) ----
 mock_payload = load_json("mock.json") or {}
+# cache_saved_tokens：KV 复用收益量化（20260901）——引擎 final_snapshot
+# 的累计 hit_tokens_total（getSnapshot 累计键，永不 drain；consolidate
+# live fetch 落 mock.json）跨引擎求和。与 mock 自报 context_tps_with_cache
+# − context_tps 的窗口差值互为印证（累计总量 vs 瞬时速率）。旧 run 无
+# 该键 → None（数据缺失标注，不误报 0）。
+cache_saved_tokens_calc = None
+_fs_snapshot = (
+    mock_payload.get("final_snapshot") or {} if isinstance(mock_payload, dict) else {}
+)
+if isinstance(_fs_snapshot, dict) and isinstance(_fs_snapshot.get("engines"), list):
+    _hit_total = 0
+    _hit_seen = False
+    for _engine_snap in _fs_snapshot["engines"]:
+        if isinstance(_engine_snap, dict) and isinstance(
+            _engine_snap.get("hit_tokens_total"), (int, float)
+        ):
+            _hit_total += _engine_snap["hit_tokens_total"]
+            _hit_seen = True
+    if _hit_seen:
+        cache_saved_tokens_calc = _hit_total
 mock_stats = []
 if os.path.isfile("mock_engine.log"):
     kv_pair_re = re.compile(r"(\w+)=([\d.]+)")
@@ -1786,6 +1838,26 @@ for _side, _role_tag in (("p", "prefill"), ("d", "decode")):
                 "sample_window_s": 5,
             }
 
+# ---- mock 自报生产口径 TPS 集群级时序（mock_tps_ts，20260901）----
+# rtp_llm_* 系列（生产同名指标，纯完成事件记账；/metrics scrape 先
+# drain 再快照 → 窗口 = scrape 间隔，G1 轮询 1s → 值即 tokens/s）经
+# G1 白名单进 per-engine 时序文件。这里按指标名跨引擎同时间戳求和成
+# 集群级行序列：一次 scrape 对全部引擎统一 drain，三指标同 ts；role
+# 不拆（prefill 桶只含 context 对、decode 桶只含 generate，跨引擎
+# 合并即集群口径）。旧 run（白名单未含该系列）→ 空行 → 报告层省略。
+_TPS_COL_NAMES = {
+    "rtp_llm_context_tps": "context_tps",
+    "rtp_llm_context_tps_with_cache": "context_tps_with_cache",
+    "rtp_llm_generate_tps": "generate_tps",
+}
+_tps_by_ts = defaultdict(dict)
+for _tps_base, _tps_col in _TPS_COL_NAMES.items():
+    for _role_engines in _ts_role_ip_split(mock_per_engine_ts, _tps_base).values():
+        for _engine_pts in _role_engines.values():
+            for _ts, _v in _engine_pts:
+                _tps_by_ts[_ts][_tps_col] = _tps_by_ts[_ts].get(_tps_col, 0.0) + _v
+mock_tps_ts = [{"t": t, **vals} for t, vals in rel_axis(sorted(_tps_by_ts.items()))]
+
 # Per-dispatch batch size gauge (engine.balancing.master.batch.size, tags
 # role + engineIp + reason, reported once per dispatch). Per reason the
 # per-engine values are averaged: each engine's gauge holds the size of
@@ -1925,6 +1997,14 @@ out = {
         "success_qps": success_qps_calc,
         "error_qps": error_qps_calc,
         "completed_qps": completed_qps_calc,
+        # client 侧 token 吞吐（完成请求口径，20260901）：ok 行 Σil/Σol
+        # ÷ elapsed；与 mock 自报 rtp_llm_* 生产口径对表（mock 侧为
+        # 完成事件记账的 1s 窗口值，client 侧为全程平均）。
+        "input_token_tps": input_token_tps_calc,
+        "output_token_tps": output_token_tps_calc,
+        # KV 复用收益量化（20260901）：引擎累计 Σhit_tokens_total
+        # （final_snapshot，consolidate live fetch 链路）。
+        "cache_saved_tokens": cache_saved_tokens_calc,
         "client_pacing_lag_ms": _pacing_dist if _have_rows else None,
         # server_* 直读：server_latency 是当前格式正式输入，非 rows 依赖。
         "server_arrival_qps": server_latency.get("arrival_qps"),
@@ -1961,6 +2041,9 @@ out = {
     "batcher_ts_by_role": batcher_ts_by_role,
     "batcher_top_engines_ts": batcher_top_engines_ts,
     "queue_top_bottom_ts": queue_top_bottom_ts,
+    # mock 自报生产口径 TPS 集群级时序（rtp_llm_* 跨引擎求和，1s 窗口
+    # 完成事件记账；报告层 2.3 节对账图消费）。
+    "mock_tps_ts": mock_tps_ts,
     "dispatch_reason_ts": dispatch_reason_ts,
     "dispatch_batch_size_ts": dispatch_batch_size_ts,
     "batch_size_final": batch_size_final,
