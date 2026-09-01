@@ -17,7 +17,12 @@ namespace {
 // Self-describing byte stream. Payload layout is versioned; readers bounds-
 // check every field. Tensor bytes are staged on CPU regardless of the source
 // device; the original device is recorded and restored on read.
-constexpr uint32_t kVersion = 1;
+// v2: the tensor presence flag encodes definedness rather than non-emptiness,
+// so defined-but-empty tensors (e.g. sequence_lengths of a pure-prefill batch)
+// survive the round-trip instead of collapsing to undefined. Host tensors are
+// rebuilt as pinned memory to match the plan tensors produced by
+// gatherModelInput, which the fused H2D copy path requires.
+constexpr uint32_t kVersion = 2;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -42,9 +47,8 @@ struct ByteWriter {
     }
 
     void tensor(const torch::Tensor& t) {
-        const bool present = t.defined() && t.numel() > 0;
-        flag(present);
-        if (!present) {
+        flag(t.defined());
+        if (!t.defined()) {
             return;
         }
         const auto cpu = t.contiguous().cpu();
@@ -128,8 +132,11 @@ struct ByteReader {
         const auto dtype   = static_cast<torch::ScalarType>(val<int32_t>());
         const bool is_cuda = flag();
         const auto nbytes  = val<uint64_t>();
-        auto       out =
-            torch::empty(sizes, torch::TensorOptions().dtype(dtype).device(is_cuda ? torch::kCUDA : torch::kCPU));
+        // Host tensors come back pinned: downstream fused H2D copies assert
+        // pinned memory (the leading stage's gatherModelInput produces it).
+        auto out = torch::empty(
+            sizes,
+            torch::TensorOptions().dtype(dtype).device(is_cuda ? torch::kCUDA : torch::kCPU).pinned_memory(!is_cuda));
         RTP_LLM_CHECK_WITH_INFO(static_cast<uint64_t>(out.nbytes()) == nbytes,
                                 "PP serialization tensor byte count mismatch");
         if (nbytes > 0) {
@@ -374,6 +381,27 @@ torch::Tensor serializeSampleResult(const PPSampleResult& result) {
         w.str(err.message);
     }
     return w.finish();
+}
+
+PPSampleResult deserializeSampleResult(const torch::Tensor& buffer) {
+    ByteReader r(buffer);
+    RTP_LLM_CHECK_WITH_INFO(r.val<uint32_t>() == kVersion, "PP sample-result payload version mismatch");
+    PPSampleResult result;
+    result.request_ids    = r.tensor();
+    result.new_token_ids  = r.tensor();
+    result.sample_success = r.tensor();
+    result.cum_log_probs  = r.tensor();
+    const auto error_num  = r.val<uint64_t>();
+    result.errors.reserve(error_num);
+    for (uint64_t i = 0; i < error_num; ++i) {
+        PPSampleError err;
+        err.request_id = r.val<int64_t>();
+        err.error_code = r.val<int32_t>();
+        err.message    = r.str();
+        result.errors.push_back(std::move(err));
+    }
+    r.expectEnd();
+    return result;
 }
 
 torch::Tensor serializeTensorsMetadata(const PPIntermediateTensors& tensors) {

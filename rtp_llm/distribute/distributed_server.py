@@ -11,6 +11,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from torch.distributed import TCPStore
 
+from rtp_llm.config.pp_layout import derive_pp_rank
 from rtp_llm.config.py_config_modules import (
     COORDINATOR_INFO_PORT_NUM,
     DistributeConfig,
@@ -109,10 +110,20 @@ def get_dp_addrs_from_world_info(
             f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
         )
     else:
+        # (PP) only the leading stage admits requests: downstream stages are
+        # driven by the plan channel and never run the scheduler, so routing
+        # to them would hang the request. With pp_size=1 the pp_rank filter
+        # is a no-op.
         members = [
             member
             for member in world_info.members
             if (member.world_rank % parallelism_config.tp_size) == 0
+            and derive_pp_rank(
+                member.world_rank,
+                parallelism_config.dp_size,
+                parallelism_config.tp_size,
+            )
+            == 0
         ]
 
     addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
