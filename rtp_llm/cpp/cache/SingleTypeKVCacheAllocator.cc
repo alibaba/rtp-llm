@@ -104,11 +104,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                                        cp_slot_mapper_->localCacheKeys(config_, 0, cache_keys) :
                                        cache_keys;
         match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
-        const int64_t        match_begin_time_us = currentTimeUs();
-        BlockTreeMatchResult match_result        = block_tree_cache_->match(match_keys);
-        match_end_time_us                        = currentTimeUs();
-        match_cost_time_us                       = match_end_time_us - match_begin_time_us;
-        load_attempted                           = match_result.async_context != nullptr;
+        const int64_t              match_begin_time_us = currentTimeUs();
+        const BlockTreeMatchPolicy policy{malloc_info.enable_device_cache,
+                                          malloc_info.enable_host_cache,
+                                          malloc_info.enable_disk_cache,
+                                          malloc_info.enable_remote_cache};
+        BlockTreeMatchResult       match_result = block_tree_cache_->match(match_keys, policy);
+        match_end_time_us                       = currentTimeUs();
+        match_cost_time_us                      = match_end_time_us - match_begin_time_us;
+        load_attempted                          = match_result.async_context != nullptr;
         load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
         match_result.async_context.reset();
         matched_device_blocks = match_result.matched_device_blocks;

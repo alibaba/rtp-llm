@@ -117,14 +117,18 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
-            const Tier target_tier = storeTarget();
-            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
+            const std::vector<Tier> targets = storeTargets();
+            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, targets=%zu",
                               stream_->streamId(),
                               total_blocks,
-                              tierName(target_tier));
-            if (target_tier != Tier::NONE) {
-                InsertInfo insert_info{
-                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, enableRemoteCache()};
+                              targets.size());
+            for (size_t target_index = 0; target_index < targets.size(); ++target_index) {
+                const Tier target_tier = targets[target_index];
+                InsertInfo insert_info{batch_kv_cache_resource_,
+                                       stream_->completeTokenIdsPtr(),
+                                       false,
+                                       target_tier,
+                                       enableRemoteCache() && target_index == 0};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
         } else {
@@ -193,9 +197,17 @@ absl::Status StreamCacheResource::initKVBlock() {
     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
         malloc_info.enable_cache_lookup = false;
+        malloc_info.enable_device_cache = false;
+        malloc_info.enable_host_cache   = false;
+        malloc_info.enable_disk_cache   = false;
+        malloc_info.enable_remote_cache = false;
     } else {
         malloc_info.reuse_cache         = reuseCache();
         malloc_info.enable_cache_lookup = enableCacheLookup();
+        malloc_info.enable_device_cache = enableDeviceCache();
+        malloc_info.enable_host_cache   = enableHostCache();
+        malloc_info.enable_disk_cache   = enableDiskCache();
+        malloc_info.enable_remote_cache = enableRemoteCache();
     }
     malloc_info.enable_remove_skipped_blocks = false;
 
@@ -376,6 +388,10 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_cache_lookup          = enableCacheLookup();
+    malloc_info.enable_device_cache          = enableDeviceCache();
+    malloc_info.enable_host_cache            = enableHostCache();
+    malloc_info.enable_disk_cache            = enableDiskCache();
+    malloc_info.enable_remote_cache          = enableRemoteCache();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
 
@@ -507,9 +523,7 @@ bool StreamCacheResource::enableRemoteCache() const {
 }
 
 bool StreamCacheResource::enableCacheLookup() const {
-    const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_host_cache
-                                 || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
-    return reuseCache() && any_global_tier;
+    return reuseCache() && (enableDeviceCache() || enableHostCache() || enableDiskCache() || enableRemoteCache());
 }
 
 Tier StreamCacheResource::storeTarget() const {
@@ -529,6 +543,22 @@ Tier StreamCacheResource::storeTarget() const {
         return Tier::REMOTE;
     }
     return Tier::NONE;
+}
+
+std::vector<Tier> StreamCacheResource::storeTargets() const {
+    const Tier primary = storeTarget();
+    if (primary == Tier::NONE) {
+        return {};
+    }
+    std::vector<Tier> targets{primary};
+    // The predecessor cache wrote the ordinary memory connector independently
+    // from BlockCache. Preserve that write-through contract when both caches
+    // are enabled; DISK remains a demotion/primary target and REMOTE is written
+    // independently through InsertInfo::write_remote.
+    if (primary == Tier::DEVICE && enableHostCache()) {
+        targets.push_back(Tier::HOST);
+    }
+    return targets;
 }
 
 void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {

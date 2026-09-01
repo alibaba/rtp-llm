@@ -455,7 +455,7 @@ TEST_F(BlockTreeCacheTest, MatchPartialPath) {
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, result.matched_device_resources);
 }
 
-TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers) {
+TEST_F(BlockTreeCacheTest, MatchAllowsIndependentIdleTierCopies) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
@@ -464,7 +464,9 @@ TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers)
     TreeNode* first_node                          = cache_->tree()->root()->children.at(100);
     first_node->group_set_resources[0].host_block = 7;
 
-    EXPECT_THROW(cache_->match({100, 200}), std::runtime_error);
+    BlockTreeMatchResult result = cache_->match({100, 200});
+    EXPECT_EQ(result.matched_device_blocks, 2u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, result.matched_device_resources);
 
     first_node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
 }
@@ -2286,7 +2288,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsRootAndLiveTreeHoldsAcrossAllPhysicalTi
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> lower_tier_resources(2, std::vector<GroupSetResource>(1));
     lower_tier_resources[0][0].host_block = host_block;
-    lower_tier_resources[1][0].disk_block  = disk_block;
+    lower_tier_resources[1][0].disk_block = disk_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, lower_tier_resources));
 
     EXPECT_EQ(device_pools[0]->freeBlocksNum(), device_free_before[0] - 1);
