@@ -115,6 +115,9 @@ class DeepSeekV41Weight(DeepSeekV4Weight):
 
 
 class DeepSeekV41(DeepSeekV4):
+    def _as_multimodal_model(self):
+        return self if type(self) is DeepSeekV41 else None
+
     @classmethod
     def _create_config(cls, ckpt_path):
         with open(os.path.join(ckpt_path, "config.json")) as reader:

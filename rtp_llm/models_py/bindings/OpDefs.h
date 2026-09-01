@@ -284,6 +284,7 @@ struct PyContextParallelParams {
     torch::Tensor prefill_qkv_padding_mask;
     torch::Tensor prefill_actual_input_lengths_cpu;
     torch::Tensor prefill_prefix_lengths_cpu;
+    torch::Tensor prefill_mm_spans;
 };
 
 struct PyAttentionInputs {
@@ -345,13 +346,15 @@ struct BertEmbeddingInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor       input_ids;
-    torch::Tensor       engram_token_windows;
-    torch::Tensor       input_hiddens;
-    PyAttentionInputs   attention_inputs;
-    BertEmbeddingInputs bert_embedding_inputs;
-    std::optional<std::vector<torch::Tensor>> multimodal_features;  // gathered ViT features
-    torch::Tensor       mm_features_locs;                           // batch-local feature starts
+    torch::Tensor                             input_ids;
+    torch::Tensor                             engram_token_windows;
+    torch::Tensor                             input_hiddens;
+    PyAttentionInputs                         attention_inputs;
+    BertEmbeddingInputs                       bert_embedding_inputs;
+    std::optional<std::vector<torch::Tensor>> multimodal_features;
+    torch::Tensor                             text_tokens_mask;
+    torch::Tensor                             mm_features_locs;
+    torch::Tensor                             mm_features_spans;
 
     PyModelInputs() = default;
     PyModelInputs(torch::Tensor       input_ids,

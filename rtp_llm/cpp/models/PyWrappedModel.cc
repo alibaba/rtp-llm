@@ -743,9 +743,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
         py_model_inputs.engram_token_windows = inputs.engram_token_windows;
         py_model_inputs.multimodal_features  = inputs.multimodal_features;
-        if (inputs.mm_features_locs.defined()) {
-            py_model_inputs.mm_features_locs = inputs.mm_features_locs;
-        }
+        // CP may replace the mask after holdInputsHostBuffers ran.
+        buffer_holder_.hold_host(inputs.text_tokens_mask);
+        py_model_inputs.text_tokens_mask     = inputs.text_tokens_mask.defined() ?
+                                                  inputs.text_tokens_mask.to(token_ids.device(), /*non_blocking=*/true) :
+                                                  torch::Tensor();
+        py_model_inputs.mm_features_locs     = inputs.mm_features_locs;
+        py_model_inputs.mm_features_spans    = inputs.mm_features_spans;
         if (py_model_inputs.engram_token_windows.defined() && !py_model_inputs.engram_token_windows.is_cuda()) {
             // Host history exists only at request gathering / prefill CP
             // boundaries. Python execution and graph staging consume CUDA
@@ -1332,6 +1336,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.text_tokens_mask);
     buffer_holder_.hold_host(inputs.mm_features_locs);
+    buffer_holder_.hold_host(inputs.mm_features_spans);
 
     if (inputs.input_embeddings.has_value()) {
         for (auto& input_embedding : inputs.input_embeddings.value()) {

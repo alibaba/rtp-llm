@@ -14,13 +14,15 @@ if TYPE_CHECKING:
 
 from rtp_llm.models.multimodal.multimodal_common import MultiModalEmbeddingInterface
 from rtp_llm.models.multimodal.multimodal_trt_engine import MultiModalTRTEngine
+from rtp_llm.models_py.distributed.collective_torch import Group, barrier
 from rtp_llm.utils.model_weight import CkptWeightInfo, identity, sp_id
-from rtp_llm.models_py.distributed.collective_torch import barrier, Group
 
 
 class BaseVitWeights:
     def __init__(self, vit_part: Dict[str, Any], with_prefix: bool = False):
         self.weight_names: List[str] = []
+        # Overrides apply both when reading the checkpoint and installing parameters.
+        self.weight_dtypes: Dict[str, torch.dtype] = {}
         self._set_weight_prefix()
         self._get_vit_params(vit_part, with_prefix)
 
@@ -74,6 +76,7 @@ class BaseMultiModalWeightInfo:
                         w,
                         [CkptWeightInfo(w_name, identity)],
                         identity,
+                        data_type=self.vit_weights.weight_dtypes.get(w),
                         split_func=sp_id,
                     )
                 )
@@ -121,7 +124,7 @@ class MultiModalMixin:
             if t is None:
                 raise Exception(f"failed to get tensor from name {fname}")
             # Convert ctype (which may be DataType enum or string) to torch.dtype
-            torch_dtype = to_torch_dtype(ctype)
+            torch_dtype = vit_weight.weight_dtypes.get(fname, to_torch_dtype(ctype))
             param.data = t.reshape(param.data.shape).to(torch_dtype).to(device)
 
         for w in weight_names:

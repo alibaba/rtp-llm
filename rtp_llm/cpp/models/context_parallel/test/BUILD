@@ -3,6 +3,16 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
+
 cc_test(
     name = "zigzag_token_layout_test",
     srcs = [
@@ -26,6 +36,8 @@ cc_library(
         "//rtp_llm/cpp/models:context_parallel",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/pybind:th_compute_lib",
+        "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ],
     copts = cuda_copts(),
     alwayslink = True,
@@ -33,7 +45,7 @@ cc_library(
 
 cc_binary(
     name = "th_context_parallel_py_wrapper_test",
-    deps = [":th_context_parallel_py_wrapper_test_lib"],
+    deps = [":th_context_parallel_py_wrapper_test_lib"] + cuda13_torch_link_deps,
     linkshared = 1,
     visibility = ["//visibility:public"],
 )

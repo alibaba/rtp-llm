@@ -120,6 +120,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
         lengths = [int(feature.shape[0]) for feature in features]
         values = features[0] if len(features) == 1 else torch.cat(features)
         cp = getattr(inputs.attention_inputs, "context_parallel_info", None)
+        spans = getattr(inputs, "mm_features_spans", None)
+        if spans is not None and spans.numel():
+            # The engine has already split features and locations to CP-local rows.
+            cp = None
         self._image_plan = (values, locs, lengths, cp)
 
     def _global_image_rows(self, total, locs, lengths, device):

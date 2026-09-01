@@ -94,6 +94,12 @@ py_test(
 )
 
 py_test(
+    name = "test_gate_fused",
+    srcs = ["test_gate_fused.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,
@@ -162,6 +168,15 @@ py_test(
 py_test(
     name = "test_mtp_hidden_buffer",
     srcs = ["test_mtp_hidden_buffer.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_mtp_multimodal",
+    srcs = ["test_mtp_multimodal.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",

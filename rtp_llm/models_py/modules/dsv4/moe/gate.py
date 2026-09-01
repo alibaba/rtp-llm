@@ -129,7 +129,8 @@ class Gate(nn.Module):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
         Reads ``W.v4_router_w`` and either ``W.v4_router_tid2eid`` (hash
-        layers) or ``W.v4_router_bias`` (non-hash)."""
+        layers) or ``W.v4_router_bias`` (non-hash), plus optional
+        ``W.v4_router_bias_vl`` for image-token routing."""
         super().__init__()
         self.dim = dim
         self.topk = n_activated_experts
@@ -147,6 +148,8 @@ class Gate(nn.Module):
             self.bias = None
         else:
             self.bias = weights[W.v4_router_bias]
+        self.bias_vl = weights.get(W.v4_router_bias_vl)
+        self.vocab_size = int(vocab_size)
 
     def _weight_bf16(self) -> torch.Tensor:
         """Lazy-cached BF16 view of ``self.weight``.
@@ -201,6 +204,7 @@ class Gate(nn.Module):
         if (
             not self.hash
             and self.bias is not None
+            and not getattr(self, "_has_visual_tokens", False)
             and _use_fused_gate(self.score_func, x.size(0))
         ):
             return fused_sqrtsoftplus_gate(
@@ -221,13 +225,36 @@ class Gate(nn.Module):
             _rt.record_if_level(2, f"{_dbg}_activated_scores", scores)
 
         original_scores = scores
+        image_mask = (
+            input_ids.reshape(-1) >= self.vocab_size
+            if self.bias_vl is not None
+            and input_ids is not None
+            and getattr(self, "_has_visual_tokens", False)
+            else None
+        )
         if self.bias is not None:
-            scores = scores + self.bias
+            if image_mask is None:
+                scores = scores + self.bias
+            else:
+                scores = scores + torch.where(
+                    image_mask.unsqueeze(-1), self.bias_vl, self.bias
+                )
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_biased_scores", scores)
 
         if self.hash:
-            indices = self.tid2eid[input_ids].long()  # [N, topk]
+            assert input_ids is not None
+            flat_ids = input_ids.reshape(-1)
+            if image_mask is None:
+                indices = self.tid2eid[flat_ids].long()
+            else:
+                indices = self.tid2eid[torch.where(image_mask, 0, flat_ids)].long()
+                vision_indices = (original_scores + self.bias_vl).topk(
+                    self.topk, dim=-1
+                )[1]
+                indices = torch.where(
+                    image_mask.unsqueeze(-1), vision_indices.long(), indices
+                )
         else:
             indices = None
 

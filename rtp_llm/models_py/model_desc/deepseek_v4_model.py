@@ -43,6 +43,9 @@ from rtp_llm.model_loader.weight_memory_saver import (
     model_build_scope,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbeddingInjector,
+)
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
     dsv4_global_chunk_tokens_configured,
@@ -1217,6 +1220,56 @@ class DeepSeekV4Model(GptModelBase):
         h = self.v4.embed(input_ids)
         return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
+    def _prepare_multimodal_prefill_hidden(
+        self,
+        inputs: PyModelInputs,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        if not inputs.multimodal_features:
+            return self._prepare_prefill_hidden(input_ids, positions)
+        hidden = self._embed_multimodal_tokens(inputs, input_ids)
+        return hidden.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
+
+    def _embed_multimodal_tokens(
+        self, inputs: PyModelInputs, input_ids: torch.Tensor
+    ) -> torch.Tensor:
+        features = inputs.multimodal_features
+        if not bool(self.v4.fp8_kv_cache):
+            raise RuntimeError("DeepSeek-V4 vision currently requires FP8 KV cache")
+        locations_tensor = inputs.mm_features_locs.reshape(-1)
+        if len(features) != locations_tensor.numel():
+            raise RuntimeError(
+                "DeepSeek-V4 multimodal feature/location mismatch: "
+                f"features={len(features)} locations={locations_tensor.numel()}"
+            )
+        cp_info = getattr(inputs.attention_inputs, "context_parallel_info", None)
+        text_tokens_mask = inputs.text_tokens_mask.reshape(-1).to(
+            device=input_ids.device, dtype=torch.bool
+        )
+        if text_tokens_mask.numel() != input_ids.numel():
+            raise RuntimeError(
+                "DeepSeek-V4 text token mask must match input ids: "
+                f"mask={text_tokens_mask.numel()} ids={input_ids.numel()}"
+            )
+        valid_rows = torch.ones_like(text_tokens_mask)
+        if cp_info is not None:
+            valid_rows = (
+                cp_info.prefill_shuffle_indices.to(
+                    device=input_ids.device, dtype=torch.long
+                )
+                >= 0
+            )
+        image_mask = text_tokens_mask.logical_not() & valid_rows
+        safe_ids = torch.where(text_tokens_mask, input_ids, 0).clamp(
+            min=0, max=self._v4_args.vocab_size - 1
+        )
+        hidden = self.v4.embed(safe_ids)
+        MultimodalEmbeddingInjector()(hidden, features, locations_tensor)
+
+        self.v4._image_token_mask = image_mask
+        return hidden
+
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
@@ -1378,6 +1431,15 @@ class DeepSeekV4Model(GptModelBase):
             )
             return PyModelOutputs(hidden)
         attn = inputs.attention_inputs
+        self.v4._image_token_mask = None
+        has_visual_tokens = bool(inputs.multimodal_features) and not getattr(
+            self._v4_args, "v41_config", None
+        )
+        if getattr(self.v4, "_has_visual_tokens", None) != has_visual_tokens:
+            self.v4._has_visual_tokens = has_visual_tokens
+            for layer in self.v4.layers:
+                layer.ffn._has_visual_tokens = has_visual_tokens
+                layer.ffn.gate._has_visual_tokens = has_visual_tokens
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides
@@ -1397,6 +1459,26 @@ class DeepSeekV4Model(GptModelBase):
             is not DeepSeekV4Model._prepare_prefill_hidden
             else None
         )
+        if has_visual_tokens:
+            if not bool(attn.is_prefill) or bool(
+                getattr(attn, "is_target_verify", False)
+            ):
+                raise RuntimeError(
+                    "DeepSeek-V4 multimodal features are only valid on initial prefill"
+                )
+            if (
+                cls is not DeepSeekV4Model
+                and cls._prepare_multimodal_prefill_hidden
+                is DeepSeekV4Model._prepare_multimodal_prefill_hidden
+            ):
+                raise RuntimeError(
+                    "DeepSeek-V4 speculative draft models do not consume image features"
+                )
+            prep_prefill = (
+                lambda input_ids, positions: self._prepare_multimodal_prefill_hidden(
+                    inputs, input_ids, positions
+                )
+            )
 
         if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
             return forward_decode(

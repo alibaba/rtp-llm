@@ -275,6 +275,7 @@ class PyCaptureMetaData:
 class PyContextParallelParams:
     prefill_actual_input_lengths_cpu: torch.Tensor
     prefill_cp_chunk_lengths: torch.Tensor
+    prefill_mm_spans: torch.Tensor
     prefill_cp_padding_lengths: torch.Tensor
     prefill_qkv_padding_mask: torch.Tensor
     prefill_qkv_restore_indice: torch.Tensor
@@ -342,9 +343,25 @@ class PyModelInputs:
     def input_ids(self, arg0: torch.Tensor) -> None: ...
     @property
     def engram_token_windows(self) -> torch.Tensor:
-        """CPU token history, [tokens, 4], current token first."""
+        """Token history, [tokens, 4], current token first; CUDA for execution."""
     @engram_token_windows.setter
     def engram_token_windows(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def multimodal_features(self) -> list[torch.Tensor] | None: ...
+    @multimodal_features.setter
+    def multimodal_features(self, arg0: list[torch.Tensor] | None) -> None: ...
+    @property
+    def mm_features_locs(self) -> torch.Tensor: ...
+    @mm_features_locs.setter
+    def mm_features_locs(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def mm_features_spans(self) -> torch.Tensor: ...
+    @mm_features_spans.setter
+    def mm_features_spans(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def text_tokens_mask(self) -> torch.Tensor: ...
+    @text_tokens_mask.setter
+    def text_tokens_mask(self, arg0: torch.Tensor) -> None: ...
 
 class PyModelOutputs:
     @typing.overload

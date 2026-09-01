@@ -280,6 +280,7 @@ class MoE(nn.Module):
         self._gate_pack_static = os.environ.get(
             "MOEDBG", "0"
         ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
+        self._has_visual_tokens = False
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         # Each strategy uses the same feature-weight API for its resident
@@ -299,13 +300,16 @@ class MoE(nn.Module):
             return False
         return tokens > max_tokens
 
+    def _use_gate_pack(self) -> bool:
+        return self._gate_pack_static and not self._has_visual_tokens
+
     def _run_chunk(
         self,
         x: torch.Tensor,
         input_ids: torch.Tensor,
         out: torch.Tensor,
     ) -> None:
-        if self._gate_pack_static:
+        if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
                     routed = self._strategy.forward_with_gate_pack(
@@ -428,7 +432,7 @@ class MoE(nn.Module):
         if self._should_chunk(x.size(0)):
             return self._forward_chunked(x, input_ids_flat, shape)
 
-        if self._gate_pack_static:
+        if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
                     y = self._strategy.forward_with_gate_pack(

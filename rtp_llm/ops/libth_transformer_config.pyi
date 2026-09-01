@@ -1000,6 +1000,7 @@ class LinearAttentionConfig:
 class MMModelConfig:
     include_sep_tokens: bool
     is_multimodal: bool
+    mm_padding_size: int
     mm_position_ids_style: int
     mm_sep_tokens: list[list[int]]
 

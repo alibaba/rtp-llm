@@ -20,6 +20,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
@@ -56,6 +57,45 @@ def _eager_sqrtsoftplus_gate(
     weights = s.gather(1, indices)
     weights = weights / (weights.sum(-1, keepdim=True) + norm_eps) * route_scale
     return weights, indices
+
+
+class GateVisionRoutingTest(unittest.TestCase):
+    def test_hash_routes_across_text_and_image_batches(self):
+        from rtp_llm.models_py.modules.dsv4.moe.gate import Gate
+        from rtp_llm.utils.model_weight import W
+
+        gate = Gate(
+            layer_id=0,
+            dim=4,
+            n_routed_experts=4,
+            n_activated_experts=2,
+            n_hash_layers=1,
+            vocab_size=8,
+            layer_weights={
+                W.v4_router_w: torch.zeros(4, 4, dtype=torch.bfloat16),
+                W.v4_router_tid2eid: torch.tensor([[0, 1]] * 8),
+                W.v4_router_bias_vl: torch.tensor([0.0, 0.0, 10.0, 20.0]),
+            },
+        )
+        x = torch.zeros(3, 4, dtype=torch.bfloat16)
+        for has_visual_tokens in (False, True, False):
+            with self.subTest(has_visual_tokens=has_visual_tokens):
+                gate._has_visual_tokens = has_visual_tokens
+                if has_visual_tokens:
+                    weights, indices = gate(x, torch.tensor([1, 8, 2]))
+                    expected_indices = torch.tensor([[0, 1], [3, 2], [0, 1]])
+                else:
+                    with patch.object(
+                        torch.Tensor,
+                        "topk",
+                        side_effect=AssertionError(
+                            "text hash routing must not run topk"
+                        ),
+                    ):
+                        weights, indices = gate(x, torch.tensor([1, 2, 3]))
+                    expected_indices = torch.tensor([[0, 1]] * 3)
+                torch.testing.assert_close(indices, expected_indices)
+                torch.testing.assert_close(weights, torch.full((3, 2), 0.5))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -108,6 +148,44 @@ class GateFusedEquivTest(unittest.TestCase):
     def test_v4_flash_default_shape(self):
         # V4-Flash: E=256 experts, K=topk=6
         self._check(N=128, E=256, K=6, route_scale=2.5)
+
+    def test_text_tokens_keep_fused_gate_with_vision_bias_loaded(self):
+        from rtp_llm.models_py.modules.dsv4.moe.gate import Gate
+        from rtp_llm.utils.model_weight import W
+
+        layer_weights = {
+            W.v4_router_w: torch.randn(4, 8, device="cuda", dtype=torch.bfloat16),
+            W.v4_router_bias: torch.randn(4, device="cuda", dtype=torch.float32),
+            W.v4_router_bias_vl: torch.randn(4, device="cuda", dtype=torch.float32),
+        }
+        gate = Gate(
+            layer_id=1,
+            dim=8,
+            n_routed_experts=4,
+            n_activated_experts=2,
+            vocab_size=32,
+            layer_weights=layer_weights,
+        )
+        gate._has_visual_tokens = False
+        expected = (
+            torch.ones(3, 2, device="cuda"),
+            torch.zeros(3, 2, device="cuda", dtype=torch.long),
+        )
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.moe.gate.fused_sqrtsoftplus_gate",
+            return_value=expected,
+        ) as fused, patch(
+            "rtp_llm.models_py.modules.dsv4.moe.gate._use_fused_gate",
+            return_value=True,
+        ):
+            result = gate(
+                torch.randn(3, 8, device="cuda", dtype=torch.bfloat16),
+                torch.tensor([1, 2, 3], device="cuda"),
+            )
+
+        self.assertIs(result, expected)
+        fused.assert_called_once()
+        self.assertIs(fused.call_args.args[1], gate.bias)
 
     def test_single_token(self):
         self._check(N=1, E=256, K=6)
