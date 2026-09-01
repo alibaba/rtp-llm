@@ -65,7 +65,8 @@ public:
                    const std::vector<int>&            kv_cache_layer_to_group    = {},
                    std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr,
                    DSparkModelRole                    dspark_model_role          = DSparkModelRole::NONE,
-                   bool                               allow_cuda_graph           = true);
+                   bool                               allow_cuda_graph           = true,
+                   bool                               reinitialize_py_model      = true);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -162,7 +163,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       const std::vector<int>&            kv_cache_layer_to_group,
                                       std::shared_ptr<ModelInputsLogger> model_inputs_logger,
                                       DSparkModelRole                    dspark_model_role,
-                                      bool                               allow_cuda_graph):
+                                      bool                               allow_cuda_graph,
+                                      bool                               reinitialize_py_model):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -279,7 +281,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     py_model_                 = py_instance;
     auto py_initialize_method = py_model_.attr("initialize");
     try {
-        py_init_result = py_initialize_method(init_resources);
+        // P0 slice 2 Variant B: a SECOND wrapper over an ALREADY-INITIALIZED py
+        // instance must not re-run initialize() — it re-creates the shared
+        // python state (pool contexts, strategies, buffers) that earlier
+        // wrappers' captured graphs still reference, silently poisoning them
+        // (boot dies at the first later replay/eager warmup).
+        if (reinitialize_py_model) {
+            py_init_result = py_initialize_method(init_resources);
+        }
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;

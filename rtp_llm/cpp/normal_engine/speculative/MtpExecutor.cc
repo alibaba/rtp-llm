@@ -662,6 +662,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         // extra graph memory (larger commit bsz falls back to eager via canRun).
         static const bool kCommitAsDecode = getenv("DSV4_COMMIT_AS_DECODE") != nullptr;
         if (is_dspark_ && kCommitAsDecode) {
+            // Bisect gate (design doc §9 step 1): DSV4_COMMIT_AS_DECODE_NOCAP
+            // builds the wrapper WITHOUT graph capture — isolates capture-time
+            // poisoning from wrapper-existence side effects.
+            const bool kNoCap = getenv("DSV4_COMMIT_AS_DECODE_NOCAP") != nullptr;
             auto decode_params = model_init_params;
             decode_params.sp_config.type                              = SP_TYPE_NONE;
             decode_params.hw_kernel_config.decode_capture_batch_sizes = {1, 2, 4};
@@ -670,8 +674,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                              false,
                                                              false,
                                                              target_cache_layer_layout.layer_to_groups,
-                                                             model_inputs_logger_));
-            RTP_LLM_LOG_INFO("[commit-as-decode] target decode wrapper created (capture bsz 1/2/4)");
+                                                             model_inputs_logger_,
+                                                             DSparkModelRole::NONE,
+                                                             !kNoCap,
+                                                             false));
+            RTP_LLM_LOG_INFO("[commit-as-decode] target decode wrapper created (capture bsz 1/2/4, nocap=%d)",
+                             (int)kNoCap);
         }
     }
 
@@ -940,6 +948,25 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         const bool commit_as_decode         = useCommitDecodePath(model_input);
+        {
+            // Geometry probe: every prefillStep target forward, unbuffered —
+            // shows whether/when all-T=1 commit rounds actually occur.
+            static std::atomic<int> cadg_budget{400};
+            if (cadg_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                const int64_t cadg_bsz = model_input.input_lengths.defined()
+                                             ? (long long)model_input.input_lengths.size(0)
+                                             : -1;
+                const int64_t cadg_total = model_input.combo_tokens.defined()
+                                               ? (long long)model_input.combo_tokens.numel()
+                                               : -1;
+                fprintf(stderr,
+                        "[CADG] bsz=%lld total=%lld route=%d\n",
+                        (long long)cadg_bsz,
+                        (long long)cadg_total,
+                        (int)commit_as_decode);
+                fflush(stderr);
+            }
+        }
         if (commit_as_decode) {
             convertCommitRoundToDecodeInputs(model_input, streams);
             fprintf(stderr,
@@ -954,17 +981,21 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (commit_as_decode) {
             try {
                 model_output = target_ref.forward(model_input);
+                fprintf(stderr, "[CAD] forward OK\n");
+                fflush(stderr);
+                // NOTE: the MTP-buffer override is deliberately SKIPPED on the
+                // decode route — it would overwrite the output with the
+                // verify-geometry buffer rows that the decode forward never
+                // wrote. The decode path returns its own hidden states.
             } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("[commit-as-decode] routed forward failed: %s", e.what());
+                RTP_LLM_LOG_ERROR("[commit-as-decode] routed post-forward failed: %s", e.what());
                 throw;
             }
-            fprintf(stderr, "[CAD] forward OK\n");
-            fflush(stderr);
         } else {
             model_output = target_ref.forward(model_input);
+            maybeOverrideAllHiddenStatesWithMtpBuffer(
+                model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
         }
-        maybeOverrideAllHiddenStatesWithMtpBuffer(
-            model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
