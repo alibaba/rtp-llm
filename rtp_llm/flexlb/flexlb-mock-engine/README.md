@@ -315,12 +315,26 @@ master-side curves are indistinguishable from production:
 - **Lease lifecycle**: prefill holds `ceil(inputLen/spb)` blocks for the duration of
   the batch and hands them to LRU on completion (release ≠ delete — availability
   recovers, `cache_keys` stay). Decode provisions its blocks at run start (opt-in
-  queued-mode provisions at enqueue) and **grows the lease per decode step** toward
-  `ceil((inputLen + generated)/spb)` (production `incrMalloc` semantics), handing
-  over to LRU at completion.
-- **Admission/eviction coupling**: allocation needs `keys.size` blocks
+  queued-mode provisions at enqueue) by re-matching the request's block keys
+  against its **OWN LRU** (KV v2 fix #5, production `reuse_block_size =
+  generate_stream->reuseBlockSize()`) and allocating the **NET demand**
+  `ceil(inputLen/spb) − hitBlocks` (floor 0): reused blocks are referenced in the
+  LRU layer (ref+1, never re-allocated into the running layer), and the
+  prefix-match read itself refreshes LRU recency — decode positive feedback, the
+  more a prefix is matched the later its blocks sit in the eviction order. The
+  lease then **grows per decode step** toward `ceil((inputLen + generated)/spb)`
+  (production `incrMalloc` semantics — growth only allocates the generation
+  delta, so the reuse deduction holds for the stream's full lifetime), handing
+  over to LRU at completion. A cancelled stream never admits: cancel runs free()
+  (blocks return to the pool, no LRU handover) — including the race where the
+  cancel lands after the step-boundary terminal claim.
+- **Admission/eviction coupling**: prefill allocation needs `keys.size` blocks
   (hash-present requests) or `ceil(inputLen/spb)` (empty-key requests, computed on
-  the spot); the gate is TOTAL_AND_AVAILABLE with a 5% reserve watermark.
+  the spot) and its TOTAL_AND_AVAILABLE gate evaluates the total demand; decode
+  admission evaluates the **net demand** (`total − reuse`) — production reuse
+  reduces `need_blocks` BEFORE the capacity gate, so a fully-reused decode
+  request admits whenever the 5% reserve watermark holds, even when
+  `total > available`.
   Free-block shortage first evicts LRU-tail blocks (sacrificing prefix reuse), and
   only returns **LACK_MEM** (error 602 `MALLOC_FAILED`, synchronous in the
   `enqueue_batch` ack `errors` with `request_states: "rejected"`; direct
@@ -348,9 +362,14 @@ master-side curves are indistinguishable from production:
 
 **Baseline caliber (IMPORTANT)**: v2 changes the *shape* of the available/active KV
 curves (prefill now occupies capacity while running; LRU holdings reduce available;
-decode grows per step). Numbers from the mock3 baseline (available ≈ total −
-in-flight decode inputLen) are NOT comparable across this version — re-baseline
-before any cross-version comparison.
+decode grows per step). KV v2 fix #5 further changes the decode *pressure level*:
+decode admission now deducts local LRU reuse (net allocation = `total − hit_blocks`,
+net-demand gate), so under prefix-heavy traffic the decode pool fills later and
+less than the pre-fix caliber — which allocated the full `ceil(inputLen/spb)` per
+request and systematically overstated decode pool pressure (earlier saturation,
+earlier LACK_MEM / `kv_admission_fails`, lower master-side decode `available`).
+Numbers from the mock3 baseline (available ≈ total − in-flight decode inputLen) are
+NOT comparable across this version — re-baseline before any cross-version comparison.
 
 ### Decode hard-admission gate (unconditional)
 

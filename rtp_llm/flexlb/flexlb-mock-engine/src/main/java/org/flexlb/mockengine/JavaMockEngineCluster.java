@@ -2400,7 +2400,11 @@ public final class JavaMockEngineCluster {
                     // to un-pooled execution (the request is NOT rejected here:
                     // the decode engine parks/retries, never rejects) and bumps
                     // kvAdmissionFails for overflow observability.
-                    if (acquireBlockLease(requestId, shape) == null) {
+                    // Fix #5: the decode engine re-matches the request's keys
+                    // against its OWN LRU here — net demand
+                    // ceil(il/spb) − hitBlocks, reused blocks referenced not
+                    // re-allocated (production reuse_block_size semantics).
+                    if (acquireDecodeBlockLease(requestId, shape) == null) {
                         kvAdmissionFails.increment();
                     }
                     // awaitsFirstStep: if a step tick is already pending (another
@@ -2434,8 +2438,9 @@ public final class JavaMockEngineCluster {
                         // a running slot must not claim it again). Failure degrades
                         // to un-pooled (kvAdmissionFails). Default OFF queued
                         // entries stay uncounted until run start — zero behavior
-                        // change.
-                        if (acquireBlockLease(requestId, shape) == null) {
+                        // change. Fix #5: decode-side reuse deduction applies here
+                        // too (own-LRU re-match, net demand, referenced reuse).
+                        if (acquireDecodeBlockLease(requestId, shape) == null) {
                             kvAdmissionFails.increment();
                         }
                     }
@@ -2566,9 +2571,10 @@ public final class JavaMockEngineCluster {
                 // default mode provisions blocks at run start; the opt-in
                 // accepted-layer mode claimed them at enqueue and only needs the
                 // phase flip. A queued request whose opt-in claim degraded takes
-                // its second chance here.
+                // its second chance here. Fix #5: decode-side reuse deduction
+                // (own-LRU re-match at run start, net demand, referenced reuse).
                 if (activeBlockLeases.get(candidateId) == null) {
-                    if (acquireBlockLease(candidateId, candidate.shape()) == null) {
+                    if (acquireDecodeBlockLease(candidateId, candidate.shape()) == null) {
                         kvAdmissionFails.increment();
                     }
                 }
@@ -2675,10 +2681,17 @@ public final class JavaMockEngineCluster {
             }
             responseQueues.remove(requestId);
             cancelledRequests.remove(requestId);
-            // Capacity model v2: the stream's block lease hands its key blocks
-            // to the LRU (release != delete: cache_keys grows, availability is
-            // restored because pure-LRU blocks count as available).
-            if (admitBlockLease(requestId, shape)) {
+            // Capacity model v2 + fix #5 (cancelled streams never admit): the
+            // stream's block lease hands its key blocks to the LRU on a NORMAL
+            // completion (release != delete: cache_keys grows, availability is
+            // restored because pure-LRU blocks count as available). A stream
+            // whose cancel landed AFTER the terminal claim (alreadyCancelled)
+            // instead releases its blocks to the pool WITHOUT LRU handover —
+            // production cancel runs free() and leaves no cache, mirroring the
+            // prefill-side completion's alreadyCancelled branch.
+            if (alreadyCancelled) {
+                releaseBlockLease(requestId);
+            } else if (admitBlockLease(requestId, shape)) {
                 cacheVersion.incrementAndGet();
             }
         }
@@ -2844,6 +2857,46 @@ public final class JavaMockEngineCluster {
         private MockLruBlockCache.BlockLease acquireBlockLease(long requestId,
                                                                 MockPerformanceModel.RequestShape shape) {
             MockLruBlockCache.BlockLease lease = cache.acquire(needBlocks(shape), shape.blockKeys());
+            if (lease == null) {
+                return null;
+            }
+            activeBlockLeases.put(requestId, lease);
+            return lease;
+        }
+
+        /**
+         * KV v2 fix #5 — decode admission with local reuse deduction: at
+         * hand-off the decode engine re-matches the request's block keys
+         * against its OWN LRU (production DecodeRpcServerNew:
+         * {@code reuse_block_size = generate_stream->reuseBlockSize()}; the
+         * engine receives the PD transfer from [reuse, total) only) and admits
+         * on the NET demand ceil(inputLen/spb) − hitBlocks (floor 0). Reused
+         * blocks are referenced, never re-allocated.
+         *
+         * <p>Token caliber: the demand is ceil(inputLen/spb) — the FULL input
+         * including the hash-channel-uncovered suffix (decode holds the
+         * request's complete KV for its lifetime; prefill-side admission keeps
+         * its hash-key-count caliber). The decode re-match also gives the
+         * decode LRU its READ path — the hit count is independent of the
+         * prefill engine's shape.hitTokens (which stays untouched for TPS
+         * accounting).
+         *
+         * <p>Growth semantics: the lease's totalBlocks() starts at
+         * hitBlocks + netNew = ceil(inputLen/spb), so the per-step growth toward
+         * ceil((inputLen+generated)/spb) only ever allocates the GENERATED
+         * increment — the reuse deduction persists for the stream's whole
+         * life (the old keys.size-caliber lease started below the token
+         * demand and back-filled the uncovered suffix at the first grow
+         * boundary, diluting the deduction whenever the pool ran dry).
+         *
+         * @return the lease (registered in {@code activeBlockLeases}), or null
+         *         = LACK_MEM (caller degrades to un-pooled + kvAdmissionFails)
+         */
+        private MockLruBlockCache.BlockLease acquireDecodeBlockLease(
+                long requestId, MockPerformanceModel.RequestShape shape) {
+            int totalDemand = (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
+            MockLruBlockCache.BlockLease lease =
+                    cache.acquireWithReuse(totalDemand, shape.blockKeys());
             if (lease == null) {
                 return null;
             }

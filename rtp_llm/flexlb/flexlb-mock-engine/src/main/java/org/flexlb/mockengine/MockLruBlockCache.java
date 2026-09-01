@@ -80,11 +80,21 @@ final class MockLruBlockCache {
         return matchPrefix(keys).size();
     }
 
-    /** Prefix match against ALL indexed keys, including ones referenced in-flight. */
+    /**
+     * Prefix match against ALL indexed keys, including ones referenced in-flight.
+     *
+     * <p>KV v2 fix #5: the match is a READ through {@code get()} (not
+     * {@code containsKey}), so the access-ordered map refreshes each matched
+     * entry's recency — the prefix-match read path itself keeps matched
+     * chains hot. This is the decode-side positive feedback: the more a
+     * prefix is matched, the later its blocks sit in the eviction order
+     * ("the more you use it, the more you save"), matching the production
+     * prefix-match read that touches every block it confirms.
+     */
     private List<Long> matchPrefix(List<Long> keys) {
         List<Long> hits = new ArrayList<>();
         for (Long key : keys) {
-            if (!blocks.containsKey(key)) {
+            if (blocks.get(key) == null) {
                 break;
             }
             hits.add(key);
@@ -148,6 +158,70 @@ final class MockLruBlockCache {
         return true;
     }
 
+    /**
+     * Decode-side admission with local reuse deduction — KV v2 fix #5, the
+     * production {@code DecodeRpcServerNew} semantics: at hand-off the decode
+     * engine re-matches the request's block keys against its OWN LRU
+     * ({@code reuse_block_size = generate_stream->reuseBlockSize()}) and the
+     * NET new allocation is {@code totalBlocksDemand − hitBlocks} (floor 0);
+     * reused blocks are REFERENCED, never re-allocated — a reuse hit does not
+     * consume pool capacity the way a fresh block does.
+     *
+     * <p>Differences from the prefill-flavored {@link #acquire}:
+     * <ul>
+     *   <li>Token caliber: {@code totalBlocksDemand} is ceil(inputLen/spb) —
+     *       the FULL input including the hash-channel-uncovered suffix (the
+     *       prefill gate keeps its hash-key-count caliber).</li>
+     *   <li>Net-demand gate: the TOTAL_AND_AVAILABLE gate evaluates the NET
+     *       demand ({@code netNew <= available && reserve <= available - netNew})
+     *       — production reuse reduces need_blocks BEFORE the capacity gate, so
+     *       a fully-reused request admits whenever the reserve watermark holds,
+     *       even with {@code totalBlocksDemand > available}.</li>
+     * </ul>
+     *
+     * <p>Hit keys are pinned (ref+1) BEFORE the free-first/LRU-tail eviction
+     * sweep for the net-new part, so an eviction victim can never be a block
+     * this request is about to reference.
+     *
+     * @param totalBlocksDemand the request's FULL block demand (ceil(inputLen/spb))
+     * @param keys the request's hash-channel block keys (may be empty)
+     * @return the lease ({@code hitKeys} = referenced reuse blocks,
+     *         {@code nakedBlocks} = net-new blocks), or {@code null} = LACK_MEM
+     *         (no state changed)
+     */
+    synchronized BlockLease acquireWithReuse(int totalBlocksDemand, List<Long> keys) {
+        if (totalBlocksDemand <= 0) {
+            return new BlockLease(List.of(), 0);
+        }
+        List<Long> hitKeys = matchPrefix(keys);
+        if (hitKeys.size() > totalBlocksDemand) {
+            // Reuse can never exceed the request's own demand — clamp the
+            // referenced prefix (defensive: a trace with more bh keys than
+            // input blocks would otherwise over-pin the LRU).
+            hitKeys = new ArrayList<>(hitKeys.subList(0, totalBlocksDemand));
+        }
+        int netNew = totalBlocksDemand - hitKeys.size();
+        int avail = availableBlocks();
+        if (netNew > avail || avail - netNew < reserveBlocks()) {
+            return null; // LACK_MEM (or reserve watermark) — no state changed
+        }
+        // Pin the reused blocks FIRST: each reference moves the key out of the
+        // evictable pure-LRU set, so the LRU-tail eviction below can never
+        // sacrifice a block this request is about to reuse.
+        for (Long key : hitKeys) {
+            blocks.put(key, blocks.get(key) + 1);
+        }
+        // Free-first allocation for the net-new part (same coupling as
+        // acquire: eviction trades prefix reuse for capacity).
+        while (freeBlocks() < netNew) {
+            if (!evictOne()) {
+                break;
+            }
+        }
+        heldBlocks += netNew;
+        return new BlockLease(hitKeys, netNew);
+    }
+
     // ─────────────────────────── completion / cancel ───────────────────────────
 
     /**
@@ -162,24 +236,25 @@ final class MockLruBlockCache {
         dereference(lease.hitKeys);
         heldBlocks -= lease.nakedBlocks;
         boolean changed = false;
-        int transferred = 0;
         for (Long key : keys) {
             Integer ref = blocks.get(key);
             if (ref == null) {
                 blocks.put(key, 0);
-                transferred++;
                 changed = true;
             } else {
                 blocks.put(key, ref); // already indexed — refresh LRU order only
             }
         }
-        // Keyed blocks come out of the lease's held allocation (naked == new-key
-        // count at acquire time for keyed requests); defensively evict LRU tail
-        // blocks for any overshoot (concurrent same-key completions).
-        for (int i = lease.nakedBlocks; i < transferred; i++) {
-            if (!evictOne()) {
-                break;
-            }
+        // Capacity conservation: the LRU (pure + referenced) may not crowd
+        // out held blocks — evict pure-LRU tail blocks ONLY when the pool is
+        // genuinely over-subscribed (free < 0). The old transferred > naked
+        // heuristic was a prefill-acquire invariant (keys.size == needBlocks
+        // there); a decode lease (fix #5) legitimately carries hash-channel
+        // keys exceeding its token-caliber net allocation ceil(inputLen/spb)
+        // (keys are trace metadata, the demand is tokens) — those keys park
+        // fine whenever the pool has room.
+        while (blocks.size() + heldBlocks > totalBlocks && evictOne()) {
+            // evictOne already counted the eviction
         }
         return changed;
     }
