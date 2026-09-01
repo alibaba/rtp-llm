@@ -28,17 +28,21 @@ struct CacheConfig {
     std::vector<std::vector<int>>  layer_region_to_group_id;  // layer id -> region name id -> group id
     std::vector<int>               layer_to_group_id;
     std::vector<int>               layer_to_block_stride_bytes;
-    std::vector<size_t>            group_seq_size_per_block;
-    std::vector<size_t>            group_kv_block_stride_bytes;
-    std::vector<size_t>            group_kv_scale_stride_bytes;
-    std::vector<size_t>            group_block_size_bytes;
-    std::vector<uint32_t>          group_block_nums;
-    uint32_t                       dsv4_fixed_pool_blocks                  = 0;
-    uint32_t                       dsv4_hca_state_pool_blocks              = 0;
-    bool                           use_independent_block_pools              = false;
-    bool                           use_typed_cache_regions                  = false;
-    bool                           use_opaque_kv_cache_store                = false;
-    bool                           disable_decode_first_malloc_device_reuse = false;
+    // Empty means the legacy one-scale-slot-per-layer layout. When populated,
+    // only the first logical layer owning each physical Indexer slot exposes a
+    // scale tensor; shared layers expose no scale tensor.
+    std::vector<int>      layer_to_indexer_kv_slot;
+    std::vector<size_t>   group_seq_size_per_block;
+    std::vector<size_t>   group_kv_block_stride_bytes;
+    std::vector<size_t>   group_kv_scale_stride_bytes;
+    std::vector<size_t>   group_block_size_bytes;
+    std::vector<uint32_t> group_block_nums;
+    uint32_t              dsv4_fixed_pool_blocks                   = 0;
+    uint32_t              dsv4_hca_state_pool_blocks               = 0;
+    bool                  use_independent_block_pools              = false;
+    bool                  use_typed_cache_regions                  = false;
+    bool                  use_opaque_kv_cache_store                = false;
+    bool                  disable_decode_first_malloc_device_reuse = false;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -115,11 +119,11 @@ struct CacheConfig {
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
             const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
-            const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
-            const bool use_explicit_hca_blocks    = region == KVCacheRegionName::HCA_STATE
-                                                 && dsv4_hca_state_pool_blocks > 0;
-            const bool use_explicit_fixed_blocks  = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
-            const bool use_explicit_dsv4_blocks   = use_explicit_hca_blocks || use_explicit_fixed_blocks;
+            const bool is_dsv4_fixed_region = isDsv4FixedRegion(region);
+            const bool use_explicit_hca_blocks =
+                region == KVCacheRegionName::HCA_STATE && dsv4_hca_state_pool_blocks > 0;
+            const bool use_explicit_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
+            const bool use_explicit_dsv4_blocks  = use_explicit_hca_blocks || use_explicit_fixed_blocks;
             uint32_t   rule_blocks;
             if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
@@ -180,6 +184,7 @@ struct CacheConfig {
         OUTPUT_FIELD(swa_block_size_bytes);
         OUTPUT_FIELD(kv_block_stride_bytes);
         OUTPUT_FIELD(kv_scale_stride_bytes);
+        os << indent1 << "layer_to_indexer_kv_slot=" << rtp_llm::vectorToString(layer_to_indexer_kv_slot) << "\n";
         os << "\n";
 
         // Attention-specific configuration section

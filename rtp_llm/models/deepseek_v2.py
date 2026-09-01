@@ -725,6 +725,9 @@ class DeepSeekV2(BaseModel):
                     config_json.get("index_share_for_mtp_iteration", False)
                 )
 
+                architectures = config_json.get("architectures") or []
+                config._is_glm52_architecture = "GlmMoeDsaForCausalLM" in architectures
+
     @staticmethod
     def get_weight_cls():
         return DeepSeekV2Weight

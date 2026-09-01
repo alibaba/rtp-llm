@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -97,6 +98,76 @@ TEST_F(BlockPoolTest, ConstructorAndInit) {
     EXPECT_TRUE(init_result);
 
     EXPECT_EQ(block_pool_->freeBlocksNum(), config.block_num - 1);
+}
+
+TEST_F(BlockPoolTest, Glm52SharedIndexerKvCacheIsOptIn) {
+    auto model_config                          = makeTestModelConfig(/*num_layers=*/4);
+    model_config.model_type                    = "glm_5";
+    model_config.attn_config.use_mla           = true;
+    model_config.attn_config.is_sparse         = true;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::FP8;
+    model_config.attn_config.kv_lora_rank      = 512;
+    model_config.attn_config.rope_head_dim     = 64;
+    model_config.attn_config.indexer_head_dim  = 128;
+    model_config.glm52_indexer_kv_slot_mapping = {0, 1, 1, 1};
+
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    auto legacy_config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, /*is_mtp=*/false);
+    EXPECT_TRUE(legacy_config.layer_to_indexer_kv_slot.empty());
+    EXPECT_EQ(legacy_config.kv_scale_size_bytes, legacy_config.layer_num * legacy_config.kv_scale_stride_bytes);
+
+    model_config.enable_glm52_shared_indexer_kv_cache = true;
+    auto compact_config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, /*is_mtp=*/false);
+    EXPECT_EQ(compact_config.layer_to_indexer_kv_slot, std::vector<int>({0, 1, 1, 1}));
+    EXPECT_EQ(compact_config.kv_scale_size_bytes, 2u * compact_config.kv_scale_stride_bytes);
+    EXPECT_LT(compact_config.block_size_bytes, legacy_config.block_size_bytes);
+    model_config.glm52_indexer_kv_slot_mapping = {-1, 0, 0, 0};
+    EXPECT_ANY_THROW(SingleConfigCreator::createSingleConfig(model_config, parallelism_config, /*is_mtp=*/false));
+}
+
+TEST_F(BlockPoolTest, Glm52CompactScoreKeepsMtpIndexerLayoutIndependent) {
+    auto score_model_config                                 = makeTestModelConfig(/*num_layers=*/4);
+    score_model_config.model_type                           = "glm_5";
+    score_model_config.attn_config.use_mla                  = true;
+    score_model_config.attn_config.is_sparse                = true;
+    score_model_config.attn_config.kv_cache_dtype           = KvCacheDataType::FP8;
+    score_model_config.attn_config.kv_lora_rank             = 512;
+    score_model_config.attn_config.rope_head_dim            = 64;
+    score_model_config.attn_config.indexer_head_dim         = 128;
+    score_model_config.enable_glm52_shared_indexer_kv_cache = true;
+    score_model_config.glm52_indexer_kv_slot_mapping        = {0, 1, 1, 1};
+
+    auto propose_model_config                                 = score_model_config;
+    propose_model_config.num_layers                           = 1;
+    propose_model_config.enable_glm52_shared_indexer_kv_cache = false;
+    propose_model_config.glm52_indexer_kv_slot_mapping.clear();
+
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    rtp_llm::RuntimeConfig runtime_config;
+    rtp_llm::KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 4;
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 1;
+
+    auto cache_config = CacheConfigCreator::createSpConfig(score_model_config,
+                                                           propose_model_config,
+                                                           parallelism_config,
+                                                           runtime_config,
+                                                           kv_cache_config,
+                                                           sp_config,
+                                                           /*warm_up_result=*/std::nullopt,
+                                                           /*is_mtp=*/true,
+                                                           /*is_eagle=*/false);
+    auto pool_config  = BlockPoolConfigHelper::createConfig(cache_config);
+    ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
+    EXPECT_EQ(pool_config.memory_layouts[0].scale_layer_num, 2u);
+    EXPECT_EQ(pool_config.memory_layouts[1].scale_layer_num, 1u);
+    ASSERT_EQ(cache_config.mtp_sub_configs.size(), 1u);
+    EXPECT_TRUE(cache_config.mtp_sub_configs[0]->layer_to_indexer_kv_slot.empty());
 }
 
 TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
