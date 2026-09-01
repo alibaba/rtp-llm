@@ -43,6 +43,22 @@ import torch
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 
+def _dsmark(msg: str) -> None:
+    """Boot-only phase marker, gated by ``DSV4_DIAG``.
+
+    Restored Aug-31: ``run_commit_step`` / ``run_propose_step`` reference this
+    helper but its definition had been lost from the tree — every propose or
+    commit step then raised ``NameError``, which the C++ rank supervisor
+    swallows, killing the rank silently right after the main MoE graph
+    captures (the "post-MoE-capture" boot crash).
+    """
+    import os
+    import sys
+
+    if os.environ.get("DSV4_DIAG"):
+        print("[DSMARK] %s" % msg, file=sys.stderr, flush=True)
+
+
 def optional_tensor(value: Any) -> Optional[torch.Tensor]:
     if value is None or not isinstance(value, torch.Tensor):
         return None
