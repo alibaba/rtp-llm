@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -743,6 +745,117 @@ def cp_all_gather_full_varlen(
     with record_function_range(f"{profile_name}.restore"):
         full = _cp_restore_gathered_full_2d(gathered, cp_ctx)
     return full.view((cp_ctx.seq_len_full,) + trailing)
+
+
+# ---------------------------------------------------------------------------
+# Lever 2 (Sep 2): fp8-compressed varlen AllGather. The CP attention gathers
+# (q / kv) are uniformly payload-bound on this box (NCCL over host SHM;
+# DSV4_ANALYSIS §5 — x4.97-5.10 per x4 tokens), so halving the transport
+# bytes halves the gather time. Quantize bf16 -> per-row-amax e4m3 (+one
+# fp32 scale per row), ride the SAME varlen gather machinery as a uint8
+# payload (reshape/index ops are dtype-agnostic), dequantize after restore.
+#
+# Numerics (review flag 1): the kv consumer index_copy_'s into a FRESH
+# per-layer bf16 attention workspace (attention.py ~3905), not the persistent
+# KV pool — cache writes happen pre-gather and rank-local, so transport error
+# is transient attention-score noise only. The KV cache itself already lives
+# at fp8 precision (--fp8_kv_cache 1); fresh-row K at per-row e4m3 is the
+# same numeric regime.
+#
+# Kernels live in THIS file on purpose: a new module would need a manual
+# bazel-runfiles symlink (known pitfall); existing files are symlinked
+# through automatically.
+# ---------------------------------------------------------------------------
+_FP8_GATHER_BLOCK: tl.constexpr = 1024  # noqa: E501 (module-level block size for both kernels)
+
+
+def _fp8_gather_enabled(kind: str) -> bool:
+    """Master switch + per-site subswitches (review: 拆 costs a reboot, not a
+    rebuild). kind is 'q' or 'kv'."""
+    import os
+    if os.environ.get("DSV4_FP8_GATHER", "0") != "1":
+        return False
+    return os.environ.get(f"DSV4_FP8_GATHER_{kind.upper()}", "1") != "0"
+
+
+@triton.jit
+def _fp8_row_quant_kernel(x_ptr, q_ptr, s_ptr, F, BLOCK: tl.constexpr):
+    # One program per row: two passes (amax, then quantize). Rows are up to
+    # ~8K elements — L2-cached second pass, cheaper than register staging.
+    row = tl.program_id(0).to(tl.int64)
+    base = row * F
+    amax = 0.0
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        v = tl.load(x_ptr + base + offs, mask=offs < F, other=0.0).to(tl.float32)
+        amax = tl.maximum(amax, tl.max(tl.abs(v)))
+    scale = amax / 448.0  # e4m3 finite max
+    scale = tl.where(scale == 0.0, 1.0, scale)
+    tl.store(s_ptr + row, scale)
+    inv = 1.0 / scale
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        m = offs < F
+        v = tl.load(x_ptr + base + offs, mask=m, other=0.0).to(tl.float32)
+        tl.store(q_ptr + base + offs, (v * inv).to(tl.float8e4nv), mask=m)
+
+
+@triton.jit
+def _fp8_row_dequant_kernel(q_ptr, s_ptr, y_ptr, F, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    base = row * F
+    scale = tl.load(s_ptr + row)
+    for start in range(0, F, BLOCK):
+        offs = start + tl.arange(0, BLOCK)
+        m = offs < F
+        q = tl.load(q_ptr + base + offs, mask=m, other=0.0).to(tl.float32)
+        tl.store(y_ptr + base + offs, (q * scale).to(tl.bfloat16), mask=m)
+
+
+def cp_all_gather_full_varlen_fp8(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    kind: str,
+    profile_name: Optional[str] = None,
+) -> torch.Tensor:
+    """fp8-transport variant of :func:`cp_all_gather_full_varlen`.
+
+    Falls through to the plain bf16 gather when the lever is off, the input
+    is not bf16, or the row count is degenerate — call sites can swap
+    unconditionally.
+    """
+    if (
+        not _fp8_gather_enabled(kind)
+        or local_flat.dtype != torch.bfloat16
+        or local_flat.size(0) == 0
+    ):
+        return cp_all_gather_full_varlen(
+            local_flat, cp_ctx, profile_name=profile_name)
+    tag = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.fp8.{kind}.varlen"
+    trailing = local_flat.shape[1:]
+    R = cp_ctx.chunk_length
+    x2d = local_flat.reshape(R, -1).contiguous()
+    F = x2d.size(1)
+    q = torch.empty((R, F), dtype=torch.float8_e4m3fn, device=x2d.device)
+    scale = torch.empty((R,), dtype=torch.float32, device=x2d.device)
+    with record_function_range(f"{tag}.quant"):
+        _fp8_row_quant_kernel[(R,)](x2d, q, scale, F, BLOCK=1024)
+    # Payload: F bytes of fp8 + 4 bytes of fp32 scale per row (-49.97% vs bf16).
+    payload = torch.cat(
+        (q.view(torch.uint8), scale.view(torch.uint8).reshape(R, 4)), dim=1)
+    del q, scale, x2d
+    gathered = cp_all_gather_full_varlen(payload, cp_ctx, profile_name=tag)
+    # gathered: [seq_len_full, F+4] uint8 (row stride may exceed F+4 on the
+    # prefix-restore view path — force contiguous slices before dtype views).
+    full_rows = gathered.size(0)
+    qf = gathered[:, :F].contiguous().view(torch.float8_e4m3fn)
+    sf = gathered[:, F:].contiguous().view(torch.float32).reshape(full_rows)
+    del gathered
+    y = torch.empty((full_rows, F), dtype=torch.bfloat16, device=qf.device)
+    with record_function_range(f"{tag}.dequant"):
+        _fp8_row_dequant_kernel[(full_rows,)](qf, sf, y, F, BLOCK=1024)
+    return y.view((cp_ctx.seq_len_full,) + trailing)
 
 
 def cp_gather_last_by_request(

@@ -31,6 +31,21 @@ _EAGER_FIXED_EP_BOUND = int(os.environ.get("DSV4_SM120_EAGER_FIXED_EP", "0"))
 # 0 = off (canonical NCCL emulation).
 _DEEPEP_REAL = int(os.environ.get("DSV4_DEEPEP_REAL", "0"))
 _DEEPEP_REAL_MAX_TOKENS = int(os.environ.get("DSV4_DEEPEP_MAX_TOKENS", "8192"))
+# Lever 1b (Sep 2): overlap variant of the real deep_ep path. The raw DeepEP
+# pair (dispatch ~3 ms + combine ~6 ms/layer) is SLOWER than the NCCL pair
+# it replaces (6.64 ms exposed — boot #3 measured +16% @32K synchronous), so
+# the lever only pays when the comm is hidden: split local tokens into two
+# halves, async_finish both dispatches on deep_ep's comm stream (overlapping
+# the aux-stream shared expert), then pipeline combine0 under GEMM-half1.
+# Requires DSV4_DEEPEP_REAL=1; 0 = synchronous real path.
+_DEEPEP_OVERLAP = int(os.environ.get("DSV4_DEEPEP_OVERLAP", "0"))
+# Below this many local rows the split pipeline degenerates (n<4 halves are
+# empty/tiny) — run the synchronous real path instead.
+_DEEPEP_OVERLAP_MIN_TOKENS = int(os.environ.get("DSV4_DEEPEP_OVERLAP_MIN_TOKENS", "64"))
+# N-way split count for the overlap pipeline (review pre-registered plan-B
+# knob: if measured exposed comm > ~4 ms/layer at 32K, raise to 3/4 — same
+# code path, more slices, tail exposure shrinks to combine/N).
+_DEEPEP_OVERLAP_SPLITS = max(1, int(os.environ.get("DSV4_DEEPEP_OVERLAP_SPLITS", "2")))
 _DEEPEP_BUFFER = None
 _DEEPEP_DISABLED = object()  # sentinel: fatal deep_ep failure -> NCCL fallback
 _DIAG_DE = [0]
@@ -274,7 +289,24 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 # Oversized calls fall through to the NCCL emulation below;
                 # a deep_ep failure disables the path permanently (the
                 # supervisor otherwise kills the rank on any exception).
+                # PD-prefill context: every rank holds an identical CP shard,
+                # so the local-n gates below are rank-invariant in practice.
                 try:
+                    if (
+                        _DEEPEP_OVERLAP > 0
+                        and _diag_x0 >= _DEEPEP_OVERLAP_MIN_TOKENS
+                    ):
+                        try:
+                            return self._forward_sm120_deepep_overlap(x, weights, indices)
+                        except TypeError:
+                            # API-contract mismatch (boot A found one: previous_event
+                            # needs deep_ep_cpp.EventHandle, not torch.Event). Do NOT
+                            # poison the whole real path — degrade this call to the
+                            # synchronous variant, which shares the same kernels.
+                            import sys
+                            if _DIAG_DE[0] < 8:
+                                print("[DIAGDE] overlap TypeError -> sync real path",
+                                      file=sys.stderr, flush=True)
                     return self._forward_sm120_deepep_real(x, weights, indices)
                 except Exception:
                     _deepep_disable("dispatch/combine raised")
@@ -486,6 +518,35 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             is_token_in_rank,
             _,
         ) = buf.get_dispatch_layout(indices_p, cfg.n_routed_experts)
+        if os.environ.get("DSV4_DEEPPROBE"):
+            # Diagnostic boot #2 ladder: memory state + n=2 micro-dispatch on the
+            # SAME buffer before the real one — splits 'engine context poisoned'
+            # (micro fails) vs 'payload-specific' (micro OK, real fails).
+            import sys
+            _r = dist.get_rank(dist.group.WORLD)
+            _free, _total = torch.cuda.mem_get_info()
+            print("[DEEPPROBE] rank=%d pre-dispatch free=%.1f/%.1f GB n=%d npr=%s" % (
+                _r, _free / 1e9, _total / 1e9, n,
+                num_tokens_per_rank.cpu().tolist()), file=sys.stderr, flush=True)
+            try:
+                _xm = torch.zeros(2, d, dtype=x.dtype, device=x.device)
+                _im = torch.full((2, topk_pad), -1, dtype=indices_p.dtype, device=x.device)
+                _im[:, 0] = 0
+                _wm = torch.zeros(2, topk_pad, dtype=weights_p.dtype, device=x.device)
+                _wm[:, 0] = 1.0
+                (_npr, _nrr, _npe, _itir, _) = buf.get_dispatch_layout(_im, cfg.n_routed_experts)
+                _rx, _, _, _, _h, _ = buf.dispatch(
+                    _xm.contiguous(), None, _npr, _nrr, _itir, _npe, _im, _wm,
+                    expert_alignment=1)
+                _y, _, _ = buf.combine(_rx.contiguous(), _h)
+                torch.cuda.synchronize()
+                print("[DEEPPROBE] rank=%d micro-dispatch OK (n=2)" % _r,
+                      file=sys.stderr, flush=True)
+            except Exception as _e:
+                _f2 = torch.cuda.mem_get_info()[0] / 1e9
+                print("[DEEPPROBE] rank=%d micro-dispatch FAILED: %s (free=%.1f GB)" % (
+                    _r, str(_e)[:200], _f2), file=sys.stderr, flush=True)
+                raise
         recv_x, recv_topk_idx, recv_topk_weights, _per_expert, handle, _ev = buf.dispatch(
             x.contiguous(),
             None,
@@ -515,6 +576,117 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         del recv_x, local_w, local_i, valid
         y_combined, _, _ = buf.combine(recv_output.contiguous(), handle)
         return y_combined.to(x.dtype)
+
+    def _forward_sm120_deepep_overlap(self, x, weights, indices) -> torch.Tensor:
+        """N-split async pipeline over the real deep_ep path (lever 1b).
+
+        The synchronous real path pays the full dispatch+combine pair exposed
+        (+16% @32K boot #3). Here local rows are split into N slices, each
+        dispatched with async_finish on deep_ep's comm stream — the dispatch
+        comm hides under the aux-stream shared expert (started by moe_layer
+        before this call when DSV4_SHARED_EXPERT_MODE=overlap) — and each
+        slice's combine is posted async right after its GEMM, so combine(i)
+        runs while GEMM(i+1) occupies the main stream. Only the LAST combine
+        tail stays exposed (design target 1-3 ms/layer; review plan-B raises
+        DSV4_DEEPEP_OVERLAP_SPLITS to 3/4 if measured exposed > ~4 ms).
+
+        Event discipline: every comm call carries a previous_event captured
+        via Buffer.capture() (deep_ep_cpp.EventHandle on the current stream —
+        the ONLY event type the runtime accepts; torch events raise a pybind
+        TypeError) so the comm stream sees the payload / GEMM outputs; every
+        returned EventOverlap is waited on the main stream before its result
+        is consumed. All slices run identically on every rank (PD-prefill:
+        identical CP shards), so the collective count is rank-invariant.
+        """
+        import deep_ep
+        dist = torch.distributed
+        cfg = self.cfg
+        world = dist.get_world_size(dist.group.WORLD)
+        n, d = x.shape
+        n_act = int(indices.size(-1))
+        topk_pad = next(
+            (k for k in _DEEPEP_SUPPORTED_TOPK if k >= n_act),
+            _DEEPEP_SUPPORTED_TOPK[-1],
+        )
+        buf = _get_deep_ep_buffer(world, int(d), topk_pad)
+        if os.environ.get("DSV4_DIAG") and _DIAG_DE[0] < 40:
+            _DIAG_DE[0] += 1
+            import sys
+            print("[DIAGDE] rank=%d x0=%d deep_ep=real path=overlap splits=%d" % (
+                dist.get_rank(dist.group.WORLD), n, _DEEPEP_OVERLAP_SPLITS),
+                file=sys.stderr, flush=True)
+
+        def _record():
+            # Official capture helper: records a deep_ep_cpp.EventHandle on the
+            # current (main) stream — the only type previous_event accepts.
+            return deep_ep.Buffer.capture()
+
+        splits = max(1, min(_DEEPEP_OVERLAP_SPLITS, n))
+        bounds = [i * n // splits for i in range(splits + 1)]
+        # Phase 1: post every slice's dispatch back-to-back; deep_ep's comm
+        # stream serializes them while the main stream stays free (shared
+        # expert runs on the aux stream meanwhile). The small host-side count
+        # sync inside each dispatch is the only stall.
+        slices = []
+        for i in range(splits):
+            b0, b1 = bounds[i], bounds[i + 1]
+            if b1 <= b0:
+                continue
+            indices_p, weights_p = self._pad_topk_for_deepep(
+                indices[b0:b1], weights[b0:b1])
+            (
+                num_tokens_per_rank,
+                num_tokens_per_rdma_rank,
+                num_tokens_per_expert,
+                is_token_in_rank,
+                _,
+            ) = buf.get_dispatch_layout(indices_p, cfg.n_routed_experts)
+            recv_x, recv_topk_idx, recv_topk_weights, _per_expert, handle, ev = \
+                buf.dispatch(
+                    x[b0:b1].contiguous(),
+                    None,
+                    num_tokens_per_rank,
+                    num_tokens_per_rdma_rank,
+                    is_token_in_rank,
+                    num_tokens_per_expert,
+                    indices_p,
+                    weights_p,
+                    expert_alignment=1,
+                    previous_event=_record(),
+                    async_finish=True,
+                )
+            slices.append({"recv_x": recv_x, "idx": recv_topk_idx,
+                           "w": recv_topk_weights, "handle": handle, "ev": ev})
+        # Phase 2: per slice — wait dispatch, masked local GEMM (same contract
+        # as the sync path: LOCAL index space, -1 pads zeroed), then post the
+        # combine async so it runs under the NEXT slice's GEMM.
+        chunk_tokens = int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "4096"))
+        outs = []
+        combine_events = []
+        for st in slices:
+            st["ev"].current_stream_wait()
+            recv_x = st["recv_x"]
+            M = int(recv_x.size(0))
+            local_i = st["idx"].to(torch.int64).contiguous()
+            valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
+            local_w = st["w"] * valid.to(st["w"].dtype)
+            local_i = torch.where(valid, local_i, torch.zeros_like(local_i))
+            recv_output = torch.empty((M, d), dtype=x.dtype, device=x.device)
+            for begin in range(0, M, chunk_tokens):
+                end = min(begin + chunk_tokens, M)
+                recv_output[begin:end] = self._sm120_grouped._forward_sm120(
+                    recv_x[begin:end].contiguous(), local_w[begin:end],
+                    local_i[begin:end]).to(x.dtype)
+            del recv_x, local_w, local_i, valid
+            y, _, evc = buf.combine(
+                recv_output.contiguous(), st["handle"],
+                previous_event=_record(), async_finish=True)
+            outs.append(y)
+            combine_events.append(evc)
+        for evc in combine_events:
+            evc.current_stream_wait()
+        # Slice bounds were monotonic, so the cat restores source-token order.
+        return torch.cat(outs, 0).to(x.dtype) if len(outs) > 1 else outs[0].to(x.dtype)
 
     def _forward_sm120_all_to_all(self, x, weights, indices) -> torch.Tensor:
         try:
