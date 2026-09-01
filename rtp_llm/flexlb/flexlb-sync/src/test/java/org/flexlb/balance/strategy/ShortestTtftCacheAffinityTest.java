@@ -158,6 +158,20 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
+    void establishedSessionDoesNotAllocateStateWhileAffinityIsDisabled() {
+        FlexlbConfig config = new FlexlbConfig();
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        BalanceContext context = buildContext(1024, 13L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(-1L, context.getRequest().getSessionPlacementEpoch());
+    }
+
+    @Test
     void selectsGlobalCacheLeaderWithinExtraTtftBound() {
         FlexlbConfig config = cacheAffinityConfig(150, 5);
         useFixedCandidatePool(config, 1);
