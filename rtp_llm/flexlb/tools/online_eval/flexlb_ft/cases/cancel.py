@@ -7,15 +7,39 @@ every lifecycle stage, and even for requests the master has never seen.
 The legacy cancel_smoke.py T1-T6 scripts port 1:1; the anomaly E1
 cancel-path case joins this family because it is the same contract seen
 from the client side of a failed request (cancel_anomaly_path).
+
+Git-session gap analysis additions (2026-09, task #87 cancel-family
+completion; assertions pin the CONTRACT, not the current behaviour —
+cases predicted to fail carry a finding note in their docstring):
+
+    cancel_deadline_exempt_inflight     M2: deadline fires after claim → exempt
+    cancel_schedule_drop_delivered       Schedule-stream drop → real engine Cancel
+    cancel_engine_notfound_settle        late Cancel vs finished request (idempotent)
+    cancel_preemption_victim             M3: P70 evicts RUNNING P30 victim (8429)
+    cancel_stream_break_prefill_autonomous  C1: engine-side stream-break cleanup
+    cancel_stream_break_decode_autonomous   C2: decode autonomous terminal on break
+
+The claim boundary (``deliveryClaimKind``) is the single point of no
+return: NONE = still owned by the master, BATCH_ENQUEUE / ROUTE_DECISION
+= already delivered to an engine.  Every case above probes what a cancel
+means on each side of that boundary.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 from ..context import CaseContext, CaseDef, rid_base
-from ..harness import AssertUtils
+from ..engine_ops import clear_type_all, engine_inflight_clean, inject_type_all
+from ..harness import (
+    AssertUtils,
+    EnvSpec,
+    default_perf,
+    flexlb_config_for_profile,
+    wait_for,
+)
 
 CANCEL_CASES: list[CaseDef] = []
 
@@ -41,6 +65,58 @@ def _master_http(ops) -> str:
     return f"http://127.0.0.1:{ops.master_http_port}"
 
 
+def _prefill_names(ops) -> list[str]:
+    snap = ops.snapshot()
+    return [e["name"] for e in snap.get("engines", []) if e.get("role") == "prefill"]
+
+
+def _all_engine_names(ops) -> list[str]:
+    snap = ops.snapshot()
+    return [e["name"] for e in snap.get("engines", [])]
+
+
+def _schedule_with_priority(ops, request_id: int, priority: int, **kwargs):
+    """Schedule RPC carrying an explicit priority (proto field 14).
+
+    EngineOps.build_schedule_request does not expose the priority kwarg
+    yet; the legacy flexlb_smoke_base._build_schedule_request proved the
+    proto carries it ("Priority must be carried by the schedule protocol;
+    embedding it only in unique_key metadata does not reach Auto-TPM
+    admission").  Rather than widening engine_ops.py from the cancel
+    category (other agents own the neighbouring modules), set the field
+    on the built message here — protobuf messages are mutable.
+    """
+    req = ops.build_schedule_request(request_id, **kwargs)
+    req.priority = priority
+    stub = ops.schedule_pb2_grpc.FlexlbServiceStub(ops._channel(ops.master_target()))
+    return stub.Schedule(req, timeout=30.0)
+
+
+def _schedule_future(ops, request_id: int, **kwargs):
+    """Fire-and-forget Schedule: a grpc Future whose cancel() aborts the
+    in-flight Schedule RPC itself.
+
+    Under BATCH dispatch the master completes the Schedule response only
+    after the EnqueueBatch ACK (RequestRegistry.deliveryPublication runs
+    on the ACK path), so an injected prefill ``enqueue_delay`` keeps the
+    Schedule RPC in flight while the batch has already been claimed —
+    exactly the window in which cancelling the client-side RPC triggers
+    the master's inbound-context CancellationListener
+    (FlexlbServiceImpl: Context.addListener → cancelUndeliveredRoute).
+    """
+    req = ops.build_schedule_request(request_id, **kwargs)
+    stub = ops.schedule_pb2_grpc.FlexlbServiceStub(ops._channel(ops.master_target()))
+    return stub.Schedule.future(req, timeout=30.0)
+
+
+def _cancel_rpc_total(ops) -> int:
+    """Sum of per-engine Cancel RPC counters from /snapshot."""
+    snap = ops.snapshot()
+    return sum(
+        int(e.get("rpc_counts", {}).get("cancel", 0)) for e in snap.get("engines", [])
+    )
+
+
 # ===========================================================================
 # Cancel cases (cancel_smoke.py T1-T6, ported 1:1)
 # ===========================================================================
@@ -48,6 +124,25 @@ def _master_http(ops) -> str:
 
 @case("cancel_t1", source="cancel_smoke.py T1")
 def t1_basic_cancel(ctx: CaseContext):
+    """T1: mid-flight client Cancel terminates stream + engine state.
+
+    Scenario: one request is streaming its first outputs; the client
+    issues the explicit Cancel RPC while the request is still running.
+
+    Behaviour: master Cancel (typed CLIENT_CANCELLED) → under BATCH
+    dispatch the master walks the real GrpcEngineCancelChannel and the
+    engine records the cancellation (cancelled_rids / lifecycle).
+
+    Expected (contract): stream terminates, engine-side cancel is
+    OBSERVED for NON_BATCH but CONTRACT-GUARANTEED for BATCH (the
+    production cancel channel is a real gRPC wiring, so the engine
+    seeing the cancel is not an implementation accident), master
+    inflight ledger drains, a follow-up request completes normally.
+
+    Prediction: passes (t1-t6 kept engine verification observational
+    while the cancel channel wiring was under construction; the BATCH
+    hard assertion is the 2026-09 upgrade — see the family docstring).
+    """
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -75,12 +170,19 @@ def t1_basic_cancel(ctx: CaseContext):
             )
         else:
             inflight_ok, inflight_detail = True, "N/A"
-        passed = ended and recovery_ok
+        # BATCH: engine cancellation is contract-guaranteed (real cancel
+        # channel wiring) — hard assertion.  NON_BATCH keeps the legacy
+        # client-driven worker-cancel path observational for compatibility.
+        if response.enqueued_by_master:
+            passed = ended and recovery_ok and engine_cancelled
+        else:
+            passed = ended and recovery_ok
         return passed, (
             f"cancel_latency={cancel_latency:.3f}s, stream_terminated={ended}, "
             f"outputs={len(handle.snap.outputs)}, "
             f"engine_recv={engine_recv}({recv_detail}), "
-            f"engine_cancelled={engine_cancelled}({cancel_detail}), "
+            f"engine_cancelled={engine_cancelled}({cancel_detail})"
+            f"[{'hard' if response.enqueued_by_master else 'observational'}], "
             f"inflight_clean={inflight_ok}({inflight_detail}), recovery={recovery_msg}"
         )
     except Exception as exc:
@@ -423,6 +525,604 @@ def e1_cancel_path(ctx: CaseContext):
             f"cancel_latency={cancel_latency:.3f}s, stream_terminated={ended}, "
             f"outputs={len(handle.snap.outputs)}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+# ===========================================================================
+# Git-session gap-analysis cases (task #87): the cancel contract around the
+# deliveryClaimKind boundary.  Assertions pin the CONTRACT behaviour; cases
+# predicted to fail before a parallel mock-engine capability lands carry an
+# explicit finding note (docstring Prediction).
+# ===========================================================================
+
+
+@case("cancel_deadline_exempt_inflight")
+def cancel_deadline_exempt_inflight(ctx: CaseContext):
+    """M2 exemption: a queue deadline that fires AFTER the claim must not
+    cancel the request.
+
+    Scenario: queueTimeoutMs=2000; every prefill engine is injected with
+    enqueue_delay=3000, so under BATCH dispatch the EnqueueBatch ACK (and
+    with it the Schedule response) is in flight when the deadline expires.
+    One request is sent synchronously (output_len=500 keeps decode alive
+    across the deadline so the NON_BATCH variant also exercises the
+    post-claim expiry path rather than racing request completion).
+
+    Behaviour: ExpirationTimer fires cancelForDeadline(DEADLINE_EXCEEDED)
+    while the request holds deliveryClaimKind != NONE.  Under BATCH the
+    cancel is deferred by the open admission mutation and promoted after
+    the ACK; under NON_BATCH it fires directly on the running request.
+    Either way RequestRegistry.cancelRequest hits the exemption
+    (RequestRegistry.java: "DEADLINE_EXCEEDED && claim != NONE → return
+    current") — the deadline is NOT a cancel reason past the boundary.
+
+    Expected (contract): the request is NOT cancelled — it completes
+    normally with its full output; no engine-side cancel record exists
+    (cancelled_rids / lifecycle end_state); the master inflight ledger
+    settles through the ordinary completion path; a follow-up request
+    completes normally.
+
+    Prediction: passes (the Java side carries the same contract in its
+    unit tests; the deadline path only ever CANCELS pre-claim — M1).
+    """
+    spec = EnvSpec(
+        label=f"cancel_exempt_{ctx.profile}",
+        n_prefill=2,
+        n_decode=4,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={
+            "FLEXLB_CONFIG": flexlb_config_for_profile(
+                ctx.profile, queue_timeout_ms=2_000
+            )
+        },
+    )
+    env = ctx.env_manager.ensure(spec)
+    ops = ctx.engine_ops(env)
+    prefill_names = _prefill_names(ops)
+    # enqueue_delay(3000) > queueTimeout(2000): the deadline expires while
+    # the EnqueueBatch ACK is still in flight (BATCH) — the canonical M2
+    # window.  Harmless no-op under NON_BATCH (no EnqueueBatch path).
+    inject_type_all(ops, prefill_names, "enqueue_delay", delay_ms=3_000)
+    rid = ops.next_request_id(rid_base(ctx, "cancel"))
+    handle = None
+    try:
+        # Long client deadline: the Schedule call itself blocks on the
+        # delayed ACK (~3s) and must still return success (exemption keeps
+        # the request alive; enqueue_delay 3000 < enqueueRpcTimeout 5000).
+        response = ops.schedule(rid, output_len=500)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=500)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        handle.wait_end(45.0)
+        snap = handle.snap
+        completed = snap.completed and not snap.error
+        engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
+        if response.enqueued_by_master:
+            inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+                _master_http(ops), 10.0
+            )
+        else:
+            inflight_ok, inflight_detail = True, "N/A"
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = completed and not engine_cancelled and inflight_ok and recovery_ok
+        return passed, (
+            f"deadline_exempt: completed={snap.completed}, "
+            f"outputs={len(snap.outputs)}, error={snap.error}, "
+            f"engine_cancelled={engine_cancelled}({cancel_detail})"
+            "[expect False — exemption], "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        clear_type_all(ops, prefill_names, "enqueue_delay")
+
+
+@case("cancel_schedule_drop_delivered", requires=["enqueue_batch"])
+def cancel_schedule_drop_delivered(ctx: CaseContext):
+    """Schedule-stream drop on a DELIVERED request → master still sends the
+    real engine Cancel.
+
+    Scenario (BATCH only): every prefill is injected with enqueue_delay,
+    which holds the Schedule RPC in flight (the master completes the
+    Schedule response only after the EnqueueBatch ACK).  The request is
+    sent fire-and-forget; after the batch has been claimed (claim =
+    BATCH_ENQUEUE, set at tryClaimForDelivery before the RPC even
+    leaves), the client CANCELS THE SCHEDULE RPC ITSELF
+    (stub.Schedule.future(...).cancel()) — the gRPC CANCEL propagates to
+    the master's inbound context and arms the CancellationListener that
+    FlexlbServiceImpl attaches per Schedule call.
+
+    Behaviour: cancelUndeliveredRoute → cancelRequest(rid, 0,
+    CLIENT_CANCELLED).  While the admission mutation is still open the
+    cancel is deferred and resumes after the ACK
+    (resumeCancellationAfterAdmission); CLIENT_CANCELLED gets NO M2-style
+    exemption (that courtesy is DEADLINE_EXCEEDED-only), so with claim !=
+    NONE the master MUST send the real Cancel RPC to the original
+    prefill — the delivered-request twin of the undelivered local
+    rollback.
+
+    Expected (contract): (a) the original prefill's Cancel RPC counter
+    increases — the master really sent an engine cancel; (b) the engine
+    records the cancellation (cancelled_rids / lifecycle end_state), the
+    cancellation landing on the tracked request after the delayed
+    enqueue processed; (c) the master inflight ledger settles through
+    the typed CANCELLED reconcile; (d) a follow-up request completes.
+
+    Trigger note: this is the Schedule-RPC drop (the only stream the
+    master's CancellationListener observes); dropping the FetchResponse
+    stream instead never reaches the master — that variant is the C1/C2
+    autonomous-cleanup cases below.
+
+    Prediction: expected to pass — the chain (listener → defer →
+    resume-after-ACK → fence cancel channel → engine tracked-cancel →
+    typed CANCELLED reconcile) is all production wiring; if it fails,
+    the finding is in the master's resume/fence path, not the test.
+    """
+    ops = ctx.ops()
+    prefill_names = _prefill_names(ops)
+    inject_type_all(ops, prefill_names, "enqueue_delay", delay_ms=2_000)
+    rid = ops.next_request_id(rid_base(ctx, "cancel"))
+    future = None
+    try:
+        baseline_cancel = _cancel_rpc_total(ops)
+        future = _schedule_future(ops, rid, output_len=500)
+        # Batch collection (~10ms) + EnqueueBatch dispatch: by 0.5s the
+        # batch is claimed; the delayed ACK keeps Schedule in flight.
+        time.sleep(0.5)
+        future.cancel()
+        try:
+            future.result(timeout=5.0)
+        except Exception:
+            pass  # cancelled future — the expected outcome
+
+        def cancel_reached() -> bool:
+            return _cancel_rpc_total(ops) - baseline_cancel >= 1
+
+        engine_cancel_rpc = wait_for(cancel_reached, 15.0, 0.2)
+        # The promoted cancel lands after the delayed enqueue processed
+        # (tracked), so the engine must record it.
+        engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 15.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = engine_cancel_rpc and engine_cancelled and inflight_ok
+        passed = passed and recovery_ok
+        return passed, (
+            f"schedule_drop_delivered: engine_cancel_rpc_delta="
+            f"{_cancel_rpc_total(ops) - baseline_cancel}, "
+            f"engine_cancelled={engine_cancelled}({cancel_detail}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if future is not None:
+            future.cancel()
+        clear_type_all(ops, prefill_names, "enqueue_delay")
+
+
+@case("cancel_engine_notfound_settle")
+def cancel_engine_notfound_settle(ctx: CaseContext):
+    """Late Cancel vs an already-finished request: idempotent everywhere,
+    no double settlement.
+
+    Scenario: a minimal request (output_len=1) runs to completion; the
+    Cancel then arrives LATE (the fence/probe raced the terminal) — once
+    through the master Cancel RPC, once directly against the original
+    prefill engine.
+
+    Behaviour: master-side RequestRegistry.cancelRequest returns the
+    terminal snapshot untouched (state is terminal → no second
+    settlement, no engine cancel is forwarded); engine-side
+    JavaMockEngineCluster.cancelRequest classifies the request as
+    alreadyFinished and answers CANCEL_STATUS_NOT_FOUND without
+    republishing any terminal.
+
+    Expected (contract): the master Cancel RPC succeeds (idempotent);
+    the direct engine Cancel answers NOT_FOUND; the engine's recorded
+    terminal stays a completion (no cancelled_rids entry / lifecycle
+    rewrite); the master inflight ledger stays clean (nothing re-opened);
+    a follow-up request completes normally.
+
+    Prediction: passes (t4 already covers the master-idempotent half;
+    the engine NOT_FOUND branch is the mock's documented three-branch
+    cancel semantics).
+    """
+    ops = ctx.ops()
+    rid = ops.next_request_id(rid_base(ctx, "cancel"))
+    try:
+        response = ops.schedule(rid, output_len=1)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=1)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        deadline = time.monotonic() + 30.0
+        while not handle.snap.completed and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if not handle.snap.completed:
+            handle.cancel()
+            return False, "request did not complete before late-cancel window"
+
+        master_cancel_ok, master_cancel_err = True, ""
+        try:
+            ops.cancel(rid, response)
+        except Exception as exc:
+            master_cancel_ok, master_cancel_err = False, repr(exc)
+
+        # Direct engine probe (bypass the master): the fence arriving at
+        # the engine AFTER the terminal must read NOT_FOUND.
+        engine_status_ok, engine_status_detail = False, "no probe"
+        try:
+            stub = ops.pb2_grpc.RpcServiceStub(ops._channel(ops.prefill_addr(response)))
+            ack = stub.Cancel(ops.pb2.CancelRequestPB(request_id=rid), timeout=10.0)
+            engine_status_ok = ack.status == ops.pb2.CANCEL_STATUS_NOT_FOUND
+            engine_status_detail = f"status={ack.status}"
+        except Exception as exc:
+            engine_status_detail = repr(exc)
+
+        handle.wait_end(2.0)
+        engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
+        if response.enqueued_by_master:
+            inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+                _master_http(ops), 10.0
+            )
+        else:
+            inflight_ok, inflight_detail = True, "N/A"
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            master_cancel_ok
+            and engine_status_ok
+            and not engine_cancelled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"late_cancel_settle: master_cancel_ok={master_cancel_ok} "
+            f"{master_cancel_err}, engine_probe={engine_status_ok}"
+            f"({engine_status_detail}), "
+            f"engine_cancelled={engine_cancelled}({cancel_detail})"
+            "[expect False — terminal preserved], "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case("cancel_preemption_victim")
+def cancel_preemption_victim(ctx: CaseContext):
+    """M3 preemption: a P70 arrival evicts a RUNNING P30 victim through the
+    master → original-Prefill weak-Cancel protocol.
+
+    Scenario: dedicated 1P+1D environment, PRIORITY ordering with the
+    production preemption block (allowedVictimStages PREFILL_QUEUED +
+    DECODE_RESERVED — master_fixed_window.json values) and
+    decode maxEngineRequests=1 so the single decode slot makes the
+    capacity contest deterministic.  The victim (priority 30,
+    input_len=512 / output_len=200 — long decode) is scheduled first and
+    waits RUNNING on the decode engine; the preemptor (priority 70,
+    output_len=2) then arrives.
+
+    Behaviour: the preemptor's ordinary placement is BLOCKED (decode
+    capacity exhausted), so RequestScheduler.attemptPlacement escalates
+    to EvictionManager.tryAdmit; the victim is selected and the master
+    sends the real (weak) Cancel to the ORIGINAL prefill, which
+    propagates to decode (P→D stream-cancel conduction).
+
+    Expected (contract): the victim's stream terminates in a
+    non-completion terminal carrying the typed 8429
+    (PRIORITY_PREEMPTED / CANCELLED) error; the engine records the
+    victim as cancelled (cancelled_rids / lifecycle); the original
+    prefill's Cancel RPC counter increased (the weak cancel really
+    went out); the P70 request completes normally once the slot frees;
+    the master inflight ledger drains with no leak; recovery works.
+
+    Prediction: expected to pass — this is the priority_preemption_smoke
+    scenario (RUNNING decode victim, batch default) ported onto the
+    flexlb_ft framework; capacity here comes from maxEngineRequests=1
+    instead of the smoke line's KV pressure so the eviction trigger is
+    deterministic.  Priority rides the Schedule proto's priority field
+    (see _schedule_with_priority).
+    """
+    config = json.loads(flexlb_config_for_profile(ctx.profile, ordering="priority"))
+    ordering = config["scheduler"]["ordering"]
+    ordering["defaultPriority"] = 50
+    ordering["preemption"] = {
+        "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"],
+    }
+    config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
+    spec = EnvSpec(
+        label=f"cancel_preempt_{ctx.profile}",
+        n_prefill=1,
+        n_decode=1,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={"FLEXLB_CONFIG": json.dumps(config, separators=(",", ":"))},
+    )
+    env = ctx.env_manager.ensure(spec)
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "cancel")
+    victim_handle = None
+    high_handle = None
+    try:
+        victim_rid = ops.next_request_id(base)
+        victim_keys = [victim_rid * 100 + 1]
+        victim_resp = _schedule_with_priority(
+            ops,
+            victim_rid,
+            30,
+            input_len=512,
+            output_len=200,
+            block_keys=victim_keys,
+        )
+        if victim_resp.code != 200 or not victim_resp.success:
+            return False, f"victim schedule failed: {victim_resp.error_message}"
+        victim_input = (
+            None
+            if victim_resp.enqueued_by_master
+            else ops.build_generate_input(
+                victim_rid,
+                input_len=512,
+                output_len=200,
+                block_keys=victim_keys,
+            )
+        )
+        victim_handle = ops.start_stream(victim_resp, victim_rid, input_pb=victim_input)
+
+        # Victim must be RUNNING on the decode engine before the preemptor
+        # arrives — otherwise the preemptor would simply take the free slot.
+        def victim_running() -> bool:
+            snap = ops.snapshot_by_name()
+            return any(
+                e.get("role") == "decode"
+                and e.get("request_lifecycle", {})
+                .get(str(victim_rid), {})
+                .get("end_state")
+                == "running"
+                for e in snap.values()
+            )
+
+        running = wait_for(victim_running, 10.0, 0.1)
+        if not running:
+            victim_handle.cancel()
+            return False, "victim never reached RUNNING on decode"
+
+        baseline_cancel = _cancel_rpc_total(ops)
+        high_rid = ops.next_request_id(base)
+        high_keys = [high_rid * 100 + 1]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            high_future = pool.submit(
+                _schedule_with_priority,
+                ops,
+                high_rid,
+                70,
+                input_len=512,
+                output_len=2,
+                block_keys=high_keys,
+            )
+            # The victim's terminal: preemption ends its stream in a
+            # non-completion state (typed 8429 surfaces as the stream
+            # error under both dispatch modes).
+            victim_ended = victim_handle.wait_end(20.0)
+            try:
+                high_resp = high_future.result(timeout=40.0)
+            except Exception as exc:
+                return False, f"high-priority schedule failed: {exc!r}"
+        if high_resp.code != 200 or not high_resp.success:
+            return False, f"high schedule failed: {high_resp.error_message}"
+        high_input = (
+            None
+            if high_resp.enqueued_by_master
+            else ops.build_generate_input(
+                high_rid,
+                input_len=512,
+                output_len=2,
+                block_keys=high_keys,
+            )
+        )
+        high_handle = ops.start_stream(high_resp, high_rid, input_pb=high_input)
+        high_handle.wait_end(30.0)
+
+        victim_cancelled, victim_cancel_detail = ops.verify_engine_cancelled(victim_rid)
+        weak_cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
+        if victim_resp.enqueued_by_master or high_resp.enqueued_by_master:
+            inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+                _master_http(ops), 15.0
+            )
+        else:
+            inflight_ok, inflight_detail = True, "N/A"
+        engine_clean, engine_clean_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 15.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            victim_ended
+            and not victim_handle.snap.completed
+            and victim_cancelled
+            and weak_cancel_delta >= 1
+            and high_handle.snap.completed
+            and not high_handle.snap.error
+            and inflight_ok
+            and engine_clean
+            and recovery_ok
+        )
+        return passed, (
+            f"preemption_victim: victim_terminated={victim_ended}"
+            f"(completed={victim_handle.snap.completed}, "
+            f"error={victim_handle.snap.error}), "
+            f"victim_engine_cancelled={victim_cancelled}"
+            f"({victim_cancel_detail}), weak_cancel_delta={weak_cancel_delta}, "
+            f"high_completed={high_handle.snap.completed}"
+            f"(outputs={len(high_handle.snap.outputs)}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_clean_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if victim_handle is not None:
+            victim_handle.cancel()
+        if high_handle is not None:
+            high_handle.cancel()
+
+
+@case("cancel_stream_break_prefill_autonomous", requires=["enqueue_batch"])
+def cancel_stream_break_prefill_autonomous(ctx: CaseContext):
+    """C1: the client drops the FetchResponse stream mid-request; the
+    ENGINE must sense the break and clean the request up on its own.
+
+    Scenario (BATCH only): a long request (output_len=500) is dispatched
+    and its first output has been received (the FetchResponse stream is
+    established, decode is running); the client then cancels the stream
+    itself (StreamHandle.call.cancel()) WITHOUT the explicit Cancel RPC.
+
+    Behaviour (production C++ semantics, being ported to the mock in
+    parallel): the engine's output loop observes the dead consumer
+    context, tears the request down, and reports the typed CANCELLED
+    terminal through WorkerStatus so the master can reconcile; any
+    decode downstream is cancelled by the P→D stream-cancel conduction.
+
+    Expected (contract): the engine records the cancellation
+    (cancelled_rids / lifecycle end_state = cancelled) and the rid
+    leaves the running set; every engine reports inflight 0 with no
+    leak; the master ledger settles through the CANCELLED reconcile; a
+    follow-up request completes normally.
+
+    Prediction: FINDING — depends on the mock engine's stream-break
+    sensing (output loop checking the consumer context's isCancelled),
+    which is being implemented in parallel.  Until that lands, the
+    engine keeps executing the request to completion and the
+    cancelled-record assertion fails by design; rerun this case in the
+    follow-up integration round once the C1 capability merges.
+    """
+    ops = ctx.ops()
+    rid = ops.next_request_id(rid_base(ctx, "cancel"))
+    try:
+        response = ops.schedule(rid, output_len=500)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        handle = ops.start_stream(response, rid)  # BATCH: FetchResponse
+        if not handle.wait_first_output():
+            handle.cancel()
+            return False, "no output received before stream-break window"
+
+        # Drop the consumer stream itself — NOT ops.cancel.
+        handle.cancel()
+
+        def engine_sensed_break() -> bool:
+            ok, _ = ops.verify_engine_cancelled(rid)
+            return ok
+
+        engine_cancelled = wait_for(engine_sensed_break, 10.0, 0.2)
+        _, cancel_detail = ops.verify_engine_cancelled(rid)
+        engine_clean, engine_clean_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 15.0
+        )
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 15.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = engine_cancelled and engine_clean and inflight_ok
+        passed = passed and recovery_ok
+        return passed, (
+            f"stream_break_prefill: engine_sensed={engine_cancelled}"
+            f"({cancel_detail}), engine_clean={engine_clean}"
+            f"({engine_clean_detail}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg} "
+            "[expected FINDING until mock C1 stream-break sensing lands]"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case("cancel_stream_break_decode_autonomous", requires=["generate_stream"])
+def cancel_stream_break_decode_autonomous(ctx: CaseContext):
+    """C2: mid-decode stream drop on the frontend-sent stream — decode
+    cleans itself up and reports the terminal early instead of waiting
+    for the stale-inflight TTL.
+
+    Scenario (NON_BATCH only): the request is delivered via
+    GenerateStreamCall (frontend → engine direct); the first output has
+    been received, so the request is decoding; the client cancels the
+    stream itself (no explicit Cancel RPC).
+
+    Behaviour (production C++ semantics, being ported to the mock in
+    parallel): the engine senses the broken consumer context, the
+    prefill leg cleans up and cancels downstream; decode stops early,
+    frees its state and reports the terminal through WorkerStatus —
+    the master reconciles without waiting for the stale-inflight TTL
+    (production 5min; the framework config keeps 30s).
+
+    Expected (contract): the engine records the cancellation
+    (cancelled_rids / lifecycle end_state = cancelled); no engine-side
+    residue (inflight 0 everywhere, no leak); the master ledger settles;
+    a follow-up request completes normally.
+
+    Prediction: FINDING — depends on the mock engine's stream-break
+    sensing for the frontend-sent stream (C2 capability, implemented in
+    parallel).  Until it lands the request simply runs to completion and
+    the cancelled-record assertion fails by design; rerun in the
+    follow-up integration round.
+    """
+    ops = ctx.ops()
+    rid = ops.next_request_id(rid_base(ctx, "cancel"))
+    try:
+        response = ops.schedule(rid, output_len=500)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = ops.build_generate_input(rid, output_len=500)
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            handle.cancel()
+            return False, "no output received before stream-break window"
+
+        # Drop the consumer stream itself — NOT ops.cancel.
+        handle.cancel()
+
+        def engine_sensed_break() -> bool:
+            ok, _ = ops.verify_engine_cancelled(rid)
+            return ok
+
+        engine_cancelled = wait_for(engine_sensed_break, 10.0, 0.2)
+        _, cancel_detail = ops.verify_engine_cancelled(rid)
+        engine_clean, engine_clean_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 15.0
+        )
+        # NON_BATCH ledger residue contract: the stale-TTL is the safety
+        # net, but the C2 terminal should settle well inside it.
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 15.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = engine_cancelled and engine_clean and inflight_ok
+        passed = passed and recovery_ok
+        return passed, (
+            f"stream_break_decode: engine_sensed={engine_cancelled}"
+            f"({cancel_detail}), engine_clean={engine_clean}"
+            f"({engine_clean_detail}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg} "
+            "[expected FINDING until mock C2 stream-break sensing lands]"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
