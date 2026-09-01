@@ -602,7 +602,7 @@ class DeepSeekV4Model(GptModelBase):
         # module tree is built under ``meta``; bind the real device table just
         # as the full path does.  Commit projection uses this table directly.
         for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+            layer.attn.init_rope_cache(device=device_str)
 
         self._load_extra_weights(self.weight)
         del self.weight

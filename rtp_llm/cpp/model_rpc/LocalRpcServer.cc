@@ -840,8 +840,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     generate_context.onflight_requests = &onflight_requests_;
-    auto input                    = QueryConverter::transQuery(request);
-    generate_context.request_info = input->request_info;
+    auto input                         = QueryConverter::transQuery(request);
+    generate_context.request_info      = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,
                           input->generate_config->profile_step,
@@ -966,10 +966,10 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         inputs.push_back(input);
     }
 
-    // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
+    // enqueueMultiple contract: returned stream vector is 1:1 with `inputs` (same size, same order).
     // Streams that failed checkInputLength carry an error reported via reportError() and surface
     // it through collectStreamOutput → nextOutput → ErrorInfo path below.
-    auto                               streams = engine_->batchEnqueue(inputs);
+    auto                               streams = engine_->enqueueMultiple(inputs).second;
     std::vector<std::shared_ptr<void>> abort_registrations;
     abort_registrations.reserve(streams.size());
     for (const auto& stream : streams) {

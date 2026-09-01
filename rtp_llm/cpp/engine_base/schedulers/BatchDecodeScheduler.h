@@ -260,8 +260,8 @@ public:
     }
 
     int64_t lastScheduleTime() override {
-        return empty() ? autil::TimeUtility::currentTimeInMilliSeconds()
-                       : last_schedule_time_.load(std::memory_order_acquire);
+        return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() :
+                         last_schedule_time_.load(std::memory_order_acquire);
     }
 
     int64_t onflightStreams() override {
@@ -278,7 +278,7 @@ private:
     uint32_t                     batch_size_;
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
-    std::atomic<int64_t>         last_schedule_time_{autil::TimeUtility::currentTimeInMilliseconds()};
+    std::atomic<int64_t>         last_schedule_time_{autil::TimeUtility::currentTimeInMilliSeconds()};
     std::atomic<bool>            stop_{false};
     bool                         wake_requested_ = false;
 
