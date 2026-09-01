@@ -3359,6 +3359,11 @@ class MSAAttention(nn.Module):
             oldest = next(iter(cls._cp_prefetch_entries))
             cls._cp_prefetch_entries.pop(oldest)["event"].synchronize()
 
+    @classmethod
+    def join_cp_prefix_prefetch(cls) -> None:
+        for entry in cls._cp_prefetch_entries.values():
+            torch.cuda.current_stream(entry["device"]).wait_event(entry["event"])
+
     def maybe_prefetch_cp_prefix(
         self, kv_cache: Optional[LayerKVCache], attn_inputs: PyAttentionInputs
     ) -> None:

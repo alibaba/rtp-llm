@@ -537,6 +537,15 @@ class GenericMoeDecoderLayer(nn.Module):
                 layer_idx=layer_idx,
             )
 
+        _prefetch_gate = getattr(self.self_attn, "cp_prefix_prefetch_enabled", None)
+        self._join_cp_prefix_prefetch = (
+            getattr(self.self_attn, "join_cp_prefix_prefetch", None)
+            if _prefetch_gate is not None
+            and _prefetch_gate()
+            and isinstance(self.mlp, GenericMoeLayer)
+            else None
+        )
+
         # 使用 RMSResNorm 来 fuse residual add 和 layernorm
         self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
@@ -683,6 +692,7 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_post_norm_quant_params = self._fuse_post_norm_quant_params
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
         clone._fuse_post_norm_quant_moe_params = self._fuse_post_norm_quant_moe_params
+        clone._join_cp_prefix_prefetch = None
         return clone
 
     def forward(
@@ -727,6 +737,9 @@ class GenericMoeDecoderLayer(nn.Module):
                 force_reuse_topk_indices,
                 attn_inputs,
             )
+
+        if self._join_cp_prefix_prefetch is not None:
+            self._join_cp_prefix_prefetch()
 
         if self._fuse_post_norm_quant and hidden_states.dim() == 2:
             _params = self._fuse_post_norm_quant_params
