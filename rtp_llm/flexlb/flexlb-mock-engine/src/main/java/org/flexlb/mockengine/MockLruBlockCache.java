@@ -42,6 +42,22 @@ final class MockLruBlockCache {
         return changed;
     }
 
+    /**
+     * Force-evict the given keys (control-plane POST /cache_evict).
+     * Idempotent: keys not present are a no-op. Each removal counts as an
+     * eviction; returns whether the key set changed.
+     */
+    synchronized boolean evict(List<Long> keys) {
+        boolean changed = false;
+        for (Long key : keys) {
+            if (blocks.remove(key) != null) {
+                evictions++;
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
     /** Total number of LRU evictions (Python {@code cache.evictions}). */
     synchronized long evictions() {
         return evictions;

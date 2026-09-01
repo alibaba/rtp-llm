@@ -2424,6 +2424,30 @@ public final class JavaMockEngineCluster {
             observer.onCompleted();
         }
 
+        /**
+         * Force-evict block keys from this engine's LRU (control-plane POST
+         * /cache_evict — the flexlb_ft KV family's forced-eviction hook).
+         * Idempotent: evicting keys that are not present is a no-op. When
+         * the key set changes the engine's cacheVersion is bumped, so the
+         * master's next cache-status poll re-pulls the key set and its
+         * global key→holder index converges on the eviction (the test
+         * family's sync premise).
+         *
+         * @return true when at least one key was actually removed
+         */
+        boolean evictCacheKeys(List<Long> keys) {
+            boolean changed = cache.evict(keys);
+            if (changed) {
+                cacheVersion.incrementAndGet();
+            }
+            return changed;
+        }
+
+        /** Current cache version (gRPC getCacheStatus / /cache_evict echo). */
+        long getCacheVersion() {
+            return cacheVersion.get();
+        }
+
         @Override
         public void checkHealth(EngineRpcService.EmptyPB request,
                                 StreamObserver<EngineRpcService.CheckHealthResponsePB> observer) {
@@ -2830,6 +2854,12 @@ public final class JavaMockEngineCluster {
             snap.put("completed", completedCount.get());
             snap.put("cache_keys", cache.snapshotKeys().size());
             snap.put("cache_evictions", cache.evictions());
+            // Full per-engine key list (flexlb_ft KV cases' per-engine key-set
+            // exposure). Debug endpoint — the whole list is exposed by design
+            // (default 6000-block caches included); sorted for determinism.
+            List<Long> cacheKeySet = new ArrayList<>(cache.snapshotKeys());
+            cacheKeySet.sort(Long::compareTo);
+            snap.put("cache_key_set", cacheKeySet);
             snap.put("active_kv_tokens", effectiveActiveKv);
             snap.put("available_kv_tokens", Math.max(0, totalKvTokens - effectiveActiveKv));
             Map<String, Object> injectConfig = new LinkedHashMap<>();

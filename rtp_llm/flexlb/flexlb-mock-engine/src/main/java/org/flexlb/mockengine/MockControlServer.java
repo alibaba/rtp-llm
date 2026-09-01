@@ -23,11 +23,12 @@ import java.util.concurrent.TimeUnit;
 /**
  * Lightweight HTTP control server for the Java mock engine cluster.
  *
- * <p>Provides 13 endpoints mirroring the legacy Python mock control API:
+ * <p>Provides 15 endpoints mirroring the legacy Python mock control API:
  * snapshot, inject, clear_inject, health, requests, set_perf, set_kv_pressure,
- * set_queue_depth, stop_engine, start_engine, add_engine, remove_engine, and
- * metrics. add_engine/remove_engine back runtime scale-out/in and keep the
- * optional --discovery-file mapping in sync (see {@link DynamicEngineManager}).
+ * set_queue_depth, cache_evict, stop_engine, start_engine, cancel_request,
+ * add_engine, remove_engine, and metrics. add_engine/remove_engine back runtime
+ * scale-out/in and keep the optional --discovery-file mapping in sync (see
+ * {@link DynamicEngineManager}).
  *
  * <p>Python compatibility layer (Phase 2): all POST endpoints accept dual
  * addressing — either {@code {"engine": "<name>"}} resolved by engine name
@@ -84,6 +85,7 @@ final class MockControlServer {
         httpServer.createContext("/set_perf", this::handleSetPerf);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
+        httpServer.createContext("/cache_evict", this::handleCacheEvict);
         httpServer.createContext("/stop_engine", this::handleStopEngine);
         httpServer.createContext("/start_engine", this::handleStartEngine);
         httpServer.createContext("/cancel_request", this::handleCancelRequest);
@@ -389,6 +391,33 @@ final class MockControlServer {
         });
     }
 
+    /**
+     * POST /cache_evict {"engine"|"port": ..., "keys": [k1, k2, ...]} —
+     * force-evict the named block keys from the addressed engine's
+     * MockLruBlockCache. Idempotent: keys not present are a no-op. When the
+     * key set changes the engine's cacheVersion is bumped, so the master's
+     * next cache-status poll re-pulls the key set and its global key→holder
+     * index converges on the eviction (the flexlb_ft KV family's sync
+     * premise). Response: {status, engine, port, changed, cache_version}.
+     */
+    private void handleCacheEvict(HttpExchange exchange) throws IOException {
+        handleServicePost(exchange, (body, service) -> {
+            JsonNode keysNode = body.path("keys");
+            if (!keysNode.isArray()) {
+                throw new ApiException(400, "'keys' must be an array of block keys");
+            }
+            List<Long> keys = new ArrayList<>();
+            for (JsonNode key : keysNode) {
+                keys.add(parseBlockKey(key));
+            }
+            boolean changed = service.evictCacheKeys(keys);
+            Map<String, Object> response = successResponse(service);
+            response.put("changed", changed);
+            response.put("cache_version", service.getCacheVersion());
+            return response;
+        });
+    }
+
     private void handleStopEngine(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
@@ -510,6 +539,26 @@ final class MockControlServer {
             }
         }
         throw new ApiException(400, "'request_id' must be an integer, got: " + node);
+    }
+
+    /**
+     * Strict block-key parsing (same policy as parseRequestId): Jackson's
+     * {@code asLong()} coerces non-numeric values to 0, silently turning a
+     * caller schema bug into an eviction of key 0. Accept integral numbers
+     * and integral decimal strings only; everything else is a 400.
+     */
+    private static long parseBlockKey(JsonNode node) throws ApiException {
+        if (node.isIntegralNumber() && node.canConvertToLong()) {
+            return node.asLong();
+        }
+        if (node.isTextual()) {
+            try {
+                return Long.parseLong(node.asText().trim());
+            } catch (NumberFormatException ignored) {
+                // fall through to the 400 below
+            }
+        }
+        throw new ApiException(400, "'keys' entries must be integers, got: " + node);
     }
 
     /**
