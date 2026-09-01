@@ -290,6 +290,7 @@ std::string ModelConfig::to_string() const {
         << "mm_model_config: {\n"
         << "  is_multimodal: " << (mm_model_config.is_multimodal ? "true" : "false") << "\n"
         << "  include_sep_tokens: " << (mm_model_config.include_sep_tokens ? "true" : "false") << "\n"
+        << "  mm_padding_size: " << mm_model_config.mm_padding_size << "\n"
         << "  mm_position_ids_style: " << mm_model_config.mm_position_ids_style << "\n"
         << "  mm_sep_tokens: [";
     for (size_t i = 0; i < mm_model_config.mm_sep_tokens.size(); ++i) {

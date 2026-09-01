@@ -264,6 +264,46 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         self.assertTrue(torch.equal(hidden, local_hidden))
 
 
+class TestMultimodalInputs(unittest.TestCase):
+    def test_mask_features_and_locations_follow_zigzag_interleave(self):
+        tokens = torch.arange(14, dtype=torch.int32)
+        text_mask = torch.ones(14, dtype=torch.int32)
+        text_mask[2:12] = 0
+        feature = torch.arange(20, dtype=torch.float32).reshape(10, 2)
+
+        rank0 = cp_test.handle_multimodal_inputs(tokens, text_mask, feature, 2, 0, 2)
+        rank1 = cp_test.handle_multimodal_inputs(tokens, text_mask, feature, 2, 1, 2)
+
+        _, mask0, features0, locs0, spans0, prefixes0 = rank0
+        _, mask1, features1, locs1, spans1, prefixes1 = rank1
+        self.assertEqual(mask0.tolist(), [1, 1, 0, 0, 1, 1, 0, 0])
+        self.assertEqual(mask1.tolist(), [0] * 8)
+        self.assertEqual(locs0.tolist(), [2])
+        self.assertEqual(locs1.tolist(), [0])
+        torch.testing.assert_close(features0[0].cpu(), feature[:2])
+        torch.testing.assert_close(features1[0].cpu(), feature[2:10])
+        torch.testing.assert_close(
+            spans0, torch.tensor([[0, 2, 12]], dtype=torch.int64)
+        )
+        torch.testing.assert_close(spans1, spans0)
+        self.assertEqual(prefixes0.tolist(), [0])
+        self.assertEqual(prefixes1.tolist(), [0])
+
+    def test_prefix_reuse_generates_absolute_position_ids(self):
+        position_ids, shuffle = cp_test.handle_prefix_reuse(
+            torch.arange(8, dtype=torch.int32), 4, 0, 2
+        )
+        self.assertEqual(shuffle.tolist(), [0, 1, 6, 7])
+        self.assertEqual(position_ids.tolist(), [4, 5, 10, 11])
+
+    def test_prefix_reuse_zeros_padding_position_ids(self):
+        position_ids, shuffle = cp_test.handle_prefix_reuse(
+            torch.arange(7, dtype=torch.int32), 4, 0, 2
+        )
+        self.assertEqual(shuffle.tolist(), [0, 1, 6, 7])
+        self.assertEqual(position_ids.tolist(), [4, 5, 10, 0])
+
+
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)

@@ -1085,6 +1085,38 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testPrefillDraftShiftsImagesWithinEachRequest) {
+    MtpBatchStreamProcessor processor(ModelConfig{},
+                                      PDSepConfig{},
+                                      ProfilingDebugLoggingConfig{},
+                                      CacheConfig{},
+                                      SpeculativeExecutionConfig{},
+                                      false);
+    GptModelInputs          input;
+    input.combo_tokens        = torch::tensor({-100, -101, 7, 8, 9, -102, -103, -104}, torch::kInt32);
+    input.input_lengths       = torch::tensor({4, 3, 1}, torch::kInt32);
+    input.text_tokens_mask    = torch::tensor({0, 0, 1, 1, 1, 0, 0, 0}, torch::kInt32);
+    input.mm_features_locs    = torch::tensor({0, 5, 7}, torch::kInt32);
+    auto first                = torch::tensor({1.f, 2.f, 3.f, 4.f}).reshape({2, 2});
+    auto second               = torch::tensor({5.f, 6.f, 7.f, 8.f}).reshape({2, 2});
+    input.multimodal_features = std::vector<torch::Tensor>{first, second, torch::ones({1, 2})};
+    GptModelOutputs output;
+    output.all_hidden_states = torch::zeros({8, 2});
+    SamplerOutput sampled;
+    sampled.token_ids = torch::tensor({10, 11, 12}, torch::kInt32).reshape({3, 1});
+    TensorHolder holder;
+
+    processor.updatePrefillPostDraftModelInput(input, output, sampled, holder);
+
+    EXPECT_EQ(toVec<int>(input.combo_tokens), (std::vector<int>{-101, 7, 8, 10, -102, -103, 11, 12}));
+    EXPECT_EQ(toVec<int>(input.text_tokens_mask), (std::vector<int>{0, 1, 1, 1, 0, 0, 1, 1}));
+    EXPECT_EQ(toVec<int>(input.mm_features_locs), (std::vector<int>{0, 4}));
+    ASSERT_EQ(input.multimodal_features->size(), 2);
+    EXPECT_TRUE(torch::equal((*input.multimodal_features)[0], first.slice(0, 1)));
+    EXPECT_TRUE(torch::equal((*input.multimodal_features)[1], second));
+    EXPECT_TRUE(torch::equal(input.last_hidden_states, output.all_hidden_states));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

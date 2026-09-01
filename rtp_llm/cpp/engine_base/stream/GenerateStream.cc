@@ -406,16 +406,6 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    if (generate_input_->mm_locs) {
-        auto& locs      = generate_input_->mm_locs.value();
-        auto* locs_data = locs.data_ptr<int32_t>();
-        for (int i = locs.numel() - 1; i >= 0; --i) {
-            if (reuse_length_ > locs_data[i]) {
-                reuse_mm_length_ = i + 1;
-                break;
-            }
-        }
-    }
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
@@ -512,8 +502,7 @@ int GenerateStream::currentExecuteTokenSize() {
 
 std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     if (generate_input_->multimodal_features) {
-        auto& features = generate_input_->multimodal_features.value();
-        return std::vector<torch::Tensor>(features.begin() + reuse_mm_length_, features.end());
+        return generate_input_->multimodal_features.value();
     } else {
         return std::vector<torch::Tensor>();
     }
@@ -527,8 +516,7 @@ torch::Tensor GenerateStream::multimodalLocations() const {
     if (!generate_input_->mm_locs) {
         return torch::Tensor();
     }
-    auto& mm_locs = generate_input_->mm_locs.value();
-    return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
+    return generate_input_->mm_locs.value();
 }
 
 vector<int> GenerateStream::textTokensMask() const {

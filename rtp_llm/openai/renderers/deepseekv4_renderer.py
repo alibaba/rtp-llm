@@ -16,7 +16,11 @@ from rtp_llm.openai.api_datatype import (
     get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.custom_renderer import OutputDelta, RendererParams
+from rtp_llm.openai.renderers.custom_renderer import (
+    OutputDelta,
+    RenderedInputs,
+    RendererParams,
+)
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
     ReasoningToolStreamStatus,
@@ -36,6 +40,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.deepseekv4_detector i
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.utils.base_model_datatypes import GenerateOutput
+from rtp_llm.utils.multimodal_util import MMUrlType
 
 _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "json_object",
@@ -241,6 +246,27 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
             return "max"
         return effort
 
+    @override
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        prompt = self._build_prompt(request)
+        input_ids = self.tokenizer.encode(prompt)
+        image_urls = [
+            part.image_url.url
+            for message in request.messages
+            if isinstance(message.content, list)
+            for part in message.content
+            if part.type.value == "image_url" and part.image_url is not None
+        ]
+        if not image_urls:
+            return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
+
+        return RenderedInputs(
+            input_ids=input_ids,
+            rendered_prompt=prompt,
+            input_urls=image_urls,
+            input_urls_type=[MMUrlType.IMAGE] * len(image_urls),
+        )
+
     def _normalize_tool_arguments(self, arguments: Any) -> str:
         if arguments is None:
             return "{}"
@@ -350,7 +376,15 @@ class DeepseekV4Renderer(ReasoningToolBaseRenderer):
         # Convert request messages to the format expected by encoding_dsv4
         messages = []
         for msg in request.messages:
-            message_dict = {"role": msg.role.value, "content": msg.content}
+            content = (
+                [
+                    part.model_dump(exclude_none=True, mode="json")
+                    for part in msg.content
+                ]
+                if isinstance(msg.content, list)
+                else msg.content
+            )
+            message_dict = {"role": msg.role.value, "content": content}
             if msg.name:
                 message_dict["name"] = msg.name
             if msg.tool_call_id:

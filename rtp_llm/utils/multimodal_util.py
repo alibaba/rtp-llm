@@ -75,6 +75,7 @@ class MMPreprocessConfig:
     fps: int = -1
     min_frames: int = -1
     max_frames: int = -1
+    mm_padding_size: int = 0  # Prefix padding tokens for this image.
 
 
 class MultimodalInput:

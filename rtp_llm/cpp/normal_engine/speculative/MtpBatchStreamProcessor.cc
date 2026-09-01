@@ -768,11 +768,38 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     int* input_lengths = input_lengths_cpu.data_ptr<int>();
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
+    const bool has_mm = model_input.multimodal_features && !model_input.multimodal_features->empty();
+    auto  text_mask   = model_input.text_tokens_mask.defined() ? model_input.text_tokens_mask.cpu() : torch::Tensor();
+    auto* mask_data   = text_mask.defined() && text_mask.numel() ? text_mask.data_ptr<int32_t>() : nullptr;
+    auto  mm_locs     = has_mm ? model_input.mm_features_locs.cpu().reshape({-1}) : torch::Tensor();
+    std::vector<torch::Tensor> shifted_features;
+    std::vector<int32_t>       shifted_locs;
+    std::vector<int64_t>       kept_features;
+    size_t                     feature_index = 0;
     int offset = 0;
     for (int i = 0; i < batch_size; i++) {
         // should shift one token for combo_tokens
         int input_length = input_lengths[i];
-        memcpy(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
+        memmove(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
+
+        // Shift within each request, then let the draft CP pass slice the
+        // aligned global inputs. A reused suffix can start inside an image.
+        if (mask_data) {
+            memmove(mask_data + offset, mask_data + offset + 1, (input_length - 1) * sizeof(int32_t));
+            mask_data[offset + input_length - 1] = 1;
+        }
+        while (has_mm && feature_index < model_input.multimodal_features->size()
+               && mm_locs.data_ptr<int32_t>()[feature_index] < offset + input_length) {
+            const int32_t loc       = mm_locs.data_ptr<int32_t>()[feature_index];
+            const auto&   feature   = (*model_input.multimodal_features)[feature_index];
+            const int64_t first_row = loc == offset ? 1 : 0;
+            if (first_row < feature.size(0)) {
+                shifted_features.push_back(feature.slice(0, first_row));
+                shifted_locs.push_back(loc - 1 + first_row);
+                kept_features.push_back(feature_index);
+            }
+            ++feature_index;
+        }
 
         // set new token id
         int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
@@ -783,6 +810,17 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
 
     model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
     model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    if (mask_data) {
+        model_input.text_tokens_mask = text_mask;
+    }
+    if (has_mm) {
+        model_input.multimodal_features = std::move(shifted_features);
+        model_input.mm_features_locs    = torch::tensor(shifted_locs, torch::kInt32);
+        if (model_input.mm_features_spans.defined()) {
+            model_input.mm_features_spans =
+                model_input.mm_features_spans.index_select(0, torch::tensor(kept_features, torch::kInt64));
+        }
+    }
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {

@@ -151,6 +151,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         pre_hc: torch.Tensor,
         positions: torch.Tensor,
         chunk_tokens: int,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert self.enorm is not None
         assert self.hnorm is not None
@@ -181,7 +182,11 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
             end = min(start + chunk_tokens, T)
             input_ids_chunk = input_ids[start:end]
             positions_chunk = positions[start:end]
-            embed_chunk = self.v4.embed(input_ids_chunk)
+            embed_chunk = (
+                self.v4.embed(input_ids_chunk)
+                if inputs_embeds is None
+                else inputs_embeds[start:end]
+            )
             embed_chunk = torch.where(
                 positions_chunk.reshape(-1, 1) == 0,
                 torch.zeros_like(embed_chunk),
@@ -201,6 +206,7 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         input_ids: torch.Tensor,  # [T] int
         pre_hc: torch.Tensor,  # [T, hc, dim] bf16
         positions: torch.Tensor,  # [T] int (mask token at position 0)
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """``e_proj(enorm(masked_embed)) + h_proj(hnorm(prev_hidden))``.
         Returns ``[T, hc, dim]``."""
@@ -212,10 +218,15 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         chunk_tokens = self._mtp_fusion_chunk_tokens()
         if T > chunk_tokens and not torch.cuda.is_current_stream_capturing():
             return self._build_fused_chunked(
-                input_ids.reshape(-1), pre_hc, positions[:T], chunk_tokens
+                input_ids.reshape(-1),
+                pre_hc,
+                positions[:T],
+                chunk_tokens,
+                inputs_embeds,
             )
 
-        inputs_embeds = self.v4.embed(input_ids)  # [T, dim]
+        if inputs_embeds is None:
+            inputs_embeds = self.v4.embed(input_ids)  # [T, dim]
         # Suppress position-0 embedding (matches main-model "step 0 of a
         # brand-new request" behavior the official MTP impl relies on).
         inputs_embeds = torch.where(
@@ -278,6 +289,18 @@ class DeepSeekV4MtpModel(DeepSeekV4Model):
         T = int(input_ids.numel())
         pre_hc = self._pre_hc_from_inputs(self._cur_inputs, T)
         return self._build_fused(input_ids.reshape(-1), pre_hc, positions[:T])
+
+    def _prepare_multimodal_prefill_hidden(
+        self, inputs, input_ids: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        # C++ shifts the image features/mask with the draft's next-token IDs,
+        # before CP slices them. Never look up the synthetic image hashes.
+        embeddings = self._embed_multimodal_tokens(inputs, input_ids)
+        token_count = input_ids.numel()
+        pre_hc = self._pre_hc_from_inputs(inputs, token_count)
+        return self._build_fused(
+            input_ids.reshape(-1), pre_hc, positions[:token_count], embeddings
+        )
 
     # ------------------------------------------------------------------
     # forward — delegate to parent, just stash ``inputs`` so the prepare

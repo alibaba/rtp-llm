@@ -32,6 +32,7 @@ public:
         mm_process_engine_(mm_process_engine),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
+        padding_size_(mm_model_config.mm_padding_size),
         max_seq_len_(max_seq_len) {}
 
 protected:
@@ -40,6 +41,7 @@ protected:
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
     bool                              include_sep_tokens_;
+    int64_t                           padding_size_;
     int64_t                           max_seq_len_;
 
     ErrorInfo getStrHash(int32_t* token_ids, std::string& url, int mm_emb_len);
@@ -53,6 +55,9 @@ private:
                                                torch::Tensor                               token_type_ids = {});
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
+
+    ErrorResult<std::vector<rtp_llm::MultimodalInput>>
+    setMMPaddingSize(const torch::Tensor& token_ids, const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
 
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 

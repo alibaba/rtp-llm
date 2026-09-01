@@ -18,6 +18,7 @@ TEST_F(MultimodalProcessorTest, testSimple) {
     input->multimodal_inputs = mm_inputs;
     auto res                 = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), true);
+    EXPECT_EQ(processor.last_mm_padding_size, std::vector<int32_t>({0}));
 
     auto input_ids = input->input_ids.data_ptr<int32_t>();
     EXPECT_EQ(input->input_ids.numel(), 6);
@@ -55,6 +56,7 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
     input->multimodal_inputs = mm_inputs;
     auto res                 = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), true);
+    EXPECT_EQ(processor.last_mm_padding_size, std::vector<int32_t>({0, 0}));
 
     EXPECT_EQ(input->input_ids.numel(), 8);
 
@@ -73,6 +75,27 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
 
     EXPECT_TRUE(input->multimodal_features);
     EXPECT_EQ(input->multimodal_features.value().size(), 2);
+}
+
+TEST_F(MultimodalProcessorTest, testMMPaddingUsesConfiguredAlignmentAndInterImageText) {
+    for (int padding_size : {0, 2, 4}) {
+        FakeMultimodalProcessor processor =
+            FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32, padding_size);
+        auto input       = std::make_shared<GenerateInput>();
+        input->input_ids = torch::tensor({9, 1, 7, 7, 1, 8}, torch::kInt32);
+        auto mm_inputs   = std::vector<MultimodalInput>();
+        mm_inputs.emplace_back("8");
+        mm_inputs.emplace_back("6");
+        input->multimodal_inputs = mm_inputs;
+
+        auto res = processor.updateMultimodalFeatures(input);
+
+        ASSERT_TRUE(res.ok()) << res.ToString();
+        const std::vector<int32_t> expected =
+            padding_size == 4 ? std::vector<int32_t>{2, 0} : std::vector<int32_t>{0, 0};
+        EXPECT_EQ(processor.last_mm_padding_size, expected);
+        EXPECT_EQ(input->input_ids.numel(), 18);
+    }
 }
 
 TEST_F(MultimodalProcessorTest, testWrongMMTag) {

@@ -83,6 +83,59 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                            cp_params.prefill_shuffle_indices.cpu().clone());
 }
 
+std::tuple<torch::Tensor, torch::Tensor, std::vector<torch::Tensor>, torch::Tensor, torch::Tensor, torch::Tensor>
+zigzagHandleMultimodalInputs(const torch::Tensor& total_input_tokens,
+                             const torch::Tensor& text_tokens_mask,
+                             const torch::Tensor& feature,
+                             int                  feature_loc,
+                             int                  cp_rank,
+                             int                  cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens        = total_input_tokens.contiguous().clone();
+    model_input.input_lengths       = torch::tensor({total_input_tokens.numel()}, torch::kInt32);
+    model_input.sequence_lengths    = torch::empty({0}, torch::kInt32);
+    model_input.text_tokens_mask    = text_tokens_mask.contiguous().clone();
+    model_input.multimodal_features = std::vector<torch::Tensor>{feature.contiguous().clone()};
+    model_input.mm_features_locs    = torch::tensor({feature_loc}, torch::kInt32);
+    model_input.mm_features_spans =
+        torch::tensor({int64_t{0}, static_cast<int64_t>(feature_loc), feature_loc + feature.size(0)}, torch::kInt64)
+            .reshape({1, 3});
+    model_input.prefix_lengths = torch::tensor({0}, torch::kInt32).to(torch::kCUDA);
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+
+    return std::make_tuple(model_input.combo_tokens.cpu().clone(),
+                           model_input.text_tokens_mask.cpu().clone(),
+                           model_input.multimodal_features.value(),
+                           model_input.mm_features_locs.cpu().clone(),
+                           cp_params.prefill_mm_spans.cpu().clone(),
+                           cp_params.prefill_prefix_lengths_cpu.clone());
+}
+
+std::tuple<torch::Tensor, torch::Tensor>
+zigzagHandlePrefixReuse(const torch::Tensor& total_input_tokens, int prefix_length, int cp_rank, int cp_size) {
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_rank = cp_rank;
+    parallelism_config.tp_size = cp_size;
+    ZigZagProcessor processor(parallelism_config);
+
+    GptModelInputs model_input;
+    model_input.combo_tokens     = total_input_tokens.contiguous().clone();
+    model_input.input_lengths    = torch::tensor({total_input_tokens.numel()}, torch::kInt32);
+    model_input.sequence_lengths = torch::empty({0}, torch::kInt32);
+    model_input.prefix_lengths   = torch::tensor({prefix_length}, torch::kInt32).to(torch::kCUDA);
+
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(model_input, cp_params);
+    return {model_input.combo_position_ids.cpu().clone(), cp_params.prefill_shuffle_indices.cpu().clone()};
+}
+
 // Wrapper for ZigZagProcessor::computeLocalLastHidden — this rank's contribution
 // to the gathered last-token hidden (no comm). The Python test sums these across
 // ranks to simulate the all-reduce in handleOutputsLastHidden.
@@ -142,6 +195,24 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_size"),
           py::arg("split_hidden_states") = true,
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
+
+    m.def("handle_multimodal_inputs",
+          &zigzagHandleMultimodalInputs,
+          py::arg("total_input_tokens"),
+          py::arg("text_tokens_mask"),
+          py::arg("feature"),
+          py::arg("feature_loc"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs and return remapped multimodal inputs");
+
+    m.def("handle_prefix_reuse",
+          &zigzagHandlePrefixReuse,
+          py::arg("total_input_tokens"),
+          py::arg("prefix_length"),
+          py::arg("cp_rank"),
+          py::arg("cp_size"),
+          "Run CP handleInputs and return cache-aware absolute position ids");
 
     m.def("compute_local_last_hidden",
           &zigzagComputeLocalLastHidden,

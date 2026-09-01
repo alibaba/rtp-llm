@@ -40,6 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     _SPARSE_PREFILL_TOPK_ALIGNMENT,
     combine_topk_swa_indices,
     combine_topk_swa_indices_cp,
+    compute_window_topk_and_length_varlen,
 )
 
 
@@ -97,6 +98,38 @@ def _ref_combine(
                 out[tok, topk_len + j] = base_swa + j
             lens[tok] = topk_len + swa_len
     return out, lens
+
+
+class CausalSwaWindowTest(unittest.TestCase):
+    def test_image_positions_use_only_previous_127_tokens_and_self(self):
+        # An image may span hundreds of tokens; its boundaries do not expand
+        # the language model's raw SWA window or make future tokens visible.
+        lengths = (324, 5)
+        positions = torch.cat([torch.arange(length) for length in lengths])
+        req_ids = torch.repeat_interleave(
+            torch.arange(len(lengths), dtype=torch.int32), torch.tensor(lengths)
+        )
+        indices, counts = compute_window_topk_and_length_varlen(
+            128,
+            torch.tensor([0, lengths[0], sum(lengths)], dtype=torch.int32),
+            positions,
+            torch.zeros(len(lengths), dtype=torch.int32),
+            req_ids,
+        )
+        self.assertEqual(tuple(indices.shape), (sum(lengths), 128))
+        base = 0
+        for length in lengths:
+            for position in range(length):
+                expected = torch.arange(
+                    base + max(position - 127, 0),
+                    base + position + 1,
+                    dtype=torch.int32,
+                )
+                row = base + position
+                self.assertEqual(int(counts[row]), expected.numel())
+                torch.testing.assert_close(indices[row, : expected.numel()], expected)
+                self.assertTrue(bool((indices[row, expected.numel() :] == -1).all()))
+            base += length
 
 
 class SwaCombineTopkTest(unittest.TestCase):
@@ -290,6 +323,70 @@ class SwaCombineTopkTest(unittest.TestCase):
             gather_lens=[S],
             N=0,
         )
+
+    def test_causal_window_preserves_compressed_candidates_after_reuse(self):
+        prefix, suffix, window = 254, 4, 128
+        n_compressed, topk = 16, 2
+        positions = torch.arange(
+            prefix, prefix + suffix, dtype=torch.int64, device=self.device
+        )
+        candidates = torch.tensor(
+            [[2, 7]] * suffix, dtype=torch.int32, device=self.device
+        )
+        gather_length = suffix + window - 1
+        for ratio in (4, 128):
+            for cp in (False, True):
+                with self.subTest(ratio=ratio, cp=cp):
+                    kwargs = dict(
+                        topk_indices=candidates,
+                        window_size=window,
+                        compress_ratio=ratio,
+                        topk=topk,
+                        M=n_compressed + gather_length,
+                        N=n_compressed,
+                    )
+                    if cp:
+                        indices, lengths = combine_topk_swa_indices_cp(
+                            global_positions=positions,
+                            sp_int=prefix,
+                            **kwargs,
+                        )
+                    else:
+                        indices, lengths = combine_topk_swa_indices(
+                            query_start_loc=torch.tensor(
+                                [0, suffix], dtype=torch.int32, device=self.device
+                            ),
+                            seq_lens=torch.tensor(
+                                [prefix + suffix], dtype=torch.int32, device=self.device
+                            ),
+                            gather_lens=torch.tensor(
+                                [gather_length], dtype=torch.int32, device=self.device
+                            ),
+                            **kwargs,
+                        )
+                    for row, position in enumerate(positions.tolist()):
+                        compressed_length = min((position + 1) // ratio, topk)
+                        self.assertEqual(int(lengths[row]), compressed_length + window)
+                        torch.testing.assert_close(
+                            indices[row, :compressed_length],
+                            candidates[row, :compressed_length],
+                        )
+                        torch.testing.assert_close(
+                            indices[
+                                row, compressed_length : compressed_length + window
+                            ],
+                            torch.arange(
+                                n_compressed + row,
+                                n_compressed + row + window,
+                                dtype=torch.int32,
+                                device=self.device,
+                            ),
+                        )
+                        self.assertTrue(
+                            bool(
+                                (indices[row, compressed_length + window :] == -1).all()
+                            )
+                        )
 
     def test_empty_input(self):
         """num_tokens=0 returns empty (combined_indices, combined_lens)."""

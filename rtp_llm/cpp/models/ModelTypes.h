@@ -82,6 +82,7 @@ enum GptModelInputIndex : size_t {
     comboPositionIds,
     textTokensMask,
     mmFeaturesLocs,
+    mmFeaturesSpans,
     mmFeaturesNum,   // number of mm features
     mmFeaturesSize,  // hidden_size of mm features
     mmFeaturesDtype,

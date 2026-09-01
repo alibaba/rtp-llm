@@ -166,6 +166,38 @@ MultimodalProcessor::getMultimodalTags(const torch::Tensor& token_ids) {
     return locs;
 }
 
+ErrorResult<std::vector<rtp_llm::MultimodalInput>>
+MultimodalProcessor::setMMPaddingSize(const torch::Tensor&                         token_ids,
+                                      const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
+    if (padding_size_ == 0) {
+        return mm_inputs;
+    }
+    CHECK_AND_RETURN_REF(locs, getMultimodalTags(token_ids));
+    if (locs.size() != mm_inputs.size()) {
+        std::stringstream exception_str;
+        exception_str << "number of multimodal tags and multimodal input not matched, expect " << locs.size()
+                      << ", get " << mm_inputs.size();
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, exception_str.str());
+    }
+
+    auto padded_inputs = mm_inputs;
+    for (size_t i = 0; i < padded_inputs.size(); ++i) {
+        int32_t phase = locs[i].first;
+        if (i > 0) {
+            RTP_LLM_CHECK_WITH_INFO(
+                locs[i].first >= locs[i - 1].second,
+                "multimodal tag ranges must be sorted and non-overlapping: previous_end=%d, start=%d",
+                locs[i - 1].second,
+                locs[i].first);
+            // The image body is alignment-padded and followed by one end token.
+            // Its successor is at offset 1; only the text gap remains to account for.
+            phase = 1 + locs[i].first - locs[i - 1].second;
+        }
+        padded_inputs[i].mm_preprocess_config.mm_padding_size = padding_size_ - 1 - phase % padding_size_;
+    }
+    return padded_inputs;
+}
+
 ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_output) {
     if (expand_output.expanded_ids.numel() >= max_seq_len_) {
         std::stringstream exception_str;
@@ -190,12 +222,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
         }
     }
 
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(input->multimodal_inputs.value(), ip_port));
+    CHECK_AND_RETURN_REF(padded_inputs, setMMPaddingSize(input->input_ids, input->multimodal_inputs.value()));
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(padded_inputs, ip_port));
     input->multimodal_features = std::move(mm_embedding_res.mm_features);
     input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
+    CHECK_AND_RETURN_REF(expanded_ids,
+                         expandTokenIds(input->multimodal_features.value(), input->input_ids, padded_inputs));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     input->input_ids        = expanded_ids.expanded_ids;
     input->text_tokens_mask = expanded_ids.text_tokens_mask;
@@ -205,11 +237,12 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, ""));
+    CHECK_AND_RETURN_REF(padded_inputs, setMMPaddingSize(input->token_ids, mm_inputs));
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(padded_inputs, ""));
     MultimodalFeature mm_features;
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(mm_features.features, input->token_ids, mm_inputs, input->token_type_ids));
+                         expandTokenIds(mm_features.features, input->token_ids, padded_inputs, input->token_type_ids));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
@@ -227,9 +260,10 @@ ErrorResult<MultimodalFeature>
 MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                         input_ids,
                                            const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
     MultimodalFeature mm_features;
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
+    CHECK_AND_RETURN_REF(padded_inputs, setMMPaddingSize(input_ids, mm_inputs));
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(padded_inputs));
     mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(mm_features.features, input_ids, mm_inputs));
+    CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(mm_features.features, input_ids, padded_inputs));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;

@@ -83,6 +83,15 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v4_vision_test",
+    srcs = ["deepseek_v4_vision_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

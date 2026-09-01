@@ -1581,6 +1581,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
+        .def_readwrite("mm_padding_size", &MMModelConfig::mm_padding_size)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
     // Register ModelConfig

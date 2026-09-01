@@ -35,6 +35,7 @@ public:
     std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
     bool                              include_sep_tokens    = false;
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    int64_t                           mm_padding_size       = 0;  // Image-token alignment; 0 disables padding.
 };
 
 class ModelConfig {
