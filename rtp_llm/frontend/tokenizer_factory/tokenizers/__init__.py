@@ -13,6 +13,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "ChatGLMV4Tokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.chatglm_tokenizer",
     "ChatGLMV5Tokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.chatglm_tokenizer",
     "DeepSeekVLV2Tokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.deepseek_vl2_tokenizer",
+    "HyV4Tokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.hy_v4_tokenizer",
     "InternVLTokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.internvl_tokenizer",
     "LlamaTokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.llama_tokenizer",
     "LlavaTokenizer": "rtp_llm.frontend.tokenizer_factory.tokenizers.llava_tokenizer",

@@ -118,6 +118,10 @@ def _register_builtin_lazy_tokenizers() -> None:
         "rtp_llm.frontend.tokenizer_factory.tokenizers.deepseek_vl2_tokenizer",
     )
     register_lazy_tokenizer(
+        ["hy_v4", "hy_v4_mtp"],
+        "rtp_llm.frontend.tokenizer_factory.tokenizers.hy_v4_tokenizer",
+    )
+    register_lazy_tokenizer(
         [
             "llama",
             "internlm",

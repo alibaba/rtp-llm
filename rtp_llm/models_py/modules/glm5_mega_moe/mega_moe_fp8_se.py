@@ -185,7 +185,12 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
         indices: torch.Tensor | None,
         *,
         inputs_prepacked: bool,
+        activation_clamp: Optional[float] = None,
     ) -> torch.Tensor:
+        # The fused-shared strategy retains its existing unclamped GLM5
+        # behavior. The argument keeps the override compatible with the base
+        # FP8 implementation's forward_prepacked() signature.
+        del activation_clamp
         import deep_gemm
 
         self._check_shared_expert_ready()

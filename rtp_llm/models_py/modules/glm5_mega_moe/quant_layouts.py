@@ -12,6 +12,7 @@ import torch
 
 FP4_BLOCK = 32
 FP8_BLOCK = 128
+MXFP8_BLOCK = 32
 
 
 def prepare_fp4_weight_scale_for_deepgemm(
@@ -53,8 +54,13 @@ def prepare_fp8_weight_scale_for_deepgemm(
     mn: int,
     k: int,
     num_groups: Optional[int] = None,
+    recipe: Tuple[int, int] = (FP8_BLOCK, FP8_BLOCK),
 ) -> torch.Tensor:
-    """Convert FP8 128x128 per-block scales to DeepGEMM's packed layout."""
+    """Convert raw FP8 scales to DeepGEMM's packed weight-scale layout.
+
+    ``recipe`` is the logical scale granularity. MegaMoE supports both the
+    existing 128x128 block-FP8 layout and MXFP8's per-row 1x32 layout.
+    """
     if scale.dtype == torch.int32:
         return scale
     if scale.dtype not in (torch.float8_e8m0fnu, torch.float32):
@@ -68,29 +74,42 @@ def prepare_fp8_weight_scale_for_deepgemm(
     )
     os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
 
-    import deep_gemm
-
     if scale.dim() < 2:
         raise ValueError(
             f"FP8 per-block scale must have at least 2 dims, got shape={tuple(scale.shape)}"
         )
-    expected_m_blocks = (mn + FP8_BLOCK - 1) // FP8_BLOCK
-    expected_k_blocks = (k + FP8_BLOCK - 1) // FP8_BLOCK
+    gran_mn, gran_k = recipe
+    if gran_mn <= 0 or gran_k <= 0:
+        raise ValueError(f"invalid FP8 scale recipe={recipe}")
+    expected_m_blocks = (mn + gran_mn - 1) // gran_mn
+    expected_k_blocks = (k + gran_k - 1) // gran_k
     if tuple(scale.shape[-2:]) != (expected_m_blocks, expected_k_blocks):
         raise ValueError(
-            "FP8 mega_moe weight scale must be 128x128 per-block or already "
-            f"packed int32. Got shape={tuple(scale.shape)}, expected trailing "
-            f"dims=({expected_m_blocks}, {expected_k_blocks}) for mn={mn}, k={k}."
+            "FP8 mega_moe weight scale has unexpected shape. Got "
+            f"shape={tuple(scale.shape)}, expected trailing dims="
+            f"({expected_m_blocks}, {expected_k_blocks}) for mn={mn}, k={k}, "
+            f"recipe={recipe}."
         )
 
-    scale_fp32 = scale.float()
-    if num_groups is None:
+    import deep_gemm
+
+    scale_fp32 = scale.float().contiguous()
+
+    def _transform() -> torch.Tensor:
+        if num_groups is None:
+            return deep_gemm.transform_sf_into_required_layout(
+                scale_fp32, mn, k, recipe
+            )
         return deep_gemm.transform_sf_into_required_layout(
-            scale_fp32, mn, k, (FP8_BLOCK, FP8_BLOCK)
+            scale_fp32, mn, k, recipe, num_groups
         )
-    return deep_gemm.transform_sf_into_required_layout(
-        scale_fp32, mn, k, (FP8_BLOCK, FP8_BLOCK), num_groups
-    )
+
+    # DeepGEMM's layout transform launches on the current CUDA device. During
+    # multi-rank loading that device is not necessarily the tensor's device.
+    if scale_fp32.is_cuda:
+        with torch.cuda.device(scale_fp32.device):
+            return _transform()
+    return _transform()
 
 
 def per_token_cast_to_fp8_packed_ue8m0(

@@ -120,9 +120,28 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.moe_gate, None, None, quant_config, hw_kernel_config
+        self._hy4_fp32_router = getattr(config, "model_type", "") in (
+            "hy_v4",
+            "hy_v4_mtp",
         )
+        if self._hy4_fp32_router:
+            self.gate = None
+            self.gate_weight = weights[W.moe_gate]
+            if self.gate_weight.dtype != torch.float32:
+                raise TypeError(
+                    f"HY V4 router weight must be fp32, got {self.gate_weight.dtype}"
+                )
+            expected_router_shape = (self.hidden_dim, config.expert_num)
+            if tuple(self.gate_weight.shape) != expected_router_shape:
+                raise ValueError(
+                    "HY V4 router weight must have runtime shape "
+                    f"{expected_router_shape}, got {tuple(self.gate_weight.shape)}"
+                )
+        else:
+            self.gate = LinearFactory.create_linear_from_weights(
+                weights, W.moe_gate, None, None, quant_config, hw_kernel_config
+            )
+            self.gate_weight = None
         self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
             self.fake_balance_expert = FakeBalanceExpert(
@@ -256,6 +275,19 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        if self._hy4_fp32_router:
+            if self.correction_bias is None:
+                raise KeyError("HY V4 MoE requires e_score_correction_bias")
+            if self.correction_bias.dtype != torch.float32:
+                raise TypeError(
+                    "HY V4 correction bias must be fp32, got "
+                    f"{self.correction_bias.dtype}"
+                )
+            if self.correction_bias.numel() != config.expert_num:
+                raise ValueError(
+                    "HY V4 correction bias must contain one value per expert, got "
+                    f"{self.correction_bias.numel()} for {config.expert_num} experts"
+                )
 
     def clone_for_cuda_graph(self) -> "GenericMoeLayer":
         clone = object.__new__(type(self))
@@ -269,6 +301,8 @@ class GenericMoeLayer(nn.Module):
         clone.top_k = self.top_k
         clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
+        clone.gate_weight = self.gate_weight
+        clone._hy4_fp32_router = self._hy4_fp32_router
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
         if hasattr(self.fused_moe, "clone_for_cuda_graph"):
@@ -309,7 +343,9 @@ class GenericMoeLayer(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        if self.gate_chunk_rows > 0 and num_tokens > 0:
+        if self._hy4_fp32_router:
+            router_logits = torch.matmul(hidden_states.float(), self.gate_weight)
+        elif self.gate_chunk_rows > 0 and num_tokens > 0:
             router_logits = fixed_m_linear(
                 self.gate, hidden_states, self.gate_chunk_rows
             )
@@ -376,6 +412,14 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_expert_args={
+                "swiglu_limit": (
+                    float(getattr(self.config, "swiglu_limit", 0.0))
+                    if getattr(self.config, "model_type", "")
+                    in ("hy_v4", "hy_v4_mtp")
+                    else 0.0
+                )
+            },
         )
         if use_mega_moe_fused_shared:
             return experts_output
