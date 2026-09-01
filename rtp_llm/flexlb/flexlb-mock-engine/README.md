@@ -135,7 +135,15 @@ efficiency, not GPU compute**: do not compare absolute values against
 production dashboards directly (the caliber semantics map one-to-one, the
 physics does not). `/snapshot` exposes the cumulative `hit_tokens_total`
 per engine (never drained — the `cache_saved_tokens` source via
-`final_snapshot`).
+`final_snapshot`). The report layer renders these three series as P/D role
+charts (the context pair = P role, generate = D role — the production
+dashboard's hippo_role split read); the client-side token reconciliation is
+not a report panel but the aggregate's fail-closed validity item
+`validity_checks.token_reconciliation_ok`: per input/output side,
+`|client completed tokens − Σ mock_tps_ts| ≤ max(5% × client, 5 × peak
+per-second tokens)` (5% absorbs scrape-window edge / clock residue and
+cancelled-request one-sided accounting, 5 × peak bounds the timeline tail);
+a missing series → `null` (no false failure).
 
 **Engine addressing**: POST bodies accept either `{"engine": "prefill-0"}` (engine
 name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).

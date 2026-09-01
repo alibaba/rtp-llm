@@ -47,9 +47,21 @@ section below for the full table):
   and `summary.cache_saved_tokens` (cumulative engine-side cache-reuse
   tokens), the per-second arrival-caliber `input_tokens` / `output_tokens`
   columns, and the mock self-reported production-caliber TPS timeline
-  `mock_tps_ts` — the report generator's 2.3 reconciliation panels consume
-  these; mock TPS values are accounting-style simulation readings over a
-  fixed 1s window, not GPU compute)
+  `mock_tps_ts` — the report generator's 2.3 P/D role TPS charts consume
+  it (P role = the context with/without-cache pair, D role = generate;
+  same read as the production dashboard's hippo_role split, engine-
+  self-reported only — no client-side TPS concept; mock TPS values are
+  accounting-style simulation readings over a fixed 1s window, not GPU
+  compute). The 20260901 correction moved the client-side token
+  reconciliation from report panels into the fail-closed validity item
+  `validity_checks.token_reconciliation_ok` (detects dropped requests /
+  inflated self-reporting): per input/output side,
+  `|client completed tokens − Σ mock_tps_ts| ≤ max(5% × client, 5 × peak
+  per-second tokens)` — the 5% relative term absorbs scrape-window edge /
+  clock-alignment residue and cancelled-request one-sided accounting
+  (healthy runs measure ~1%), the 5 × peak absolute term bounds the G1
+  timeline tail; missing mock TPS data → `null` (no false failure), and
+  `summary.test_valid` aggregates it via `all`)
 - `run_meta.json`, `mock.json` / `mock.log`, `master.json` / `master.log`,
   `client.json` / `client.log` (one JSON + one log per component)
 - `per_request.jsonl` (or `per_request.jsonl.gz` for larger runs)
