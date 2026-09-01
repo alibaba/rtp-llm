@@ -23,6 +23,7 @@ from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 MIN_SHORT_SIDE_PIXEL = 112
 IMAGE_MAX_TOTAL_PIXELS = 12_845_056
 VIDEO_MAX_TOTAL_PIXELS = 301_056_000
+DEFAULT_MAX_PIXELS = 451584
 
 
 def round_by_factor(number: int, factor: int) -> int:
@@ -43,7 +44,6 @@ def _smart_resize_by_long_side(
     factor: int,
     max_long_side_pixel: int,
     min_short_side_pixel: int,
-    max_total_pixels: Optional[int],
 ) -> tuple[int, int]:
     if max_long_side_pixel <= 0:
         raise_mm(
@@ -67,13 +67,6 @@ def _smart_resize_by_long_side(
 
     h_bar = max(factor, round_by_factor(scaled_height, factor))
     w_bar = max(factor, round_by_factor(scaled_width, factor))
-    if max_total_pixels is not None and h_bar * w_bar > max_total_pixels:
-        raise_mm(
-            MMErr.IMG_HW.format(
-                f"image area {h_bar * w_bar} exceeds max_total_pixels "
-                f"{max_total_pixels} after resizing"
-            )
-        )
     return h_bar, w_bar
 
 
@@ -82,11 +75,16 @@ def smart_resize(
     width: int,
     factor: int = 28,
     min_pixels: int = 4 * 28 * 28,
-    max_pixels: int = 451584,
+    max_pixels: Optional[int] = None,
     max_long_side_pixel: Optional[int] = None,
     min_short_side_pixel: int = MIN_SHORT_SIDE_PIXEL,
     max_total_pixels: Optional[int] = None,
 ) -> tuple[int, int]:
+    # max_total_pixels is kept as a compatibility alias. It supplies the
+    # default area budget only when max_pixels is not explicitly provided.
+    if max_pixels is None or max_pixels <= 0:
+        max_pixels = max_total_pixels or DEFAULT_MAX_PIXELS
+
     if max_long_side_pixel is not None:
         return _smart_resize_by_long_side(
             height,
@@ -94,7 +92,6 @@ def smart_resize(
             factor=factor,
             max_long_side_pixel=max_long_side_pixel,
             min_short_side_pixel=min_short_side_pixel,
-            max_total_pixels=max_total_pixels,
         )
     h_bar = max(factor, round_by_factor(height, factor))
     w_bar = max(factor, round_by_factor(width, factor))
@@ -108,13 +105,6 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
     if h_bar <= 0 or w_bar <= 0:
         raise_mm(MMErr.IMG_TOO_SMALL)
-    if max_total_pixels is not None and h_bar * w_bar > max_total_pixels:
-        raise_mm(
-            MMErr.IMG_HW.format(
-                f"image area {h_bar * w_bar} exceeds max_total_pixels "
-                f"{max_total_pixels} after resizing"
-            )
-        )
     return h_bar, w_bar
 
 
@@ -263,9 +253,10 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
     temporal_patch_size = 2
     merge_size = 2
     min_pixels = 4 * 28 * 28  # 3136, matches smart_resize default lower bound
-    max_pixels = 451584  # 672*672
+    max_pixels = IMAGE_MAX_TOTAL_PIXELS
     max_long_side_pixel = None
     min_short_side_pixel = MIN_SHORT_SIDE_PIXEL
+    # Kept as the named M3-VL default for callers that still reference it.
     max_total_pixels = IMAGE_MAX_TOTAL_PIXELS
     valid_kwargs = MiniMaxM3VLImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
@@ -276,6 +267,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
     def preprocess(
         self, images, **kwargs: Unpack[MiniMaxM3VLImageProcessorKwargs]
     ) -> BatchFeature:
+        kwargs.setdefault("max_pixels", self.max_total_pixels)
         return super().preprocess(images, **kwargs)
 
     def _preprocess(
@@ -315,7 +307,6 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
                     max_pixels=max_pixels,
                     max_long_side_pixel=max_long_side_pixel,
                     min_short_side_pixel=self.min_short_side_pixel,
-                    max_total_pixels=self.max_total_pixels,
                 )
                 stacked_images = self.resize(
                     stacked_images,
@@ -400,7 +391,7 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
         images_kwargs = images_kwargs or {}
         patch_size = images_kwargs.get("patch_size", self.patch_size)
         merge_size = images_kwargs.get("merge_size", self.merge_size)
-        max_pixels = images_kwargs.get("max_pixels", self.max_pixels)
+        max_pixels = images_kwargs.get("max_pixels", self.max_total_pixels)
         max_long_side_pixel = images_kwargs.get(
             "max_long_side_pixel", self.max_long_side_pixel
         )
@@ -412,7 +403,6 @@ class MiniMaxM3VLImageProcessor(BaseImageProcessorFast):
             max_pixels=max_pixels,
             max_long_side_pixel=max_long_side_pixel,
             min_short_side_pixel=self.min_short_side_pixel,
-            max_total_pixels=self.max_total_pixels,
         )
         grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
         return grid_h * grid_w

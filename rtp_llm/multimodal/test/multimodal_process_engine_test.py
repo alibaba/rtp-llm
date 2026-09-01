@@ -1617,25 +1617,36 @@ class MiniMaxM3VLPreprocessTest(TestCase):
         )
         self.assertEqual(min(resized), MIN_SHORT_SIDE_PIXEL)
 
-        with self.assertRaises(FtRuntimeException) as context:
-            smart_resize(
-                4000,
-                4000,
-                factor=28,
-                max_long_side_pixel=4000,
-                max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
-            )
-        self.assertIn("exceeds max_total_pixels", context.exception.message)
+        resized = smart_resize(
+            4000,
+            4000,
+            factor=28,
+            max_long_side_pixel=4000,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+        )
+        self.assertEqual(resized, (4004, 4004))
 
-        with self.assertRaises(FtRuntimeException) as context:
-            smart_resize(
-                4000,
-                4000,
-                factor=28,
-                max_pixels=20_000_000,
-                max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
-            )
-        self.assertIn("exceeds max_total_pixels", context.exception.message)
+        resized = smart_resize(
+            4000,
+            4000,
+            factor=28,
+            max_pixels=20_000_000,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+        )
+        self.assertGreater(resized[0] * resized[1], IMAGE_MAX_TOTAL_PIXELS)
+
+    def test_max_total_pixels_is_the_default_max_pixels(self):
+        from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            smart_resize,
+        )
+
+        resized = smart_resize(
+            4000,
+            4000,
+            factor=28,
+            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
+        )
+        self.assertLessEqual(resized[0] * resized[1], IMAGE_MAX_TOTAL_PIXELS)
 
     def test_minimax_request_media_limits_and_fps_range(self):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (

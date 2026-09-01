@@ -497,7 +497,9 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
 
         patch_size = int(self.mm_processor.patch_size)
         merge_size = int(self.merge_size)
-        max_pixels = int(self.mm_processor.max_pixels)
+        max_pixels = int(
+            getattr(self.mm_processor, "max_total_pixels", IMAGE_MAX_TOTAL_PIXELS)
+        )
         reference_patches = max(1, max_pixels // (patch_size**2))
         reference_output_tokens = reference_patches // (merge_size**2) + 2
         max_frames = self.visual.vision_config.vision_segment_max_frames
@@ -578,7 +580,9 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         _, height, width = raw.shape
         factor = processor.patch_size * processor.merge_size
         min_pixels = processor.min_pixels
-        max_pixels = processor.max_pixels
+        # M3-VL's total image-pixel limit is the default area budget. A
+        # request-level max_pixels remains an explicit override below.
+        max_pixels = getattr(processor, "max_total_pixels", IMAGE_MAX_TOTAL_PIXELS)
         pre_cfg = mm_input.mm_preprocess_config
         if getattr(pre_cfg, "max_pixels", -1) > 0:
             max_pixels = int(pre_cfg.max_pixels)
@@ -596,7 +600,6 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             max_pixels=max_pixels,
             max_long_side_pixel=max_long_side_pixel,
             min_short_side_pixel=MIN_SHORT_SIDE_PIXEL,
-            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
         )
         return raw, (target_h, target_w), None
 
