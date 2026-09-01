@@ -11,12 +11,12 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
 from rtp_llm.test.perf_test.grid_runner import GridRunner
-from rtp_llm.test.perf_test.dataset import extract_arg
 from rtp_llm.test.perf_test.perf_config import (
     parse_args,
     prepare_config,
@@ -82,6 +82,17 @@ def _effective_grid_max_seq_len(
     """
     needed_seq_len = max(input_len_list) + args.decode_test_length
     return max(needed_seq_len, args.max_seq_len)
+
+
+def _ensure_default_role_type(
+    engine_args: List[str], environ: Mapping[str, str] = os.environ
+) -> None:
+    """Default to PDFUSION only when neither CLI nor environment chose a role."""
+    if (
+        extract_arg(engine_args, "role_type") is None
+        and not environ.get("ROLE_TYPE", "").strip()
+    ):
+        engine_args.extend(["--role_type", "PDFUSION"])
 
 
 def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
@@ -205,8 +216,7 @@ def main() -> str:
     # backend in PDFUSION mode unless a caller explicitly supplies a role; the
     # standalone DECODE RPC role intentionally does not implement the
     # GenerateStreamCall path used by this perf client.
-    if extract_arg(remaining, "role_type") is None:
-        remaining.extend(["--role_type", "PDFUSION"])
+    _ensure_default_role_type(remaining)
     # batch_decode_test always needs BatchDecodeScheduler
     if extract_arg(remaining, "use_batch_decode_scheduler") is None:
         remaining.extend(["--use_batch_decode_scheduler", "1"])

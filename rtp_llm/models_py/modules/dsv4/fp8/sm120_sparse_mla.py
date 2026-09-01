@@ -5,12 +5,6 @@ from typing import Optional, Sequence
 import torch
 
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
-_PACKED_CACHE: dict[tuple, list[torch.Tensor]] = {}
-_GATHERED_CACHE: dict[tuple, list[torch.Tensor]] = {}
-_SLOT_CACHE: dict[tuple, list[torch.Tensor]] = {}
-_REMAP_CACHE: dict[tuple, list[torch.Tensor]] = {}
-_LOOKUP_CACHE: dict[tuple, list[torch.Tensor]] = {}
-_NEGATIVE_MASK_CACHE: dict[tuple, list[torch.Tensor]] = {}
 
 # FlashInfer's DSV4 sparse-decode dispatcher specializes on the static index
 # width.  HCA compresses one entry per 128 input tokens, so a 1M context needs
@@ -18,43 +12,6 @@ _NEGATIVE_MASK_CACHE: dict[tuple, list[torch.Tensor]] = {}
 # one place so eager and CUDA-graph preparation cannot diverge.
 SM120_SWA_TOPK_WIDTHS = (128, 512, 1024)
 SM120_EXTRA_TOPK_WIDTHS = (2, 128, 512, 1024, 2048, 4096, 8192)
-
-
-def _cached_buffer(
-    cache: dict[tuple, list[torch.Tensor]],
-    key: tuple,
-    shape: tuple[int, ...],
-    *,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> torch.Tensor:
-    """Return a stable-address arena buffer for a device/layout key.
-
-    A captured graph owns the address it observed. Growing a single cached
-    tensor by replacement would free that address and leave the graph with a
-    dangling pointer. Keep power-of-two generations alive and reuse the
-    smallest generation that covers the request. This bounds growth
-    logarithmically while preserving every captured address.
-    """
-    needed = 1
-    for extent in shape:
-        needed *= int(extent)
-    buffers = cache.setdefault(key, [])
-    result = min(
-        (buffer for buffer in buffers if buffer.numel() >= needed),
-        key=lambda buffer: buffer.numel(),
-        default=None,
-    )
-    if result is None:
-        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
-            raise RuntimeError(
-                "SM120 sparse MLA packed buffers must be materialized before "
-                "CUDA graph capture"
-            )
-        capacity = 1 if needed <= 1 else 1 << (needed - 1).bit_length()
-        result = torch.empty((capacity,), dtype=dtype, device=device)
-        buffers.append(result)
-    return result.reshape(-1)[:needed].view(shape)
 
 
 def workspace(device: torch.device) -> torch.Tensor:
@@ -187,94 +144,6 @@ def canonical_topk(
     return canonical, effective_lengths.contiguous()
 
 
-def pack_logical_workspace(
-    pool: torch.Tensor,
-    indices: torch.Tensor,
-    page_size: int,
-    *,
-    namespace: str = "default",
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
-        gather_k_cache_slots_packed,
-    )
-    from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
-        insert_packed_k_cache_flat,
-    )
-
-    flat_indices = indices.reshape(-1)
-    # Padding slots use -1 by contract.  Gather a harmless row for them, then
-    # keep -1 in the remapped indices so FlashInfer masks the slot instead of
-    # accidentally attending to physical slot zero.
-    slot_count = int(flat_indices.numel())
-    # The SWA and extra-sparse pools can have identical layouts (notably both
-    # use 64-token pages).  Keep their packed pages and remap workspaces
-    # independent: the two calls happen back-to-back, but both tensors are
-    # consumed by FlashInfer after the second call returns.
-    cache_key = (
-        namespace,
-        pool.device,
-        int(page_size),
-        int(pool.shape[-1]),
-        pool.dtype,
-    )
-    slot_key = cache_key
-    lookup_indices = _cached_buffer(
-        _LOOKUP_CACHE,
-        slot_key,
-        (slot_count,),
-        dtype=torch.int64,
-        device=pool.device,
-    )
-    lookup_indices.copy_(flat_indices)
-    lookup_indices.clamp_min_(0)
-    packed_rows = _cached_buffer(
-        _GATHERED_CACHE,
-        cache_key,
-        (slot_count, pool.shape[-1]),
-        dtype=pool.dtype,
-        device=pool.device,
-    )
-    gather_k_cache_slots_packed(pool, lookup_indices, out=packed_rows)
-    packed_pages = max((slot_count + page_size - 1) // page_size, 1)
-    packed = _cached_buffer(
-        _PACKED_CACHE,
-        cache_key,
-        (packed_pages, page_size, pool.shape[-1]),
-        dtype=pool.dtype,
-        device=pool.device,
-    )
-    packed.zero_()
-    local_slots = _cached_buffer(
-        _SLOT_CACHE,
-        slot_key,
-        (slot_count,),
-        dtype=torch.int64,
-        device=pool.device,
-    )
-    # The grow-only buffer may have been allocated for a larger request; only
-    # populate the range used by this invocation.
-    local_slots.copy_(torch.arange(slot_count, dtype=torch.int64, device=pool.device))
-    insert_packed_k_cache_flat(packed_rows, packed, local_slots)
-    remap = _cached_buffer(
-        _REMAP_CACHE,
-        slot_key,
-        (slot_count,),
-        dtype=torch.int32,
-        device=pool.device,
-    )
-    remap.copy_(local_slots)
-    negative_mask = _cached_buffer(
-        _NEGATIVE_MASK_CACHE,
-        slot_key,
-        (slot_count,),
-        dtype=torch.bool,
-        device=pool.device,
-    )
-    torch.lt(flat_indices, 0, out=negative_mask)
-    remap.masked_fill_(negative_mask, -1)
-    return packed, remap.view_as(indices)
-
-
 def run(
     *,
     query: torch.Tensor,
@@ -289,10 +158,11 @@ def run(
     extra_lens: Optional[torch.Tensor] = None,
 ) -> None:
     from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
-        _sm120_sparse_mla,
+        _load_sm120_sparse_mla,
     )
 
-    if _sm120_sparse_mla is None:
+    sm120_sparse_mla = _load_sm120_sparse_mla()
+    if sm120_sparse_mla is None:
         raise RuntimeError(
             "SM120 sparse MLA kernel was unavailable during model initialization"
         )
@@ -305,7 +175,7 @@ def run(
         kernel_query = torch.cat((kernel_query, torch.zeros_like(kernel_query)), dim=-2)
         kernel_sinks = torch.cat((kernel_sinks, torch.zeros_like(kernel_sinks)), dim=-1)
         kernel_out = torch.empty_like(kernel_query)
-    _sm120_sparse_mla(
+    sm120_sparse_mla(
         query=kernel_query,
         swa_kv_cache=swa_cache.unsqueeze(-2),
         workspace_buffer=workspace(query.device),

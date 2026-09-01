@@ -855,40 +855,47 @@ class DeepSeekV4Model(GptModelBase):
                 )
 
             try:
-                from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+                if is_sm12x(device_str):
+                    logging.info(
+                        "[DeepSeekV4Model] skip flash_mla SWA kv_full prewarm on SM12x"
+                    )
+                else:
+                    # Keep the import inside the backend branch.  The SM120
+                    # service uses FlashInfer and its CUDA 13 image need not
+                    # contain a loadable FlashMLA wheel.
+                    from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
 
-                _swa_attn = self.v4.layers[0].attn
-                _H_swa = int(_swa_attn.n_heads)
-                _D_swa = int(_swa_attn.head_dim)
-                _W_swa = int(_swa_attn.window_size)
-                _q_swa = _torch.zeros(
-                    (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _kv_swa = _torch.zeros(
-                    (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
-                )
-                _idx_swa = _torch.full(
-                    (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
-                )
-                _cp_rank_swa = 0
-                try:
-                    import torch.distributed as _dist
-
-                    if _dist.is_available() and _dist.is_initialized():
-                        _cp_rank_swa = int(_dist.get_rank())
-                except Exception:
+                    _swa_attn = self.v4.layers[0].attn
+                    _H_swa = int(_swa_attn.n_heads)
+                    _D_swa = int(_swa_attn.head_dim)
+                    _W_swa = int(_swa_attn.window_size)
+                    _q_swa = _torch.zeros(
+                        (2, _H_swa, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _kv_swa = _torch.zeros(
+                        (5, 1, _D_swa), dtype=_torch.bfloat16, device=device_str
+                    )
+                    _idx_swa = _torch.full(
+                        (2, 1, _W_swa), -1, dtype=_torch.int32, device=device_str
+                    )
                     _cp_rank_swa = 0
-                _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
-                _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
-                    _first_topk_len_swa, dtype=_torch.int32, device=device_str
-                )
-                _idx_swa[1, 0, :5] = _torch.arange(
-                    5, dtype=_torch.int32, device=device_str
-                )
-                _topk_len_swa = _torch.tensor(
-                    [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
-                )
-                if not is_sm12x(device_str):
+                    try:
+                        import torch.distributed as _dist
+
+                        if _dist.is_available() and _dist.is_initialized():
+                            _cp_rank_swa = int(_dist.get_rank())
+                    except Exception:
+                        _cp_rank_swa = 0
+                    _first_topk_len_swa = min(_cp_rank_swa + 1, 5, _W_swa)
+                    _idx_swa[0, 0, :_first_topk_len_swa] = _torch.arange(
+                        _first_topk_len_swa, dtype=_torch.int32, device=device_str
+                    )
+                    _idx_swa[1, 0, :5] = _torch.arange(
+                        5, dtype=_torch.int32, device=device_str
+                    )
+                    _topk_len_swa = _torch.tensor(
+                        [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
+                    )
                     _flash_mla_sparse_fwd(
                         q=_q_swa,
                         kv=_kv_swa,
@@ -898,10 +905,6 @@ class DeepSeekV4Model(GptModelBase):
                         topk_length=_topk_len_swa,
                     )
                     logging.info("[DeepSeekV4Model] flash_mla SWA kv_full prewarm done")
-                else:
-                    logging.info(
-                        "[DeepSeekV4Model] skip flash_mla SWA kv_full prewarm on SM12x"
-                    )
             except Exception:
                 logging.exception(
                     "[DeepSeekV4Model] flash_mla SWA kv_full prewarm failed"

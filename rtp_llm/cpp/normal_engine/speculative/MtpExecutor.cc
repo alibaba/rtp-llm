@@ -866,20 +866,25 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     releaseAllModelBuffers();
 
     // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES
-    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` in
+    // ``model_input.combo_tokens``, ``model_input.input_lengths`` and
+    // ``model_input.combo_position_ids`` in
     // place to the rank-local zigzag chunk layout for the target forward.
     // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
-    // draft re-CP-slice) needs the FULL/global view, so snapshot both
+    // draft re-CP-slice) needs the FULL/global view, so snapshot all three
     // tensors here while they still hold the global sequence and restore
     // on rank 0 before the second tpSync (which then broadcasts the
     // restored full view to every rank for the draft pass).
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
+    torch::Tensor saved_combo_position_ids;
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
         saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        if (model_input.combo_position_ids.defined()) {
+            saved_combo_position_ids = toCudaWithHostHold(model_input.combo_position_ids, buffer_holder_);
+        }
     }
 
     // target model prefill
@@ -909,15 +914,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output = std::move(sampler_->forward(sampler_input));
         }
-        // Restore the full combo_tokens / input_lengths — under CP both were
-        // mutated to rank-local by the target forward's handleInputs. The MTP
-        // shift formula (offset += input_length, last token overwrite at
+        // Restore the full tokens, lengths and position ids — under CP all
+        // three may be mutated to rank-local by the target forward's
+        // handleInputs. The MTP shift formula (offset += input_length,
+        // last token overwrite at
         // offset+input_length-1) and the dspark commit validation both assume
         // the contiguous full sequence; the tpSync below then publishes the
         // restored view to every draft rank (fake/warmup streams included).
         if (cp_enabled) {
-            model_input.combo_tokens  = saved_combo_tokens;
-            model_input.input_lengths = saved_input_lengths;
+            model_input.combo_tokens       = saved_combo_tokens;
+            model_input.input_lengths      = saved_input_lengths;
+            model_input.combo_position_ids = saved_combo_position_ids;
         }
         if (!is_dspark_ && model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;

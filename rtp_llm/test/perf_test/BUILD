@@ -1,5 +1,10 @@
 package(default_visibility = ["//visibility:public"])
 
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
 # across packages.
@@ -1005,6 +1010,7 @@ py_test(
     },
     tags = ["manual", "SM120_X86"],
     exec_properties = {"gpu": "SM120_X86"},
+    target_compatible_with = _DSV4_SM120_ONLY,
 )
 
 py_test(
@@ -1078,6 +1084,7 @@ py_test(
     },
     tags = ["manual", "SM120_X86"],
     exec_properties = {"gpu": "SM120_X86"},
+    target_compatible_with = _DSV4_SM120_ONLY,
 )
 
 test_suite(

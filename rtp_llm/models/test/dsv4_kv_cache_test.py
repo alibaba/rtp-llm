@@ -1,8 +1,19 @@
+import os
+from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.server_config_setup import setup_default_args
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models.deepseek_v4 import DeepSeekV4, DeepSeekV4DSpark
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.models.deepseek_v4 import (
+    DeepSeekV4,
+    DeepSeekV4DSpark,
+    DeepSeekV4DSparkWeight,
+    DeepSeekV4Weight,
+)
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
@@ -32,7 +43,9 @@ from rtp_llm.ops import (
     KVCacheSpecDesc,
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
+    RoleType,
 )
+from rtp_llm.utils.model_weight import W
 
 # CSA / HCA / SWA / SWA / CSA -- covers every routing branch plus a repeat.
 LAYER_COMPRESS_RATIOS = [4, 128, 0, 0, 4]
@@ -42,6 +55,42 @@ FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
 
 
 class Dsv4KvCacheSpecTest(TestCase):
+    def test_dspark_prefill_role_filters_production_weight_descriptors(self):
+        descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
+        descriptor.role_type = RoleType.PREFILL
+        source = ModelWeightInfo(
+            layer_weights=[
+                [
+                    SimpleNamespace(name=W.v4_attn_wkv_w),
+                    SimpleNamespace(name=W.v4_attn_kv_norm),
+                    SimpleNamespace(name=W.v4_routed_w1_w),
+                ]
+            ],
+            weights=[
+                SimpleNamespace(name=W.embedding),
+                SimpleNamespace(name=W.lm_head),
+                SimpleNamespace(name=W.v4_dspark_main_norm),
+                SimpleNamespace(name=W.v4_dspark_main_proj_w),
+                SimpleNamespace(name=W.v4_dspark_markov_w1),
+            ],
+        )
+        with patch.object(DeepSeekV4Weight, "get_weight_info", return_value=source):
+            filtered = descriptor.get_weight_info()
+
+        self.assertEqual(
+            [weight.name for weight in filtered.layer_weights[0]],
+            [W.v4_attn_wkv_w, W.v4_attn_kv_norm],
+        )
+        self.assertEqual(
+            [weight.name for weight in filtered.weights],
+            [
+                W.embedding,
+                W.lm_head,
+                W.v4_dspark_main_norm,
+                W.v4_dspark_main_proj_w,
+            ],
+        )
+
     def test_dspark_model_type_routes_to_production_wrapper(self):
         self.assertIs(
             ModelFactory.get_model_cls("deepseek_v4_dspark"),
@@ -329,6 +378,29 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         self.assertEqual(
             [desc.tag for desc in config.kv_cache_spec_descs[1]],
             [HCA_KV_TAG, HCA_STATE_TAG, SWA_KV_TAG],
+        )
+
+    def test_cli_bound_fixed_pool_memory_reaches_descriptor_residency(self):
+        env_config = PyEnvConfigs()
+        env_config.model_args.model_type = "fake_model"
+        env_config.kv_cache_config.dsv4_fixed_pool_use_memory = True
+        with patch.dict(os.environ, {}, clear=True):
+            setup_default_args(env_config)
+            self.assertEqual(os.environ["DSV4_FIXED_POOL_USE_MEMORY"], "1")
+
+            config = self._model_config()
+            DeepSeekV4._post_build_model_config(config)
+
+        by_tag = {
+            desc.tag
+            for layer in config.kv_cache_spec_descs
+            for desc in layer
+            if desc.memory is not None
+            and desc.memory.placement == CacheMemoryPlacement.HOST_PINNED
+        }
+        self.assertEqual(
+            by_tag,
+            {INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG},
         )
 
     def test_post_build_promotes_default_block_size(self):

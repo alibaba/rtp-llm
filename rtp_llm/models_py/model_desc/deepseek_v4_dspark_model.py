@@ -46,11 +46,12 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_slot_mapping_from_positions,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
-from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
-from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-    get_or_build_sched_meta,
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    BIND_KEEP,
+    _decode_sched_meta,
+    bind_attn_cache,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
@@ -692,7 +693,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
-            sched_meta = get_or_build_sched_meta(
+            sched_meta = _decode_sched_meta(
+                x.device,
                 graph_metadata,
                 batch_size=batch_size,
                 q_len=gamma,

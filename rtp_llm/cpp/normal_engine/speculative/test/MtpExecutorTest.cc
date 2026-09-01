@@ -735,6 +735,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     target_output.logits           = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({(int64_t)batch_size, 4});
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->expectTargetVerify(false);
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
@@ -805,6 +806,7 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->expectTargetVerify(false);
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 

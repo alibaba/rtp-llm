@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -14,6 +15,42 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import 
 
 
 class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
+    def test_sm120_passes_original_paged_caches_without_static_width_copy(self):
+        # This unit verifies only the cache ABI.  Keep construction independent
+        # of whether the host running the Python test has the optional CUDA 13
+        # FlashInfer wheel installed; the dedicated hardware target exercises
+        # the real entry point.
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.decode."
+            "fp8_sparse_attn_decode_op._load_sm120_sparse_mla",
+            return_value=object(),
+        ):
+            op = SparseAttnV4DecodeFp8Op(8, 512, 1.0)
+        query = torch.zeros(1, 1, 8, 512, dtype=torch.bfloat16)
+        sink = torch.zeros(8, dtype=torch.float32)
+        swa_cache = torch.zeros(2, 64, 584, dtype=torch.uint8)
+        extra_cache = torch.zeros(3, 2, 584, dtype=torch.uint8)
+        swa_indices = torch.tensor([[[1, -1, 3]]], dtype=torch.int32)
+        extra_indices = torch.tensor([[[2, -1]]], dtype=torch.int32)
+
+        with patch("rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla.warmup"), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla.run"
+        ) as mock_run:
+            out = op._forward_sm120_flashinfer(
+                query,
+                swa_cache,
+                sink,
+                swa_indices,
+                torch.tensor([3], dtype=torch.int32),
+                extra_cache,
+                extra_indices,
+                torch.tensor([2], dtype=torch.int32),
+            )
+
+        self.assertEqual(tuple(out.shape), tuple(query.shape))
+        self.assertIs(mock_run.call_args.kwargs["swa_cache"], swa_cache)
+        self.assertIs(mock_run.call_args.kwargs["extra_cache"], extra_cache)
+
     def test_attn_sink_cache_tracks_source_identity_and_inplace_updates(self):
         op = SparseAttnV4DecodeFp8Op(
             n_heads=2,
