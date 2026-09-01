@@ -945,7 +945,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillMetadataShiftOnlyForMultimodal) {
     EXPECT_EQ(std::vector<int>({11, 12, 30, 21, 40}), toVec<int>(multimodal_input.combo_tokens));
     EXPECT_EQ(std::vector<int>({0, 1, 1, 0, 1}), toVec<int>(multimodal_input.text_tokens_mask));
     EXPECT_EQ(std::vector<int>({6, 7, 8, 11, 12}), toVec<int>(multimodal_input.combo_position_ids));
-    EXPECT_EQ(std::vector<int>({0, 2}), toVec<int>(multimodal_input.mm_features_locs));
+    EXPECT_EQ(std::vector<int>({0, 3}), toVec<int>(multimodal_input.mm_features_locs));
 
     // A feature beginning at token zero becomes a negative loc after MTP
     // removes the first token; the injector drops the reused feature head.
@@ -958,7 +958,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillMetadataShiftOnlyForMultimodal) {
     image_first_input.multimodal_features =
         std::vector<torch::Tensor>{torch::ones({2, 4}, torch::kFloat32), torch::ones({1, 4}, torch::kFloat32)};
     processor.updatePrefillPostDraftModelInput(image_first_input, model_output, sampler_output, holder);
-    EXPECT_EQ(std::vector<int>({-1, 2}), toVec<int>(image_first_input.mm_features_locs));
+    EXPECT_EQ(std::vector<int>({-1, 3}), toVec<int>(image_first_input.mm_features_locs));
 
     // MROPE-style position IDs are flattened [tokens, 3] rows. Each appended
     // row follows the same max-component rule as the position generator.
@@ -973,6 +973,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillMetadataShiftOnlyForMultimodal) {
     processor.updatePrefillPostDraftModelInput(mrope_input, model_output, sampler_output, holder);
     EXPECT_EQ(std::vector<int>({1, 2, 3, 4, 5, 6, 7, 7, 7, 11, 12, 13, 14, 14, 14}),
               toVec<int>(mrope_input.combo_position_ids));
+    EXPECT_EQ(std::vector<int>({0, 3}), toVec<int>(mrope_input.mm_features_locs));
     // Pure text keeps the existing token update, but does not enter the new
     // multimodal metadata shift path even when explicit positions are present.
     GptModelInputs text_input;

@@ -212,9 +212,11 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
         // chunk. CP or the MTP embedding injector consumes only its overlap
         // with the current local input, so do not reject a valid partial
         // feature here. The feature must still overlap at least one request.
-        // Each request loses its first token. The global offset also loses one
-        // token for every preceding request, hence owner + 1 total positions.
-        dst_locs[feature_idx] = static_cast<int32_t>(feature_start - owner - 1);
+        // MTP shifts each request in place and overwrites its last slot, so
+        // packed request boundaries and global offsets remain unchanged. The
+        // owner is only used to validate the request span; it must not be
+        // subtracted from the packed global location.
+        dst_locs[feature_idx] = static_cast<int32_t>(feature_start - 1);
     }
     model_input.mm_features_locs = model_input.mm_features_locs.is_cuda() ?
                                        output.to(model_input.mm_features_locs.device(), /*non_blocking=*/true) :
