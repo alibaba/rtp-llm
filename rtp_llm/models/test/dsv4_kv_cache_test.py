@@ -58,10 +58,20 @@ class Dsv4KvCacheSpecTest(TestCase):
     def test_dspark_prefill_role_filters_production_weight_descriptors(self):
         descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
         descriptor.role_type = RoleType.PREFILL
+        # Quantized attention weights are composites whose outer name is the
+        # kernel name.  Filtering must retain the whole object so its sibling
+        # FP8 scale remains available to CommitOnlyAttentionFP8.
+        wkv = SimpleNamespace(
+            name=W.v4_attn_wkv_w,
+            sub_weights={
+                W.v4_attn_wkv_w: SimpleNamespace(name=W.v4_attn_wkv_w),
+                W.v4_attn_wkv_s: SimpleNamespace(name=W.v4_attn_wkv_s),
+            },
+        )
         source = ModelWeightInfo(
             layer_weights=[
                 [
-                    SimpleNamespace(name=W.v4_attn_wkv_w),
+                    wkv,
                     SimpleNamespace(name=W.v4_attn_kv_norm),
                     SimpleNamespace(name=W.v4_routed_w1_w),
                 ]
@@ -81,6 +91,8 @@ class Dsv4KvCacheSpecTest(TestCase):
             [weight.name for weight in filtered.layer_weights[0]],
             [W.v4_attn_wkv_w, W.v4_attn_kv_norm],
         )
+        self.assertIs(filtered.layer_weights[0][0], wkv)
+        self.assertIn(W.v4_attn_wkv_s, filtered.layer_weights[0][0].sub_weights)
         self.assertEqual(
             [weight.name for weight in filtered.weights],
             [

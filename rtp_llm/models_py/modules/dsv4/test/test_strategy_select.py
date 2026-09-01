@@ -300,6 +300,48 @@ class StrategySelectTest(unittest.TestCase):
         finally:
             grouped_fp4_module._SM120_FUSED_MOE_WORKSPACES.clear()
 
+    def test_sm120_capture_masks_zero_weight_routes(self):
+        strategy = GroupedFP4Strategy(_cfg(ep_size=1))
+        strategy._w13 = torch.zeros(8, dtype=torch.uint8)
+        strategy._w2 = torch.zeros(8, dtype=torch.uint8)
+        strategy._s13_sm120 = torch.zeros(1, dtype=torch.int32)
+        strategy._s2_sm120 = torch.zeros(1, dtype=torch.int32)
+
+        captured = {}
+
+        def fake_cutlass_fused_moe(**kwargs):
+            captured.update(kwargs)
+            kwargs["output"].zero_()
+
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.mxfp8_quantize = lambda value, **_: (value, value)
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        fake_fused_moe.cutlass_fused_moe = fake_cutlass_fused_moe
+        fake_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_core.ActivationType = types.SimpleNamespace(Swiglu=object())
+
+        x = torch.zeros(2, 8, dtype=torch.bfloat16)
+        weights = torch.tensor([[1.0, 0.0], [0.5, 0.0]])
+        indices = torch.tensor([[3, 17], [4, 99]], dtype=torch.int64)
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.fused_moe": fake_fused_moe,
+                "flashinfer.fused_moe.core": fake_core,
+            },
+        ), mock.patch.object(
+            strategy,
+            "_get_sm120_fused_moe_workspace",
+            return_value=torch.zeros(1, dtype=torch.uint8),
+        ):
+            strategy._forward_capture_sm120(x, weights, indices)
+
+        torch.testing.assert_close(
+            captured["token_selected_experts"],
+            torch.tensor([[3, -1], [4, -1]], dtype=torch.int32),
+        )
+
     def test_ep_gt1_with_mega_picks_mega(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
