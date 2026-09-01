@@ -42,7 +42,7 @@ class TestFuser(unittest.TestCase):
         self.assertTrue(request["enableMntRef"])
         self.assertEqual(
             request["cacheOptions"],
-            {"writeMode": "WRITE_THROUGH", "enableRemove": True},
+            {"writeMode": "WRITE_THROGH", "enableRemove": True},
         )
 
     def test_mount_dir_with_retries(self):

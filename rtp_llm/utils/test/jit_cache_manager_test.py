@@ -126,6 +126,14 @@ class StoreTest(JitCacheTestBase):
         self.publish(snap_store, {"triton/op.so": b"x"})
         self.assertEqual(snapshots(snap_store)[0].stat().st_mode & 0o777, 0o644)
 
+    def test_fuse_publish_does_not_chmod_remote_path(self):
+        snap_store = self.make_store(mounted="/mnt/fake")
+        with mock.patch.object(
+            Path, "chmod", side_effect=AssertionError("remote chmod is unsupported")
+        ):
+            self.publish(snap_store, {"triton/op.so": b"x"})
+        self.assertEqual(len(snapshots(snap_store)), 1)
+
     def test_extract_strips_setuid_bits(self):
         source = self.root / "suid.so"
         source.write_bytes(b"x")
@@ -314,6 +322,16 @@ class StoreTest(JitCacheTestBase):
                 False,
                 OSError,
             ),
+            (
+                "remote-ready",
+                mock.patch.object(
+                    store.RemoteSnapshotStore,
+                    "_wait_remote_ready",
+                    side_effect=TimeoutError("not visible"),
+                ),
+                False,
+                TimeoutError,
+            ),
             ("grew", contextlib.nullcontext(), True, store.SnapshotRaced),
         )
         for name, patcher, grows, error in cases:
@@ -329,6 +347,20 @@ class StoreTest(JitCacheTestBase):
                 snap_store.publish_snapshot(files, rescan)
             self.assertFalse(snapshots(snap_store))
             self.assertFalse(list(snap_store.remote_root.glob("*.tmp")))
+
+    def test_remote_ready_checks_size_and_tail(self):
+        source, remote = self.root / "source.tar.zst", self.root / "remote.tar.zst"
+        source.write_bytes(b"prefix" + b"a" * 5000)
+        remote.write_bytes(b"prefix" + b"b" * 5000)
+        with mock.patch.object(
+            store, "REMOTE_READY_TIMEOUT_S", 0.01
+        ), mock.patch.object(store.time, "sleep", return_value=None), self.assertRaises(
+            TimeoutError
+        ):
+            store.RemoteSnapshotStore._wait_remote_ready(remote, source)
+
+        remote.write_bytes(source.read_bytes())
+        store.RemoteSnapshotStore._wait_remote_ready(remote, source)
 
     def test_unmount_waits_for_in_flight_publish(self):
         snap_store = self.make_store(mounted="/mnt/fake")
