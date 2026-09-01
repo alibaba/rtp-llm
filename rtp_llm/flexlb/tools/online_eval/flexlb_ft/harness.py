@@ -1346,6 +1346,26 @@ class ClientOps:
 
 
 # ---------------------------------------------------------------------------
+# TTL-settle drain window (shared by every case whose leaked inflight slots
+# settle via the master's stale-inflight TTL path)
+# ---------------------------------------------------------------------------
+
+# Worst-case master-side TTL settle: staleInflightTimeoutMs (30s) + the
+# ExpirationTimer @Scheduled(60s) sweep + 5s margin.  A leaked slot's TTL
+# expires at t+30s, but the sweeper only visits on its 60s period, so with
+# worst-phase alignment the ledger entry survives until ~t+90s after its
+# last touch.  Drain windows shorter than this (the legacy TTL+margin=60s
+# or the 90s caps) let the residue bleed into the NEXT case on the shared
+# env — the integration-round cascade (2026-09-01 task #87: 16 false
+# FAILs with scheduler=4/8/5 constant residue and an all-zero engine
+# side; every affected case was solo-PASS on a clean env).  Waiting longer
+# is "wait for the settle", NOT a weaker assertion: the target stays
+# all-zero and a true leak (a slot that is never released) still times
+# out and fails the caller.
+TTL_DRAIN_TIMEOUT_S = 95.0
+
+
+# ---------------------------------------------------------------------------
 # AssertUtils
 # ---------------------------------------------------------------------------
 

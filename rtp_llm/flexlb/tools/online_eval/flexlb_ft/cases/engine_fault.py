@@ -42,6 +42,7 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
+    TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     _BackgroundFlow,
     _cleanup_dynamic,
@@ -228,6 +229,14 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
     try:
         _cleanup_dynamic(ops, env)
 
+        # Integration-round cascade hygiene (task #87): residues from the
+        # preceding elastic cases on this shared env settle via the
+        # stale-TTL + ExpirationTimer path (worst ~90s).  Drain them
+        # BEFORE the baseline batch so an earlier case's TTL settle cannot
+        # fail this case's Phase-1 gate (best-effort — a true leak is
+        # caught by the case's own end-of-run drain assertion below).
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+
         def master_up() -> bool:
             return (
                 http_get_status(
@@ -284,6 +293,15 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
         master_ok5 = master_up()
         recovery_ok = ok5 >= 19  # ≥95%
 
+        # Drain guard (task #87): the tolerated Phase-3 failures (err2<=2,
+        # requests routed onto the stopped engine) settle through the
+        # TTL path — wait for the worst-case window so this case does not
+        # leak its residue into engine_fault_flap/master_kill on the same
+        # env; a slot that never settles still FAILs this case here.
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+        )
+
         passed = (
             master_ok1
             and master_ok2
@@ -293,6 +311,7 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
             and alive_back
             and recovery_ok
             and ttft_ok
+            and inflight_ok
         )
         return passed, (
             f"baseline=20/20, evicted_after_stop={evicted}"
@@ -301,7 +320,8 @@ def engine_down_http_stop_prefill(ctx: CaseContext):
             f"alive_restored={alive_back}, "
             f"recovery={ok5}/20({ok5 / 20:.0%}), "
             f"ttft_recovery=[{ttft_detail}], "
-            f"master_up=(p1:{master_ok1}, p3:{master_ok2}, p5:{master_ok5})"
+            f"master_up=(p1:{master_ok1}, p3:{master_ok2}, p5:{master_ok5}), "
+            f"inflight_clean={inflight_ok}({inflight_detail})"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
@@ -334,7 +354,8 @@ def engine_flap(ctx: CaseContext):
       * after the flapping stops: the engine is re-discovered
         (discovered == alive == initial topology), routing and requests
         recover (>=95% batch), and no inflight leaks (global drain to zero
-        within the 90s cap that covers the 30s stale-inflight TTL).
+        within the TTL_DRAIN_TIMEOUT_S cap that covers the 30s
+        stale-inflight TTL plus the 60s ExpirationTimer sweep).
 
     The per-cycle alive count is observational evidence of the eviction vs
     re-discovery race: dipping below 2 means the 3-strike demotion landed,
@@ -388,9 +409,12 @@ def engine_flap(ctx: CaseContext):
         # Routing/request recovery: 20 requests, >=95%.
         ok_batch, _, _ = _run_batch(ops, base, 20)
         recovery_ok = ok_batch >= 19
-        # No inflight leak: global drain to zero (covers the 30s TTL).
+        # No inflight leak: global drain to zero (covers the 30s TTL plus
+        # the 60s ExpirationTimer sweep — task #87: the legacy 90s cap sat
+        # below the worst-phase settle and let residue poison the next
+        # case on this shared env).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), 90.0
+            _master_http(ops), TTL_DRAIN_TIMEOUT_S
         )
 
         passed = (
@@ -626,6 +650,13 @@ def inject_enqueue_delay(ctx: CaseContext):
         recovered_total = time.monotonic() - t2
 
         delta = delayed_total - baseline_total
+        # Integration-round cascade hygiene (task #87): residue from
+        # earlier cases on this shared env settles via the stale-TTL +
+        # ExpirationTimer path (worst ~90s); drain it BEFORE the clean
+        # assertion so another case's TTL settle cannot fail this one.
+        # Best-effort on purpose — a true leak never drains and the 10s
+        # assertion below still catches it.
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 10.0
         )
@@ -682,6 +713,11 @@ def inject_generate_delay(ctx: CaseContext):
 
         delta = ttft_delayed - ttft_base
         if enq0:
+            # Integration-round cascade hygiene (task #87): drain earlier
+            # cases' TTL-settling residue before the clean assertion (see
+            # inject_enqueue_delay) — best-effort, the 10s assertion below
+            # keeps the real leak detection.
+            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )

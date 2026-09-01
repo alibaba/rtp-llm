@@ -80,6 +80,7 @@ from ..context import CaseContext, CaseDef, rid_base
 from ..grade import GradeReport
 from ..harness import (
     DEFAULT_PREFILL_CACHE_BLOCKS,
+    TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     default_perf,
@@ -1817,7 +1818,13 @@ def kv_prefix_stickiness(ctx: CaseContext):
         if fired or fired_handles:
             _drain_fired(ops, fired, fired_handles)
         try:
-            AssertUtils.inflight_clean(_master_http(ops), 30.0)
+            # Best-effort residue drain (task #87): a drain-fallback cancel
+            # that fails leaves slots settling on the stale-TTL +
+            # ExpirationTimer path (worst ~90s) — the legacy 30s window
+            # stopped short of it and the residue poisoned later cases on
+            # this shared env.  Still not asserted (this finally is
+            # hygiene, the case's own contract lives in its verdict).
+            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
         except Exception:
             pass
 

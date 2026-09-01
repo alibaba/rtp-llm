@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..context import CaseContext, CaseDef, rid_base
 from ..grade import GradeReport
-from ..harness import AssertUtils
+from ..harness import TTL_DRAIN_TIMEOUT_S, AssertUtils
 
 BALANCE_CASES: list[CaseDef] = []
 
@@ -620,7 +620,13 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
                 except Exception:
                     pass
         try:
-            AssertUtils.inflight_clean(_master_http(ops), 30.0)
+            # Best-effort residue drain (task #87): a drain-fallback cancel
+            # that fails leaves slots settling on the stale-TTL +
+            # ExpirationTimer path (worst ~90s) — the legacy 30s window
+            # stopped short of it and the residue poisoned later cases on
+            # this shared env.  Still not asserted (this finally is
+            # hygiene, the case's own contract lives in its verdict).
+            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
         except Exception:
             pass
 
@@ -990,6 +996,10 @@ def balance_len_mixed(ctx: CaseContext):
         if fired or fired_handles:
             _drain_fired(ops, fired, fired_handles)
         try:
-            AssertUtils.inflight_clean(_master_http(ops), 30.0)
+            # Best-effort residue drain with the TTL-aware window (task
+            # #87 — same rationale as balance_overload_avoid_prefill: a
+            # drain-fallback cancel that fails settles on the stale-TTL +
+            # ExpirationTimer path, worst ~90s).
+            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
         except Exception:
             pass

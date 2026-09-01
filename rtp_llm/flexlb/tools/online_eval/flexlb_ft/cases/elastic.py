@@ -28,6 +28,7 @@ from typing import Optional
 from ..context import CaseContext, CaseDef, rid_base
 from ..grade import GradeReport
 from ..harness import (
+    TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     _accepted,
@@ -193,9 +194,12 @@ def elastic_remove_flow(ctx: CaseContext):
             0.1,
         )
         # In-flight requests reach a terminal state: master inflight drains
-        # (relaxed to 90s — covers the 30s stale-inflight TTL).
+        # (TTL_DRAIN_TIMEOUT_S — covers the 30s stale-inflight TTL plus the
+        # 60s ExpirationTimer sweep; the legacy 90s cap sat below the
+        # worst-phase settle and let residue poison later cases on this
+        # shared env, task #87).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), 90.0
+            _master_http(ops), TTL_DRAIN_TIMEOUT_S
         )
         passed = rate >= 0.90 and gone_from_snapshot and gone_from_file and inflight_ok
         return passed, (

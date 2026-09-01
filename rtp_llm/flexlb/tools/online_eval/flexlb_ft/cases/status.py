@@ -79,6 +79,7 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
+    TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     _accepted,
@@ -339,12 +340,19 @@ def _fire_and_forget(ops, base: int, n: int, output_len: int = 10) -> tuple:
     return rids, None
 
 
-def _wait_scheduler_zero(ops, timeout_s: float = STALE_INFLIGHT_TTL_S + TTL_MARGIN_S):
+def _wait_scheduler_zero(ops, timeout_s: float = TTL_DRAIN_TIMEOUT_S):
+    # TTL-aware default: the settle rides the 30s stale TTL PLUS the
+    # ExpirationTimer's 60s sweep period (worst-phase ~90s).  The legacy
+    # TTL+margin=60s default lost that race whenever the TTL expiry landed
+    # in the sweeper's second half: the case itself false-FAILed on the
+    # drain and the surviving residue poisoned the next case on this
+    # shared env (integration-round cascade, task #87).
     return wait_for(lambda: ops.master_scheduler_inflight() == 0, timeout_s, 2.0)
 
 
-def _stale_inflight_clean(ops, timeout_s: float = 95.0) -> tuple:
-    """Master inflight drain with the TTL-aware window (30s TTL + margin)."""
+def _stale_inflight_clean(ops, timeout_s: float = TTL_DRAIN_TIMEOUT_S) -> tuple:
+    """Master inflight drain with the TTL-aware window (30s TTL + 60s
+    ExpirationTimer sweep + margin — the worst-case settle path)."""
     return AssertUtils.inflight_clean(_master_http(ops), timeout_s)
 
 
@@ -662,7 +670,7 @@ def status_prefill_suppress_all(ctx: CaseContext):
             sched_zero = _wait_scheduler_zero(ops)
             batches_zero = wait_for(
                 lambda: _prefill_batches_sum(ops) == 0,
-                STALE_INFLIGHT_TTL_S + TTL_MARGIN_S,
+                TTL_DRAIN_TIMEOUT_S,
                 2.0,
             )
             anchors_after = _ttl_anchor_deltas(env, anchors_before)
@@ -748,9 +756,7 @@ def status_prefill_suppress_finished(ctx: CaseContext):
             str(e)[:70] for e in errs if e is not None and not _timeout_typed(e)
         ]
         # Clear -> keep-alive stops -> frozen clock expires -> drain.
-        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), STALE_INFLIGHT_TTL_S + TTL_MARGIN_S + 30.0
-        )
+        inflight_ok, inflight_detail = _stale_inflight_clean(ops)
         master_ok = _master_ok(ops)
 
         passed = legal_terminal and inflight_ok and master_ok
@@ -1126,7 +1132,7 @@ def status_decode_before_prefill(ctx: CaseContext):
             # stale TTL on the frozen slots.
             p_batches_zero = wait_for(
                 lambda: _prefill_batches_sum(ops) == 0,
-                STALE_INFLIGHT_TTL_S + TTL_MARGIN_S,
+                TTL_DRAIN_TIMEOUT_S,
                 2.0,
             )
             anchors_after = _ttl_anchor_deltas(env, anchors_before)
@@ -1557,9 +1563,7 @@ def status_zombie_completed_running(ctx: CaseContext):
             clear_type_all(ops, dnames, "status_zombie_running")
 
         ok = sum(1 for e in errs if e is None)
-        clean_ok, clean_detail = AssertUtils.inflight_clean(
-            _master_http(ops), STALE_INFLIGHT_TTL_S + TTL_MARGIN_S
-        )
+        clean_ok, clean_detail = _stale_inflight_clean(ops)
         d_requests = _decode_requests_sum(ops)
         master_ok = _master_ok(ops)
 
