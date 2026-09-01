@@ -17,6 +17,7 @@ import zstandard as zstd
 
 SNAPSHOT_SUFFIX, MTIME_MANIFEST = ".jit_snapshot.tar.zst", ".jit_mtime_ns.json"
 SNAPSHOT_KEEP, STALE_REMOTE_TMP_S, STALE_BATON_S = 20, 1800.0, 7200.0
+REMOTE_READY_TIMEOUT_S = 120.0
 Restored = namedtuple("Restored", "staging snapshot")
 
 
@@ -148,6 +149,27 @@ class RemoteSnapshotStore:
                 logging.warning("JIT snapshot unusable: %s", snap)
                 shutil.rmtree(staging, ignore_errors=True)
 
+    @staticmethod
+    def _wait_remote_ready(path: Path, source: Path) -> None:
+        """Wait until an uploaded snapshot is fully readable through FUSE."""
+
+        def tail(file: Path, offset: int) -> bytes:
+            with file.open("rb", buffering=0) as handle:
+                handle.seek(offset)
+                return handle.read()
+
+        size = source.stat().st_size
+        offset = max(0, size - 4096)
+        expected = tail(source, offset)
+        deadline, delay = time.monotonic() + REMOTE_READY_TIMEOUT_S, 0.05
+        while time.monotonic() < deadline:
+            with suppress(OSError):
+                if path.stat().st_size == size and tail(path, offset) == expected:
+                    return
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
+        raise TimeoutError(f"remote snapshot did not become ready: {path.name}")
+
     def publish_snapshot(self, files: dict[str, Path], rescan=None):
         with self._mount_lock:
             if self._closed or not files:
@@ -161,8 +183,14 @@ class RemoteSnapshotStore:
                 remote_tmp = self.remote_root / f"{name}.tmp"
                 try:
                     shutil.copyfile(archive, remote_tmp)
-                    remote_tmp.chmod(0o644)
+                    # A local directory needs an explicit shared mode. FUSE-backed
+                    # object storage may not support chmod and can expose a created
+                    # path only after the upload has become readable.
+                    if not self._mounted:
+                        remote_tmp.chmod(0o644)
+                    self._wait_remote_ready(remote_tmp, archive)
                     os.rename(remote_tmp, self.remote_root / name)
+                    logging.info("JIT_CACHE_PUBLISHED: %s", name)
                 finally:
                     with suppress(OSError):
                         remote_tmp.unlink()
