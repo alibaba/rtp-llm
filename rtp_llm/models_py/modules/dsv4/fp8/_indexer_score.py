@@ -220,6 +220,53 @@ def fp8_mqa_indexer_score(
         from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
             v4_indexer_score,
         )
+        M_rows = q_fp8.shape[0]
+        N_cols = k_quant.shape[0]
+        banded = (
+            os.environ.get("DSV4_INDEXER_BANDED", "0") == "1"
+            and M_rows > 0
+            and N_cols > 0
+        )
+        if banded:
+            # L3 causal-band fix (Sep 3): the dense SM120 fallback scores the
+            # FULL [M, N] axis even though row m only ever reads columns
+            # [ks[m], ke[m]) (the vendored topk never touches out-of-window
+            # entries and clean_logits re-masks anyway). Prefill rows ascend
+            # with position, so ke grows monotonically down the chunk: split
+            # rows into bands and score each against only its column range.
+            # Microbench (bench/indexer_score_microbench.py): dense scaling is
+            # exactly quadratic (x4.0 per ISL doubling; 20.7 ms @32K shape)
+            # and band_frac = 0.5 → ~2x saving at 32K, growing with ISL.
+            band_rows = int(os.environ.get("DSV4_INDEXER_BAND_ROWS", "1024"))
+            q_bf16 = q_fp8.to(torch.bfloat16).unsqueeze(0).contiguous()
+            k_bf16 = (k_quant.float() * k_scale.float()[:, None]).to(
+                torch.bfloat16
+            ).unsqueeze(0).contiguous()
+            w_f32 = w_fold.float().unsqueeze(0).contiguous()
+            # ONE D2H sync per call: chunk bounds are computed host-side.
+            ke_host = cu_seqlen_ke.to(torch.int64).cpu()
+            ks_host = cu_seqlen_ks.to(torch.int64).cpu()
+            out = torch.empty(
+                (M_rows, N_cols), dtype=torch.float32, device=q_fp8.device)
+            for r0 in range(0, M_rows, band_rows):
+                r1 = min(r0 + band_rows, M_rows)
+                ke_max = min(int(ke_host[r0:r1].max().item()), N_cols)
+                ks_min = max(int(ks_host[r0:r1].min().item()), 0)
+                if ke_max <= ks_min:
+                    continue
+                sub = v4_indexer_score(
+                    q_bf16[:, r0:r1].contiguous(),
+                    k_bf16[:, ks_min:ke_max].contiguous(),
+                    w_f32[:, r0:r1].contiguous(),
+                ).squeeze(0)
+                out[r0:r1, ks_min:ke_max] = sub
+            if clean_logits:
+                positions = torch.arange(N_cols, device=q_fp8.device).unsqueeze(0)
+                valid = (positions >= cu_seqlen_ks.long().unsqueeze(1)) & (
+                    positions < cu_seqlen_ke.long().unsqueeze(1)
+                )
+                out.masked_fill_(~valid, float("-inf"))
+            return out
         q_bf16 = q_fp8.to(torch.bfloat16).unsqueeze(0).contiguous()
         k_bf16 = (k_quant.float() * k_scale.float()[:, None]).to(
             torch.bfloat16
