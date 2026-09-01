@@ -223,26 +223,34 @@ def _contiguous_prefix_len(key_set: set, keys: list) -> int:
     return n
 
 
-def _wait_cache_sync(ops, engine_names: list, timeout_s: float = 15.0) -> bool:
-    """Wait for the mock-side cache_version to go QUIET.
+def _wait_cache_sync(ops, engine_names: list, timeout_s: float = 8.0) -> bool:
+    """Wait for every named engine's cache key set to go QUIET.
 
-    Polls every 0.5s and requires KV_SYNC_CONVERGENCE_S (>= 3.5s) with
-    no cache_version change on every named engine — after that window
-    the master's cache-status poll (its own ~1-2s period) has necessarily
-    observed the final state.  This is the spec's ">= 3.5s quiet or
-    cache_version polling" convergence caliber.
+    Polls /snapshot every 0.5s and requires KV_SYNC_CONVERGENCE_S (>= 3.5s)
+    with no cache_key_set change (two consecutive samples equal) on every
+    named engine — after that window the master's cache-status poll (its own
+    ~1-2s period) has necessarily observed the final state.  This is the
+    spec's ">= 3.5s quiet" convergence caliber.
+
+    Key-set equality is the cache_version proxy: mock commit fc35323af7
+    dropped the per-engine ``cache_version`` snapshot field, and every
+    cacheVersion bump is driven by a key-set change anyway (admit insert /
+    evict removal / capacity eviction inside admit), so set equality tracks
+    version stability exactly.  The bare two-sample signal alone only proves
+    1s of stability — too short for the master poll to have caught up, so
+    the quiet window (which subsumes it) is kept as the convergence bar.
     """
     deadline = time.monotonic() + timeout_s
-    last_versions = {n: None for n in engine_names}
+    last_sets: dict = {}
     last_change = {n: time.monotonic() for n in engine_names}
     while time.monotonic() < deadline:
         snap = ops.snapshot_by_name()
         now = time.monotonic()
         quiet = True
         for n in engine_names:
-            version = snap.get(n, {}).get("cache_version")
-            if version != last_versions[n]:
-                last_versions[n] = version
+            keys = frozenset(int(k) for k in snap.get(n, {}).get("cache_key_set", ()))
+            if keys != last_sets.get(n):
+                last_sets[n] = keys
                 last_change[n] = now
             if now - last_change[n] < KV_SYNC_CONVERGENCE_S:
                 quiet = False
