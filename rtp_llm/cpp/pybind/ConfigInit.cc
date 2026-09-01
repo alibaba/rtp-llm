@@ -1620,6 +1620,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("input_embedding_scalar", &ModelConfig::input_embedding_scalar)
         .def_readwrite("residual_scalar", &ModelConfig::residual_scalar)
         .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
+        .def_readwrite("enable_glm52_shared_indexer_kv_cache", &ModelConfig::enable_glm52_shared_indexer_kv_cache)
+        .def_readwrite("glm52_indexer_kv_slot_mapping", &ModelConfig::glm52_indexer_kv_slot_mapping)
         .def_readwrite("use_norm_input_residual", &ModelConfig::use_norm_input_residual)
         .def_readwrite("use_norm_attn_out_residual", &ModelConfig::use_norm_attn_out_residual)
         .def_readwrite("input_vocab_size", &ModelConfig::input_vocab_size)

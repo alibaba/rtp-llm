@@ -48,6 +48,12 @@ py_test(
     ],
 )
 
+py_test(
+    name = "dsa_indexing_test",
+    srcs = ["dsa_indexing_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
 
 py_test(
     name = "util_test",

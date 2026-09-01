@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfig.h"
 
+#include <algorithm>
 #include <string>
 
 namespace rtp_llm {
@@ -31,7 +32,8 @@ public:
                                                                   cache_config.kv_block_stride_bytes,
                                                                   cache_config.kv_scale_stride_bytes,
                                                                   main_spec,
-                                                                  cache_config);
+                                                                  cache_config,
+                                                                  cache_config.layer_to_indexer_kv_slot);
 
         main_layout.kv_cache_offset_bytes = 0;
         main_layout.kv_scale_offset_bytes = main_layout.kv_cache_offset_bytes + main_layout.kv_block_pool_size_bytes;
@@ -57,7 +59,8 @@ public:
                                                                      mtp_sub_config->kv_block_stride_bytes,
                                                                      mtp_sub_config->kv_scale_stride_bytes,
                                                                      mtp_spec,
-                                                                     cache_config);
+                                                                     cache_config,
+                                                                     mtp_sub_config->layer_to_indexer_kv_slot);
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
             RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
@@ -126,7 +129,7 @@ public:
         }
 
         MemoryLayoutConfig layout =
-            createMemoryLayoutConfig(false, layer_num, kv_stride, scale_stride, spec, group_cache_config);
+            createMemoryLayoutConfig(false, layer_num, kv_stride, scale_stride, spec, group_cache_config, {});
         RTP_LLM_CHECK_WITH_INFO(group_id < cache_config.group_types.size(),
                                 "missing cache group type for group %zu (group_types.size=%zu)",
                                 group_id,
@@ -168,12 +171,13 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool           enable_hybrid_attention,
-                                                       uint32_t       layer_num,
-                                                       size_t         kv_block_stride_bytes,
-                                                       size_t         kv_scale_stride_bytes,
-                                                       KVCacheSpecPtr spec,
-                                                       CacheConfig    cache_config) {
+    static MemoryLayoutConfig createMemoryLayoutConfig(bool                    enable_hybrid_attention,
+                                                       uint32_t                layer_num,
+                                                       size_t                  kv_block_stride_bytes,
+                                                       size_t                  kv_scale_stride_bytes,
+                                                       KVCacheSpecPtr          spec,
+                                                       CacheConfig             cache_config,
+                                                       const std::vector<int>& layer_to_scale_slot) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
         cfg.block_num             = cache_config.block_num;
@@ -189,15 +193,26 @@ private:
         cfg.local_head_num_kv       = spec->local_head_num_kv;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla            = cache_config.use_mla;
-        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
+        cfg.is_mla              = cache_config.use_mla || cache_config.is_sparse;
+        cfg.use_mla             = cache_config.use_mla;
+        cfg.seq_size_per_block  = static_cast<size_t>(cache_config.seq_size_per_block);
+        cfg.layer_to_scale_slot = layer_to_scale_slot;
+        cfg.scale_layer_num     = layer_num;
+        if (!layer_to_scale_slot.empty()) {
+            RTP_LLM_CHECK_WITH_INFO(layer_to_scale_slot.size() == layer_num,
+                                    "scale slot mapping size(%zu) != layer_num(%u)",
+                                    layer_to_scale_slot.size(),
+                                    layer_num);
+            const int max_slot = *std::max_element(layer_to_scale_slot.begin(), layer_to_scale_slot.end());
+            RTP_LLM_CHECK_WITH_INFO(max_slot >= 0, "scale slot mapping must contain a non-negative slot");
+            cfg.scale_layer_num = static_cast<uint32_t>(max_slot + 1);
+        }
 
         cfg.kv_block_pool_size_bytes =
             static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_block_stride_bytes;
 
         cfg.kv_scale_pool_size_bytes =
-            static_cast<size_t>(layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_scale_stride_bytes;
+            static_cast<size_t>(cfg.scale_layer_num) * static_cast<size_t>(cfg.block_num) * cfg.kv_scale_stride_bytes;
         cfg.total_size_bytes = cfg.kv_block_pool_size_bytes + cfg.kv_scale_pool_size_bytes;
         return cfg;
     }

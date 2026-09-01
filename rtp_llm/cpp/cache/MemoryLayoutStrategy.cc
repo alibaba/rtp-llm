@@ -130,7 +130,13 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
             torch::TensorOptions().dtype(torch::kUInt8).device(kv_scale_tensor.device()).requires_grad(false);
         torch::Tensor kv_scale_typed = torch::from_blob(
             kv_scale_tensor.data_ptr(), {static_cast<int64_t>(config_.kv_scale_pool_size_bytes)}, scale_options);
-        torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(config_.layer_num),
+        const uint32_t scale_layer_num = config_.scale_layer_num == 0 ? config_.layer_num : config_.scale_layer_num;
+        RTP_LLM_CHECK_WITH_INFO(config_.layer_to_scale_slot.empty()
+                                    || config_.layer_to_scale_slot.size() == config_.layer_num,
+                                "scale slot mapping size(%zu) != layer_num(%u)",
+                                config_.layer_to_scale_slot.size(),
+                                config_.layer_num);
+        torch::Tensor reshaped_scale_tensor = kv_scale_typed.reshape({static_cast<int64_t>(scale_layer_num),
                                                                       static_cast<int64_t>(config_.block_num),
                                                                       static_cast<int64_t>(config_.seq_size_per_block),
                                                                       static_cast<int64_t>(scale_bytes_per_token)});
@@ -139,12 +145,26 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         layer_kv_scale_tensors_.clear();
         layer_kv_scale_tensors_.reserve(config_.layer_num);
         for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-            layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[layer_id]);
-
-            RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld (MLA)",
-                              layer_id,
-                              torch::str(layer_kv_scale_tensors_[layer_id].sizes()).c_str(),
-                              layer_kv_scale_tensors_[layer_id].numel());
+            const int scale_slot = config_.layer_to_scale_slot.empty() ? static_cast<int>(layer_id) :
+                                                                         config_.layer_to_scale_slot[layer_id];
+            RTP_LLM_CHECK_WITH_INFO(scale_slot >= 0 && static_cast<uint32_t>(scale_slot) < scale_layer_num,
+                                    "invalid scale slot %d for layer %u (physical slots=%u)",
+                                    scale_slot,
+                                    layer_id,
+                                    scale_layer_num);
+            const bool owns_scale_slot =
+                config_.layer_to_scale_slot.empty() || layer_id == 0
+                || config_.layer_to_scale_slot[layer_id] != config_.layer_to_scale_slot[layer_id - 1];
+            if (owns_scale_slot) {
+                layer_kv_scale_tensors_.push_back(reshaped_scale_tensor[scale_slot]);
+                RTP_LLM_LOG_DEBUG("Layer %d scale tensor shape: [%s], elements: %ld (MLA)",
+                                  layer_id,
+                                  torch::str(layer_kv_scale_tensors_[layer_id].sizes()).c_str(),
+                                  layer_kv_scale_tensors_[layer_id].numel());
+            } else {
+                layer_kv_scale_tensors_.push_back(torch::Tensor());
+                RTP_LLM_LOG_DEBUG("Layer %d shares Indexer result and has no scale tensor", layer_id);
+            }
         }
     } else {
         // MHA: scale is FP32, shape [layer_num, block_num, scale_stride_elems] for kernel/model
@@ -242,7 +262,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     }
     auto kv_info = makeBlockInfo(layer_tensor, kv_addr, static_cast<size_t>(config_.kv_block_stride_bytes));
 
-    if (config_.hasScale()) {
+    if (config_.hasScale() && layer_kv_scale_tensors_[layer_id].defined()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* kv_scale_addr      = nullptr;
         if (config_.kernel_blocks_per_kv_block > 1) {
@@ -282,7 +302,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
 
     std::vector<BlockInfo> out = createPartitionedSubBlocks(layer_tensor, kv_addr, kv_parts);
 
-    if (config_.hasScale()) {
+    if (config_.hasScale() && layer_kv_scale_tensors_[layer_id].defined()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* scale_addr         = getBlockPtr(layer_scale_tensor, block_id);
         auto  sc_parts     = MHAKVCacheSpec::splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),

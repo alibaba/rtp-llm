@@ -101,3 +101,11 @@ def init_model_group_args(parser, model_args):
         default=None,
         help="是否将lm_head权重加载为fp32精度，默认为true",
     )
+    model_group.add_argument(
+        "--enable_glm52_shared_indexer_kv_cache",
+        env_name="ENABLE_GLM52_SHARED_INDEXER_KV_CACHE",
+        bind_to=(model_args, "enable_glm52_shared_indexer_kv_cache"),
+        type=str2bool,
+        default=False,
+        help="仅为GLM5.2压缩shared层未使用的Indexer KV cache，默认关闭",
+    )

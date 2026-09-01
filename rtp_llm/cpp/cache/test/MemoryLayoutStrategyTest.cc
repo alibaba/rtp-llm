@@ -224,6 +224,61 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
 }
 
+TEST_F(MemoryLayoutStrategyTest, SharedIndexerLayersHaveNoScaleTensorWithoutChangingKvLayout) {
+    auto                 spec = createTestKvCacheSpec(/*layer_num=*/4,
+                                      /*dtype=*/rtp_llm::DataType::TYPE_INT8,
+                                      /*local_head_num_kv=*/1,
+                                      /*seq_size_per_block=*/4,
+                                      /*k_block_stride_bytes=*/512,
+                                      /*v_block_stride_bytes=*/256);
+    rtp_llm::CacheConfig cache_config;
+    cache_config.cache_specs              = {spec};
+    cache_config.layer_num                = 4;
+    cache_config.block_num                = 8;
+    cache_config.dtype                    = rtp_llm::DataType::TYPE_INT8;
+    cache_config.use_mla                  = true;
+    cache_config.is_sparse                = true;
+    cache_config.seq_size_per_block       = 4;
+    cache_config.kv_block_stride_bytes    = spec->block_size_bytes();
+    cache_config.kv_scale_stride_bytes    = 132 * cache_config.seq_size_per_block;
+    cache_config.layer_to_indexer_kv_slot = {0, 1, 1, 1};
+
+    auto pool_config = BlockPoolConfigHelper::createConfig(cache_config);
+    ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
+    auto config = pool_config.memory_layouts[0];
+    EXPECT_EQ(config.layer_num, 4u);
+    EXPECT_EQ(config.scale_layer_num, 2u);
+    EXPECT_EQ(config.kv_scale_pool_size_bytes, 2u * config.block_num * config.kv_scale_stride_bytes);
+
+    auto context  = createTestContext(config);
+    auto strategy = std::make_unique<MemoryLayoutStrategy>();
+    ASSERT_TRUE(strategy->init(context.config, context.kv_cache_buffer, context.kv_scale_buffer, context.cache_ptr));
+
+    auto layer0 = strategy->convertIndexToAddr(0, 0);
+    auto layer1 = strategy->convertIndexToAddr(1, 0);
+    auto layer2 = strategy->convertIndexToAddr(2, 0);
+    auto layer3 = strategy->convertIndexToAddr(3, 0);
+    EXPECT_NE(layer0.kv_addr, layer1.kv_addr);
+    EXPECT_NE(layer1.kv_addr, layer2.kv_addr);
+    EXPECT_NE(layer2.kv_addr, layer3.kv_addr);
+    EXPECT_NE(layer0.kv_scale_addr, layer1.kv_scale_addr);
+    EXPECT_NE(layer1.kv_scale_addr, nullptr);
+    EXPECT_EQ(layer2.kv_scale_addr, nullptr);
+    EXPECT_EQ(layer3.kv_scale_addr, nullptr);
+
+    auto scale_tensors = strategy->getLayerScaleCacheTensors();
+    ASSERT_EQ(scale_tensors.size(), 4u);
+    EXPECT_TRUE(scale_tensors[0].defined());
+    EXPECT_TRUE(scale_tensors[1].defined());
+    EXPECT_FALSE(scale_tensors[2].defined());
+    EXPECT_FALSE(scale_tensors[3].defined());
+
+    EXPECT_EQ(strategy->convertIndexToBuffer(0, 0).size(), 2u);
+    EXPECT_EQ(strategy->convertIndexToBuffer(1, 0).size(), 2u);
+    EXPECT_EQ(strategy->convertIndexToBuffer(2, 0).size(), 1u);
+    EXPECT_EQ(strategy->convertIndexToBuffer(3, 0).size(), 1u);
+}
+
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext();
 
