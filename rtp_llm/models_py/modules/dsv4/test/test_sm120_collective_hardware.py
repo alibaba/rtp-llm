@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -275,6 +276,18 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
             swiglu_limit=cfg.swiglu_limit,
         )
         torch.testing.assert_close(public_cp, public_cp_reference, rtol=8e-2, atol=5e-1)
+        dist.barrier()
+
+        # Materialize the exact graph backend and its fixed-address workspace
+        # before capture.  The public entry point still exercises Pure-CP
+        # routing here, while the warmup flag makes the local grouped executor
+        # select the same graph-safe kernel used during capture.
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            graph_warmup = strategy(x, weights, indices)
+        torch.testing.assert_close(
+            graph_warmup, public_cp_reference, rtol=8e-2, atol=5e-1
+        )
+        torch.cuda.synchronize(device)
         dist.barrier()
 
         graph = torch.cuda.CUDAGraph()

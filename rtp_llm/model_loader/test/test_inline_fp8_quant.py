@@ -9,7 +9,7 @@ Covers:
 """
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -17,6 +17,10 @@ from rtp_llm.model_loader.ffn_weight import (
     MoeAtomicWeight,
     MoeConfig,
     iter_stacked_moe_weights,
+)
+from rtp_llm.model_loader.per_block_fp8_quant_weight import (
+    LoadQuantPerBlockFp8Weight,
+    per_block_cast_to_fp8,
 )
 from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     LoadQuantPerChannelFp8Weight,
@@ -177,6 +181,36 @@ class TestPerChannelCastToFp8Expert(unittest.TestCase):
             per_channel_cast_to_fp8_expert(torch.randn(4, 8, 16))
 
 
+class TestPerBlockOnlineSm120Layout(unittest.TestCase):
+    def test_rectangular_weight_keeps_output_major_layout(self):
+        loader = LoadQuantPerBlockFp8Weight.__new__(LoadQuantPerBlockFp8Weight)
+        loader.group_size = 128
+        loader.kernel = MagicMock()
+        loader.kernel.name = W.attn_o_w
+        loader.scale = MagicMock()
+        loader.scale.name = W.attn_o_s
+
+        raw_weight = torch.linspace(-1.0, 1.0, 256 * 384).reshape(256, 384)
+        loader.kernel._load_raw_tensor.return_value = {W.attn_o_w: raw_weight}
+        expected_weight, expected_scale = per_block_cast_to_fp8(
+            raw_weight, loader.group_size
+        )
+
+        with patch(
+            "rtp_llm.model_loader.per_block_fp8_quant_weight."
+            "_preserve_output_major_fp8_layout",
+            return_value=True,
+        ):
+            loaded = loader._load_raw_tensor(
+                MagicMock(), layer_id=0, device="cpu", load_config=MagicMock()
+            )
+
+        self.assertEqual(loaded[W.attn_o_w].shape, (256, 384))
+        self.assertEqual(loaded[W.attn_o_s].shape, (2, 3))
+        self.assertTrue(torch.equal(loaded[W.attn_o_w], expected_weight))
+        torch.testing.assert_close(loaded[W.attn_o_s], expected_scale)
+
+
 class TestTransposeStackMoeW1Swap(unittest.TestCase):
     """_load_moe_inline_quant applies gate/up swap for transpose_stack_moe_w1."""
 
@@ -228,10 +262,7 @@ class TestTransposeStackMoeW1Swap(unittest.TestCase):
         up_data = torch.randn(num_experts, gate_dim, hidden_dim)
         fused_experts = torch.cat([gate_data, up_data], dim=1)
 
-        expert_keys = {
-            f"layers.0.moe.{W.moe_w1}.{eid}.0"
-            for eid in range(num_experts)
-        }
+        expert_keys = {f"layers.0.moe.{W.moe_w1}.{eid}.0" for eid in range(num_experts)}
         collector = TensorCollector(expert_keys, FakeDatabase())
         for eid in range(num_experts):
             key = f"layers.0.moe.{W.moe_w1}.{eid}.0"

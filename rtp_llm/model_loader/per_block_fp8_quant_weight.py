@@ -951,14 +951,17 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
+        preserve_output_major = _preserve_output_major_fp8_layout(
+            quant_kernel, load_config
+        )
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2:
+        elif quant_kernel.dim() == 2 and not preserve_output_major:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
+            scale = scale.T if scale.dim() == 2 and not preserve_output_major else scale
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res
