@@ -936,7 +936,10 @@ test_suite(
 )
 
 # SM120 DeepSeek-V4-Flash-0731 DSpark profiles matching the CP4/DP4 smoke
-# deployment.  Keep these manual: the full decode cartesian grid is expensive.
+# deployment. Keep these manual: the full decode cartesian grid is expensive.
+# Supply model locations with --test_env=CHECKPOINT_PATH=... and, when they
+# differ, TOKENIZER_PATH/SP_CHECKPOINT_PATH. Public targets must not encode a
+# developer-specific NAS mount.
 py_test(
     name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
     main = "batch_decode_test.py",
@@ -950,8 +953,6 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1",
         "--input_len", "1024,2048,4096,8192,16384,32768,65536,131072,262144",
         "--partial", "2",
@@ -978,7 +979,6 @@ py_test(
         "--sp_type", "dspark",
         "--gen_num_per_cycle", "3",
         "--sp_model_type", "deepseek_v4_dspark",
-        "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
     ],
     env = {
@@ -1026,8 +1026,6 @@ py_test(
     data = ["//rtp_llm:sdk"],
     args = [
         "--model_type", "deepseek_v4",
-        "--checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
-        "--tokenizer_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--batch_size", "1,2,4,8,16,32,64,128",
         "--input_len", "1024,4096,8192,16384,32768,65536,131072,262144",
         "--partial", "1",
@@ -1053,7 +1051,6 @@ py_test(
         "--sp_type", "dspark",
         "--gen_num_per_cycle", "3",
         "--sp_model_type", "deepseek_v4_dspark",
-        "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
     ],
     env = {

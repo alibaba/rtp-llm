@@ -9,12 +9,33 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8.decode import fp8_sparse_attn_decode_op
 from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
     SparseAttnV4DecodeFp8Op,
 )
 
 
 class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
+    def test_flash_mla_optional_wheel_failures_are_lazy_and_nonfatal(self):
+        old_available = fp8_sparse_attn_decode_op._FLASH_MLA_AVAILABLE
+        old_attempted = fp8_sparse_attn_decode_op._flash_mla_load_attempted
+        try:
+            for error in (OSError("ABI mismatch"), RuntimeError("load failure")):
+                with self.subTest(error=type(error).__name__):
+                    fp8_sparse_attn_decode_op._FLASH_MLA_AVAILABLE = False
+                    fp8_sparse_attn_decode_op._flash_mla_load_attempted = False
+                    with patch.object(torch.version, "cuda", "12.9"), patch.object(
+                        fp8_sparse_attn_decode_op.importlib,
+                        "import_module",
+                        side_effect=error,
+                    ) as import_module:
+                        self.assertFalse(fp8_sparse_attn_decode_op._load_flash_mla())
+                        self.assertFalse(fp8_sparse_attn_decode_op._load_flash_mla())
+                    import_module.assert_called_once_with("flash_mla")
+        finally:
+            fp8_sparse_attn_decode_op._FLASH_MLA_AVAILABLE = old_available
+            fp8_sparse_attn_decode_op._flash_mla_load_attempted = old_attempted
+
     def test_sm120_passes_original_paged_caches_without_static_width_copy(self):
         # This unit verifies only the cache ABI.  Keep construction independent
         # of whether the host running the Python test has the optional CUDA 13
