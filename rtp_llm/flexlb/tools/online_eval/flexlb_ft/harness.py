@@ -1367,15 +1367,22 @@ class AssertUtils:
                 prefill_clean = all(
                     ep.get("inflight_batches", 0) == 0 for ep in prefill_eps
                 )
-                decode_clean = all(
-                    ep.get("inflight_requests", 0) == 0 for ep in decode_eps
-                )
+
+                # decode_endpoints no longer emit the legacy inflight_requests
+                # key (see HttpLoadBalanceServer.inflightStatus): fall back to
+                # total_load (= confirmedEngineOwnedCount + inflight) so the
+                # decode leg still observes a live field instead of a missing
+                # key that always reads 0.
+                def _decode_inflight(ep: dict) -> int:
+                    return ep.get("inflight_requests", 0) or ep.get("total_load", 0)
+
+                decode_clean = all(_decode_inflight(ep) == 0 for ep in decode_eps)
                 if sched == 0 and prefill_clean and decode_clean:
                     return True, "all inflight zero"
                 detail = (
                     f"scheduler={sched}, "
                     f"prefill={[(ep.get('ip_port'), ep.get('inflight_batches', 0)) for ep in prefill_eps]}, "
-                    f"decode={[(ep.get('ip_port'), ep.get('inflight_requests', 0)) for ep in decode_eps]}"
+                    f"decode={[(ep.get('ip_port'), _decode_inflight(ep)) for ep in decode_eps]}"
                 )
             time.sleep(0.5)
         return False, f"timeout waiting for inflight clean: {detail}"
