@@ -399,6 +399,11 @@ per_sec = defaultdict(
         "output_len": [],
         "input_tokens": 0,
         "output_tokens": 0,
+        # output 完成口径时序（20260901 修复）：ok 行按完成秒分桶的
+        # Σol，与 mock 自报 rtp_llm_generate_tps 的完成事件记账同轴对账
+        # （出生口径 output_tokens 在 ramp/drain 期因在途请求错位）。桶
+        # 键集合 = 出生秒 ∪ 完成秒（drain 期在途完成会新建纯完成桶）。
+        "output_tokens_completed": 0,
     }
 )
 for d in rows:
@@ -456,6 +461,16 @@ for d in rows:
     b["input_tokens"] += d.get("input_len") or 0
     b["output_tokens"] += d.get("output_len") or 0
     if _bucket_key is None:
+        # output 完成口径时序（20260901 修复）：ok 行按完成秒分桶累加
+        # ol。完成时刻 = send_start + total_ms（total_ms 终点是最后一帧
+        # finished，与引擎侧 decode 完成回调同点；不用 wall_clock_ts——
+        # 它在流消费完之后才取且 scheduled 路径缺赋值，覆盖不完整）。
+        # total_ms 缺失的行跳过（计入与 ok_output_tokens 的差值，不编造
+        # 分桶）；完成秒可超出出生窗尾（drain 期在途完成），defaultdict
+        # 自动新建纯完成桶（arrivals=0，仅 output_tokens_completed 非零）。
+        if d.get("total_ms"):
+            _tc = int((_send_ts + d["total_ms"] - epoch0) // 1000)
+            per_sec[_tc]["output_tokens_completed"] += d.get("output_len") or 0
         b["success"] += 1
         b["sched"].append(d.get("schedule_ms", 0))
         if d.get("total_ms"):
@@ -572,6 +587,11 @@ for t in sorted(per_sec):
             # 同数据源不同聚合（求和 vs 分位）。
             "input_tokens": b["input_tokens"],
             "output_tokens": b["output_tokens"],
+            # token 完成口径时序（20260901 修复，完成秒分桶 ok 行）：
+            # Σoutput_tokens_completed 与 summary.output_token_tps 的分子
+            # ok_output_tokens 同源，差值 = 缺 total_ms / 无时间戳的 ok
+            # 行（不编造分桶）；供报告层 output 侧完成口径守恒对账。
+            "output_tokens_completed": b["output_tokens_completed"],
         }
     )
 

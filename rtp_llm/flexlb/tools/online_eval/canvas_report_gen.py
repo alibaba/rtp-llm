@@ -784,8 +784,11 @@ def main():
     output_len_p50 = output_len_p95 = None
     # mock 自报 TPS / client token 序列（20260901）：2.3 节对账图；
     # 旧 aggregate 无 mock_tps_ts / input_tokens 键时保持 None -> 省略。
+    # client_out_tok_done（完成口径，20260901 修复）：output 侧对账主
+    # 口径；旧 aggregate 无 output_tokens_completed 键时保持 None ->
+    # output 面板回退出生秒到达口径（client_out_tok）。
     mock_ctx_tps = mock_ctx_cache_tps = mock_gen_tps = None
-    client_in_tok = client_out_tok = None
+    client_in_tok = client_out_tok = client_out_tok_done = None
     if per_second:
         ps_by_t = {int(p.get("t", 0) or 0): p for p in per_second}
         tsec_vals = rel_ts
@@ -916,6 +919,21 @@ def main():
                 "clientOutTok",
                 num_arr(
                     [(ps_by_t.get(t) or {}).get("output_tokens", 0) for t in tsec_vals]
+                ),
+            )
+        # client 完成口径 token 序列（per_second.output_tokens_completed，
+        # 完成秒分桶 ok 行 Σol，20260901 修复）：output 侧对账主口径——
+        # 与 mock 自报 rtp_llm_generate_tps（完成事件记账）同为完成口径，
+        # 两线应基本重合构成吞吐守恒校验；旧 aggregate 无键时保持 None
+        # -> output 面板回退出生秒到达口径（非零才注册，同上规则）。
+        if any((p.get("output_tokens_completed") or 0) for p in per_second):
+            client_out_tok_done = const(
+                "clientOutTokDone",
+                num_arr(
+                    [
+                        (ps_by_t.get(t) or {}).get("output_tokens_completed", 0)
+                        for t in tsec_vals
+                    ]
                 ),
             )
 
@@ -2414,15 +2432,24 @@ def main():
     # 2.3 TPS 对账（20260901）：mock 自报生产口径 TPS（rtp_llm_*，完成
     # 事件记账，1s scrape 窗口）双视角对账——① context with/without
     # cache 双曲线：差值 = cache 复用等效吞吐（KV 容量对齐任务的收益
-    # 面）；② mock vs client：mock 完成口径 vs client 到达口径（出生秒
-    # 分桶，含失败行），差值 = 调度链路损耗（排队/传输/拒绝吃掉的
-    # 部分）。两口径不同是有意的：稳态吞吐守恒两线重合，差值即损耗
-    # 读数。口径提醒：mock TPS 是记账式模拟读数（分母固定 1s 窗口），
+    # 面）；② input 侧：mock 完成口径 vs client 到达口径（出生秒分桶，
+    # 含失败行），差值 = 调度链路损耗（排队/传输/拒绝吃掉的部分）——
+    # 到达 vs 产出是设计意图；③ output 侧（20260901 修复）：mock 完成
+    # 口径 vs client 完成口径（完成秒分桶 ok 行）——同口径守恒对账，
+    # 区别于 input 侧到达口径对账：出生秒口径在 ramp/drain 期因在途
+    # 请求错位（实测约 14%），完成口径两线应基本重合；旧 aggregate 无
+    # output_tokens_completed 键时回退出生秒到达口径（损耗语义）。
+    # 口径提醒：mock TPS 是记账式模拟读数（分母固定 1s 窗口），
     # 衡量调度组织效率而非 GPU 算力，不可与生产数值直接对表（口径
     # 语义一一对应）。
     tps_containers = []
     tps_recon_in = mock_ctx_cache_tps is not None and client_in_tok is not None
-    tps_recon_out = mock_gen_tps is not None and client_out_tok is not None
+    # output 侧：优先完成口径守恒对账（两线同口径应重合）；完成口径
+    # 序列缺失（旧 aggregate）时回退出生秒到达口径（调度链路损耗）。
+    tps_recon_out_done = mock_gen_tps is not None and client_out_tok_done is not None
+    tps_recon_out = mock_gen_tps is not None and (
+        client_out_tok_done is not None or client_out_tok is not None
+    )
     if mock_ctx_tps is not None:
         _ctx_cap = max((p.get("context_tps_with_cache", 0) or 0) for p in mock_tps_rows)
         tps_containers.append(
@@ -2494,16 +2521,45 @@ def main():
             )
         )
     if tps_recon_out:
-        _out_cap = max(
-            max((p.get("output_tokens") or 0) for p in per_second),
-            max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows),
-        )
-        tps_containers.append(
-            emit_container(
-                "output 侧对账：mock 产出 vs client 期望",
+        if tps_recon_out_done:
+            # 完成口径守恒对账（主口径）：两线同为完成事件记账，稳态
+            # 应基本重合；残差 = 记账窗口边缘/时钟对齐误差（非损耗）。
+            _client_out_series = client_out_tok_done
+            _client_out_label = "client 完成 Σol"
+            _out_cap = max(
+                max((p.get("output_tokens_completed") or 0) for p in per_second),
+                max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows),
+            )
+            _out_caption = (
+                "x = 压测时间（s）；y = token/s。mock 线 = rtp_llm_generate_tps"
+                "（完成事件记账，1s 窗口，Σol）；client 线 = 每秒完成 Σoutput_len"
+                "（完成秒分桶，ok 行）；两线同为完成口径，稳态应基本重合"
+                "（吞吐守恒校验；残差 = 记账窗口边缘/时钟对齐误差）；"
+                "output 侧为完成口径守恒对账（区别于 input 侧到达口径对账"
+                "——到达口径的差值才是调度链路损耗）"
+            )
+            _out_title = "output 侧对账：mock 产出 vs client 完成（完成口径守恒）"
+        else:
+            # 回退（旧 aggregate 无 output_tokens_completed 键）：保留
+            # 出生秒到达口径与调度链路损耗语义。
+            _client_out_series = client_out_tok
+            _client_out_label = "client 期望 Σol"
+            _out_cap = max(
+                max((p.get("output_tokens") or 0) for p in per_second),
+                max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows),
+            )
+            _out_caption = (
                 "x = 压测时间（s）；y = token/s。mock 线 = rtp_llm_generate_tps"
                 "（完成事件记账，1s 窗口，Σol）；client 线 = 每秒到达 Σoutput_len"
                 "（出生秒分桶，失败行按 0 计）；两线差值 = 调度链路损耗"
+                "（ramp/drain 期另有在途请求错位；旧 aggregate 无"
+                " output_tokens_completed 键，回退出生口径）"
+            )
+            _out_title = "output 侧对账：mock 产出 vs client 期望"
+        tps_containers.append(
+            emit_container(
+                _out_title,
+                _out_caption
                 + (
                     "；client 全程均值 output_token_tps = "
                     + fmt_int_trunc(sm.get("output_token_tps"))
@@ -2516,7 +2572,7 @@ def main():
                     TSEC,
                     230,
                     [
-                        ("cot", "client 期望 Σol", client_out_tok, "neutral"),
+                        ("cot", _client_out_label, _client_out_series, "neutral"),
                         ("mgt", "mock 产出 Σol", mock_gen_tps, "success"),
                     ],
                     suffix=" tok/s",
@@ -3672,11 +3728,20 @@ def main():
         assert "cache 复用等效吞吐" in html_out, (
             TAG + " context TPS pair present but cache-reuse annotation missing"
         )
-    if tps_recon_in or tps_recon_out:
+    # 调度链路损耗标注：input 侧到达口径对账恒含；output 侧仅回退
+    # （出生口径）模式含——完成口径模式的 caption 语义是守恒校验，
+    # 不再承诺损耗串。
+    if tps_recon_in or (tps_recon_out and not tps_recon_out_done):
         assert "调度链路损耗" in html_out, (
             TAG
             + " mock-vs-client TPS reconciliation present but "
             + "link-loss annotation missing"
+        )
+    if tps_recon_out_done:
+        assert "守恒" in html_out, (
+            TAG
+            + " completion-caliber output reconciliation present but "
+            + "conservation annotation missing"
         )
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
