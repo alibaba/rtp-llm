@@ -670,8 +670,8 @@ fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../deps/requirements_base.txt
-fastsafetensors @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl \
-    --hash=sha256:c2a9945c4a11a4b8afa8eafe20d51aaf5b77ab1bfe6decd66d2c65396a213605
+fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_aarch64.whl \
+    --hash=sha256:95a89d0b641b7dd57f8e137a04a82d3dd9d09cf36378764d81662cfd0185f8c9
     # via -r internal_source/deps/requirements_cuda13_arm.txt
 filelock==3.32.0 \
     --hash=sha256:7be2ad23a14607ccc71808e68fe30848aeace7058ace17852f68e2a68e310402 \
