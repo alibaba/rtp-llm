@@ -1047,6 +1047,11 @@ py_test(
         # HCA_STATE is an active-tail ring and does not participate in prefix
         # reuse; this pool is independently configurable from LINEAR_STEP.
         "--dsv4_hca_state_pool_blocks", "256",
+        "--sp_type", "dspark",
+        "--gen_num_per_cycle", "3",
+        "--sp_model_type", "deepseek_v4_dspark",
+        "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
+        "--sp_act_type", "bf16",
     ],
     env = {
         "WORLD_SIZE": "4",

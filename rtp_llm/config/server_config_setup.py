@@ -381,6 +381,87 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _configure_nccl_p2p_disable(py_env_configs: PyEnvConfigs) -> None:
+    """Apply the NCCL P2P workaround without disabling healthy GPU pairs."""
+    if (
+        py_env_configs.role_config.role_type == RoleType.FRONTEND
+        or "NCCL_P2P_DISABLE" in os.environ
+        or os.path.exists("/dev/kfd")
+        or not torch.cuda.is_available()
+    ):
+        return
+
+    device_count = torch.cuda.device_count()
+    if device_count <= 0:
+        return
+
+    local_world_size = py_env_configs.parallelism_config.local_world_size
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
+    )
+    device_ids = list(range(participating_device_count))
+
+    try:
+        device_names = [
+            torch.cuda.get_device_name(device_id) for device_id in device_ids
+        ]
+    except Exception as exc:
+        logging.warning(
+            "unable to identify CUDA devices for NCCL P2P setup; "
+            "leaving NCCL_P2P_DISABLE unset: %s",
+            exc,
+        )
+        return
+
+    model_requires_disable = any("RTX" in name.upper() for name in device_names)
+    unsupported_pairs: list[tuple[int, int]] = []
+    supported_pair_found = False
+    try:
+        for src in device_ids:
+            for dst in device_ids:
+                if src == dst:
+                    continue
+                if torch.cuda.can_device_access_peer(src, dst):
+                    supported_pair_found = True
+                else:
+                    unsupported_pairs.append((src, dst))
+    except Exception as exc:
+        if not model_requires_disable:
+            logging.warning(
+                "unable to probe CUDA P2P access for devices %s; "
+                "leaving NCCL_P2P_DISABLE unset: %s",
+                device_ids,
+                exc,
+            )
+            return
+        logging.warning(
+            "unable to probe CUDA P2P access for RTX devices %s; "
+            "retaining the RTX NCCL workaround: %s",
+            device_ids,
+            exc,
+        )
+
+    no_pair_supports_p2p = len(device_ids) > 1 and not supported_pair_found
+    if model_requires_disable or no_pair_supports_p2p:
+        os.environ["NCCL_P2P_DISABLE"] = "1"
+        logging.warning(
+            "set NCCL_P2P_DISABLE=1 for devices %s: model_workaround=%s, "
+            "no_pair_supports_p2p=%s, unsupported_pairs=%s",
+            device_ids,
+            model_requires_disable,
+            no_pair_supports_p2p,
+            unsupported_pairs,
+        )
+    elif unsupported_pairs:
+        logging.warning(
+            "CUDA P2P is unavailable for device pairs %s within participating "
+            "devices %s; keeping NCCL P2P enabled so NCCL can degrade per pair",
+            unsupported_pairs,
+            device_ids,
+        )
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -430,41 +511,21 @@ def setup_default_args(py_env_configs):
 
     if py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks > 0:
         logging.warning(
-            "DSV4_FIXED_POOL_BLOCKS=%d is deprecated and ignored for descriptor-based "
-            "pool sizing; use DSV4_HCA_STATE_POOL_BLOCKS=%d for HCA_STATE, while "
-            "the remaining pools use descriptor-derived sizing",
+            "DSV4_FIXED_POOL_BLOCKS=%d is deprecated but remains effective for "
+            "INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV compatibility; "
+            "DSV4_HCA_STATE_POOL_BLOCKS=%d takes precedence for HCA_STATE when set",
             py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks,
             py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks,
         )
 
-    # Frontend doesn't need this setting
-    if py_env_configs.role_config.role_type != RoleType.FRONTEND:
-        if (
-            torch.cuda.is_available()
-            and torch.cuda.device_count() > 1
-            and "NCCL_P2P_DISABLE" not in os.environ
-        ):
-            try:
-                device_count = torch.cuda.device_count()
-                peer_access = all(
-                    torch.cuda.can_device_access_peer(src, dst)
-                    for src in range(device_count)
-                    for dst in range(device_count)
-                    if src != dst
-                )
-            except (AttributeError, RuntimeError, AssertionError) as exc:
-                logging.warning(
-                    "unable to probe CUDA P2P access; leaving NCCL_P2P_DISABLE unset: %s",
-                    exc,
-                )
-            else:
-                if not peer_access:
-                    os.environ["NCCL_P2P_DISABLE"] = "1"
-                    logging.info(
-                        "set NCCL_P2P_DISABLE=1: at least one CUDA device pair "
-                        "does not support peer access (device_count=%d)",
-                        device_count,
-                    )
+    # DeepSeekV4 descriptors are currently built before KVCacheConfig reaches
+    # the model hook. Publish the final bound value (including CLI precedence)
+    # through the legacy environment bridge consumed by that hook.
+    os.environ["DSV4_FIXED_POOL_USE_MEMORY"] = (
+        "1" if py_env_configs.kv_cache_config.dsv4_fixed_pool_use_memory else "0"
+    )
+
+    _configure_nccl_p2p_disable(py_env_configs)
 
     if (
         py_env_configs.role_config.role_type == RoleType.PREFILL

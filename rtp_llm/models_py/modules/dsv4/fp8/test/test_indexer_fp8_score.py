@@ -74,10 +74,10 @@ def _ue8m0_quantize_k(K_bf16):
     return fp8, scale
 
 
-def _pack_132B(fp8_bytes, scales, *, num_blocks, block_size):
+def _pack_132B(fp8_bytes, scales, *, slot_indices, num_blocks, block_size):
     """Pack ``[N, 128] uint8`` + ``[N] fp32`` into the 132B per-block
-    layout: ``[bs*128 K | bs*4 scale]``. Slot ``i`` lives at
-    ``(blk=i//bs, off=i%bs)``. Returns
+    layout: ``[bs*128 K | bs*4 scale]``. ``slot_indices[i]`` selects the
+    physical slot for source row ``i``. Returns
     ``[num_blocks, block_size, 132] uint8``."""
     device = fp8_bytes.device
     pool = torch.zeros(
@@ -85,9 +85,11 @@ def _pack_132B(fp8_bytes, scales, *, num_blocks, block_size):
     )
     pool_2d = pool.view(num_blocks, block_size * INDEXER_ENTRY_BYTES)
     N = fp8_bytes.shape[0]
-    for i in range(N):
-        blk = i // block_size
-        off = i % block_size
+    assert len(slot_indices) == N
+    for i, slot in enumerate(slot_indices):
+        assert 0 <= slot < num_blocks * block_size
+        blk = slot // block_size
+        off = slot % block_size
         pool_2d[blk, off * INDEXER_HEAD_DIM : (off + 1) * INDEXER_HEAD_DIM] = fp8_bytes[
             i
         ]
@@ -147,9 +149,15 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
     # from the request block table rather than the globally packed token count.
     blocks_per_req = (T_per_req + block_size - 1) // block_size
     num_blocks = B * blocks_per_req
+    slot_indices = [
+        b * blocks_per_req * block_size + token_idx
+        for b in range(B)
+        for token_idx in range(T_per_req)
+    ]
     pool = _pack_132B(
         fp8_bytes,
         scales,
+        slot_indices=slot_indices,
         num_blocks=num_blocks,
         block_size=block_size,
     )
@@ -198,24 +206,27 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size):
     logits_ref = _ref_indexer_score(Q, K_dequant, weights.to(torch.float32))
 
     # ── Compare ──
-    diff = (logits_dg - logits_ref).abs()
-    max_abs = diff.max().item()
-    # Relative error vs the magnitude of the reference logits per row.
-    ref_abs = logits_ref.abs()
-    # Avoid div-by-zero for rows where ReLU killed everything.
-    safe_ref = torch.clamp(ref_abs, min=1e-6)
-    rel = (diff / safe_ref).max().item()
-    mean_abs = diff.mean().item()
-
     # For relu-summed scores the dominant terms can be large (sum over 64
     # heads × 128 dims of fp8*fp8 products). 5% relative is a comfortable
     # bound for combined Q-fp8 + K-fp8 quant noise + DeepGEMM reduction
-    # order; absolute floor of 1.0 covers near-zero rows where rel
-    # blows up.
-    assert max_abs < 5.0 or rel < 0.10, (
-        f"DeepGEMM logits diverge from bf16 reference: max_abs={max_abs:.3f}, "
-        f"max_rel={rel:.3%}, mean_abs={mean_abs:.3f}"
-    )
+    # order. Check each request independently so one correctly packed request
+    # cannot hide another request reading an all-zero block. Relative error is
+    # evaluated on dominant logits to avoid dividing by near-zero values.
+    for b in range(B):
+        actual = logits_dg[b]
+        expected = logits_ref[b]
+        diff = (actual - expected).abs()
+        max_abs = diff.max().item()
+        dominant = expected.abs() >= torch.clamp(expected.abs().max() * 0.05, min=1e-3)
+        max_rel = (diff[dominant] / expected[dominant].abs()).max().item()
+        mean_abs = diff.mean().item()
+
+        assert actual.abs().max().item() > 1e-3, f"request {b} read an all-zero K pool"
+        assert max_abs < 5.0 and max_rel < 0.10, (
+            f"request {b} DeepGEMM logits diverge from bf16 reference: "
+            f"max_abs={max_abs:.3f}, max_rel={max_rel:.3%}, "
+            f"mean_abs={mean_abs:.3f}"
+        )
 
 
 if __name__ == "__main__":

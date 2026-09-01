@@ -1,3 +1,4 @@
+import argparse
 import importlib
 import json
 import os
@@ -6,6 +7,7 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.server.server_args.util import nonnegative_uint32
 from rtp_llm.utils.backend_registry import (
     register_backend_hook,
     reset_backend_registrations,
@@ -75,6 +77,14 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_dsv4_pool_block_parser_rejects_out_of_uint32_range(self):
+        self.assertEqual(nonnegative_uint32("0"), 0)
+        self.assertEqual(nonnegative_uint32(str((1 << 32) - 1)), (1 << 32) - 1)
+        for value in ("-1", str(1 << 32), "not-a-number"):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    nonnegative_uint32(value)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -100,6 +110,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["DSV4_STARTUP_REAL_WARMUP"] = "0"
+        os.environ["DSV4_FIXED_POOL_BLOCKS"] = "64"
+        os.environ["DSV4_HCA_STATE_POOL_BLOCKS"] = "96"
 
         sys.argv = ["prog"]
 
@@ -188,6 +201,12 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertFalse(py_env_configs.misc_config.dsv4_startup_real_warmup)
+        self.assertEqual(py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks, 64)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks,
+            96,
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -289,6 +308,10 @@ class ServerArgsSetTest(TestCase):
         # Pins the shipped defaults: neither env nor argv sets the flags here.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertEqual(
+            py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks,
+            -1,
+        )
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 

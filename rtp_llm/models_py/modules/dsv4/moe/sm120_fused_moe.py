@@ -25,13 +25,6 @@ from typing import Any, Optional, Type
 import torch
 
 from rtp_llm.models_py.modules.factory import FusedMoeFactory
-from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
-    StrategyAttributes,
-)
-from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
-    PureCpRouterNoQuant,
-)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
@@ -40,12 +33,19 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     FusedMoeDataRouter,
     FusedMoeExpertExecutor,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
+    StrategyAttributes,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
+    PureCpRouterNoQuant,
 )
 
 from .strategies.base import MoeCfg, RoutedExpertsStrategy
@@ -178,14 +178,14 @@ class Sm120GroupedFp4FusedMoeExecutor(FusedMoeExpertExecutor):
             if payload.expert_x_scale is None:
                 output = self.local_strategy(x, local_weights, local_ids)
             else:
-                output = self.local_strategy._forward_sm120(
+                output = self.local_strategy.forward_sm120_eager(
                     x,
                     local_weights,
                     local_ids,
                     input_scale=payload.expert_x_scale,
                 )
         else:
-            output = self.local_strategy._forward_into_buf(
+            output = self.local_strategy.forward_local_range(
                 x,
                 weights,
                 indices,
@@ -257,9 +257,7 @@ class Sm120FactoryStrategy(MoeStrategy):
     def create_executor(
         self, config: Any, weights: dict[str, torch.Tensor]
     ) -> FusedMoeExpertExecutor:
-        return Sm120GroupedFp4FusedMoeExecutor(
-            config, self.quant_config, weights
-        )
+        return Sm120GroupedFp4FusedMoeExecutor(config, self.quant_config, weights)
 
 
 def build_sm120_fused_moe(
@@ -276,9 +274,7 @@ def build_sm120_fused_moe(
     shared by both modes.
     """
 
-    factory_config = Sm120FactoryConfig.from_cfg(
-        cfg, local_strategy, uses_grouped_fp4
-    )
+    factory_config = Sm120FactoryConfig.from_cfg(cfg, local_strategy, uses_grouped_fp4)
     return FusedMoeFactory().create_fused_moe(
         factory_config,
         {},

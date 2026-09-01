@@ -35,6 +35,7 @@ mutate the Python list first, then assign it once.
 from typing import Optional, Sequence
 
 from rtp_llm.ops import (
+    DSV4_HCA_STATE_TAG,
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
     CacheEvictPolicy,
@@ -59,6 +60,10 @@ DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES = 576
 # Sliding window length in entries; doubles as the HCA compression unit and as
 # the minimum entry count that may pay for block-stride alignment padding.
 DSV4_SWA_WINDOW_ENTRIES = 128
+# HCA_STATE is a small fixed ring.  This descriptor value is the product
+# default; KVCacheConfig only overrides it when the user explicitly supplies
+# the HCA-only option (or the deprecated all-fixed-pool option).
+DSV4_HCA_STATE_POOL_BLOCKS = 256
 # DSv4's physical KV block is 256 tokens (the CLI default is 64).
 DSV4_TOKENS_PER_BLOCK = 256
 
@@ -70,7 +75,7 @@ HCA_KV_TAG = "hca_kv"
 INDEXER_KV_TAG = "indexer_kv"
 INDEXER_STATE_TAG = "indexer_state"
 CSA_STATE_TAG = "csa_state"
-HCA_STATE_TAG = "hca_state"
+HCA_STATE_TAG = DSV4_HCA_STATE_TAG
 SWA_KV_TAG = "swa_kv"
 
 _COMPRESSED_KV_KIND = "compressed_kv"
@@ -133,10 +138,12 @@ def _make_dsv4_desc(
         cp.align_payload = True
         cp.prefill_slice_layout = CpPrefillSliceLayout.PAYLOAD
         cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
-        # HCA_STATE has a one-block active tail and no prefix reuse.  Its fixed
-        # capacity is injected from KVCacheConfig by HybridPoolConfigCreator;
-        # leaving the descriptor unspecified keeps the model description free
-        # of runtime/CLI sizing policy.
+        capacity = CacheCapacityPolicyDesc()
+        capacity.explicit_block_num = DSV4_HCA_STATE_POOL_BLOCKS
+        capacity.charge_to_paged_budget = True
+        desc.capacity = capacity
+        # HCA_STATE has a one-block active tail and no prefix reuse.  Runtime
+        # config may explicitly override (or clear) this descriptor capacity.
         reuse.enable_prefix_reuse = False
         tail = CacheTailPolicyDesc()
         tail.active_tail_blocks = 1

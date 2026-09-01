@@ -14,6 +14,26 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import 
 
 
 class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
+    def test_attn_sink_cache_tracks_source_identity_and_inplace_updates(self):
+        op = SparseAttnV4DecodeFp8Op(
+            n_heads=2,
+            head_dim=128,
+            softmax_scale=1.0,
+        )
+        source = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+
+        first = op._cached_attn_sink(source)
+        self.assertIs(first, op._cached_attn_sink(source))
+
+        source.add_(1)
+        second = op._cached_attn_sink(source)
+        self.assertIsNot(first, second)
+        torch.testing.assert_close(second, torch.tensor([2.0, 3.0]))
+
+        replacement = source.clone()
+        third = op._cached_attn_sink(replacement)
+        self.assertIsNot(second, third)
+
     def test_sparse_indices_drop_dense_cache_metadata(self):
         calls = []
         fake_flash_mla = types.ModuleType("flash_mla")
@@ -51,8 +71,8 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             q = torch.zeros(2, 3, 4, 512, dtype=torch.bfloat16)
             kv_cache = torch.zeros(8, 256, 584, dtype=torch.uint8)
             attn_sink = torch.zeros(4, dtype=torch.float32)
-            topk = torch.arange(128, dtype=torch.int32).view(1, 1, 128).expand(
-                2, 3, 128
+            topk = (
+                torch.arange(128, dtype=torch.int32).view(1, 1, 128).expand(2, 3, 128)
             )
             block_table = torch.full((2, 257), -1, dtype=torch.int32)
             cache_seqlens = torch.tensor([65537, 65537], dtype=torch.int32)

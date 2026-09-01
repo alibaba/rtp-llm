@@ -99,11 +99,29 @@ class StrategySelectTest(unittest.TestCase):
             self.assertFalse(GroupedFP4Strategy.can_handle(cfg))
 
     def test_grouped_kernel_probe_supports_sm100_and_sm120(self):
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.block_scale_interleave = lambda value: value
+        fake_flashinfer.mxfp8_quantize = lambda value, **_: (value, value)
+        fake_gemm = types.ModuleType("flashinfer.gemm")
+        fake_gemm.group_gemm_mxfp4_nt_groupwise = lambda *args, **kwargs: None
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        fake_fused_moe.cutlass_fused_moe = lambda *args, **kwargs: None
+        fake_fused_moe.cutlass_fused_moe_workspace_size = lambda *args, **kwargs: 1
+        fake_fused_moe_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_fused_moe_core.ActivationType = types.SimpleNamespace(Swiglu=object())
         fake_deep_gemm = types.SimpleNamespace(
             m_grouped_fp8_fp4_gemm_nt_contiguous=object(),
             get_mk_alignment_for_contiguous_layout=lambda: (128, 128),
         )
-        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.gemm": fake_gemm,
+                "flashinfer.fused_moe": fake_fused_moe,
+                "flashinfer.fused_moe.core": fake_fused_moe_core,
+            },
+        ), mock.patch(
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.is_available",
             return_value=True,
@@ -111,6 +129,9 @@ class StrategySelectTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.get_device_capability",
             return_value=(12, 0),
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+            return_value=True,
         ):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
@@ -122,8 +143,41 @@ class StrategySelectTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.get_device_capability",
             return_value=(10, 0),
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+            return_value=False,
         ):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
+
+    def test_sm120_grouped_probe_requires_cuda_graph_apis(self):
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.block_scale_interleave = lambda value: value
+        fake_flashinfer.mxfp8_quantize = lambda value, **_: (value, value)
+        fake_gemm = types.ModuleType("flashinfer.gemm")
+        fake_gemm.group_gemm_mxfp4_nt_groupwise = lambda *args, **kwargs: None
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        # Deliberately omit cutlass_fused_moe: eager grouped GEMM exists, but
+        # graph capture must be rejected during strategy selection.
+        fake_fused_moe.cutlass_fused_moe_workspace_size = lambda *args, **kwargs: 1
+        fake_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_core.ActivationType = types.SimpleNamespace(Swiglu=object())
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.gemm": fake_gemm,
+                "flashinfer.fused_moe": fake_fused_moe,
+                "flashinfer.fused_moe.core": fake_core,
+            },
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.is_available",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+            return_value=True,
+        ):
+            self.assertFalse(_has_fp8_fp4_grouped_kernel())
 
     def test_ep1_no_grouped_falls_to_local(self):
         with mock.patch.object(
@@ -145,16 +199,20 @@ class StrategySelectTest(unittest.TestCase):
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
-    def test_ep_gt1_no_mega_uses_deepep(self):
+    def test_ep_gt1_no_mega_fails_instead_of_silently_using_deepep(self):
         with mock.patch.object(
             MegaMoEStrategy, "can_handle", return_value=False
         ), mock.patch.object(
             Sm120FusedMoeStrategy, "can_handle", return_value=False
         ), mock.patch.object(
             DeepEPStrategy, "can_handle", return_value=True
-        ), self.assertLogs(level="WARNING") as logs:
-            self.assertIs(select_strategy(_cfg(ep_size=4)), DeepEPStrategy)
-        self.assertIn("falling back to DeepEP", "\n".join(logs.output))
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.mega_buf."
+            "_mega_moe_disabled_or_unavailable_reason",
+            return_value="Mega unavailable in test",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Mega unavailable in test"):
+                select_strategy(_cfg(ep_size=4))
 
     def test_sm120_ep_gt1_uses_explicit_fused_moe_strategy(self):
         with mock.patch.object(
@@ -292,13 +350,12 @@ class StrategySelectTest(unittest.TestCase):
         with _env(DSV4_USE_MEGA_MOE="0"):
             self.assertEqual(_resolve_forced(None), (None, False))
 
-    def test_legacy_negation_ep_gt1_uses_deepep(self):
+    def test_legacy_negation_ep_gt1_fails_closed(self):
         with _env(DSV4_USE_MEGA_MOE="0"), mock.patch.object(
             Sm120FusedMoeStrategy, "can_handle", return_value=False
-        ), mock.patch.object(
-            DeepEPStrategy, "can_handle", return_value=True
-        ):
-            self.assertIs(select_strategy(_cfg(ep_size=4)), DeepEPStrategy)
+        ), mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "DSV4_USE_MEGA_MOE=0"):
+                select_strategy(_cfg(ep_size=4))
 
     def test_legacy_force_nonstrict_falls_through_when_incapable(self):
         # Legacy DSV4_USE_MEGA_MOE=1 + ep_size=1 cfg: Mega.can_handle False

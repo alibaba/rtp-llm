@@ -813,11 +813,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
-        # Consumer SM120 uses the float-scale CUTLASS backend rather than
-        # DeepGEMM's packed int32 UE8M0 layout.
-        from rtp_llm.models_py.utils.arch import is_sm12x
-
-        use_e8m0 = is_deep_gemm_e8m0_used() and not is_sm12x()
+        # is_deep_gemm_e8m0_used() is the shared producer/consumer contract;
+        # SM12x returns False because it uses float-scale backends.
+        use_e8m0 = is_deep_gemm_e8m0_used()
         if not use_e8m0:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)

@@ -244,6 +244,9 @@ cc_library(
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
+        # fp4_gemm_cu is compiled for SM100/SM100a only.  SM120 uses the
+        # FlashInfer grouped-FP4 implementation and must not link this target.
+        "@//:using_cuda13_sm120": [],
         "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],

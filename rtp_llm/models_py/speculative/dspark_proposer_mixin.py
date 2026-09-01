@@ -57,9 +57,7 @@ def device_metadata_tensor(attention_inputs: Any, name: str) -> Optional[torch.T
     to the host field keeps eager and unit-test callers compatible, while the
     preferred path avoids introducing a host-to-device copy inside capture.
     """
-    device_value = optional_tensor(
-        getattr(attention_inputs, f"{name}_device", None)
-    )
+    device_value = optional_tensor(getattr(attention_inputs, f"{name}_device", None))
     if device_value is not None:
         return device_value
     return optional_tensor(getattr(attention_inputs, name, None))
@@ -235,7 +233,7 @@ class DSparkProposerMixin:
         carries the feature rows packed in the same request-major order.
         Produces no logits."""
         attention_inputs = primary_attention_inputs(
-            inputs.attention_inputs, getattr(self, "kv_cache", None)
+            inputs.attention_inputs, self.kv_cache
         )
         input_lengths = device_metadata_tensor(attention_inputs, "input_lengths")
         batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
@@ -330,7 +328,7 @@ class DSparkProposerMixin:
         width = self._dspark_width
 
         attention_inputs = primary_attention_inputs(
-            inputs.attention_inputs, getattr(self, "kv_cache", None)
+            inputs.attention_inputs, self.kv_cache
         )
         token_count = int(inputs.input_ids.numel())
         if token_count % width != 0:

@@ -6,6 +6,7 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 from rtp_llm.ops.compute_ops import PyModelInputs
 
@@ -24,6 +25,69 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    @staticmethod
+    def _construct_production_model(role_type: RoleType) -> DeepSeekV4DSparkModel:
+        """Exercise the real descriptor constructor while isolating heavy weights."""
+
+        def initialize_base(self, *args, **kwargs):
+            torch.nn.Module.__init__(self)
+            self._v4_args = SimpleNamespace(
+                commit_only=False,
+                dim=8,
+                n_layers=3,
+                compress_ratios=(0, 0, 0),
+                window_size=128,
+                norm_eps=1e-6,
+            )
+            self._gen_num_per_cycle = 3
+            self.v4 = SimpleNamespace(
+                embed=SimpleNamespace(weight=torch.empty((1, 8), dtype=torch.bfloat16))
+            )
+            self.kv_cache = None
+            self.fp8_kv_cache = True
+
+        config = SimpleNamespace(
+            dspark_noise_token_id=7,
+            dspark_target_layer_ids=(40, 41, 42),
+            dspark_markov_rank=16,
+        )
+        parallelism = SimpleNamespace(
+            role_type=role_type,
+            tp_size=1,
+            tp_rank=0,
+            prefill_cp_config=None,
+        )
+        with patch.object(DeepSeekV4Model, "__init__", initialize_base):
+            return DeepSeekV4DSparkModel(
+                config,
+                parallelism,
+                weights=object(),
+                moe_config=None,
+                max_generate_batch_size=4,
+            )
+
+    def test_real_descriptor_constructor_and_role_entrypoints(self) -> None:
+        for role_type in (RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION):
+            with self.subTest(role_type=role_type):
+                model = self._construct_production_model(role_type)
+                self.assertEqual(
+                    model._commit_only_prefill,
+                    role_type == RoleType.PREFILL,
+                )
+                self.assertEqual(model._v4_args.commit_only, model._commit_only_prefill)
+
+                inputs = PyModelInputs()
+                inputs.input_ids = torch.zeros(3, dtype=torch.int32)
+                if role_type == RoleType.PREFILL:
+                    model.main_proj = SimpleNamespace(
+                        weight=torch.empty((1, 8), dtype=torch.bfloat16)
+                    )
+                    outputs = model.forward_commit(inputs)
+                    self.assertEqual(tuple(outputs.hidden_states.shape), (0, 8))
+                else:
+                    outputs = model.forward_propose(inputs)
+                    self.assertEqual(tuple(outputs.hidden_states.shape), (3, 8))
+
     def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(

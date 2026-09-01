@@ -9,6 +9,7 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    _configure_nccl_p2p_disable,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -54,6 +55,120 @@ class ServerConfigPortLayoutTest(TestCase):
         config.worker_info_port_num = 8
 
         config.validate_port_layout(dash_sc_enabled=False)
+
+
+class NcclP2pSetupTest(TestCase):
+    @staticmethod
+    def _config(local_world_size: int = 2) -> PyEnvConfigs:
+        config = PyEnvConfigs()
+        config.role_config.role_type = RoleType.DECODE
+        config.parallelism_config.local_world_size = local_world_size
+        return config
+
+    def _run_probe(
+        self,
+        *,
+        device_count: int,
+        device_name: str,
+        peer_access,
+        local_world_size: int = 2,
+    ):
+        peer_access_effect = (
+            (lambda _src, _dst: peer_access)
+            if isinstance(peer_access, bool)
+            else peer_access
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "rtp_llm.config.server_config_setup.os.path.exists",
+                return_value=False,
+            ),
+            patch(
+                "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+                return_value=True,
+            ),
+            patch(
+                "rtp_llm.config.server_config_setup.torch.cuda.device_count",
+                return_value=device_count,
+            ),
+            patch(
+                "rtp_llm.config.server_config_setup.torch.cuda.get_device_name",
+                return_value=device_name,
+            ),
+            patch(
+                "rtp_llm.config.server_config_setup.torch.cuda.can_device_access_peer",
+                side_effect=peer_access_effect,
+            ) as can_access_peer,
+        ):
+            _configure_nccl_p2p_disable(self._config(local_world_size))
+            return os.environ.get("NCCL_P2P_DISABLE"), can_access_peer.call_args_list
+
+    def test_single_rtx_keeps_model_workaround(self):
+        value, calls = self._run_probe(
+            device_count=1,
+            device_name="NVIDIA RTX PRO 6000 Blackwell",
+            peer_access=True,
+            local_world_size=1,
+        )
+        self.assertEqual(value, "1")
+        self.assertEqual(calls, [])
+
+    def test_all_connected_devices_keep_p2p_enabled(self):
+        value, _ = self._run_probe(
+            device_count=2,
+            device_name="NVIDIA H20",
+            peer_access=True,
+        )
+        self.assertIsNone(value)
+
+    def test_partially_connected_devices_degrade_per_pair(self):
+        value, calls = self._run_probe(
+            device_count=3,
+            device_name="NVIDIA H20",
+            peer_access=lambda src, dst: {src, dst} == {0, 1},
+            local_world_size=3,
+        )
+        self.assertIsNone(value)
+        self.assertEqual(
+            {call.args for call in calls},
+            {(0, 1), (0, 2), (1, 0), (1, 2), (2, 0), (2, 1)},
+        )
+
+    def test_completely_disconnected_devices_disable_p2p(self):
+        value, _ = self._run_probe(
+            device_count=2,
+            device_name="NVIDIA H20",
+            peer_access=False,
+        )
+        self.assertEqual(value, "1")
+
+    def test_probe_is_scoped_to_participating_local_devices(self):
+        value, calls = self._run_probe(
+            device_count=4,
+            device_name="NVIDIA H20",
+            peer_access=True,
+            local_world_size=2,
+        )
+        self.assertIsNone(value)
+        self.assertEqual({call.args for call in calls}, {(0, 1), (1, 0)})
+
+    def test_probe_failure_leaves_non_rtx_override_unset(self):
+        value, _ = self._run_probe(
+            device_count=2,
+            device_name="NVIDIA H20",
+            peer_access=RuntimeError("probe failed"),
+        )
+        self.assertIsNone(value)
+
+    @patch.dict(os.environ, {"NCCL_P2P_DISABLE": "0"}, clear=True)
+    def test_explicit_override_is_preserved(self):
+        with patch(
+            "rtp_llm.config.server_config_setup.torch.cuda.is_available"
+        ) as is_available:
+            _configure_nccl_p2p_disable(self._config())
+        self.assertEqual(os.environ["NCCL_P2P_DISABLE"], "0")
+        is_available.assert_not_called()
 
 
 class GenerateConfigTest(TestCase):
@@ -124,8 +239,9 @@ class GenerateConfigTest(TestCase):
             ),
         )
         for args, env, expected in valid:
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
             ):
                 config = setup_args(args).jit_config
                 self.assertEqual(
@@ -137,8 +253,9 @@ class GenerateConfigTest(TestCase):
             (["--manage_jit_cache", "0"], {}, False),
             ([], {"MANAGE_JIT_CACHE": "0"}, False),
         ):
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
             ):
                 self.assertIs(setup_args(args).jit_config.manage_jit_cache, expected)
 
@@ -154,11 +271,12 @@ class GenerateConfigTest(TestCase):
             ([], {"MANAGE_JIT_CACHE": ""}, bool_error),
         ):
             stderr = io.StringIO()
-            with self.subTest(args=args, env=env), patch.dict(
-                os.environ, _jit_env(**env), clear=True
-            ), contextlib.redirect_stderr(stderr), self.assertRaises(
-                SystemExit
-            ) as context:
+            with (
+                self.subTest(args=args, env=env),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as context,
+            ):
                 setup_args(args)
             self.assertEqual(context.exception.code, 2)
             # Fail *because of this validator*, not from an unrelated parse error.
@@ -173,8 +291,10 @@ class GenerateConfigTest(TestCase):
             ({"JIT_CACHE_SETUP_TIMEOUT_S": "45"}, (45, True)),
             ({"MANAGE_JIT_CACHE": "0"}, (180, False)),
         ):
-            with self.subTest(env=env), patch.object(sys, "argv", ["prog"]), patch.dict(
-                os.environ, _jit_env(**env), clear=True
+            with (
+                self.subTest(env=env),
+                patch.object(sys, "argv", ["prog"]),
+                patch.dict(os.environ, _jit_env(**env), clear=True),
             ):
                 config = setup_args().jit_config
                 self.assertEqual(

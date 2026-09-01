@@ -190,19 +190,20 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-    // Deprecated legacy DSV4 fixed-allocation pool block count. Retained for
-    // config serialization/older callers, but ignored by descriptor-based
-    // sizing; use dsv4_hca_state_pool_blocks for HCA_STATE capacity.
+    // Deprecated legacy DSV4 fixed-allocation pool block count.  A positive
+    // value still applies to INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV
+    // so upgrading an existing deployment does not silently change capacity.
+    // New deployments should use descriptor sizing plus the HCA-only override.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
-    // DSV4 HCA_STATE is a small active-tail ring, independent of linear_step
-    // and prefix reuse.  The server CLI supplies the product default (256);
-    // zero here keeps programmatic callers on the framework fallback unless
-    // they explicitly request a fixed capacity.
-    uint32_t dsv4_hca_state_pool_blocks = 0;
+    // HCA_STATE-only runtime override.  -1 = unset (honor the model
+    // descriptor), 0 = explicitly use framework sizing, >0 = fixed blocks.
+    // int64_t is intentional: pybind/server args must preserve all three
+    // states, while accepted non-negative values are range-checked to uint32.
+    int64_t dsv4_hca_state_pool_blocks = -1;
 
-    // DSV4 fixed-pool residency switch. false = GPU BlockPool; true = pinned
-    // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
+    // DSV4 state/KV pool residency request. This does not change pool sizing;
+    // each descriptor determines whether the requested placement is supported.
     bool dsv4_fixed_pool_use_memory = false;
 
     // Remote connector configuration fields

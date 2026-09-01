@@ -119,9 +119,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # and V4Transformer take the identical path without consulting env
         # variables or duplicating role policy in lower modules.
         role_type = getattr(parallelism_config, "role_type", None)
-        self._commit_only_prefill = role_type == RoleType.PREFILL or str(
-            role_type
-        ).upper().rsplit(".", 1)[-1] == "PREFILL"
+        self._commit_only_prefill = (
+            role_type == RoleType.PREFILL
+            or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+        )
         self._v4_args.commit_only = self._commit_only_prefill
         if self._commit_only_prefill:
             logging.info(
@@ -540,7 +541,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         attached — the packed ``starts``/``lengths`` layout only describes
         the non-CP row order."""
         attention_inputs = primary_attention_inputs(
-            inputs.attention_inputs, getattr(self, "kv_cache", None)
+            inputs.attention_inputs, self.kv_cache
         )
         cp_info = getattr(attention_inputs, "context_parallel_info", None)
         if not self._dspark_commit_cp_enabled or cp_info is None:
@@ -793,7 +794,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def _forward_device(self) -> torch.device:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
-        if getattr(self, "_commit_only_prefill", False):
+        if self._commit_only_prefill:
             if self.main_proj is None:
                 raise RuntimeError(
                     "DSpARK commit-only model has no initialized main projection"
@@ -804,9 +805,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             device = self.main_proj.weight.device
         else:
             device = self.v4.embed.weight.device
-        if getattr(self, "kv_cache", None) is not None and not bool(
-            getattr(self, "fp8_kv_cache", True)
-        ):
+        if self.kv_cache is not None and not self.fp8_kv_cache:
             raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
         return device
 
@@ -817,7 +816,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         device = self._forward_device()
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
-        if getattr(self, "kv_cache", None) is None:
+        if self.kv_cache is None:
             gamma = self._gen_num_per_cycle
             input_tokens = int(inputs.input_ids.numel())
             batch_size = max((input_tokens + gamma - 1) // gamma, 1)
@@ -827,7 +826,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 batch_size,
             )
             return self.dspark_empty_outputs(batch_size, device)
-        if getattr(self, "_commit_only_prefill", False):
+        if self._commit_only_prefill:
             raise RuntimeError(
                 "DSpARK PREFILL commit-only model cannot execute forward_propose; "
                 "use the DECODE/PDFUSION role for proposal inference"
@@ -839,7 +838,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
         device = self._forward_device()
-        if getattr(self, "kv_cache", None) is None:
+        if self.kv_cache is None:
             return PyModelOutputs(
                 torch.zeros(
                     (0, int(self._v4_args.dim)),

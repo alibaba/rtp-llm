@@ -15,16 +15,16 @@ from typing import Dict
 
 import torch
 
-from ..._profiler import record_function_range
-from ..sm120_fused_moe import build_sm120_fused_moe
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
     PureCpRouterNoQuant,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
+
+from ..._profiler import record_function_range
+from ..sm120_fused_moe import build_sm120_fused_moe
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .grouped_fp4 import GroupedFP4Strategy, _has_fp8_fp4_grouped_kernel
 from .local_loop import LocalLoopStrategy
-from rtp_llm.models_py.utils.arch import is_sm120
-
 
 _SM120_CP_FUSED_MOE_LOGGED = False
 
@@ -34,6 +34,19 @@ def _is_sm120_runtime() -> bool:
     # treat other SM12x devices as compatible merely because they share the
     # major capability number.
     return is_sm120()
+
+
+def _validate_world_collective_topology(cfg: MoeCfg, dist, group) -> tuple[int, int]:
+    world = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    if world != cfg.ep_size or rank != cfg.ep_rank:
+        raise RuntimeError(
+            "SM120 WORLD collective topology does not match the expert "
+            f"partition: world/rank={world}/{rank}, "
+            f"ep_size/ep_rank={cfg.ep_size}/{cfg.ep_rank}. "
+            "A dedicated EP process group is required for mixed DP/TP+EP."
+        )
+    return world, rank
 
 
 @register_strategy
@@ -160,8 +173,7 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
         if not dist.is_initialized():
             raise RuntimeError("SM120 collective MoE requires torch.distributed")
         group = dist.group.WORLD
-        world = dist.get_world_size(group)
-        rank = dist.get_rank(group)
+        world, rank = _validate_world_collective_topology(self.cfg, dist, group)
         if torch.cuda.is_current_stream_capturing():
             # Decode graphs use a fixed equal batch shape on every rank.
             counts = [x.size(0)] * world

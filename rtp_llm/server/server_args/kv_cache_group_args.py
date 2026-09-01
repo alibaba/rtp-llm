@@ -1,4 +1,4 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.server.server_args.util import nonnegative_uint32, str2bool
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -453,19 +453,19 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         "--dsv4_fixed_pool_blocks",
         env_name="DSV4_FIXED_POOL_BLOCKS",
         bind_to=(kv_cache_config, "dsv4_fixed_pool_blocks"),
-        type=int,
+        type=nonnegative_uint32,
         default=0,
-        help="[DEPRECATED] DSV4 固定池 block 数。仅为兼容旧配置保留，设置后将被忽略；"
-        "HCA_STATE 请改用 --dsv4_hca_state_pool_blocks，其余 pool 的 sizing 由 descriptor 决定。",
+        help="[DEPRECATED] DSV4 固定池 block 数。>0 时继续兼容地覆盖 "
+        "INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV；新配置请仅按需设置 HCA_STATE。",
     )
     kv_cache_group.add_argument(
         "--dsv4_hca_state_pool_blocks",
         env_name="DSV4_HCA_STATE_POOL_BLOCKS",
         bind_to=(kv_cache_config, "dsv4_hca_state_pool_blocks"),
-        type=int,
-        default=256,
-        help="DSV4 HCA_STATE pool block 数。默认 256；>0 时仅固定 HCA_STATE，"
-        "配置为 0 时回退到框架默认 sizing。",
+        type=nonnegative_uint32,
+        default=None,
+        help="DSV4 HCA_STATE pool block 数。不设置时使用模型 descriptor（当前为 256）；"
+        ">0 时固定 HCA_STATE，显式 0 时清除 descriptor 固定容量并使用框架 sizing。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_use_memory",

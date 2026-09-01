@@ -1278,7 +1278,7 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
 }
 
 TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency) {
-    auto make_config = [](uint32_t                            blocks,
+    auto make_config = [](int64_t                             blocks,
                           std::optional<CacheMemoryPlacement> placement,
                           std::optional<uint32_t>             descriptor_blocks = std::nullopt) {
         auto              mc = makeProModelConfig();
@@ -1327,6 +1327,13 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency
     EXPECT_EQ(descriptor_override_config.policyForGroup(hca_gid).explicit_block_num, 256u);
     EXPECT_EQ(descriptor_override_config.explicitly_sized_pool_reserve_bytes,
               256u * descriptor_override_config.blockSizeBytesForGroup(hca_gid));
+
+    // The default -1 is genuinely unset: descriptor-owned capacity remains
+    // authoritative instead of being overwritten by a C++ scalar default.
+    auto descriptor_default_config = make_config(-1, std::nullopt, 350u);
+    hca_gid                        = gidForTag(descriptor_default_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(descriptor_default_config.blockNumForGroup(hca_gid), 350u);
+    EXPECT_EQ(descriptor_default_config.policyForGroup(hca_gid).explicit_block_num, 350u);
 
     auto host_config = make_config(256, CacheMemoryPlacement::HOST_PINNED);
     hca_gid          = gidForTag(host_config, std::string(DSV4_HCA_STATE_TAG));
@@ -1436,11 +1443,9 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency
         ParallelismConfig pc;
         RuntimeConfig     runtime_config;
         KVCacheConfig     kv_cache_config;
-        kv_cache_config.seq_size_per_block = 128;
-        kv_cache_config.test_block_num     = 100;
-        for (const auto& tag : dsv4StateSwaTags()) {
-            setDsv4ExplicitPoolBlocks(mc, tag, kFixedPoolBlocks);
-        }
+        kv_cache_config.seq_size_per_block                          = 128;
+        kv_cache_config.test_block_num                              = 100;
+        kv_cache_config.dsv4_fixed_pool_blocks                      = kFixedPoolBlocks;
         runtime_config.max_generate_batch_size                      = max_concurrency;
         runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
@@ -1464,6 +1469,31 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency
         EXPECT_GT(expected_reserve, 0u);
         EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve)
             << "max_concurrency=" << max_concurrency;
+    }
+}
+
+TEST(HybridPoolConfigCreatorTest, DSV4HcaSpecificOverrideWinsLegacyFixedPoolBlocks) {
+    constexpr uint32_t kLegacyBlocks = 64;
+    constexpr uint32_t kHcaBlocks    = 96;
+    auto               mc            = makeProModelConfig();
+    ParallelismConfig  pc;
+    RuntimeConfig      runtime_config;
+    KVCacheConfig      kv_cache_config;
+    kv_cache_config.test_block_num                              = 100;
+    kv_cache_config.dsv4_fixed_pool_blocks                      = kLegacyBlocks;
+    kv_cache_config.dsv4_hca_state_pool_blocks                  = kHcaBlocks;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    auto       config     = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+    const auto state_tags = dsv4StateSwaTags();
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto& tag = config.tagForGroup(gid);
+        if (tag == DSV4_HCA_STATE_TAG) {
+            EXPECT_EQ(config.blockNumForGroup(gid), kHcaBlocks);
+        } else if (std::find(state_tags.begin(), state_tags.end(), tag) != state_tags.end()) {
+            EXPECT_EQ(config.blockNumForGroup(gid), kLegacyBlocks) << "tag=" << tag;
+        }
     }
 }
 

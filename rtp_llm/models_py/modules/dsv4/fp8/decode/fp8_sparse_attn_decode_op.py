@@ -41,6 +41,16 @@ try:
 except (ImportError, AttributeError, ValueError) as e:
     logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
 
+_SM120_SPARSE_MLA_AVAILABLE = False
+_sm120_sparse_mla = None
+try:
+    from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+
+    _sm120_sparse_mla = trtllm_batch_decode_sparse_mla_dsv4
+    _SM120_SPARSE_MLA_AVAILABLE = True
+except (ImportError, AttributeError) as e:
+    logging.info("[dsv4-fp8] SM120 FlashInfer sparse MLA unavailable (%s)", e)
+
 
 class SparseAttnV4DecodeFp8Op:
     """FP8 sparse attention decode op (single- or dual-pool).
@@ -76,20 +86,34 @@ class SparseAttnV4DecodeFp8Op:
         self.head_dim = head_dim
         self.softmax_scale = softmax_scale
         self._attn_sink_fp32: Optional[torch.Tensor] = None
-        self._attn_sink_source_ptr = 0
+        self._attn_sink_source: Optional[torch.Tensor] = None
+        self._attn_sink_source_version = -1
+
+        if torch.cuda.is_available() and is_sm120():
+            if not _SM120_SPARSE_MLA_AVAILABLE:
+                raise RuntimeError(
+                    "SM120 FP8 sparse decode requires FlashInfer "
+                    "trtllm_batch_decode_sparse_mla_dsv4; install the CUDA 13 "
+                    "RTP-LLM dependency set before starting the service"
+                )
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import warmup
+
+            warmup(torch.device("cuda", torch.cuda.current_device()))
 
     def _cached_attn_sink(self, attn_sink: torch.Tensor) -> torch.Tensor:
         if attn_sink.dtype == torch.float32 and attn_sink.is_contiguous():
             return attn_sink
-        ptr = int(attn_sink.data_ptr())
         if (
             self._attn_sink_fp32 is not None
-            and self._attn_sink_source_ptr == ptr
+            and self._attn_sink_source is attn_sink
+            and self._attn_sink_source_version == attn_sink._version
             and self._attn_sink_fp32.device == attn_sink.device
+            and self._attn_sink_fp32.shape == attn_sink.shape
         ):
             return self._attn_sink_fp32
         self._attn_sink_fp32 = attn_sink.float().contiguous()
-        self._attn_sink_source_ptr = ptr
+        self._attn_sink_source = attn_sink
+        self._attn_sink_source_version = attn_sink._version
         return self._attn_sink_fp32
 
     def forward(
@@ -149,6 +173,7 @@ class SparseAttnV4DecodeFp8Op:
             extra_topk_idxs,
             extra_topk_length,
         )
+
     def _forward_sm120_flashinfer(
         self,
         q: torch.Tensor,
@@ -161,18 +186,21 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+            SM120_EXTRA_TOPK_WIDTHS,
+            SM120_SWA_TOPK_WIDTHS,
             canonical_topk,
             pack_logical_workspace,
             run,
             warmup,
         )
+
         batch, q_len, heads, dim = q.shape
         rows = batch * q_len
         swa_indices = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
         swa_indices, swa_topk_lens = canonical_topk(
             swa_indices.reshape(rows, -1),
             topk_length,
-            (128, 512, 1024),
+            SM120_SWA_TOPK_WIDTHS,
         )
         extra_indices = extra_topk_idxs
         if extra_indices is not None and extra_indices.dim() == 4:
@@ -181,7 +209,7 @@ class SparseAttnV4DecodeFp8Op:
             extra_indices, extra_topk_lens = canonical_topk(
                 extra_indices.reshape(rows, -1),
                 extra_topk_length,
-                (2, 128, 512, 1024, 2048),
+                SM120_EXTRA_TOPK_WIDTHS,
             )
         else:
             extra_topk_lens = None

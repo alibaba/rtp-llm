@@ -18,7 +18,10 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_rows,
+)
 
 
 def _assert_raises(fn, exc_type, msg_substr: str):
@@ -28,6 +31,30 @@ def _assert_raises(fn, exc_type, msg_substr: str):
         assert msg_substr in str(exc), str(exc)
         return
     raise AssertionError(f"expected {exc_type.__name__} containing {msg_substr!r}")
+
+
+def test_dynamic_workspace_rows_disabled_keeps_configured_capacity():
+    assert resolve_prefill_workspace_rows(
+        128, 1024, 256, 8, allow_dynamic_growth=False
+    ) == (128, 1024)
+
+
+def test_dynamic_workspace_rows_grows_q_and_cp_capacity():
+    assert resolve_prefill_workspace_rows(
+        128, 1024, 256, 8, allow_dynamic_growth=True
+    ) == (256, 2048)
+
+
+def test_dynamic_workspace_rows_preserves_disabled_cp_region():
+    assert resolve_prefill_workspace_rows(
+        128, 0, 256, 8, allow_dynamic_growth=True
+    ) == (256, 0)
+
+
+def test_dynamic_workspace_rows_never_shrinks_configured_capacity():
+    assert resolve_prefill_workspace_rows(
+        512, 8192, 128, 8, allow_dynamic_growth=True
+    ) == (512, 8192)
 
 
 def test_prefill_q_eager_alloc_shape_and_dtype():

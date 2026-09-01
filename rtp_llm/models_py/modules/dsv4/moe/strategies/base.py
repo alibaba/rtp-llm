@@ -1,7 +1,5 @@
-
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from typing import ClassVar, Dict, Optional, Type
@@ -306,21 +304,15 @@ def select_strategy(
         )
         if sm120_cls is not None and sm120_cls.can_handle(cfg):
             return sm120_cls
-        deepep_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "deepep"), None)
-        if deepep_cls is not None and deepep_cls.can_handle(cfg):
-            logging.warning(
-                "[DSV4 MoE] Mega/SM120 fused path unavailable; falling back to "
-                "DeepEP (layer_id=%s, ep_size=%s)",
-                cfg.layer_id,
-                cfg.ep_size,
-            )
-            return deepep_cls
+        from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
+            _mega_moe_disabled_or_unavailable_reason,
+        )
 
         raise RuntimeError(
-            "DSV4 EP MoE requires MegaMoE, SM120 FusedMoe, or DeepEP "
-            "dispatch/combine. "
+            "DSV4 EP MoE auto-selection requires MegaMoE or SM120 FusedMoe. "
+            "DeepEP must be requested explicitly with DSV4_MOE_STRATEGY=deepep. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
-            "Neither distributed strategy is available in this runtime."
+            f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
         )
 
     for cls in _STRATEGY_PRIORITY:

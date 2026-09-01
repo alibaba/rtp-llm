@@ -548,13 +548,10 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not role_is_prefill:
         return False
 
-    if getattr(py_env_configs.model_args, "model_type", "") != "deepseek_v4":
+    if py_env_configs.model_args.model_type != "deepseek_v4":
         return False
 
-    # Smoke/perf targets can explicitly disable the real-request warmup.  An
-    # empty value is treated as the default (enabled), matching the existing
-    # env parsing convention used by the speculative warmup helpers.
-    if not str_to_bool(os.environ.get("DSV4_STARTUP_REAL_WARMUP", "1") or "1"):
+    if not py_env_configs.misc_config.dsv4_startup_real_warmup:
         logging.info(
             "skip DSV4 startup real warmup: DSV4_STARTUP_REAL_WARMUP is disabled"
         )

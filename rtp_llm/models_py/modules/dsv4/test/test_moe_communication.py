@@ -1,16 +1,18 @@
 """Unit tests for the DSV4 collective MoE communication layout."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.moe.sm120_fused_moe import (
-    build_sm120_fused_moe,
-)
+from rtp_llm.models_py.modules.dsv4.moe.sm120_fused_moe import build_sm120_fused_moe
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import (
     MoeCfg,
     RoutedExpertsStrategy,
+)
+from rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe import (
+    _validate_world_collective_topology,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
@@ -66,9 +68,7 @@ class Sm120FusedMoeTest(unittest.TestCase):
         global_ids = torch.tensor([[0, 2], [3, 1]])
         output = fused_moe(x, weights, global_ids)
 
-        self.assertTrue(
-            torch.allclose(output, torch.tensor([[0.7, 0.7], [0.6, 0.6]]))
-        )
+        self.assertTrue(torch.allclose(output, torch.tensor([[0.7, 0.7], [0.6, 0.6]])))
         self.assertEqual(local.last_indices.tolist(), [[0, 0], [1, 0]])
         self.assertTrue(
             torch.allclose(
@@ -76,6 +76,15 @@ class Sm120FusedMoeTest(unittest.TestCase):
                 torch.tensor([[0.0, 0.7], [0.6, 0.0]]),
             )
         )
+
+    def test_world_collective_rejects_non_ep_topology(self):
+        cfg = self._cfg()
+        dist = SimpleNamespace(
+            get_world_size=lambda _group: 4,
+            get_rank=lambda _group: 1,
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not match the expert"):
+            _validate_world_collective_topology(cfg, dist, object())
 
     def test_cp_uses_common_factory_pure_cp_router(self):
         cfg = self._cfg()
