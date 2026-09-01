@@ -40,9 +40,11 @@ protected:
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    int reuseCache(const CacheKeysType&                 cache_keys,
-                   BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper);
+    int reuseCache(const CacheKeysType&                            cache_keys,
+                   BatchKVCacheResource&                           kv_resource,
+                   const std::shared_ptr<CPSlotMapper>&            cp_mapper,
+                   const std::vector<std::pair<int64_t, int64_t>>& multimodal_reuse_spans,
+                   int                                             reuse_unit_tokens);
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;

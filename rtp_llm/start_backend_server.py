@@ -240,6 +240,14 @@ def local_rank_start(
         local_rank = py_env_configs.parallelism_config.local_rank
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
+        if py_env_configs.model_args.model_type == "deepseek_v4":
+            # DSV4 discovers its vision/PIL modules before BaseModel creates the
+            # tokenizer. In Bazel runfiles, resolving transformers only after
+            # the native CUDA backend is initialized can terminate the child
+            # process inside the extension loader. AutoTokenizer is required a
+            # few lines later anyway; resolve its lazy import first.
+            from transformers import AutoTokenizer  # noqa: F401
+
         setup_cuda_device_and_accl_env(local_rank)
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
@@ -513,9 +521,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         _send_pipe_status(

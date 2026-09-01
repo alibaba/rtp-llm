@@ -40,6 +40,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     _SPARSE_PREFILL_TOPK_ALIGNMENT,
     combine_topk_swa_indices,
     combine_topk_swa_indices_cp,
+    compute_window_topk_and_length_varlen,
 )
 
 
@@ -290,6 +291,70 @@ class SwaCombineTopkTest(unittest.TestCase):
             gather_lens=[S],
             N=0,
         )
+
+    def test_visible_window_override(self):
+        starts = torch.zeros(4, dtype=torch.int32, device=self.device)
+        lens = torch.full((4,), 4, dtype=torch.int32, device=self.device)
+        indices, out_lens = combine_topk_swa_indices(
+            topk_indices=torch.empty((4, 0), dtype=torch.int32, device=self.device),
+            query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=self.device),
+            seq_lens=torch.tensor([4], dtype=torch.int32, device=self.device),
+            gather_lens=torch.tensor([4], dtype=torch.int32, device=self.device),
+            window_size=2,
+            compress_ratio=1,
+            topk=0,
+            M=8,
+            N=0,
+            swa_win_starts=starts,
+            swa_win_lens=lens,
+            swa_win_max_len=4,
+        )
+        torch.testing.assert_close(out_lens, lens)
+        for row in indices:
+            torch.testing.assert_close(
+                row[:4], torch.arange(4, dtype=torch.int32, device=self.device)
+            )
+            self.assertTrue(bool((row[4:] == -1).all()))
+
+    def test_cp_visible_window_override(self):
+        starts = torch.zeros(2, dtype=torch.int32, device=self.device)
+        lens = torch.full((2,), 4, dtype=torch.int32, device=self.device)
+        indices, out_lens = combine_topk_swa_indices_cp(
+            topk_indices=torch.empty((2, 0), dtype=torch.int32, device=self.device),
+            global_positions=torch.tensor([0, 3], device=self.device),
+            sp_int=0,
+            window_size=2,
+            compress_ratio=1,
+            topk=0,
+            M=8,
+            N=0,
+            swa_win_starts=starts,
+            swa_win_lens=lens,
+            swa_win_max_len=4,
+        )
+        torch.testing.assert_close(out_lens, lens)
+        for row in indices:
+            torch.testing.assert_close(
+                row[:4], torch.arange(4, dtype=torch.int32, device=self.device)
+            )
+            self.assertTrue(bool((row[4:] == -1).all()))
+
+    def test_visible_window_metadata_kernel(self):
+        starts = torch.zeros(4, dtype=torch.int32, device=self.device)
+        lens = torch.full((4,), 4, dtype=torch.int32, device=self.device)
+        indices, out_lens = compute_window_topk_and_length_varlen(
+            2,
+            torch.tensor([0, 4], dtype=torch.int32, device=self.device),
+            torch.arange(4, dtype=torch.int32, device=self.device),
+            torch.zeros(1, dtype=torch.int32, device=self.device),
+            torch.zeros(4, dtype=torch.int32, device=self.device),
+            swa_win_starts=starts,
+            swa_win_lens=lens,
+            swa_win_max_len=4,
+        )
+        torch.testing.assert_close(out_lens, lens)
+        expected = torch.arange(4, dtype=torch.int32, device=self.device).expand(4, 4)
+        torch.testing.assert_close(indices, expected)
 
     def test_empty_input(self):
         """num_tokens=0 returns empty (combined_indices, combined_lens)."""

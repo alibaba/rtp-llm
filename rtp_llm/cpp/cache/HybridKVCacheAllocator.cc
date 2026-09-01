@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -77,6 +78,29 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
     return valid;
 }
 
+int capReuseBlocksForMultimodalSpans(int                                             reuse_blocks,
+                                     int                                             reuse_unit_tokens,
+                                     int                                             retained_raw_tokens,
+                                     const std::vector<std::pair<int64_t, int64_t>>& spans) {
+    if (reuse_blocks <= 0 || reuse_unit_tokens <= 0 || retained_raw_tokens <= 0 || spans.empty()) {
+        return reuse_blocks;
+    }
+    while (reuse_blocks > 0) {
+        const int64_t position = static_cast<int64_t>(reuse_blocks) * reuse_unit_tokens;
+        int           capped   = reuse_blocks;
+        for (const auto& [start, end] : spans) {
+            if (start < position - (retained_raw_tokens - 1) && position < end) {
+                capped = std::min(capped, static_cast<int>(std::max<int64_t>(start, 0) / reuse_unit_tokens));
+            }
+        }
+        if (capped >= reuse_blocks) {
+            break;
+        }
+        reuse_blocks = capped;
+    }
+    return reuse_blocks;
+}
+
 }  // namespace
 
 bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
@@ -99,9 +123,11 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
                                                int64_t                            reserve_block_ratio):
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
-int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
-                                       BatchKVCacheResource&                kv_resource,
-                                       const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                            cache_keys,
+                                       BatchKVCacheResource&                           kv_resource,
+                                       const std::shared_ptr<CPSlotMapper>&            cp_mapper,
+                                       const std::vector<std::pair<int64_t, int64_t>>& multimodal_reuse_spans,
+                                       int                                             reuse_unit_tokens) {
     // Under cp shard, FULL groups index block_ids by cp-virtual-block units
     // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
     // raw block_size logical blocks. So when populating tail blocks for
@@ -115,6 +141,25 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         auto match_result     = kv_cache_groups_[static_cast<size_t>(gid)]->match(cache_keys);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
+    }
+
+    const bool has_dsv4_swa = std::any_of(swa_group_ids_.begin(), swa_group_ids_.end(), [&](int gid) {
+        if (static_cast<size_t>(gid) >= config_.cache_specs.size()) {
+            return false;
+        }
+        const auto spec = std::dynamic_pointer_cast<DSV4StateSpec>(config_.cache_specs[static_cast<size_t>(gid)]);
+        return spec != nullptr && spec->cache_type == KVCacheRegionName::SWA_KV;
+    });
+    if (has_dsv4_swa) {
+        auto image_spans = multimodal_reuse_spans;
+        for (auto& [start, end] : image_spans) {
+            (void)end;
+            // DSV4's visible span starts at IMAGE_START, after 0..3 leading
+            // alignment PAD tokens, and is always at phase 3 modulo 4.
+            start += 3 - start % 4;
+        }
+        min_full_reuse_blocks = capReuseBlocksForMultimodalSpans(
+            min_full_reuse_blocks, reuse_unit_tokens, DSV4_SWA_WINDOW_ENTRIES, image_spans);
     }
 
     int                           pos = min_full_reuse_blocks - 1;
@@ -227,8 +272,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         // aligned, fully reusing the input leaves no prefill tokens to compute.
         CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
         auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
-        match_cost_time_us     = currentTimeUs() - begin_us;
+        reuse_blocks =
+            reuseCache(match_keys, *kv_resource, cp_mapper, malloc_info.multimodal_reuse_spans, reuse_unit_tokens);
+        match_cost_time_us = currentTimeUs() - begin_us;
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             const auto&      blocks = kv_resource->blocks(0, gid);

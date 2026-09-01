@@ -75,6 +75,7 @@ class MMPreprocessConfig:
     fps: int = -1
     min_frames: int = -1
     max_frames: int = -1
+    image_block_start_mod4: int = -1
 
 
 class MultimodalInput:

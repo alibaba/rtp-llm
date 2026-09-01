@@ -36,6 +36,7 @@ struct GatherModelInputContext {
     int*         prefix_lengths_host;
     int*         merged_text_mask;
     int*         mm_features_locs;
+    int64_t*     mm_features_spans;
     int          token_idx;
     int          mm_feature_index;
 };
@@ -63,6 +64,7 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
     ctx.prefix_lengths_host  = nullptr;
     ctx.merged_text_mask     = ctx.has_multimodal_input ? model_input.text_tokens_mask.data_ptr<int32_t>() : nullptr;
     ctx.mm_features_locs     = ctx.has_multimodal_input ? model_input.mm_features_locs.data_ptr<int32_t>() : nullptr;
+    ctx.mm_features_spans    = ctx.has_multimodal_input ? model_input.mm_features_spans.data_ptr<int64_t>() : nullptr;
 
     size_t kv_cache_mapping_offset = 0;
     if (mode == GatherContextMode::DECODE) {
@@ -130,18 +132,36 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     if (!mm_locs.defined()) {
         return;
     }
-    auto* mm_locs_data = mm_locs.data_ptr<int>();
-    for (int i = 0; i < mm_locs.numel(); ++i) {
-        ctx.mm_features_locs[ctx.mm_feature_index] = mm_locs_data[i] + ctx.token_idx - stream->reuseLength();
-        ctx.mm_feature_index++;
-    }
-    for (auto& mm_feature : mm_features) {
-        if (!mm_feature.is_cuda()) {
-            host_holder.hold_host(mm_feature);
-            gathered_mm_features.emplace_back(mm_feature.to(torch::kCUDA, /*non_blocking=*/true));
-        } else {
-            gathered_mm_features.emplace_back(mm_feature);
+    RTP_LLM_CHECK_WITH_INFO(mm_locs.numel() == static_cast<int64_t>(mm_features.size()),
+                            "mm_locs count %ld != mm_features count %zu for stream %ld",
+                            mm_locs.numel(),
+                            mm_features.size(),
+                            stream->streamId());
+    auto*     mm_locs_data = mm_locs.data_ptr<int32_t>();
+    const int reuse_length = stream->reuseLength();
+    for (int i = 0; i < static_cast<int>(mm_features.size()); ++i) {
+        const auto&   mm_feature  = mm_features[i];
+        const int64_t feature_len = mm_feature.size(0);
+        const int64_t feature_loc = mm_locs_data[i];
+        const int64_t feature_end = feature_loc + feature_len;
+        if (reuse_length >= feature_end) {
+            continue;
         }
+
+        const int64_t token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
+        auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
+        if (!current_feature.is_cuda()) {
+            host_holder.hold_host(current_feature);
+            gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
+        } else {
+            gathered_mm_features.emplace_back(std::move(current_feature));
+        }
+        ctx.mm_features_locs[ctx.mm_feature_index] =
+            ctx.token_idx + static_cast<int>(std::max<int64_t>(feature_loc - reuse_length, 0));
+        ctx.mm_features_spans[ctx.mm_feature_index * 3]     = ctx.batch_idx - ctx.total_decode_batch_size;
+        ctx.mm_features_spans[ctx.mm_feature_index * 3 + 1] = feature_loc;
+        ctx.mm_features_spans[ctx.mm_feature_index * 3 + 2] = feature_end;
+        ++ctx.mm_feature_index;
     }
     auto text_token_mask = stream->textTokensMask();
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
@@ -269,8 +289,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
             torch::empty({(int64_t)(current_tokens_size * config_.position_id_len_factor)}, pinned_i32);
     }
     if (has_multimodal_input) {
-        model_input.text_tokens_mask = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
-        model_input.mm_features_locs = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
+        model_input.text_tokens_mask  = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+        model_input.mm_features_locs  = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
+        model_input.mm_features_spans = torch::empty({(int64_t)multimodal_features_len, 3}, pinned_i64);
     }
 
     model_input.kv_block_stride_bytes     = config_.block_stride_bytes;
@@ -476,10 +497,15 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
+    if (ctx.has_multimodal_input && model_input.mm_features_locs.defined()
+        && ctx.mm_feature_index < model_input.mm_features_locs.numel()) {
+        model_input.mm_features_locs  = model_input.mm_features_locs.slice(0, 0, ctx.mm_feature_index);
+        model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
+    }
     // Keep the CPU source alongside the CUDA publication. CP Python metadata
     // consumes these scalar prefixes without synchronizing a device tensor.
     model_input.prefix_lengths_host_for_log = prefix_lengths_host;
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    model_input.prefix_lengths              = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 

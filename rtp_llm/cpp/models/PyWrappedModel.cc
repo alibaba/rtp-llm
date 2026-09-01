@@ -699,7 +699,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     try {
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
-        if (int(device_props_.enable_layer_micro_batch)) {
+        if (int(device_props_.enable_layer_micro_batch) && !inputs.multimodal_features.has_value()) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
@@ -737,6 +737,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // the current stream and will be ordered correctly with the kernels below.
 
         auto py_model_inputs = PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs);
+        py_model_inputs.multimodal_features = inputs.multimodal_features;
+        py_model_inputs.text_tokens_mask    = inputs.text_tokens_mask.defined() ?
+                                                  inputs.text_tokens_mask.to(torch::kCUDA, /*non_blocking=*/true) :
+                                                  torch::Tensor();
+        py_model_inputs.mm_features_locs    = inputs.mm_features_locs;
+        py_model_inputs.mm_features_spans   = inputs.mm_features_spans;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -1300,6 +1306,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.text_tokens_mask);
     buffer_holder_.hold_host(inputs.mm_features_locs);
+    buffer_holder_.hold_host(inputs.mm_features_spans);
 
     if (inputs.input_embeddings.has_value()) {
         for (auto& input_embedding : inputs.input_embeddings.value()) {

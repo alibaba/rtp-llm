@@ -502,6 +502,10 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
         stub: _StubAttention,
         prefix_lengths: list[int],
         input_lengths: list[int],
+        *,
+        swa_win_starts: Optional[torch.Tensor] = None,
+        swa_win_lens: Optional[torch.Tensor] = None,
+        swa_win_max_len: Optional[int] = None,
     ) -> SwaPrefillMeta:
         positions, req_id, cu_seqlens = _flat_positions(
             prefix_lengths, input_lengths, self.device
@@ -519,6 +523,9 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
             prefix_lengths=pl,
             position_ids=positions,
             req_id_per_token=req_id,
+            swa_win_starts=swa_win_starts,
+            swa_win_lens=swa_win_lens,
+            swa_win_max_len=swa_win_max_len,
         )
 
     # ----- B==1 bit-equality vs legacy scalar path -------------------------
@@ -669,6 +676,31 @@ class BuildSwaPrefillMetaVarlenTest(unittest.TestCase):
             [5, 6, 7, 8, 8, 8, 8, 8], dtype=torch.int32, device=self.device
         )
         self.assertTrue(torch.equal(meta.combined_lens, expected_cmb))
+
+    def test_continuation_preserves_image_visible_window(self) -> None:
+        """A shallow prefix cut inside an image must keep bidirectional image
+        visibility on the SWA-only continuation path."""
+        stub = self._build_stub(win=4, compress_ratio=0)
+        # Prefix ends at absolute position 6. The cached SWA tail starts at 3;
+        # the image spans [4, 9], so all six image tokens remain addressable in
+        # the continuation workspace [abs 3, 10).
+        starts = torch.tensor([4, 4, 4, 4], dtype=torch.int32, device=self.device)
+        lengths = torch.tensor([6, 6, 6, 4], dtype=torch.int32, device=self.device)
+        meta = self._build_meta_varlen(
+            stub,
+            [6],
+            [4],
+            swa_win_starts=starts,
+            swa_win_lens=lengths,
+            swa_win_max_len=6,
+        )
+
+        self.assertTrue(torch.equal(meta.combined_lens, lengths))
+        # Workspace M=7 and gather_start=3, hence image [4,9] maps to slots
+        # [1,6] for each image query.
+        expected = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
+        self.assertTrue(torch.equal(meta.combined_indices[0, :6].cpu(), expected))
+        self.assertTrue(torch.equal(meta.combined_indices[2, :6].cpu(), expected))
 
     def test_cp_byte_sliced_swa_only_precomputes_write_and_cache_compaction(
         self,

@@ -7,7 +7,15 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
 
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
 cc_test(
     name = "multimodal_processor_test",
     srcs = glob([
@@ -25,7 +33,7 @@ cc_test(
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
-    ],
+    ] + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

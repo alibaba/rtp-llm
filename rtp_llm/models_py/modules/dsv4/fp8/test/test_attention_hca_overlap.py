@@ -44,6 +44,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     PrefillQKV,
     SwaPrefillMeta,
     WorkspaceMeta,
+    _get_visible_window_overrides,
     _prefill_cp_overlap_enabled,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
@@ -132,6 +133,46 @@ def _make_qkv(device: torch.device) -> PrefillQKV:
         q=torch.zeros(2, 4, dtype=torch.bfloat16, device=device),
         kv_full=torch.zeros(2, 4, dtype=torch.bfloat16, device=device),
     )
+
+
+class ImageVisibleTopKTest(unittest.TestCase):
+    def test_visible_window_bounds_match_reference(self) -> None:
+        positions = torch.arange(323, dtype=torch.long)
+        starts, win_lens = _get_visible_window_overrides(
+            128,
+            positions,
+            torch.tensor([[0, 10, 309]], dtype=torch.long),
+        )
+
+        for row, expected in {
+            0: torch.arange(0, 1),
+            10: torch.arange(0, 310),
+            200: torch.arange(10, 310),
+            309: torch.arange(10, 310),
+            310: torch.arange(183, 311),
+        }.items():
+            visible = torch.arange(int(starts[row]), int(starts[row] + win_lens[row]))
+            self.assertTrue(torch.equal(visible, expected), row)
+        torch.testing.assert_close(
+            starts[[10, 200, 309]], torch.tensor([0, 10, 10], dtype=torch.int32)
+        )
+
+    def test_image_visibility_is_scoped_to_each_request(self) -> None:
+        positions = torch.tensor([0, 1, 2, 0, 1, 2], dtype=torch.long)
+        req_ids = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32)
+        starts, lengths = _get_visible_window_overrides(
+            2,
+            positions,
+            torch.tensor([[0, 0, 2]], dtype=torch.long),
+            req_ids,
+        )
+
+        torch.testing.assert_close(
+            lengths, torch.tensor([3, 3, 3, 1, 2, 2], dtype=torch.int32)
+        )
+        torch.testing.assert_close(
+            starts, torch.tensor([0, 0, 0, 0, 0, 1], dtype=torch.int32)
+        )
 
 
 class HCAOverlapGateTest(unittest.TestCase):

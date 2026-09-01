@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 #include <cstdint>
 
@@ -59,6 +60,10 @@ struct MallocInfo {
     bool                          reuse_cache         = true;
     bool                          enable_device_cache = true;
     std::shared_ptr<CPSlotMapper> cp_slot_mapper;  // nullptr = redundant (default)
+    // Expanded multimodal token ranges [start, end). DSV4 hybrid cache uses
+    // these to cap a deep prefix hit to the image start when the raw SWA tail
+    // no longer retains enough KV for bidirectional visible-window attention.
+    std::vector<std::pair<int64_t, int64_t>> multimodal_reuse_spans;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.

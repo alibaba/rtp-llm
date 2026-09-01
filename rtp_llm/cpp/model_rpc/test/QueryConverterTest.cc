@@ -80,6 +80,16 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
 }
 
+TEST_F(QueryConverterTest, MultimodalImageBlockPhaseRoundTrips) {
+    MultimodalInput input("image", torch::empty(0), 1, -1, -1, -1, -1, -1, -1, -1, 3);
+
+    auto pb     = QueryConverter::transMMInputsPB({input});
+    auto output = QueryConverter::transMMInput(&pb);
+
+    ASSERT_EQ(output.size(), 1);
+    EXPECT_EQ(output[0].mm_preprocess_config.image_block_start_mod4, 3);
+}
+
 TEST_F(QueryConverterTest, RoleAddrReadsLegacyTypedAndDualWritePayloads) {
     GenerateConfigPB config;
 

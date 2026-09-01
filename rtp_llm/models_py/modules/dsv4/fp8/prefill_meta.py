@@ -70,6 +70,7 @@ def build_and_propagate_prefill_meta_fp8(
     prefix_lengths = _flat_optional(prefix_lengths)
     position_ids = _flat_optional(position_ids)
     req_id_per_token = _flat_optional(req_id_per_token)
+    image_spans = getattr(v4, "_image_spans", None)
 
     representatives: Dict[int, Any] = {}
     for layer in v4.layers:
@@ -108,6 +109,7 @@ def build_and_propagate_prefill_meta_fp8(
                         position_ids=position_ids,
                         req_id_per_token=req_id_per_token,
                         max_seqlen_q=max_seqlen_q,
+                        image_spans=image_spans,
                         reuse_common_meta=reusable_common,
                         reuse_freqs_meta=reusable_freqs_by_rope_kind.get(
                             compressed_rope

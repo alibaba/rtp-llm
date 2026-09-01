@@ -856,22 +856,32 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     releaseAllModelBuffers();
 
-    // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES
-    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` in
-    // place to the rank-local zigzag chunk layout for the target forward.
+    // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES the token
+    // sequence and every token-aligned input in place to the rank-local
+    // zigzag layout for the target forward.
     // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
     // draft re-CP-slice) needs the FULL/global view, so snapshot both
     // tensors here while they still hold the global sequence and restore
     // on rank 0 before the second tpSync (which then broadcasts the
     // restored full view to every rank for the draft pass).
-    const bool    cp_enabled = enable_prefill_cp_;
-    torch::Tensor saved_combo_tokens;
-    torch::Tensor saved_input_lengths;
+    const bool                                cp_enabled = enable_prefill_cp_;
+    torch::Tensor                             saved_combo_tokens;
+    torch::Tensor                             saved_input_lengths;
+    torch::Tensor                             saved_text_tokens_mask;
+    torch::Tensor                             saved_combo_tokens_type_ids;
+    torch::Tensor                             saved_combo_position_ids;
+    torch::Tensor                             saved_mm_features_locs;
+    std::optional<std::vector<torch::Tensor>> saved_multimodal_features;
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens          = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths         = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_text_tokens_mask      = model_input.text_tokens_mask;
+        saved_combo_tokens_type_ids = model_input.combo_tokens_type_ids;
+        saved_combo_position_ids    = model_input.combo_position_ids;
+        saved_mm_features_locs      = model_input.mm_features_locs;
+        saved_multimodal_features   = model_input.multimodal_features;
     }
 
     // target model prefill
@@ -910,8 +920,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // the contiguous full sequence; the tpSync below then publishes the
         // restored view to every draft rank (fake/warmup streams included).
         if (cp_enabled) {
-            model_input.combo_tokens  = saved_combo_tokens;
-            model_input.input_lengths = saved_input_lengths;
+            model_input.combo_tokens          = saved_combo_tokens;
+            model_input.input_lengths         = saved_input_lengths;
+            model_input.text_tokens_mask      = saved_text_tokens_mask;
+            model_input.combo_tokens_type_ids = saved_combo_tokens_type_ids;
+            model_input.combo_position_ids    = saved_combo_position_ids;
+            model_input.mm_features_locs      = saved_mm_features_locs;
+            model_input.multimodal_features   = std::move(saved_multimodal_features);
         }
         if (!is_dspark_ && model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;

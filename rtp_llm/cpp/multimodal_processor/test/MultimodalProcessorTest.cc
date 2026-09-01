@@ -18,6 +18,7 @@ TEST_F(MultimodalProcessorTest, testSimple) {
     input->multimodal_inputs = mm_inputs;
     auto res                 = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), true);
+    EXPECT_EQ(processor.last_image_block_start_mod4, std::vector<int32_t>({1}));
 
     auto input_ids = input->input_ids.data_ptr<int32_t>();
     EXPECT_EQ(input->input_ids.numel(), 6);
@@ -55,6 +56,7 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
     input->multimodal_inputs = mm_inputs;
     auto res                 = processor.updateMultimodalFeatures(input);
     EXPECT_EQ(res.ok(), true);
+    EXPECT_EQ(processor.last_image_block_start_mod4, std::vector<int32_t>({1, 2}));
 
     EXPECT_EQ(input->input_ids.numel(), 8);
 
@@ -73,6 +75,22 @@ TEST_F(MultimodalProcessorTest, testMultiInput) {
 
     EXPECT_TRUE(input->multimodal_features);
     EXPECT_EQ(input->multimodal_features.value().size(), 2);
+}
+
+TEST_F(MultimodalProcessorTest, testImageBlockStartPhaseUsesOnlyInterImageText) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 32);
+    auto                    input     = std::make_shared<GenerateInput>();
+    input->input_ids                  = torch::tensor({9, 1, 7, 7, 1, 8}, torch::kInt32);
+    auto mm_inputs                    = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("6");
+    mm_inputs.emplace_back("2");
+    input->multimodal_inputs = mm_inputs;
+
+    auto res = processor.updateMultimodalFeatures(input);
+
+    ASSERT_TRUE(res.ok()) << res.ToString();
+    EXPECT_EQ(processor.last_image_block_start_mod4, std::vector<int32_t>({1, 3}));
+    EXPECT_EQ(input->input_ids.numel(), 12);
 }
 
 TEST_F(MultimodalProcessorTest, testWrongMMTag) {

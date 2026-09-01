@@ -54,6 +54,9 @@ private:
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 
+    ErrorResult<std::vector<rtp_llm::MultimodalInput>>
+    setImageBlockStartPhases(const torch::Tensor& token_ids, const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
+
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:

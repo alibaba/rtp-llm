@@ -1130,7 +1130,7 @@ static CacheConfig makeDSV4CpAllocatorConfig(uint32_t cp_size) {
     pc.role_type                          = RoleType::PREFILL;
     pc.tp_size                            = cp_size;
     pc.prefill_cp_config.kv_cache_sharded = true;
-    auto config = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
+    auto config      = HybridPoolConfigCreator::createConfig(mc, pc, makeDsv4KvCacheConfig(), false, 0);
     config.block_num = 200;
     config.group_block_nums.assign(config.groupNums(), config.block_num);
     return config;
@@ -1150,7 +1150,7 @@ protected:
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
-    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     // 7 groups → HybridTypeKVCacheAllocator path
@@ -1161,9 +1161,9 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
 }
 
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
-    constexpr uint32_t cp_size = 4;
-    auto               config  = makeDSV4CpAllocatorConfig(cp_size);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    constexpr uint32_t cp_size   = 4;
+    auto               config    = makeDSV4CpAllocatorConfig(cp_size);
+    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = allocator->seqSizePerBlock();
@@ -1634,6 +1634,110 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     }
 
     // Clean up
+    FreeInfo free_info{batch_res};
+    allocator->free(free_info);
+}
+
+TEST_F(DSV4AllocatorTest, PrefixCacheReuseCapsOnlyDeepImageCuts) {
+    auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto shared_cache = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto          block_pool = allocator->getBlockPool();
+    constexpr int group_num  = 7;
+    CacheKeysType cached_keys{700, 701, 702};
+    for (int gid = 0; gid < group_num; ++gid) {
+        auto blocks = block_pool->malloc(static_cast<int>(cached_keys.size()));
+        ASSERT_EQ(blocks.size(), cached_keys.size());
+        for (size_t i = 0; i < cached_keys.size(); ++i) {
+            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
+            group_slots[gid] = blocks[i];
+            shared_cache->put(cached_keys[i], group_slots, true);
+        }
+        block_pool->requestFree(blocks);
+    }
+
+    const int spb = allocator->seqSizePerBlock();
+    auto      run = [&](std::pair<int64_t, int64_t> image_span) {
+        auto batch_res = std::make_shared<BatchKVCacheResource>();
+        batch_res->resetBatchSize(1);
+        batch_res->initGroups(7, static_cast<int>(config.layer_all_num), config.layer_to_group_id);
+        batch_res->setBatchCacheKeys(0, CacheKeysType{700, 701, 702, 703});
+
+        auto cti                        = std::make_shared<CompleteTokenIds>(1, 1, 4 * spb, spb);
+        auto generate_input             = std::make_shared<GenerateInput>();
+        generate_input->input_ids       = torch::arange(3 * spb + 1, torch::kInt32);
+        generate_input->generate_config = std::make_shared<GenerateConfig>();
+        cti->init(generate_input);
+
+        MallocInfo info{batch_res, cti};
+        info.enable_device_cache    = true;
+        info.reuse_cache            = true;
+        info.multimodal_reuse_spans = {image_span};
+        auto result                 = allocator->malloc(info);
+        EXPECT_TRUE(result.success);
+        FreeInfo free_info{batch_res};
+        allocator->free(free_info);
+        return result.reuse_len;
+    };
+
+    // The raw SWA tail still contains this image start, so the three-block hit
+    // remains valid. A deeper cut is capped to the full block before the image.
+    EXPECT_EQ(run({3 * spb - 100, 4 * spb}), 3 * spb);
+    EXPECT_EQ(run({spb + 10, 4 * spb}), spb);
+}
+
+TEST_F(DSV4AllocatorTest, PrefixCacheReuseCapsDeepImageCutInCPVirtualBlocks) {
+    constexpr int cp_size      = 2;
+    auto          config       = makeDSV4CpAllocatorConfig(cp_size);
+    auto          allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto          shared_cache = std::make_shared<SharedBlockCache>();
+    allocator->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(allocator->init());
+
+    auto          block_pool = allocator->getBlockPool();
+    constexpr int group_num  = 7;
+    CacheKeysType matched_cp_keys{701, 703, 705};
+    for (int gid = 0; gid < group_num; ++gid) {
+        auto blocks = block_pool->malloc(static_cast<int>(matched_cp_keys.size()));
+        ASSERT_EQ(blocks.size(), matched_cp_keys.size());
+        for (size_t i = 0; i < matched_cp_keys.size(); ++i) {
+            std::vector<BlockIdxType> group_slots(group_num, NULL_BLOCK_IDX);
+            group_slots[gid] = blocks[i];
+            shared_cache->put(matched_cp_keys[i], group_slots, true);
+        }
+        block_pool->requestFree(blocks);
+    }
+
+    const int spb         = allocator->seqSizePerBlock();
+    const int virtual_spb = spb * cp_size;
+    auto      batch_res   = std::make_shared<BatchKVCacheResource>();
+    batch_res->resetBatchSize(1);
+    batch_res->initGroups(7,
+                          static_cast<int>(config.layer_all_num),
+                          config.layer_to_group_id,
+                          config.kernelBlocksPerKvBlock(),
+                          config.group_types,
+                          config.layer_region_to_group_id);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{700, 701, 702, 703, 704, 705, 706, 707});
+
+    auto cti                        = std::make_shared<CompleteTokenIds>(1, 1, 4 * virtual_spb, spb);
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = torch::arange(3 * virtual_spb + 1, torch::kInt32);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    cti->init(generate_input);
+
+    MallocInfo info{batch_res, cti};
+    info.enable_device_cache    = true;
+    info.reuse_cache            = true;
+    info.cp_slot_mapper         = std::make_shared<CPSlotMapper>(0, cp_size, spb);
+    info.multimodal_reuse_spans = {{virtual_spb + 10, 4 * virtual_spb}};
+    auto result                 = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, virtual_spb);
+
     FreeInfo free_info{batch_res};
     allocator->free(free_info);
 }

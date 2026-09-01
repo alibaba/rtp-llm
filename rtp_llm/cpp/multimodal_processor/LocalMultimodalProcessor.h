@@ -9,7 +9,8 @@ public:
     using MultimodalProcessor::MultimodalProcessor;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs, std::string ip_port = "") {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+                                                      std::string                                 ip_port = "") {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -27,7 +28,8 @@ private:
                                                  mm_input.mm_preprocess_config.max_pixels,
                                                  mm_input.mm_preprocess_config.fps,
                                                  mm_input.mm_preprocess_config.min_frames,
-                                                 mm_input.mm_preprocess_config.max_frames});
+                                                 mm_input.mm_preprocess_config.max_frames,
+                                                 mm_input.mm_preprocess_config.image_block_start_mod4});
             }
             try {
                 py::gil_scoped_acquire acquire;

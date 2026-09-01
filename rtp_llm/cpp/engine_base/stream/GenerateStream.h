@@ -740,7 +740,6 @@ protected:
     int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
     int                                   memory_reuse_length_  = 0;
-    int                                   reuse_mm_length_      = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

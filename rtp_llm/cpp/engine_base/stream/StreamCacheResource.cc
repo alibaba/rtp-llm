@@ -17,6 +17,42 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+std::vector<std::pair<int64_t, int64_t>> multimodalReuseSpans(const GenerateStream* stream) {
+    auto features = stream->multimodalFeatures();
+    auto locs     = stream->multimodalLocations();
+    if (features.empty() || !locs.defined()) {
+        return {};
+    }
+    RTP_LLM_CHECK_WITH_INFO(!locs.is_cuda() && locs.scalar_type() == torch::kInt32 && locs.dim() == 1,
+                            "multimodal locations must be a host int32 vector");
+    RTP_LLM_CHECK_WITH_INFO(locs.numel() == static_cast<int64_t>(features.size()),
+                            "multimodal feature/location count mismatch: features=%zu locations=%ld",
+                            features.size(),
+                            locs.numel());
+    const auto*                              loc_data = locs.data_ptr<int32_t>();
+    std::vector<std::pair<int64_t, int64_t>> spans;
+    spans.reserve(features.size());
+    int64_t previous_end = 0;
+    for (size_t i = 0; i < features.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(features[i].defined() && features[i].dim() >= 1 && features[i].size(0) > 0,
+                                "multimodal feature %zu must have a positive token dimension",
+                                i);
+        const int64_t start = loc_data[i];
+        const int64_t end   = start + features[i].size(0);
+        RTP_LLM_CHECK_WITH_INFO(start >= previous_end,
+                                "multimodal spans must be sorted and non-overlapping: start=%ld previous_end=%ld",
+                                start,
+                                previous_end);
+        spans.emplace_back(start, end);
+        previous_end = end;
+    }
+    return spans;
+}
+
+}  // namespace
+
 // ----------------------------- KVCacheConnectorReadWriteContextImpl -----------------------------
 
 class KVCacheConnectorReadWriteContextImpl: public KVCacheConnectorReadWriteContext {
@@ -376,6 +412,7 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
     malloc_info.request_id              = stream_->streamId();
     malloc_info.verbose                 = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
+    malloc_info.multimodal_reuse_spans  = multimodalReuseSpans(stream_);
 
     const bool disable_first_malloc_reuse =
         resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;

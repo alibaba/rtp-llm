@@ -460,21 +460,68 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
 
-        auto&       model_input      = merge_input_status.value();
-        vector<int> combo_tokens     = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
-        vector<int> input_lengths    = {5, 3, 5};
-        vector<int> text_tokens_mask = {1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
-        vector<int> mm_features_locs = {1, 10};
+        auto&           model_input       = merge_input_status.value();
+        vector<int>     combo_tokens      = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
+        vector<int>     input_lengths     = {5, 3, 5};
+        vector<int>     text_tokens_mask  = {1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
+        vector<int>     mm_features_locs  = {1, 10};
+        vector<int64_t> mm_features_spans = {0, 1, 4, 2, 2, 4};
 
         EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(text_tokens_mask, toVec<int>(model_input.text_tokens_mask));
         EXPECT_EQ(mm_features_locs, toVec<int>(model_input.mm_features_locs));
+        EXPECT_EQ(mm_features_spans, toVec<int64_t>(model_input.mm_features_spans));
 
         EXPECT_EQ(model_input.multimodal_features.value().size(), 2);
         EXPECT_EQ(model_input.multimodal_features.value()[0].numel(), 3 * 10);
         EXPECT_EQ(model_input.multimodal_features.value()[1].numel(), 2 * 10);
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherSlicesReusedPrefix) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.attn_config.kv_cache_dtype    = KvCacheDataType::INT8;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
+    auto full_feature          = torch::arange(30, torch::kFloat16).reshape({3, 10});
+    query->multimodal_features = {full_feature};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->setReuseLength(2);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    std::list<GenerateStreamPtr> stream_list;
+    stream_list.emplace_back(stream);
+    StreamGroups streams(stream_list);
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(streams, holder);
+    ASSERT_TRUE(gathered.ok());
+    auto& model_input = gathered.value();
+
+    EXPECT_EQ(toVec<int>(model_input.combo_tokens), std::vector<int>({-1, -1, 2}));
+    EXPECT_EQ(toVec<int>(model_input.text_tokens_mask), std::vector<int>({0, 0, 1}));
+    EXPECT_EQ(toVec<int>(model_input.mm_features_locs), std::vector<int>({0}));
+    EXPECT_EQ(toVec<int64_t>(model_input.mm_features_spans), std::vector<int64_t>({0, 1, 4}));
+    ASSERT_TRUE(model_input.multimodal_features.has_value());
+    ASSERT_EQ(model_input.multimodal_features->size(), 1);
+    EXPECT_TRUE(torch::equal(model_input.multimodal_features->at(0).cpu(), full_feature.slice(0, 1, 3)));
 }
 
 }  // namespace rtp_llm

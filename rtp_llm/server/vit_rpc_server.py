@@ -34,6 +34,9 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         mm_process_config_pb.min_pixels,
         mm_process_config_pb.max_pixels,
         mm_process_config_pb.fps,
+        mm_process_config_pb.min_frames,
+        mm_process_config_pb.max_frames,
+        mm_process_config_pb.image_block_start_mod4,
     ]
 
 
