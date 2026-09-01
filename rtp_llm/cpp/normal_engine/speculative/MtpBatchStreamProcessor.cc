@@ -208,14 +208,10 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
                                 feature_idx,
                                 feature_start,
                                 feature_end);
-        RTP_LLM_CHECK_WITH_INFO(feature_end <= request_starts[owner + 1],
-                                "MTP multimodal feature %ld crosses request boundary: [%ld,%ld), request=%ld [%ld,%ld)",
-                                feature_idx,
-                                feature_start,
-                                feature_end,
-                                owner,
-                                request_starts[owner],
-                                request_starts[owner + 1]);
+        // A global multimodal feature may extend beyond the current prefill
+        // chunk. CP or the MTP embedding injector consumes only its overlap
+        // with the current local input, so do not reject a valid partial
+        // feature here. The feature must still overlap at least one request.
         // Each request loses its first token. The global offset also loses one
         // token for every preceding request, hence owner + 1 total positions.
         dst_locs[feature_idx] = static_cast<int32_t>(feature_start - owner - 1);

@@ -69,22 +69,25 @@ class MultimodalEmbeddingInjector(nn.Module):
             if feature.device != embeddings.device:
                 feature = feature.to(embeddings.device)
 
-            # A partially-cached leading image arrives with loc < 0: its head rows already live in the
-            # reused KV prefix, so drop them and inject only the remaining tail at the recompute start.
-            if loc < 0:
-                feature = feature[-loc:]
-                loc = 0
-                if feature.size(0) == 0:
-                    continue
+            # A feature may overlap only part of the current input: loc < 0 means
+            # its head is in the reused prefix, while the right edge may extend
+            # into a later prefill chunk. Inject only the intersection and keep
+            # the source rows aligned with the destination rows.
+            src_start = -loc if loc < 0 else 0
+            dst_start = max(loc, 0)
+            if src_start >= feature.size(0) or dst_start >= embeddings.size(0):
+                continue
 
-            length = feature.size(0)
-            if loc + length > embeddings.size(0):
-                raise IndexError(
-                    f"feature[{idx}] with length {length} cannot be placed at loc {loc} "
-                    f"within embeddings of length {embeddings.size(0)}"
-                )
+            length = min(
+                feature.size(0) - src_start,
+                embeddings.size(0) - dst_start,
+            )
+            if length <= 0:
+                continue
 
-            embeddings.narrow(0, loc, length).copy_(feature.contiguous())
+            embeddings.narrow(0, dst_start, length).copy_(
+                feature.narrow(0, src_start, length).contiguous()
+            )
 
         return embeddings
 
