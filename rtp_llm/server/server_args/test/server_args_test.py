@@ -35,8 +35,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
-        os.environ["REMOTE_JIT_READ_DIR"] = "dfs://bucket/jit/baseline"
-        os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
+        os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit"
+        os.environ["JIT_CACHE_SETUP_TIMEOUT_S"] = "60"
+        os.environ["MANAGE_JIT_CACHE"] = "1"
 
         sys.argv = ["prog"]
 
@@ -88,13 +89,11 @@ class ServerArgsSetTest(TestCase):
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(
-            py_env_configs.jit_config.remote_jit_read_dir,
-            "dfs://bucket/jit/baseline",
+            py_env_configs.jit_config.remote_jit_dir,
+            "dfs://bucket/jit",
         )
-        self.assertEqual(
-            py_env_configs.jit_config.warm_up_jit_and_write_remote,
-            "dfs://bucket/jit/writer",
-        )
+        self.assertEqual(py_env_configs.jit_config.jit_cache_setup_timeout_s, 60)
+        self.assertTrue(py_env_configs.jit_config.manage_jit_cache)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

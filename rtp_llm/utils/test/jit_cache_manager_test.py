@@ -662,6 +662,16 @@ class ManagerTest(JitCacheTestBase):
             finally:
                 blocked.set()
 
+    def test_missing_watchdog_uses_polling_fallback(self):
+        manager = self.make_manager(self.make_scope())
+        with mock.patch.object(jit, "Observer", None), self.assertLogs(
+            level="ERROR"
+        ) as logs:
+            self.assertTrue(manager.bootstrap(timeout_s=30))
+        self.assertIsNone(manager._observer)
+        self.assertTrue(manager._worker.is_alive())
+        self.assertIn("polling fallback active", "\n".join(logs.output))
+
     def test_publish_then_restore_round_trip(self):
         scope = self.make_scope()
         producer = self.make_manager(scope)
@@ -1026,51 +1036,6 @@ class BackendTest(JitCacheTestBase):
             self.assertEqual(backend.start_backend_server(None, configs), "served")
         self.assertEqual(events, ["rank", "stop"])
 
-    def test_runtime_handler_installed_after_start_requests_shutdown(self):
-        handlers = {}
-
-        class FakeBackendManager:
-            instance = None
-
-            def __init__(self, _configs):
-                self.request_shutdown = mock.Mock()
-                self.serve_forever = mock.Mock()
-                FakeBackendManager.instance = self
-
-            def start(self):
-                assert backend.signal.SIGTERM not in handlers
-
-        backend_module = types.ModuleType("rtp_llm.server.backend_manager")
-        backend_module.BackendManager = FakeBackendManager
-        configs = mock.Mock()
-        configs.parallelism_config.local_rank = 0
-        configs.parallelism_config.world_size = 1
-        status = mock.Mock()
-        with mock.patch.dict(
-            sys.modules, {"rtp_llm.server.backend_manager": backend_module}
-        ), contextlib.ExitStack() as stack:
-            for name in (
-                "copy_gemm_config",
-                "set_parallelism_config",
-                "setup_cuda_device_and_accl_env",
-                "set_global_controller",
-                "setproctitle",
-            ):
-                stack.enter_context(mock.patch.object(backend, name))
-            stack.enter_context(
-                mock.patch.object(
-                    backend.signal,
-                    "signal",
-                    side_effect=lambda s, h: handlers.__setitem__(s, h),
-                )
-            )
-            stack.enter_context(mock.patch.object(backend, "_send_pipe_status", status))
-            backend.local_rank_start(None, configs, pipe_writer=object())
-        self.assertEqual(status.call_args[0][1], "success")
-        handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
-        FakeBackendManager.instance.request_shutdown.assert_called_once_with()
-        FakeBackendManager.instance.serve_forever.assert_called_once_with()
-
     def test_parent_signal_during_jit_setup_prevents_rank_start(self):
         handlers = {}
         configs = self.make_configs(remote="/r", world_size=2)
@@ -1096,100 +1061,6 @@ class BackendTest(JitCacheTestBase):
             readers.append(mock.Mock())
 
         return fake
-
-    def test_rank_wait_teardown_covers_startup_abort(self):
-        configs = self.make_configs(remote="/r")
-        configs.distribute_config.fake_gang_env = False
-        proc = mock.Mock()
-        proc.name, proc.pid = "rank-0", 123
-        proc.is_alive.side_effect = [True, False, False]  # dies after terminate
-        status = mock.Mock()
-
-        with mock.patch.object(
-            backend.multiprocessing, "get_context"
-        ), mock.patch.object(
-            backend, "_create_rank_processes", side_effect=self._fake_create(proc)
-        ), mock.patch.object(
-            backend,
-            "_wait_for_ranks_startup",
-            side_effect=KeyboardInterrupt("signal 15 during startup"),
-        ), mock.patch.object(
-            backend, "_send_pipe_status", status
-        ):
-            # The abort must never be downgraded to a catchable Exception.
-            with self.assertRaisesRegex(KeyboardInterrupt, "signal 15"):
-                backend.multi_rank_start(None, configs, pipe_writer=object())
-        proc.terminate.assert_called_once_with()
-        self.assertEqual(status.call_args[0][1], "failed")
-        self.assertIn("KeyboardInterrupt", status.call_args[0][3])
-        self.assertIn("signal 15 during startup", status.call_args[0][3])
-
-    def test_spawn_failure_terminates_already_started_ranks(self):
-        configs = self.make_configs(remote="/r")
-        configs.distribute_config.fake_gang_env = False
-        configs.parallelism_config.world_rank = 0
-        configs.parallelism_config.dp_size = 1
-        first = mock.Mock()
-        first.name, first.pid = "rank-0", 123
-        first.is_alive.side_effect = [True, False, False]
-        second = mock.Mock()
-        second.start.side_effect = RuntimeError("spawn failed")
-        second.is_alive.return_value = False
-        ctx = mock.Mock()
-        ctx.Process.side_effect = [first, second]
-        ctx.Pipe.return_value = (mock.Mock(), mock.Mock())
-        with mock.patch.object(
-            backend.multiprocessing, "get_context", return_value=ctx
-        ), mock.patch.object(
-            backend, "_get_local_world_size", return_value=2
-        ), mock.patch.object(
-            backend, "_get_cuda_device_list", return_value=["0", "1"]
-        ), mock.patch.object(
-            backend, "_send_pipe_status"
-        ):
-            with self.assertRaisesRegex(Exception, "spawn failed"):
-                backend.multi_rank_start(None, configs)
-        first.terminate.assert_called_once_with()  # started before the failure
-
-    def test_failed_rank_raises_even_when_reporting_last(self):
-        def pipe(status):
-            reader = mock.Mock()
-            reader.poll.return_value = True
-            reader.recv.return_value = {"status": status, "message": "boom"}
-            return reader
-
-        proc = mock.Mock()
-        proc.is_alive.return_value = True
-        proc.exitcode = None
-        with self.assertRaisesRegex(Exception, "Rank 1 startup failed: boom"):
-            backend._wait_for_ranks_startup(
-                [proc, proc], [pipe("success"), pipe("failed")], 2
-            )
-
-    def test_hard_exit_runs_bounded_cleanup(self):
-        configs = self.make_configs(remote="/r")
-        configs.distribute_config.fake_gang_env = False
-        proc = mock.Mock()
-        proc.name, proc.pid = "rank-0", 123
-        proc.is_alive.return_value = True
-        cleanup = mock.Mock()
-
-        with mock.patch.object(
-            backend.multiprocessing, "get_context"
-        ), mock.patch.object(
-            backend, "_create_rank_processes", side_effect=self._fake_create(proc)
-        ), mock.patch.object(
-            backend, "_wait_for_ranks_startup", side_effect=RuntimeError("failed")
-        ), mock.patch.object(
-            backend, "_send_pipe_status"
-        ), mock.patch.object(
-            backend.os, "_exit", side_effect=SystemExit(1)
-        ):
-            with self.assertRaises(SystemExit):
-                backend.multi_rank_start(None, configs, cleanup=cleanup)
-        cleanup.assert_called_once_with()
-        proc.terminate.assert_called_once_with()
-        proc.kill.assert_called_once_with()
 
 
 class TipcTest(JitCacheTestBase):

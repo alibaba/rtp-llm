@@ -135,7 +135,7 @@ class Fuser:
         }
         if mount_mode in [MountRwMode.RWMODE_WO, MountRwMode.RWMODE_RW]:
             req_json.update(
-                {"cacheOptions": {"writeMode": "WRITE_THROGH", "enableRemove": True}}
+                {"cacheOptions": {"writeMode": "WRITE_THROUGH", "enableRemove": True}}
             )
 
         logging.info(f"mount request to {self._fuse_uri}/FuseService/mount: {req_json}")

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import requests
 
-from rtp_llm.utils.fuser import Fuser, retry_with_timeout
+from rtp_llm.utils.fuser import Fuser, MountRwMode, retry_with_timeout
 
 
 class TestFuser(unittest.TestCase):
@@ -28,6 +28,22 @@ class TestFuser(unittest.TestCase):
         # Assert the response was as expected
         self.assertIsNotNone(mount_path)
         self.assertIn(mount_path, self.fuser._mount_src_map)
+
+    @patch("requests.post")
+    def test_mount_dir_rw_payload(self, mock_post):
+        mock_post.return_value = self.mock_response
+
+        self.fuser.mount_dir(
+            "oss://bucket/jit-cache/", MountRwMode.RWMODE_RW, enable_mnt_ref=True
+        )
+
+        request = mock_post.call_args.kwargs["json"]
+        self.assertEqual(request["rwMode"], "RWMODE_RW")
+        self.assertTrue(request["enableMntRef"])
+        self.assertEqual(
+            request["cacheOptions"],
+            {"writeMode": "WRITE_THROUGH", "enableRemove": True},
+        )
 
     def test_mount_dir_with_retries(self):
         # 准备side effects列表

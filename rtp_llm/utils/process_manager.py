@@ -6,12 +6,6 @@ import time
 from multiprocessing import Process
 from typing import Callable, Dict, List, Optional, Set
 
-from rtp_llm.utils.shutdown_config import (
-    AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
-    normalize_non_negative_seconds,
-    pre_stop_drain_headroom_seconds,
-)
-
 DEFER_FIRST_SIGTERM_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM"
 DEFER_FIRST_SIGTERM_SECONDS_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM_SECONDS"
 DEFER_FIRST_SIGTERM_VALUE = "1"
@@ -45,16 +39,11 @@ class ProcessManager:
         shutdown_timeout: int = 600,
         monitor_interval: int = 1,
         allow_defer_first_sigterm: bool = False,
-        frontend_pre_stop_drain_seconds: float = 0.0,
-        dash_sc_grpc_pre_stop_drain_seconds: float = 0.0,
-        pre_stop_drain_headroom_seconds: float = AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
-        pre_stop_drain_signal: bool = False,
-        backend_post_frontend_drain_seconds: float = DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS,
         pre_exit_cleanup: Optional[Callable[[], None]] = None,
     ):
-        if shutdown_timeout != -1 and shutdown_timeout <= 0:
+        if shutdown_timeout <= 0:
             logging.warning(
-                f"shutdown_timeout={shutdown_timeout} is invalid; "
+                f"shutdown_timeout={shutdown_timeout} is non-positive; "
                 "coercing to 600s so the parent cannot hang on a "
                 "non-draining child."
             )
@@ -65,23 +54,6 @@ class ProcessManager:
         self.pre_exit_cleanup = pre_exit_cleanup
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
-        self.frontend_pre_stop_drain_seconds = normalize_non_negative_seconds(
-            frontend_pre_stop_drain_seconds,
-            0.0,
-            "frontend_pre_stop_drain_seconds",
-        )
-        self.dash_sc_grpc_pre_stop_drain_seconds = normalize_non_negative_seconds(
-            dash_sc_grpc_pre_stop_drain_seconds,
-            0.0,
-            "dash_sc_grpc_pre_stop_drain_seconds",
-        )
-        self.pre_stop_drain_headroom_seconds = pre_stop_drain_headroom_seconds
-        self.pre_stop_drain_signal = bool(pre_stop_drain_signal)
-        self._backend_post_frontend_drain_seconds_value = (
-            self._resolve_backend_post_frontend_drain_seconds(
-                backend_post_frontend_drain_seconds
-            )
-        )
         self.process_groups: Dict[str, List[Process]] = {}
         self.shutdown_group_order: List[str] = []
         self._defer_first_sigterm = allow_defer_first_sigterm and (
@@ -127,12 +99,6 @@ class ProcessManager:
 
         self._deferred_sigterm_seen = True
         delay_s = self._deferred_sigterm_delay_seconds()
-        if delay_s is None:
-            logging.info(
-                "Process manager deferring first SIGTERM indefinitely; waiting for "
-                "parent-staged backend shutdown"
-            )
-            return True
         logging.info(
             "Process manager deferring first SIGTERM for %.3fs; waiting for "
             "parent-staged backend shutdown",
@@ -144,14 +110,12 @@ class ProcessManager:
         timer.start()
         return True
 
-    def _deferred_sigterm_delay_seconds(self) -> Optional[float]:
+    def _deferred_sigterm_delay_seconds(self) -> float:
         raw = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV, "")
         try:
             delay_s = float(raw) if raw else float(self.shutdown_timeout)
         except ValueError:
             delay_s = float(self.shutdown_timeout)
-        if delay_s == -1:
-            return None
         if delay_s <= 0:
             delay_s = 600.0
         return delay_s
@@ -357,11 +321,7 @@ class ProcessManager:
           Phase 2 — SIGTERM deferred groups (backend), then wait for remaining
                     managed processes before the monitor's last-resort SIGKILL.
 
-        Non-staged mode (post-crash all-stop): SIGTERM ordinary children at
-        once, but SIGINT deferred groups.  A backend manager intentionally
-        defers its first SIGTERM to tolerate cgroup-wide shutdown noise; using
-        SIGINT here is the explicit parent-to-backend shutdown handoff so it
-        can begin reaping its rank children before the outer manager escalates.
+        Non-staged mode (post-crash all-stop): SIGTERM everyone at once.
         """
         logging.info(f"Sending SIGTERM (drain_timeout={drain_timeout}s)")
         self._used_pre_stop_drain_signal = False
@@ -387,19 +347,9 @@ class ProcessManager:
                     "managed",
                 )
         else:
-            for group_name in self.shutdown_group_order:
-                self._terminate_process_list(
-                    self.process_groups.get(group_name, []),
-                    group_name,
-                    force_immediate=(
-                        self._defer_first_sigterm and group_name == "default"
-                    ),
-                    signum=(
-                        signal.SIGINT
-                        if group_name in self.DEFERRED_GROUPS
-                        else signal.SIGTERM
-                    ),
-                )
+            self._terminate_process_list(
+                self.processes, "managed", force_immediate=self._defer_first_sigterm
+            )
             self._wait_process_list_exit(
                 self.processes,
                 self._remaining_timeout(drain_deadline),
@@ -446,8 +396,6 @@ class ProcessManager:
             timeout = int(shutdown_timeout)
         except (TypeError, ValueError):
             timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
-        if timeout == -1:
-            return -1
         if timeout <= 0:
             timeout = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
         return timeout
@@ -538,30 +486,33 @@ class ProcessManager:
         )
         time.sleep(linger_s)
 
-    def _resolve_backend_post_frontend_drain_seconds(
-        self, configured_seconds: float
-    ) -> float:
-        try:
-            seconds = float(configured_seconds)
-        except (TypeError, ValueError):
-            return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
-        if seconds >= 0:
-            return seconds
+    @staticmethod
+    def _backend_post_frontend_drain_seconds() -> float:
+        # Route/master state convergence tends to track the pre-stop drain
+        # window, so reuse that value unless operators set a dedicated linger.
+        for env_key in (
+            BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
+            FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
+            DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
+        ):
+            raw = os.environ.get(env_key, "")
+            if not raw:
+                continue
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
+        return DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS
 
-        # Route/master state convergence should cover every drainable frontend
-        # protocol process.  With no dedicated value, use the longest app drain.
-        return max(
-            self.frontend_pre_stop_drain_seconds,
-            self.dash_sc_grpc_pre_stop_drain_seconds,
-        )
-
-    def _backend_post_frontend_drain_seconds(self) -> float:
-        return self._backend_post_frontend_drain_seconds_value
-
-    def _pre_stop_drain_signal_enabled(self) -> bool:
-        return (
-            self.pre_stop_drain_signal
-            and self._backend_post_frontend_drain_seconds() > 0
+    @staticmethod
+    def _pre_stop_drain_signal_enabled() -> bool:
+        if os.environ.get(PRE_STOP_DRAIN_SIGNAL_ENV, "1").strip() == (
+            PRE_STOP_DRAIN_SIGNAL_DISABLED_VALUE
+        ):
+            return False
+        return bool(
+            os.environ.get(FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV, "").strip()
+            or os.environ.get(DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV, "").strip()
         )
 
     @staticmethod
@@ -645,11 +596,19 @@ class ProcessManager:
             )
         return clamped_window_s
 
-    def _pre_stop_drain_headroom_seconds(self, shutdown_timeout: float) -> float:
-        return pre_stop_drain_headroom_seconds(
-            self.pre_stop_drain_headroom_seconds,
-            shutdown_timeout,
-        )
+    @staticmethod
+    def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
+        raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                logging.warning(
+                    "Invalid %s=%r, using default pre-stop drain headroom",
+                    PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
+                    raw,
+                )
+        return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
 
     def _sigterm_deferred_groups(self):
         """Signal deferred groups (backend); outer monitor loop polls.
@@ -777,15 +736,14 @@ class ProcessManager:
             # iterations). Inspect final exitcodes to surface silent crashes
             # the monitor missed.
             if not self.shutdown_requested and not self.failure_detected:
-                unexpected_exits = [
+                crashed = [
                     (p.name, p.exitcode)
                     for p in self.processes
-                    if p.exitcode is not None
+                    if p.exitcode is not None and p.exitcode != 0
                 ]
-                if unexpected_exits:
+                if crashed:
                     logging.error(
-                        "Children exited without shutdown request: "
-                        f"{unexpected_exits}"
+                        f"Children exited non-zero without shutdown request: {crashed}"
                     )
                     self.failure_detected = True
         else:
