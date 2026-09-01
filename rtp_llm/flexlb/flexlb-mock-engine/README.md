@@ -140,10 +140,17 @@ charts (the context pair = P role, generate = D role — the production
 dashboard's hippo_role split read); the client-side token reconciliation is
 not a report panel but the aggregate's fail-closed validity item
 `validity_checks.token_reconciliation_ok`: per input/output side,
-`|client completed tokens − Σ mock_tps_ts| ≤ max(5% × client, 5 × peak
-per-second tokens)` (5% absorbs scrape-window edge / clock residue and
-cancelled-request one-sided accounting, 5 × peak bounds the timeline tail);
-a missing series → `null` (no false failure).
+`|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×
+client, 5 × peak per-second tokens)` — the in-flight term adds the
+Σil/Σol of ok rows whose rid is absent from the engine-terminal done sets
+(`mock_prefill_done` / `mock_decode_done`, the same join full_e2e uses):
+fire-and-forget runs record ok at schedule success with the expected
+output_len, so requests still decoding at run end never feed the mock Σ
+(measured 7.1M / 15.3% of client output tokens on run 20260901_200108);
+runs without engine terminal logs degrade to in-flight = 0 (legacy
+formula). 5% absorbs scrape-window edge / clock residue and
+cancelled-request one-sided accounting, 5 × peak bounds the post-scrape
+drain tail; a missing series → `null` (no false failure).
 
 **Engine addressing**: POST bodies accept either `{"engine": "prefill-0"}` (engine
 name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).

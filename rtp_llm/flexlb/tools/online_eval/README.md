@@ -56,12 +56,24 @@ section below for the full table):
   reconciliation from report panels into the fail-closed validity item
   `validity_checks.token_reconciliation_ok` (detects dropped requests /
   inflated self-reporting): per input/output side,
-  `|client completed tokens − Σ mock_tps_ts| ≤ max(5% × client, 5 × peak
-  per-second tokens)` — the 5% relative term absorbs scrape-window edge /
-  clock-alignment residue and cancelled-request one-sided accounting
-  (healthy runs measure ~1%), the 5 × peak absolute term bounds the G1
-  timeline tail; missing mock TPS data → `null` (no false failure), and
-  `summary.test_valid` aggregates it via `all`)
+  `|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×
+  client, 5 × peak per-second tokens)` — the in-flight term reuses the
+  engine-terminal rid sets (`mock_prefill_done` / `mock_decode_done`, the
+  same join full_e2e/engine_exec uses): ok rows whose rid is absent from
+  the done set were still in flight at run end (fire-and-forget runs
+  record ok at schedule success with the expected output_len, so their
+  tokens never enter the mock Σ — measured 7.1M / 15.3% of client output
+  tokens on run 20260901_200108), and their Σil/Σol joins the mock side
+  symmetrically (input joins the prefill done set, output the decode one;
+  runs without engine terminal logs degrade to in-flight = 0, keeping the
+  legacy formula and the `null` semantics). The 5% relative term absorbs
+  scrape-window edge / clock-alignment residue and cancelled-request
+  one-sided accounting (healthy runs measure ~1%), the 5 × peak absolute
+  term bounds the post-scrape drain tail (completed after the last scrape
+  but never drained); missing mock TPS data → `null` (no false failure),
+  and `summary.test_valid` aggregates it via `all`; the per-side
+  client/mock/in-flight/residual/tolerance numbers are surfaced in
+  `summary.token_reconciliation` for forensics)
 - `run_meta.json`, `mock.json` / `mock.log`, `master.json` / `master.log`,
   `client.json` / `client.log` (one JSON + one log per component)
 - `per_request.jsonl` (or `per_request.jsonl.gz` for larger runs)

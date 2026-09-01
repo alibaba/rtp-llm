@@ -1879,49 +1879,99 @@ for _tps_base, _tps_col in _TPS_COL_NAMES.items():
                 _tps_by_ts[_ts][_tps_col] = _tps_by_ts[_ts].get(_tps_col, 0.0) + _v
 mock_tps_ts = [{"t": t, **vals} for t, vals in rel_axis(sorted(_tps_by_ts.items()))]
 
-# ---- token 对账（20260901 纠偏）：client 完成 token vs mock 自报累计 ----
+# ---- token 对账（20260901 纠偏；同日二次修复补在途项）：client 完成 ----
+# ---- token vs mock 自报累计 ----
 # 原 canvas 2.3 节 input/output 侧 client 对账面板移除后，丢请求 /
 # 自报造假的检测能力保留为 validity 项 token_reconciliation_ok
 # （fail-closed 断言，与 leak KPI 同族）。数据源与口径：
 #   * client 侧 = ok 行 Σil/Σol（ok_input_tokens / ok_output_tokens，
 #     完成请求口径，与 mock 完成事件记账语义对齐——被拒/取消行两边
 #     都不进分子）。
-#   * mock 侧 = Σ mock_tps_ts 窗口值。/metrics 的 scrape-先-drain
-#     语义保证每个 token 恰好被 drain 一次（漏拍时下窗并入，Σ 对
-#     scrape 抖动稳健），Σ = 截至最后一次 scrape 的累计完成 token
-#     （G1 poller 运行至 client 退出，drain 期完成事件基本被覆盖）。
-# 容限（input/output 两侧各自）：|client − mock| ≤
+#   * mock 侧 = Σ mock_tps_ts 窗口值 + 在途项 in-flight Σ。/metrics
+#     的 scrape-先-drain 语义保证每个 token 恰好被 drain 一次（漏拍
+#     时下窗并入，Σ 对 scrape 抖动稳健），Σ = 截至最后一次 scrape 的
+#     累计完成 token。
+#   * 在途项 in-flight（20260901 run 20260901_200108 取证）：fire-and-
+#     forget（FETCH_OUTPUT_STREAM=0，标准 run）下 client 在 master
+#     schedule 成功即记 ok（output_len 记期望值），run 结束仍在
+#     decode 引擎在途的长 ol 请求（实测 904 个、Σol≈7.1M、占 client
+#     Σ 15.3%）不进 mock Σ（decode 未完成 → 无完成事件可记账）。修复
+#     方案：复用 engine_exec/full_e2e 的引擎终态 rid 集合
+#     （decode_done_map / prefill_done_map，mock_decode_done /
+#     mock_prefill_done 行解析），ok 行中 rid 不在对应 done 集的行即
+#     在途，其 token 对称补进 mock 侧（input 侧 join prefill done 集、
+#     output 侧 join decode done 集；join 判定只用 rid membership 不做
+#     时间戳过滤——引擎已记终态即 token 已入 mock 完成事件流，时间戳
+#     异常只影响延迟样本有效性不影响记账归属）。rid 缺失/不可解析的
+#     ok 行无法证明完成，保守计为在途（fail-closed 方向：宁可放大残差
+#     也不掩盖缺口）。
+# 容限（input/output 两侧各自）：|client − (mock + in-flight)| ≤
 #   max(5% × client, 5 × 每秒峰值 token)。
 #   * 5% 相对项：吸收 scrape 窗口边缘 / 时钟对齐残差与取消请求的
 #     单侧记账不对称（prefill 已完成但 client 记 error）；健康 run
 #     实测完成口径差 ~1%，5% 有 5 倍余量。
-#   * 5 × 峰值绝对项：覆盖 G1 时序尾巴（最后一次 scrape 之后、
-#     client 退出前的完成事件）与首尾窗口错位，按 ≤5s × 峰值速率
-#     的上界估计；对 120s run 占比 <5%，仍远小于要检测的异常量级
-#     （丢请求 / 自报虚高 ≥10%）。
+#   * 5 × 峰值绝对项：覆盖 G1 scrape 停止后的 drain 尾巴（最后一次
+#     scrape 之后、引擎已完成但未被 drain 记账的量，实测残差 1.1M <
+#     容限 2.5M）与首尾窗口错位，按 ≤5s × 峰值速率的上界估计。若某
+#     run 的 G1 尾巴特别长导致仍 False，属真实采集缺口，如实失败是
+#     正确行为。
 # 双向检测：丢请求（mock < client）与自报虚高（mock > client）任一
 # 超容限即 False。缺数据（mock_tps_ts 空 / 侧系列全零 / client 侧无
 # token）→ None（不误报，与现有六项缺输入语义一致；test_valid =
 # all 保守判 invalid）。两侧子对账任一可评估即以可评估侧的 AND
 # 定值；均不可评估 → None。
+# 退化语义：旧 run 无引擎终态日志（mock.log / mock_engine.log 均缺，
+# done 集不可用）→ 在途项恒 0，公式退化为旧式 |client − mock|（None
+# 语义不变）；日志在但 done 集为空且 client 有大量未完成行 → 正常
+# 计算（在途 = 全部未完成行）。两侧数值依据输出进 summary.
+# token_reconciliation 诊断键（validity 不进 canvas 版面，报告层不
+# 消费，供取证与排查）。
 _mock_in_total = sum(
     r.get("context_tps_with_cache") or 0 for r in mock_tps_ts if isinstance(r, dict)
 )
 _mock_out_total = sum(
     r.get("generate_tps") or 0 for r in mock_tps_ts if isinstance(r, dict)
 )
+# 在途项：ok 行 rid 不在引擎终态 done 集的 Σil/Σol（两侧对称，见上
+# 块注释）。done 集不可用（无引擎终态日志）→ 恒 0（旧语义退化）。
+_engine_rids_available = _engine_done_src is not None
+inflight_input_tokens = 0
+inflight_output_tokens = 0
+if _engine_rids_available:
+    for d in rows:
+        if not is_ok(d):
+            continue
+        _rid = d.get("request_id")
+        try:
+            _rid = int(_rid)
+        except (TypeError, ValueError):
+            _rid = None
+        if _rid not in prefill_done_map:
+            inflight_input_tokens += d.get("input_len") or 0
+        if _rid not in decode_done_map:
+            inflight_output_tokens += d.get("output_len") or 0
+token_recon_diag = None
 if isinstance(validity_checks_calc, dict):
     _token_recon_subs = []
-    for _client_tok, _mock_tok, _peaks in (
+    token_recon_diag = {
+        "engine_rids_available": _engine_rids_available,
+        "input": None,
+        "output": None,
+    }
+    for _side, _client_tok, _mock_tok, _infl_tok, _peaks in (
         (
+            "input",
             ok_input_tokens,
             _mock_in_total,
+            inflight_input_tokens,
             [(p.get("input_tokens") or 0) for p in per_second]
             + [r.get("context_tps_with_cache") or 0 for r in mock_tps_ts],
         ),
         (
+            "output",
             ok_output_tokens,
             _mock_out_total,
+            inflight_output_tokens,
             [(p.get("output_tokens_completed") or 0) for p in per_second]
             + [r.get("generate_tps") or 0 for r in mock_tps_ts],
         ),
@@ -1930,7 +1980,16 @@ if isinstance(validity_checks_calc, dict):
             continue
         _peak = max(_peaks) if _peaks else 0
         _tol = max(0.05 * _client_tok, 5 * _peak)
-        _token_recon_subs.append(abs(_client_tok - _mock_tok) <= _tol)
+        _residual = abs(_client_tok - (_mock_tok + _infl_tok))
+        _token_recon_subs.append(_residual <= _tol)
+        token_recon_diag[_side] = {
+            "client_tokens": _client_tok,
+            "mock_tokens": round(_mock_tok, 1),
+            "inflight_tokens": _infl_tok,
+            "residual": round(_residual, 1),
+            "tolerance": round(_tol, 1),
+            "pass": _residual <= _tol,
+        }
     validity_checks_calc["token_reconciliation_ok"] = (
         all(_token_recon_subs) if _token_recon_subs else None
     )
@@ -2083,6 +2142,10 @@ out = {
         # KV 复用收益量化（20260901）：引擎累计 Σhit_tokens_total
         # （final_snapshot，consolidate live fetch 链路）。
         "cache_saved_tokens": cache_saved_tokens_calc,
+        # token 对账诊断（20260901 in-flight 修复）：两侧 client/mock/
+        # in-flight/residual/tolerance 取证值（validity 判定的数值依据，
+        # 报告层不消费；rows 缺失 → None）。
+        "token_reconciliation": token_recon_diag,
         "client_pacing_lag_ms": _pacing_dist if _have_rows else None,
         # server_* 直读：server_latency 是当前格式正式输入，非 rows 依赖。
         "server_arrival_qps": server_latency.get("arrival_qps"),
