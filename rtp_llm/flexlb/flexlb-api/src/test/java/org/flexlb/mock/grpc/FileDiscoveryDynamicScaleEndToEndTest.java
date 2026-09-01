@@ -37,7 +37,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -93,6 +92,17 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
     private static final long SYNC_INTERVAL_MS = 20L;
     private static final long CONVERGENCE_CAP_MS = 10_000L;
+    /**
+     * Upstream's schedule refactor made disappearance eviction
+     * staleness-gated (retireMissingGenerationIfExpired): a worker dropped
+     * from discovery is retired only once its last successful status poll
+     * is older than this threshold — the 15-arg constructor defaults to
+     * 10 s, which would land exactly on Phase 3's 10 s convergence cap.
+     * The 16-arg constructor exists to inject a short staleness so this
+     * test verifies the eviction mechanism without waiting out the
+     * production TTL.
+     */
+    private static final long STATUS_STALE_AFTER_US = 500_000L;
 
     @TempDir
     Path tempDir;
@@ -160,9 +170,17 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 MODEL_NAME,
                 // Upstream's directory refactor removed the shared static
                 // ledger (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS), so the
-                // sync runner now owns a plain local map — same contract as
-                // upstream EngineSyncRunnerTest's setUp.
-                new ConcurrentHashMap<>(),
+                // sync runner now takes the status map via constructor. Reuse
+                // the base fixture's WorkerDirectory map — it holds the
+                // preinitialized placeholder generations paired with the
+                // registry's preinitialized endpoints, so the FIRST sync pass
+                // retires them through the group-change path (detaching
+                // those endpoints) and republishes A/B from discovery. A bare
+                // new ConcurrentHashMap<>() would orphan the placeholder
+                // endpoints: every newly created generation would then hit
+                // "existing endpoint generation must be withdrawn before
+                // publication" and be retired, oscillating forever.
+                engineWorkerStatus.statusMap(RoleType.PREFILL),
                 workerAddressService,
                 statusCheckExecutor,
                 healthReporter,
@@ -180,7 +198,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 // same contract as upstream EngineSyncRunnerTest's
                 // RunnerTestSupport.eventSink().
                 mock(EndpointEventSink.class),
-                endpointRegistry);
+                endpointRegistry,
+                STATUS_STALE_AFTER_US);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "e2e-engine-sync");
