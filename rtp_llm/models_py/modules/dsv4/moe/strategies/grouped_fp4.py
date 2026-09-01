@@ -28,6 +28,12 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_fp4_gemm_nt_contiguous,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.modules.dsv4.const_cache import cached_zeroed
+
+# DSV4_GROUPED_FP4_ASYNC=1: shape-driven grouped GEMM — no counts.cpu() /
+# sf_offsets.item() per layer per forward (each was a pipeline drain).
+# Default off = legacy host-counts path (byte-identical to pre-flag code).
+_GROUPED_FP4_ASYNC = os.environ.get("DSV4_GROUPED_FP4_ASYNC", "0") == "1"
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
     ep_scatter,
@@ -365,20 +371,42 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
         adjusted_ids, counts = recompute_topk_ids_sum_expert_count(
             routed_ids, current_expert_start_id=0, num_local_experts=e)
-        counts_list = counts.cpu().tolist()
-        aligned_list = [align(int(count), 4) for count in counts_list]
-        total_rows = sum(aligned_list)
-        if total_rows == 0:
-            return torch.zeros((n, d), dtype=torch.float32, device=device)
-        aligned = torch.tensor(aligned_list, dtype=torch.int32,
-                               pin_memory=True).to(device, non_blocking=True)
-        # P1a tranche 2: was torch.cat((zeros(1), cumsum)) — 3 ops + 2 allocs
-        # per layer per forward; now one small memset + one cumsum.
-        indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
-        torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
-        expert_start = torch.empty_like(aligned)
-        m_indices = torch.empty(align(total_rows, 128),
-                                dtype=torch.int32, device=device)
+        topk = indices.shape[-1]
+        if _GROUPED_FP4_ASYNC:
+            # Shape-driven sizing, zero D2H syncs. sum(counts) == n*topk always
+            # and 4-alignment adds <= 3 rows/expert, so `rows` overshoots the
+            # true total by <= ~0.6% — extra GEMM rows are stale-expert garbage
+            # discarded by ep_gather. The flashinfer SM120 group GEMM derives
+            # per-group work from m_indptr on device (its exact-shape assert is
+            # disabled "in consideration of performance").
+            rows = n * topk + 4 * e
+            aligned = (counts + 3) & ~3
+            indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
+            torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
+            expert_start = torch.empty_like(aligned)
+            # m_indices MUST be initialized (0 = a valid expert id): garbage
+            # values would index out-of-range expert weights.
+            m_indices = cached_zeroed((align(rows, 128),), dtype=torch.int32,
+                                      device=device)
+            # Host-side upper bound of sf_offsets[-1]: each expert's scale
+            # rows round up by <= 127; block_scale_interleave additionally
+            # pads rows to a 128-multiple, so keep sf_rows 128-aligned too.
+            sf_rows = ((rows + 127 * e + 128 + 127) // 128) * 128
+        else:
+            counts_list = counts.cpu().tolist()
+            aligned_list = [align(int(count), 4) for count in counts_list]
+            rows = sum(aligned_list)
+            if rows == 0:
+                return torch.zeros((n, d), dtype=torch.float32, device=device)
+            aligned = torch.tensor(aligned_list, dtype=torch.int32,
+                                   pin_memory=True).to(device, non_blocking=True)
+            # P1a tranche 2: was torch.cat((zeros(1), cumsum)) — 3 ops + 2 allocs
+            # per layer per forward; now one small memset + one cumsum.
+            indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
+            torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
+            expert_start = torch.empty_like(aligned)
+            m_indices = torch.empty(align(rows, 128),
+                                    dtype=torch.int32, device=device)
         output_index = torch.empty_like(adjusted_ids)
         if input_scale is None:
             x_q, linear_scale = mxfp8_quantize(x.contiguous(),
@@ -387,18 +415,19 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         else:
             x_q = x
             linear_scale = input_scale.reshape(n, d // FP4_BLOCK).view(torch.uint8)
-        routed_q = torch.empty(total_rows, d, dtype=x_q.dtype, device=device)
-        routed_scale = torch.zeros(total_rows, d // FP4_BLOCK,
+        routed_q = torch.empty(rows, d, dtype=x_q.dtype, device=device)
+        routed_scale = torch.zeros(rows, d // FP4_BLOCK,
                                    dtype=torch.uint8, device=device)
         ep_scatter(x_q, linear_scale, adjusted_ids, aligned, expert_start,
                    routed_q, routed_scale, m_indices, output_index)
-        expert_ids = torch.bucketize(torch.arange(total_rows, device=device),
-                                     indptr[1:], right=True)
+        expert_ids = torch.bucketize(torch.arange(rows, device=device),
+                                     indptr[1:], right=True).clamp_max_(e - 1)
         group_ids = torch.arange(e + 1, dtype=torch.int32, device=device)
         sf_offsets = ((indptr + group_ids * 127) // 128) * 128
-        scale_rows = torch.arange(total_rows, device=device) + \
+        scale_rows = torch.arange(rows, device=device) + \
             (sf_offsets[:-1] - indptr[:-1]).index_select(0, expert_ids)
-        sf_rows = int(sf_offsets[-1].item())
+        if not _GROUPED_FP4_ASYNC:
+            sf_rows = int(sf_offsets[-1].item())
         def pack_scale(linear: torch.Tensor) -> torch.Tensor:
             padded = torch.zeros(sf_rows, linear.size(1),
                                  dtype=torch.uint8, device=device)
@@ -414,7 +443,7 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         hidden_q, hidden_scale_packed = silu_mul_fp8_quant_packed_from_parts(
             gate, up, clamp_limit=cfg.swiglu_limit, group_size=FP4_BLOCK)
         hidden_scale = hidden_scale_packed.contiguous().view(torch.uint8) \
-            .reshape(total_rows, inter // FP4_BLOCK)
+            .reshape(rows, inter // FP4_BLOCK)
         down = gemm(hidden_q, hidden_scale,
                     self._w2.view(torch.uint8), self._s2_sm120)
         output = torch.empty((n, d), dtype=torch.float32, device=device)
