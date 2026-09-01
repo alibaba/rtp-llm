@@ -242,6 +242,8 @@ class PyAttentionInputs:
     prefill_cuda_graph_copy_params: PyPrefillCudaGaphCopyParams | None
     prefix_lengths: torch.Tensor
     sequence_lengths: torch.Tensor
+    @property
+    def sequence_lengths_device(self) -> torch.Tensor: ...
     sequence_lengths_plus_1_device: torch.Tensor
     total_tokens: int
     headwise_config: dict | None

@@ -222,8 +222,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
-    py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
+    py_attn_inputs.prefix_lengths_device   = to_device_i32(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.sequence_lengths_device = to_device_i32(py_attn_inputs.sequence_lengths);
+    py_attn_inputs.input_lengths_device    = to_device_i32(py_attn_inputs.input_lengths);
 
     if (inputs.combo_position_ids.defined()) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);

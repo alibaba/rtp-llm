@@ -180,6 +180,10 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+    // Event after replay-preparation H2D copies. The async host-prepare path
+    // waits on this before reusing pinned capture mirrors on the next step.
+    torch::Event prepare_copy_event_ = cuda_graph::makeGraphEvent();
+    bool         prepare_copy_event_recorded_{false};
 
     std::atomic<bool> prepared_attention_inputs_ = false;
 };

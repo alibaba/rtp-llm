@@ -28,6 +28,11 @@ bool deviceInputEnabled() {
     return env != nullptr && std::string(env) == "1";
 }
 
+bool streamAsyncEnabled() {
+    const char* env = std::getenv("RTP_LLM_STREAM_ASYNC");
+    return env != nullptr && std::string(env) == "1";
+}
+
 struct GatherModelInputContext {
     int               input_vocab_size;
     bool              need_cal_position_id;
@@ -397,7 +402,14 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
-    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+    model_input.combo_tokens = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+    if (streamAsyncEnabled()) {
+        // CUDA-graph attention planning consumes these values synchronously on
+        // the CPU. Keep the already-pinned gather buffers on host so replay
+        // preparation does not turn them into a D2H round trip. Device mirrors
+        // are still staged by PyWrappedModel for the captured kernels.
+        return;
+    }
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
@@ -503,6 +515,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             }
         }
     }
+    const bool                 use_async_host_prepare = streamAsyncEnabled();
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
     std::vector<torch::Tensor> normal_sequence_lengths_gpu;
     if (use_normal_device_state) {
@@ -536,7 +549,17 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         ctx.batch_idx);
                 }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
-                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                if (use_async_host_prepare) {
+                    // publishNormalDeviceState advances this CPU mirror before
+                    // the bookkeeping worker starts. It is therefore safe to
+                    // plan step N+1 while the worker commits step N, without a
+                    // device-to-host copy or a read of mutable stream state.
+                    RTP_LLM_CHECK_WITH_INFO(state.next_real_seq_len > 0,
+                                            "async host prepare requires a valid next_real_seq_len");
+                    ctx.sequence_lengths[ctx.batch_idx] = state.next_real_seq_len - 1;
+                } else {
+                    normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                }
                 ctx.input_lengths[ctx.batch_idx] = stream->inputLength();
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
@@ -559,8 +582,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
-        model_input.combo_tokens     = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
-        model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        model_input.combo_tokens = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
+        if (!use_async_host_prepare) {
+            model_input.sequence_lengths = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        }
     }
     return absl::OkStatus();
 }

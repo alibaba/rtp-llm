@@ -615,7 +615,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             self.assertEqual(plan_mock.call_count, 1)
             capture_call = plan_mock.call_args
             self.assertFalse(capture_call.args[0].is_cuda)
-            self.assertFalse(capture_call.args[1].is_cuda)
+            # Page indices alias the graph-bound device buffer so FlashInfer's
+            # internal copy is a no-op instead of a blocking host-to-device copy.
+            self.assertTrue(capture_call.args[1].is_cuda)
             self.assertFalse(capture_call.args[2].is_cuda)
             self.assertTrue(capture_call.kwargs["non_blocking"])
             self.assertTrue(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))

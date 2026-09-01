@@ -243,6 +243,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_forward_event)");
         forward_event_.synchronize();
     }
+    if (streamAsyncReplayPrepEnabled() && prepare_copy_event_recorded_) {
+        // The previous prepare queued H2D copies from reusable pinned capture
+        // mirrors before launching its graph. Wait only for those copies—not
+        // for the graph itself—before overwriting the mirrors for step N+1.
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_prepare_copies)");
+        prepare_copy_event_.synchronize();
+    }
     prepared_attention_inputs_.store(true, std::memory_order_release);
 
     const size_t graph_idx =
@@ -354,6 +361,20 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                                 max_bs_ + 1,
                                                 inputs.attention_inputs.cu_kv_seqlens_device,
                                                 state.current_batch_size);
+    } else {
+        // Padding lanes must not retain values from capture or a larger
+        // preceding batch. RoPE consumes the direct mirror while FlashInfer's
+        // device metadata helper consumes the plus-one mirror.
+        addCudaGraphPrepareFillRegion(fill_params,
+                                      py_model_inputs_.attention_inputs.sequence_lengths_device,
+                                      state.current_batch_size,
+                                      state.current_real_graph_bs,
+                                      0);
+        addCudaGraphPrepareFillRegion(fill_params,
+                                      py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
+                                      state.current_batch_size,
+                                      state.current_real_graph_bs,
+                                      1);
     }
     invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
 #else
@@ -407,6 +428,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     if (!is_prefill_cuda_graph_mode_) {
         // D2D copies — collected for single batched kernel launch
+        tryAddD2DCopy(inputs.attention_inputs.sequence_lengths_device,
+                      py_model_inputs_.attention_inputs.sequence_lengths_device,
+                      state.current_batch_size * sizeof(int));
         tryAddD2DCopy(inputs.attention_inputs.sequence_lengths_plus_1_device,
                       py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
                       state.current_batch_size * sizeof(int));
@@ -596,6 +620,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
         py::gil_scoped_acquire gil;
         callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
+    }
+    if (streamAsyncReplayPrepEnabled()) {
+        prepare_copy_event_.record(cuda_graph::graphGetCurrentStream());
+        prepare_copy_event_recorded_ = true;
     }
 }
 
@@ -937,7 +965,8 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // sequence_length should in pinned memory
     inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32_);
     inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
-    inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
+    inputs.attention_inputs.sequence_lengths        = inputs.attention_inputs.sequence_lengths.pin_memory();
+    inputs.attention_inputs.sequence_lengths_device = inputs.attention_inputs.sequence_lengths.cuda();
 
     const int64_t max_kv_blocks =
         static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
@@ -1268,6 +1297,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.sequence_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.sequence_lengths_device =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_device.slice(0, 0, batch_size);
     if (capture_mem_hold_.py_model_inputs_.combo_position_ids.defined()) {
         // Buffer was allocated as max_bs_ * num_tokens_per_bs_ * position_id_len_factor_;
         // slice proportionally with current batch_size using the same factor.

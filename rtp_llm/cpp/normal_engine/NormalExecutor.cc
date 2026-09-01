@@ -472,10 +472,12 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     };
 
     to_cuda(model_input.combo_tokens, "combo_tokens");
-    to_cuda(model_input.input_lengths, "input_lengths");
-    to_cuda(model_input.sequence_lengths, "sequence_lengths");
-    to_cuda(model_input.prefix_lengths, "prefix_lengths");
-    to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    if (!useStreamAsync()) {
+        to_cuda(model_input.input_lengths, "input_lengths");
+        to_cuda(model_input.sequence_lengths, "sequence_lengths");
+        to_cuda(model_input.prefix_lengths, "prefix_lengths");
+        to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    }
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
     checkModelInputsOnCuda(model_input, tag);
 }
@@ -496,10 +498,12 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
                                 tensor.numel());
     };
     check(model_input.combo_tokens, "combo_tokens");
-    check(model_input.input_lengths, "input_lengths");
-    check(model_input.sequence_lengths, "sequence_lengths");
-    check(model_input.prefix_lengths, "prefix_lengths");
-    check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    if (!useStreamAsync()) {
+        check(model_input.input_lengths, "input_lengths");
+        check(model_input.sequence_lengths, "sequence_lengths");
+        check(model_input.prefix_lengths, "prefix_lengths");
+        check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    }
     check(model_input.lm_output_indexes, "lm_output_indexes");
 }
 
