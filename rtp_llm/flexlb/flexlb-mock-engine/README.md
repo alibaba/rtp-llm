@@ -157,6 +157,32 @@ formula). 5% absorbs scrape-window edge / clock residue and
 cancelled-request one-sided accounting, 5 × peak bounds the post-scrape
 drain tail; a missing series → `null` (no false failure).
 
+**Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
+reports the KV v2 block-pool state as time series in BOTH emission modes
+(per-engine and role-aggregated) — four per-scrape GAUGES
+`mock_engine_cache_blocks` / `mock_engine_available_blocks` /
+`mock_engine_held_blocks` / `mock_engine_referenced_blocks` (the three-state
+split: available = free + pure LRU, held = in-flight keyless leases,
+referenced = in-flight-referenced key blocks — the same snapshot fields the
+`/snapshot` terminal view exposes) and four cumulative COUNTERS
+`mock_engine_cache_evictions_total` (LRU evictions, allocation-coupled),
+`mock_engine_kv_admission_fails_total` (DECODE degradations: un-pooled
+continue + growth stall), `mock_engine_lack_mem_rejects_total` (PREFILL
+synchronous 602 rejections — prefill REJECTS, decode DEGRADES, the two
+surfaces never cross-book; healthy runs keep both at 0, overload runs light
+them up each on its own role) and `mock_engine_decode_reuse_blocks_total`
+(the KV v2 fix #5 net-demand deduction: hit keys against the engine's OWN
+LRU at decode admission, never drained — "the more decode runs, the more
+it saves"). All seven ride the report chain: the G1 whitelist →
+aggregate `kv_blocks_ts_by_role` (per-role cluster sums) → the canvas 5. KV
+engine-side block-pool panels at the **per-engine average** (the same
+engine-count chain as the TPS charts; counter columns rendered as
+adjacent-bucket cumulative diffs ÷ bucket gap, counter resets clamped to
+zero). Caliber note: the gauges are the mock's simulated block pool at
+1s scrape granularity (the KV v2 capacity model's own state), not real GPU
+memory pages — read the shapes and the admission/reuse events, not
+absolute block counts against production.
+
 **Engine addressing**: POST bodies accept either `{"engine": "prefill-0"}` (engine
 name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 
@@ -174,7 +200,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 - `/metrics`: aggregated by role by default; append `?per_engine=true` for
   per-engine labels (`engine_name`/`role`/`grpc_port`/`engine_ip`).
 
-## Test Suite (226 test methods)
+## Test Suite (229 test methods)
 
 | Test | Methods | Description |
 |------|---------|-------------|
@@ -195,6 +221,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | MatrixSweepTest | 1 | P/D config × concurrency sweep |
 | MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
 | TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
+| BlockPoolMetricsObservabilityTest | 3 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-degrade counter split, decode reuse accumulation (cumulative, never drained) |
 | RealisticTimingTest | 1 | Real timing verification |
 
 ## JavaLoadClient

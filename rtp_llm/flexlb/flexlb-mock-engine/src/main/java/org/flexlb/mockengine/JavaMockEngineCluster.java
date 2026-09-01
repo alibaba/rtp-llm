@@ -570,6 +570,18 @@ public final class JavaMockEngineCluster {
         private final Map<Long, MockLruBlockCache.BlockLease> activeBlockLeases = new ConcurrentHashMap<>();
         /** Decode requests that ran un-pooled because admission/growth failed (overflow observability). */
         private final LongAdder kvAdmissionFails = new LongAdder();
+        /** Prefill requests synchronously rejected with LACK_MEM 602 (the
+         *  enqueue-batch Phase-1.5 gate + the direct generate_stream gate —
+         *  distinct from kvAdmissionFails, which counts DECODE degradations:
+         *  prefill rejects, decode degrades). /metrics carries it as
+         *  mock_engine_lack_mem_rejects_total. */
+        private final LongAdder prefillLackMemRejects = new LongAdder();
+        /** Decode prefix-reuse blocks accumulated (KV v2 fix #5): every
+         *  acquireWithReuse hit key — the net-demand deduction the decode
+         *  engine makes against its OWN LRU. Cumulative counter (never
+         *  drained): /metrics carries it as mock_engine_decode_reuse_blocks_total,
+         *  /snapshot as decode_reuse_blocks. */
+        private final LongAdder decodeReuseBlocks = new LongAdder();
         // Per-engine busy time. Prefill engines accumulate batch execution ms
         // (maxPrefillConcurrency=1 -> busy == wall-clock occupancy; utilization =
         // busy/elapsed). Decode engines accumulate per-request execution ms under
@@ -863,6 +875,7 @@ public final class JavaMockEngineCluster {
                         MockLruBlockCache.BlockLease lease =
                                 acquireBlockLease(requestId, shape);
                         if (lease == null) {
+                            prefillLackMemRejects.increment();
                             String message = String.format(
                                     "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
                                     needBlocks(shape), cache.availableBlocks(), seqSizePerBlock);
@@ -1210,6 +1223,7 @@ public final class JavaMockEngineCluster {
                 // EnqueueBatch flavor; generate_stream carries it in the
                 // RuntimeException message).
                 if (acquireBlockLease(requestId, shape) == null) {
+                    prefillLackMemRejects.increment();
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
                     observer.onError(new RuntimeException(String.format(
@@ -2900,6 +2914,10 @@ public final class JavaMockEngineCluster {
             if (lease == null) {
                 return null;
             }
+            // Reuse observability (KV v2 fix #5): the hit keys are exactly the
+            // blocks this decode admission did NOT re-allocate — the
+            // net-demand deduction, accumulated for the /metrics counter.
+            decodeReuseBlocks.add(lease.hitKeys.size());
             activeBlockLeases.put(requestId, lease);
             return lease;
         }
@@ -3436,6 +3454,8 @@ public final class JavaMockEngineCluster {
             snap.put("held_blocks", cache.heldBlocks());
             snap.put("referenced_blocks", cache.referencedKeyBlocks());
             snap.put("kv_admission_fails", kvAdmissionFails.sum());
+            snap.put("lack_mem_rejects", prefillLackMemRejects.sum());
+            snap.put("decode_reuse_blocks", decodeReuseBlocks.sum());
             Map<String, Object> injectConfig = new LinkedHashMap<>();
             injectConfig.put("enqueue_error", faultConfig.isFailOnEnqueue());
             injectConfig.put("fetch_error", faultConfig.isFetchError());

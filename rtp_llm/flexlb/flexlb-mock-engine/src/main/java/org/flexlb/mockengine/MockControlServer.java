@@ -712,6 +712,19 @@ final class MockControlServer {
                 {"rtp_llm_context_tps", "computed context tokens (input minus cache hits) per scrape window", "gauge"},
                 {"rtp_llm_context_tps_with_cache", "context tokens per scrape window including cache hits", "gauge"},
                 {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
+                // Block-pool observability (KV capacity model v2): the
+                // three-state block split + the admission/reuse counters.
+                // Gauges read the pool state; counters are cumulative
+                // (prefill rejects synchronously, decode degrades un-pooled
+                // and stalls growth; decode reuse = the fix #5 net-demand
+                // deduction against the engine's own LRU).
+                {"mock_engine_cache_blocks", "total block-pool size in blocks", "gauge"},
+                {"mock_engine_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
+                {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
+                {"mock_engine_referenced_blocks", "cache-key blocks referenced by in-flight requests", "gauge"},
+                {"mock_engine_kv_admission_fails_total", "total KV admission/growth failures (decode degradations)", "counter"},
+                {"mock_engine_lack_mem_rejects_total", "total prefill LACK_MEM synchronous rejections (error 602)", "counter"},
+                {"mock_engine_decode_reuse_blocks_total", "total decode prefix-reuse blocks (own-LRU net-demand deduction)", "counter"},
         };
         for (String[] m : meta) {
             sb.append("# HELP ").append(m[0]).append(' ').append(m[1]).append('\n');
@@ -764,6 +777,15 @@ final class MockControlServer {
             sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
             sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
             sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
+            // Block-pool observability (KV v2): gauges + cumulative counters,
+            // same snapshot fields the /snapshot endpoint exposes.
+            sb.append(String.format("mock_engine_cache_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
+            sb.append(String.format("mock_engine_available_blocks{%s} %s%n", labels, snap.get("available_blocks")));
+            sb.append(String.format("mock_engine_held_blocks{%s} %s%n", labels, snap.get("held_blocks")));
+            sb.append(String.format("mock_engine_referenced_blocks{%s} %s%n", labels, snap.get("referenced_blocks")));
+            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %s%n", labels, snap.get("kv_admission_fails")));
+            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %s%n", labels, snap.get("lack_mem_rejects")));
+            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %s%n", labels, snap.get("decode_reuse_blocks")));
         }
     }
 
@@ -808,6 +830,16 @@ final class MockControlServer {
             sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
             sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
             sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
+            // Block-pool observability (KV v2): blocks and cumulative counters
+            // sum across engines (role-level pool totals; the report layer
+            // derives per-engine averages via its engine-count chain).
+            sb.append(String.format("mock_engine_cache_blocks{%s} %d%n", label, sumLong(group, "cache_blocks")));
+            sb.append(String.format("mock_engine_available_blocks{%s} %d%n", label, sumLong(group, "available_blocks")));
+            sb.append(String.format("mock_engine_held_blocks{%s} %d%n", label, sumLong(group, "held_blocks")));
+            sb.append(String.format("mock_engine_referenced_blocks{%s} %d%n", label, sumLong(group, "referenced_blocks")));
+            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %d%n", label, sumLong(group, "kv_admission_fails")));
+            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %d%n", label, sumLong(group, "lack_mem_rejects")));
+            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
 
             Map<String, Long> rpcTotals = new TreeMap<>();
             for (Map<String, Object> e : group) {

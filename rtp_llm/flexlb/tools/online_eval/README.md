@@ -86,7 +86,20 @@ section below for the full table):
   but never drained); missing mock TPS data → `null` (no false failure),
   and `summary.test_valid` aggregates it via `all`; the per-side
   client/mock/in-flight/residual/tolerance numbers are surfaced in
-  `summary.token_reconciliation` for forensics)
+  `summary.token_reconciliation` for forensics); since 20260902 also the
+  engine-side KV v2 block-pool timeline `kv_blocks_ts_by_role` —
+  `{role: [{t, total/available/held/referenced_blocks (three-state
+  gauges), cache_evictions / kv_admission_fails / lack_mem_rejects /
+  decode_reuse_blocks (cumulative counters)}]}` summed across engines per
+  role (raw cluster sums; the canvas 5. KV engine-side block-pool panels
+  divide by the engine count for the per-engine average via the same
+  three-level chain as the TPS charts and render the counter columns as
+  adjacent-bucket cumulative diffs ÷ bucket gap with counter resets
+  clamped to zero — the prefill-602-rejection vs decode-degradation split,
+  decode reuse as the fix #5 net-demand deduction readout, evictions as
+  the allocation-coupled LRU pressure readout; healthy runs keep both
+  admission surfaces at zero, non-zero = overload signal; old aggregates
+  without the series → the whole panel group silently omitted)
 - `run_meta.json`, `mock.json` / `mock.log`, `master.json` / `master.log`,
   `client.json` / `client.log` (one JSON + one log per component)
 - `per_request.jsonl` (or `per_request.jsonl.gz` for larger runs)
@@ -162,7 +175,7 @@ sources: merged into the component JSON and then deleted, same treatment as
 
 | File (pre-consolidation) | Source | Lands in |
 |---|---|---|
-| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the six analyzer-consumed series per engine (`mock_engine_running` / `waiting` / `active_kv_tokens` / `available_kv_tokens` / `accepted_total` / `completed_total`, C whitelist ≈ ÷4 bytes vs the full ~22-series surface), each sample appended after a `# ts=<epoch_ms>` separator (~2.2KB × N_engines per sample) | `mock_per_engine_timeseries.json.gz` (A-split) |
+| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the analyzer-consumed series per engine — the queue-depth pair (`mock_engine_running` / `waiting`), the production-caliber TPS trio (`rtp_llm_context_tps` / `rtp_llm_context_tps_with_cache` / `rtp_llm_generate_tps`) and the KV v2 block-pool family (`mock_engine_cache_blocks` / `available_blocks` / `held_blocks` / `referenced_blocks` + `mock_engine_cache_evictions_total` / `kv_admission_fails_total` / `lack_mem_rejects_total` / `decode_reuse_blocks_total`) — 13 series total, every entry with a downstream consumer (aggregate `mock_tps_ts` / `kv_blocks_ts_by_role` → the report-layer 2.3 / 5. KV panels; no dead keys; C whitelist ≈ ÷4 bytes vs the full ~29-series surface), each sample appended after a `# ts=<epoch_ms>` separator (~2.2KB × N_engines per sample) | `mock_per_engine_timeseries.json.gz` (A-split) |
 | `master_prometheus_timeseries.prom` | management port `/actuator/prometheus` (fallback `/prometheus`), whitelisted to the analyzer-consumed series (`flexlb_app_cache_*`, `flexlb_app_flexlb_batcher_queue_size`, `flexlb_app_routing_queue_length`, `flexlb_app_flexlb_inflight_max_age_ms`, `flexlb_app_engine_balancing_master_dispatch_reason_total`, `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), same `# ts=` grouping | `master.json` `prometheus_timeseries` |
 | `master_inflight_timeseries.jsonl` | master HTTP port `/rtp_llm/inflight_status`, one JSON line `{"ts_epoch_ms", "inflight"}` per second | `master.json` `inflight_timeseries` |
 | `process_usage_timeseries.txt` | `ps -o pid,%cpu,rss,etime` over the mock / master / load-client JVM pids (`ts_epoch_ms=... label=... pid=... cpu_pct=... rss_kb=... etime=...` kv lines; exited pids tolerated) | `run_meta.json` `process_usage` |

@@ -42,13 +42,25 @@ import urllib.request
 # G1 C whitelist — the analyzer-consumed mock per-engine series: the
 # running/waiting pair (queue depth curves) plus the production-caliber
 # TPS trio (rtp_llm_*, completion-event accounting in 1s scrape windows;
-# consumed by aggregate mock_tps_ts and the report-layer 2.3 对账图).
+# consumed by aggregate mock_tps_ts and the report-layer 2.3 对账图) and
+# the KV v2 block-pool family (three-state block gauges + admission /
+# reuse / eviction counters; consumed by aggregate kv_blocks_ts_by_role
+# and the report-layer 5. KV 块池面板 — every entry below has a
+# downstream consumer, do not add dead keys).
 MOCK_KEEP_SERIES = {
     "mock_engine_running",
     "mock_engine_waiting",
     "rtp_llm_context_tps",
     "rtp_llm_context_tps_with_cache",
     "rtp_llm_generate_tps",
+    "mock_engine_cache_blocks",
+    "mock_engine_available_blocks",
+    "mock_engine_held_blocks",
+    "mock_engine_referenced_blocks",
+    "mock_engine_cache_evictions_total",
+    "mock_engine_kv_admission_fails_total",
+    "mock_engine_lack_mem_rejects_total",
+    "mock_engine_decode_reuse_blocks_total",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,

@@ -637,6 +637,10 @@ def main():
     batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
     queue_top_bottom_ts = agg.get("queue_top_bottom_ts") or {}
     mock_tps_rows = agg.get("mock_tps_ts") or []
+    # 引擎侧 KV v2 块池时序（aggregate kv_blocks_ts_by_role：P/D 桶
+    # 跨引擎求和，三态 gauge + 准入/复用/淘汰累计 counter；旧
+    # aggregate 无键 -> 空表 -> 5. KV 块池面板整组省略）。
+    kv_blocks_by_role = agg.get("kv_blocks_ts_by_role") or {}
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
     cancel_ts = agg.get("cancel_qps_ts") or []
@@ -2998,6 +3002,8 @@ def main():
         lines.append("")
 
     # 5. KV（kv_ts 集群口径优先；旧 engine_dist decode_kv 每引擎均值回退）
+    # 上方 master 侧面板 + 下方 5b 引擎侧块池面板（两种视角同节并存，
+    # caption 各自注明口径）。
     kv_containers = []
     if kv_ts:
         kvt_t = [r.get("t", 0) for r in kv_ts]
@@ -3079,11 +3085,312 @@ def main():
                     ),
                 )
             )
-    if kv_containers:
+    # 5b. 引擎侧 KV v2 块池面板（20260902）：aggregate kv_blocks_ts_by_role
+    # （引擎 /metrics 三态 gauge + 准入/复用/淘汰累计 counter，P/D 桶跨
+    # 引擎求和的集群级行）→ 每引擎平均呈现（÷ tps_p_div / tps_d_div，
+    # 与 2.3 TPS 同一三级回退链：引擎数未知时除数 1 = 集群和回退）。
+    # 与上方 master 侧 kv_ts 面板分工：master 侧 = 调度器聚合视角的
+    # KV tokens 占用，本组 = 引擎侧视角的块池三态分解 / 准入 / 复用
+    # （KV v2 容量模型直接读数）。counter 列在呈现层做相邻有效桶累计
+    # 差分 ÷ 桶间隔（归一 blocks/s；计数器回退钳 0——注入 clear()
+    # 归零等场景不产生负速率）。旧 aggregate 无键 -> 空表 -> 本组
+    # 面板整组省略（与上方 master 侧面板互不影响）。
+    kv_pool_containers = []
+    kv_pool_gauge_roles = []
+    kv_pool_rate_present = False
+    kv_pool_adm_present = False
+    _KVP_GAUGE_DEFS = (
+        ("available_blocks", "available（free+LRU 可淘汰）", "success", "Avail"),
+        ("held_blocks", "held（运行中裸块）", "warning", "Held"),
+        ("referenced_blocks", "referenced（被引用不可淘汰）", "danger", "Ref"),
+    )
+    _KVP_COUNTER_COLS = (
+        "cache_evictions",
+        "kv_admission_fails",
+        "lack_mem_rejects",
+        "decode_reuse_blocks",
+    )
+    # 桶化：int(t) 桶内均值（aggregate 行已跨引擎求和，同秒多行时
+    # 防御性取均值）——与 mock TPS 桶化同规则。
+    _kvp_mean = {}
+    for _role, _rows in kv_blocks_by_role.items():
+        _buckets = {}
+        for r in _rows or []:
+            try:
+                _t = float(r.get("t", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if _t < 0:
+                continue
+            for _col in (
+                ("total_blocks",)
+                + tuple(c for c, _, _, _ in _KVP_GAUGE_DEFS)
+                + _KVP_COUNTER_COLS
+            ):
+                _v = r.get(_col)
+                if _v is None:
+                    continue
+                _buckets.setdefault(int(_t), {}).setdefault(_col, []).append(float(_v))
+        _kvp_mean[_role] = {
+            _b: {c: sum(vs) / len(vs) for c, vs in _cols.items()}
+            for _b, _cols in _buckets.items()
+        }
+    # counter 差分速率：相邻有效桶 (v2−v1)/(t2−t1)，计数器回退钳 0
+    _kvp_rate = {}
+    for _role, _mean in _kvp_mean.items():
+        for _col in _KVP_COUNTER_COLS:
+            _prev = None
+            for _b in sorted(_mean):
+                _v = _mean[_b].get(_col)
+                if _v is None:
+                    continue
+                if _prev is not None and _b > _prev[0] and _v > _prev[1]:
+                    _kvp_rate.setdefault(_role, {}).setdefault(_col, {})[_b] = (
+                        _v - _prev[1]
+                    ) / (_b - _prev[0])
+                _prev = (_b, _v)
+
+    def _kvp_has_col(role, col):
+        return any(
+            (cols or {}).get(col) is not None
+            for cols in _kvp_mean.get(role, {}).values()
+        )
+
+    # 三态分解面板（P/D 各一）：三态 gauge 每引擎平均三线 + 池大小
+    # 参考线；caption 讲三态语义（fail-closed 断言 kv_pool_gauge_roles）。
+    for _role, _engines, _div, _tag, _axis_name, _val_prefix in (
+        ("prefill", tps_p_engines, tps_p_div, "P", "kvPoolPT", "kvPoolP"),
+        ("decode", tps_d_engines, tps_d_div, "D", "kvPoolDT", "kvPoolD"),
+    ):
+        _mean = _kvp_mean.get(_role)
+        if not _mean:
+            continue
+        _grid = sorted(_mean)
+        _AXIS = const(_axis_name, str_arr(sparse_cats(_grid)))
+        reg_time(_AXIS, _grid)
+        if _engines:
+            _y_scope = (
+                "y = 块数，每引擎平均（集群和 ÷ "
+                + _tag
+                + " 引擎数 "
+                + str(_engines)
+                + "）"
+            )
+            _per = "（÷N）"
+        else:
+            sys.stderr.write(
+                TAG + " warning: 5b " + _tag + " 角色块池面板引擎数不可得"
+                "（run_meta params / engine_dist / mock final_snapshot 均未给出），"
+                "回退集群和呈现\n"
+            )
+            _y_scope = "y = 块数 集群和（引擎数未知）"
+            _per = "（集群和）"
+        _lines = []
+        for _col, _label, _color, _short in _KVP_GAUGE_DEFS:
+            _lines.append(
+                (
+                    _short.lower(),
+                    _label + _per,
+                    const(
+                        _val_prefix + _short,
+                        num_arr(
+                            [round((_mean[t].get(_col) or 0) / _div, 1) for t in _grid]
+                        ),
+                    ),
+                    _color,
+                )
+            )
+        _tot_vals = [
+            round((_mean[t].get("total_blocks") or 0) / _div, 1) for t in _grid
+        ]
+        _lines.append(
+            (
+                "tot",
+                "池大小 total" + _per,
+                const(_val_prefix + "Tot", num_arr(_tot_vals)),
+                "info",
+            )
+        )
+        kv_pool_containers.append(
+            emit_container(
+                _tag + " 角色块池三态分解（引擎侧）",
+                _tag
+                + " 角色（"
+                + _role
+                + "）；x = 压测时间（s，1s 采样）；"
+                + _y_scope
+                + "；三态块语义：available = free + 纯 LRU（ref=0 可淘汰，计入可用），"
+                "held = 运行中裸块（prefill 执行期租约 / decode 净新分配），"
+                "referenced = 被在途引用块（decode 命中 pin，不可淘汰不计可用），"
+                "恒等式 available = 池大小 − held − referenced，完成移交 LRU 后"
+                "恢复可用（释放 ≠ 删除）；引擎侧口径（引擎 /metrics 自报），"
+                "与上方 master 侧 KV tokens 面板（调度器聚合视角）口径不同",
+                emit_chart(
+                    "LineChart",
+                    _AXIS,
+                    230,
+                    _lines,
+                    domain="[0, " + num(nice_max(max(_tot_vals) * 1.15)) + "]",
+                ),
+            )
+        )
+        kv_pool_gauge_roles.append(_role)
+    # 速率面板（P/D 共用并集时间轴）：counter 差分每引擎平均。
+    if _kvp_mean:
+        _kvp_union = sorted(set().union(*(set(m) for m in _kvp_mean.values())))
+
+        def _kvp_rate_vals(role, col, div):
+            _rm = (_kvp_rate.get(role) or {}).get(col) or {}
+            return [round(_rm.get(t, 0) / div, 2) for t in _kvp_union]
+
+        _RAXIS = const("kvPoolRT", str_arr(sparse_cats(_kvp_union)))
+        reg_time(_RAXIS, _kvp_union)
+        # 准入失败面板：prefill 同步 602 拒绝与 decode 降级分线记账
+        # （正常健康档全零——过载档才非零）。
+        _adm_lines = []
+        _adm_scopes = []
+        _adm_max = 0.0
+        if _kvp_has_col("prefill", "lack_mem_rejects"):
+            _vals = _kvp_rate_vals("prefill", "lack_mem_rejects", tps_p_div)
+            _adm_max = max(_adm_max, max(_vals) if _vals else 0)
+            _adm_lines.append(
+                (
+                    "pRej",
+                    "P·LACK_MEM 602 同步拒绝"
+                    + ("（÷N）" if tps_p_engines else "（集群和）"),
+                    const("kvPoolRejP", num_arr(_vals)),
+                    "danger",
+                )
+            )
+            _adm_scopes.append(
+                "P 线每引擎平均（÷ P 引擎数 " + str(tps_p_engines) + "）"
+                if tps_p_engines
+                else "P 线集群和（引擎数未知）"
+            )
+        if _kvp_has_col("decode", "kv_admission_fails"):
+            _vals = _kvp_rate_vals("decode", "kv_admission_fails", tps_d_div)
+            _adm_max = max(_adm_max, max(_vals) if _vals else 0)
+            _adm_lines.append(
+                (
+                    "dDeg",
+                    "D·decode 降级（un-pooled）"
+                    + ("（÷N）" if tps_d_engines else "（集群和）"),
+                    const("kvPoolDegD", num_arr(_vals)),
+                    "warning",
+                )
+            )
+            _adm_scopes.append(
+                "D 线每引擎平均（÷ D 引擎数 " + str(tps_d_engines) + "）"
+                if tps_d_engines
+                else "D 线集群和（引擎数未知）"
+            )
+        if _adm_lines:
+            kv_pool_containers.append(
+                emit_container(
+                    "KV 准入失败速率（引擎侧）",
+                    "x = 压测时间（s，1s 采样）；y = 次/s，相邻有效桶累计差分 ÷ 桶间隔；"
+                    + "；".join(_adm_scopes)
+                    + "；prefill 同步拒绝（enqueue 602 LACK_MEM，请求直接失败）与"
+                    " decode 降级（un-pooled 继续跑 + kv_admission_fails 计数）分线"
+                    "记账互不混线；正常健康档全零——非零即 KV 池过载信号",
+                    emit_chart(
+                        "LineChart",
+                        _RAXIS,
+                        230,
+                        _adm_lines,
+                        domain="[0, " + num(nice_max(_adm_max * 1.15)) + "]",
+                    ),
+                )
+            )
+            kv_pool_rate_present = True
+            kv_pool_adm_present = True
+        # LRU evictions 速率面板（P/D 两线）
+        _ev_lines = []
+        _ev_scopes = []
+        _ev_max = 0.0
+        for _role, _engines, _div, _tag in (
+            ("prefill", tps_p_engines, tps_p_div, "P"),
+            ("decode", tps_d_engines, tps_d_div, "D"),
+        ):
+            if not _kvp_has_col(_role, "cache_evictions"):
+                continue
+            _vals = _kvp_rate_vals(_role, "cache_evictions", _div)
+            _ev_max = max(_ev_max, max(_vals) if _vals else 0)
+            _ev_lines.append(
+                (
+                    "ev" + _tag,
+                    _tag + "·LRU evictions" + ("（÷N）" if _engines else "（集群和）"),
+                    const("kvPoolEv" + _tag, num_arr(_vals)),
+                    "info" if _tag == "P" else "warning",
+                )
+            )
+            _ev_scopes.append(
+                _tag + " 线每引擎平均（÷ " + _tag + " 引擎数 " + str(_engines) + "）"
+                if _engines
+                else _tag + " 线集群和（引擎数未知）"
+            )
+        if _ev_lines:
+            kv_pool_containers.append(
+                emit_container(
+                    "LRU evictions 速率（引擎侧）",
+                    "x = 压测时间（s，1s 采样）；y = 块/s，相邻有效桶累计差分 ÷ 桶间隔；"
+                    + "；".join(_ev_scopes)
+                    + "；LRU 淘汰与分配耦合：池余量不足时先淘汰纯 LRU 块再分配"
+                    "（mock_engine_cache_evictions_total 累计 counter 差分，"
+                    "引擎 /metrics 自报）",
+                    emit_chart(
+                        "LineChart",
+                        _RAXIS,
+                        230,
+                        _ev_lines,
+                        domain="[0, " + num(nice_max(_ev_max * 1.15)) + "]",
+                    ),
+                )
+            )
+            kv_pool_rate_present = True
+        # decode 复用块速率面板（D 线）：fix #5 净需求折减的直接读数
+        if _kvp_has_col("decode", "decode_reuse_blocks"):
+            _vals = _kvp_rate_vals("decode", "decode_reuse_blocks", tps_d_div)
+            _reuse_max = max(_vals) if _vals else 0
+            _reuse_scope = (
+                "y = 块/s，每引擎平均（集群和 ÷ D 引擎数 " + str(tps_d_engines) + "）"
+                if tps_d_engines
+                else "y = 块/s 集群和（引擎数未知）"
+            )
+            kv_pool_containers.append(
+                emit_container(
+                    "decode 复用块速率（引擎侧）",
+                    "D 角色（decode）；x = 压测时间（s，1s 采样）；"
+                    + _reuse_scope
+                    + "，相邻有效桶累计差分 ÷ 桶间隔；KV v2 准入复用折减（fix #5）："
+                    "decode 接手用自身 LRU 重算命中，净需求 = total − 命中，命中块"
+                    " pin 为 referenced 不重分配——本线即命中块速率，读数上行 ="
+                    " 「decode 越用省越多」正反馈"
+                    "（mock_engine_decode_reuse_blocks_total 累计 counter 差分，"
+                    "never drained）",
+                    emit_chart(
+                        "LineChart",
+                        _RAXIS,
+                        230,
+                        [
+                            (
+                                "reuse",
+                                "decode 命中块"
+                                + ("（÷N）" if tps_d_engines else "（集群和）"),
+                                const("kvPoolReuseD", num_arr(_vals)),
+                                "success",
+                            )
+                        ],
+                        domain="[0, " + num(nice_max(_reuse_max * 1.15)) + "]",
+                    ),
+                )
+            )
+            kv_pool_rate_present = True
+    if kv_containers or kv_pool_containers:
         lines.append("      <Divider />")
         lines.append("")
         lines.append("      <H2>5. KV</H2>")
-        lines.extend(emit_grid(kv_containers))
+        lines.extend(emit_grid(kv_containers + kv_pool_containers))
         lines.append("")
 
     # 6. 资源（mock heap + 进程 CPU/RSS，run_meta process_usage）
@@ -3795,6 +4102,61 @@ def main():
                 + "annotation missing"
             )
 
+    # 9) 引擎侧 KV v2 块池面板口径（20260902）：三态分解面板存在时 HTML
+    #    必含「三态」与「释放 ≠ 删除」语义标注 + 角色级引擎数标注（每
+    #    引擎平均 + 具体引擎数，或「集群和（引擎数未知）」回退标注）
+    #    ——防止把三态 gauge 当普通占用曲线读；速率面板存在时必含
+    #    「累计差分」标注（防止把差分速率当瞬时计数读）；准入失败
+    #    面板存在时必含「正常健康档全零」观测语义标注。
+    if kv_pool_gauge_roles:
+        assert "三态" in html_out, (
+            TAG
+            + " kv block-pool gauge panels present but three-state "
+            + "annotation missing"
+        )
+        assert "释放 ≠ 删除" in html_out, (
+            TAG
+            + " kv block-pool gauge panels present but release-semantics "
+            + "annotation missing"
+        )
+        for _role in kv_pool_gauge_roles:
+            _ecnt = tps_p_engines if _role == "prefill" else tps_d_engines
+            if _ecnt:
+                assert "每引擎平均" in html_out, (
+                    TAG
+                    + " kv block-pool gauge panel ("
+                    + _role
+                    + ") present but per-engine-average annotation missing"
+                )
+                assert (
+                    ("P 引擎数 " if _role == "prefill" else "D 引擎数 ") + str(_ecnt)
+                ) in html_out, (
+                    TAG
+                    + " kv block-pool gauge panel ("
+                    + _role
+                    + ") present but engine-count annotation missing"
+                )
+            else:
+                assert "集群和（引擎数未知）" in html_out, (
+                    TAG
+                    + " kv block-pool gauge panel ("
+                    + _role
+                    + ") cluster-sum fallback present but fallback "
+                    + "annotation missing"
+                )
+    if kv_pool_rate_present:
+        assert "累计差分" in html_out, (
+            TAG
+            + " kv block-pool rate panels present but cumulative-diff "
+            + "annotation missing"
+        )
+    if kv_pool_adm_present:
+        assert "正常健康档全零" in html_out, (
+            TAG
+            + " kv admission-fail panel present but healthy-zero "
+            + "annotation missing"
+        )
+
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -3824,7 +4186,7 @@ def main():
         sections.append("dist")
     if inflight_ts or inflight_age:
         sections.append("inflight")
-    if kv_containers:
+    if kv_containers or kv_pool_containers:
         sections.append("kv")
     if res_containers:
         sections.append("resource")
@@ -3887,6 +4249,23 @@ def main():
                 else "cluster-sum (engine count unknown)"
             )
             + " (production dashboard single-instance series read)"
+        )
+    if kv_pool_containers:
+        print(
+            TAG
+            + " kv-blocks scope: engine-side block-pool panels (three-state "
+            + "gauges + admission/reuse/eviction diff rates) P="
+            + (
+                "per-engine avg ÷" + str(tps_p_engines)
+                if tps_p_engines
+                else "cluster-sum"
+            )
+            + " D="
+            + (
+                "per-engine avg ÷" + str(tps_d_engines)
+                if tps_d_engines
+                else "cluster-sum"
+            )
         )
     if full_e2e_sum:
         print(

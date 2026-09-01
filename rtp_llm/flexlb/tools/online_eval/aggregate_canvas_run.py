@@ -1879,6 +1879,45 @@ for _tps_base, _tps_col in _TPS_COL_NAMES.items():
                 _tps_by_ts[_ts][_tps_col] = _tps_by_ts[_ts].get(_tps_col, 0.0) + _v
 mock_tps_ts = [{"t": t, **vals} for t, vals in rel_axis(sorted(_tps_by_ts.items()))]
 
+# ---- 引擎侧 KV v2 块池时序（kv_blocks_ts_by_role，20260902）----
+# mock /metrics 新块池系列（三态 gauge + 准入/复用/淘汰累计 counter，
+# 1s 采样）经 G1 白名单进 per-engine 时序文件。按 role 拆分、同 ts
+# 跨引擎求和（块数与累计 counter 均可加）—— aggregate 保留集群和原
+# 始语义，报告层除以引擎数（三级回退链）得每引擎平均、对 counter 列
+# 累计差分得速率。列语义：
+#   total/available/held/referenced_blocks —— 三态块分解（gauge，
+#     available = free + 纯 LRU；held = 运行中裸块；referenced =
+#     在途请求引用的 key 块）；
+#   cache_evictions —— LRU 淘汰累计（容量 + 强制 /cache_evict）；
+#   kv_admission_fails —— decode 降级/增长失速累计（prefill 同步拒绝
+#     不在此列，另计 lack_mem_rejects）；
+#   lack_mem_rejects —— prefill 同步 602 拒绝累计（生产 MALLOC_FAILED
+#     同码，enqueue ack 直接拒）；
+#   decode_reuse_blocks —— decode 接手自身 LRU 重算命中的复用块累计
+#     （KV v2 fix #5 净需求折减量，“越用省越多”正反馈的直接读数）。
+# 旧 run（白名单未含该系列）→ 空表 → 报告层整节静默省略。
+_KV_BLOCK_COLUMNS = {
+    "mock_engine_cache_blocks": "total_blocks",
+    "mock_engine_available_blocks": "available_blocks",
+    "mock_engine_held_blocks": "held_blocks",
+    "mock_engine_referenced_blocks": "referenced_blocks",
+    "mock_engine_cache_evictions_total": "cache_evictions",
+    "mock_engine_kv_admission_fails_total": "kv_admission_fails",
+    "mock_engine_lack_mem_rejects_total": "lack_mem_rejects",
+    "mock_engine_decode_reuse_blocks_total": "decode_reuse_blocks",
+}
+_kv_by_role_ts = defaultdict(lambda: defaultdict(dict))
+for _kv_base, _kv_col in _KV_BLOCK_COLUMNS.items():
+    for _role, _engines in _ts_role_ip_split(mock_per_engine_ts, _kv_base).items():
+        for _pts in _engines.values():
+            for _ts, _v in _pts:
+                _row = _kv_by_role_ts[_role.lower()][_ts]
+                _row[_kv_col] = _row.get(_kv_col, 0.0) + _v
+kv_blocks_ts_by_role = {
+    _role: [{"t": t, **vals} for t, vals in rel_axis(sorted(ts_map.items()))]
+    for _role, ts_map in _kv_by_role_ts.items()
+}
+
 # ---- token 对账（20260901 纠偏；同日二次修复补在途项）：client 完成 ----
 # ---- token vs mock 自报累计 ----
 # 原 canvas 2.3 节 input/output 侧 client 对账面板移除后，丢请求 /
@@ -2185,6 +2224,10 @@ out = {
     # mock 自报生产口径 TPS 集群级时序（rtp_llm_* 跨引擎求和，1s 窗口
     # 完成事件记账；报告层 2.3 节对账图消费）。
     "mock_tps_ts": mock_tps_ts,
+    # 引擎侧 KV v2 块池时序（三态 gauge + 准入/复用/淘汰 counter，按
+    # role 拆分跨引擎求和；报告层 5. KV 块池面板消费——除以引擎数得
+    # 每引擎平均、counter 列累计差分得速率）。
+    "kv_blocks_ts_by_role": kv_blocks_ts_by_role,
     "dispatch_reason_ts": dispatch_reason_ts,
     "dispatch_batch_size_ts": dispatch_batch_size_ts,
     "batch_size_final": batch_size_final,
