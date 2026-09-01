@@ -9,6 +9,7 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -54,6 +55,58 @@ class ServerConfigPortLayoutTest(TestCase):
         config.worker_info_port_num = 8
 
         config.validate_port_layout(dash_sc_enabled=False)
+
+
+class KVCacheEventHostIdentityTest(TestCase):
+    def _dp_publisher_configs(self) -> PyEnvConfigs:
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.kv_cache_config.kv_cache_event_publisher_type = "kvcm"
+        py_env_configs.parallelism_config.dp_size = 2
+        py_env_configs.parallelism_config.dp_rank = 1
+        py_env_configs.parallelism_config.tp_rank = 0
+        py_env_configs.server_config.ip = "10.0.0.8"
+        py_env_configs.server_config.start_port = 20000
+        py_env_configs.server_config.worker_info_port_num = 9
+        py_env_configs.server_config.set_local_rank(3)
+        return py_env_configs
+
+    def test_empty_host_identity_uses_rank_port_layout(self):
+        py_env_configs = self._dp_publisher_configs()
+
+        with self.assertLogs(level="WARNING") as logs:
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "10.0.0.8:20027",
+        )
+        self.assertIn("auto-derived", "\n".join(logs.output))
+        self.assertIn("overwrite", "\n".join(logs.output))
+
+    def test_explicit_host_identity_is_preserved(self):
+        py_env_configs = self._dp_publisher_configs()
+        py_env_configs.kv_cache_config.kv_cache_event_host_ip_port = (
+            "cache-replica-1:19000"
+        )
+
+        with self.assertLogs(level="WARNING") as logs:
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port,
+            "cache-replica-1:19000",
+        )
+        self.assertIn("explicit", "\n".join(logs.output))
+
+    def test_non_publisher_tp_rank_is_unchanged(self):
+        py_env_configs = self._dp_publisher_configs()
+        py_env_configs.parallelism_config.tp_rank = 1
+
+        configure_kv_cache_event_host_ip_port(py_env_configs)
+
+        self.assertEqual(
+            py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, ""
+        )
 
 
 class GenerateConfigTest(TestCase):

@@ -15,7 +15,9 @@ fail-open and never affects allocation, eviction, readiness, or inference respon
 
 Only `tp_rank=0` publishes when `pp_size=1`. Pipeline parallelism and CP-sharded KV cache are unsupported because the
 runtime cannot assign an unambiguous external owner and block granularity. Each DP replica needs a distinct
-`KV_CACHE_EVENT_HOST_IP_PORT`.
+`KV_CACHE_EVENT_HOST_IP_PORT`; sharing one lets an authoritative snapshot from one replica replace another replica's
+host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
+`server_ip:(start_port + rank_id * worker_info_port_num)`.
 
 ## KVCM lifecycle
 
@@ -36,10 +38,10 @@ Arguments have equivalent upper-case environment variables.
 | `--kv_cache_event_manager_endpoint` | empty | KVCM Meta HTTP endpoint |
 | `--kv_cache_event_instance_group` | empty | group; falls back to `reco_instance_group` |
 | `--kv_cache_event_instance_id` | empty | stable deployment-level instance ID |
-| `--kv_cache_event_host_ip_port` | empty | stable endpoint for this DP replica |
+| `--kv_cache_event_host_ip_port` | empty (auto-derived) | stable endpoint; must be unique for every DP replica when `dp_size>1` |
 
-Invalid configuration disables publishing without disabling inference. The endpoint must already be resolved; service
-discovery and leader switching are outside this version.
+Invalid configuration disables publishing without disabling inference. The KVCM manager endpoint must already be
+resolved; service discovery and leader switching are outside this version.
 
 `KVCacheConfig` pickle state supports legacy 43-, 54-, and 57-element layouts plus the current 62-element layout.
 Processes exchanging this state must be upgraded or rolled back together.

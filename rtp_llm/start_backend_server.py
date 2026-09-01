@@ -19,6 +19,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
+    configure_kv_cache_event_host_ip_port,
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
@@ -87,6 +88,7 @@ def local_rank_start(
         local_rank = py_env_configs.parallelism_config.local_rank
         py_env_configs.server_config.set_local_rank(local_rank)
         py_env_configs.distribute_config.set_local_rank(local_rank)
+        configure_kv_cache_event_host_ip_port(py_env_configs)
         setup_cuda_device_and_accl_env(local_rank)
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
