@@ -18,6 +18,13 @@ from typing import Dict, Optional, Tuple
 
 import torch
 _DIAG_CT = [0]
+
+# P0 slice 1: eager decode-round commit MoE via the fixed_ep path. 0 = off
+# (legacy all_to_all for every eager call); N > 0 routes eager calls with
+# n <= N rows through _forward_sm120_fixed_ep(pad_floor=N). Safe because the
+# decode-round commit geometry bounds n identically on every rank (see the
+# selector comment); rank-invariant padding keeps the collectives matching.
+_EAGER_FIXED_EP_BOUND = int(os.environ.get("DSV4_SM120_EAGER_FIXED_EP", "0"))
 _DIAG_ATA = [0]
 _SERVE_PATH_CT = {"__total": 0}
 _DIAG_FE = [0]
@@ -183,6 +190,35 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 and self._sm120_grouped is not None
             ):
                 return self._forward_sm120_fixed_ep(x, weights, indices, pad_floor=4)
+            # P0 slice 1 (Aug 31): decode-round commit forwards run eagerly and
+            # took the all_to_all path (AG + 8 P2P SendRecv per layer = 12
+            # collectives/layer, ~150 ms NCCL + host dispatch per commit round —
+            # the dominant cost of the fused decode window). The fixed_ep path is
+            # eager-safe only when the pad is RANK-INVARIANT, and eager T is NOT
+            # locally known to match across ranks (DP + fake/warmup streams: a
+            # rank can run a large seed/prefill commit while others run tiny
+            # decode commits — a local-n guard deadlocked exactly there).
+            # Decision = WORLD-MAX token count via one 1-element all_reduce per
+            # MoE call (~25 us; 43/forward ~= 1 ms, trivial vs the ~150 ms it
+            # saves). max_n <= bound => every rank pads to `bound`.
+            _eager_fixed_bound = _EAGER_FIXED_EP_BOUND
+            if (
+                _eager_fixed_bound > 0
+                and not _capturing
+                and not _symbolic
+                and not replicated_tp_tokens
+                and self._sm120_grouped is not None
+            ):
+                _n_max_t = torch.tensor(
+                    [_diag_x0 if _diag_x0 >= 0 else 0],
+                    dtype=torch.int32,
+                    device=x.device,
+                )
+                dist.all_reduce(_n_max_t, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+                if int(_n_max_t.item()) <= _eager_fixed_bound:
+                    return self._forward_sm120_fixed_ep(
+                        x, weights, indices, pad_floor=_eager_fixed_bound
+                    )
             if (
                 not _capturing
                 and not _symbolic
