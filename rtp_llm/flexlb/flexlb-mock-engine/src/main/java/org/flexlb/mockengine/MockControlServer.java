@@ -473,6 +473,11 @@ final class MockControlServer {
                         "failed to start engine on port " + port + ": " + e);
             }
             service.setStopped(false);
+            // Point the service at the rebuilt server: after a crash_after
+            // true-crash the old reference is a dead victim; after stop_engine
+            // the port simply rebinds. Either way the service must be able to
+            // kill THIS server on a future crash.
+            service.setGrpcServer(server);
             serversByPort.put(port, server);
             Map<String, Object> response = successResponse(service);
             response.put("action", "started");

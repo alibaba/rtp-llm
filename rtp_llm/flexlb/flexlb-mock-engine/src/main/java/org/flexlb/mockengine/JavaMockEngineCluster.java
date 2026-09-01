@@ -279,6 +279,10 @@ public final class JavaMockEngineCluster {
                     .build()
                     .start();
             serversByPort.put(grpcPort, server);
+            // Let the service kill its own port on crash_after (true-crash
+            // semantics) — the FastRpcService has no other handle on the
+            // server it backs.
+            service.setGrpcServer(server);
         } catch (IOException e) {
             services.remove(grpcPort);
             throw e;
@@ -520,6 +524,12 @@ public final class JavaMockEngineCluster {
         private static final int CANCELLED_RID_CAP = 10_000;
         /** Window of recent execution times used for prefill_ms/decode_ms avg+p99 (Python keeps 100). */
         private static final int RECENT_TIME_CAP = 100;
+        /** Grace between a crash_after trigger and the gRPC port kill: the
+         *  crash-triggering EMPTY ack must flush to the wire before the socket
+         *  dies (the master's BATCH_ACK_UNCERTAIN fence contract reads an empty
+         *  ack, not a connection reset); 200ms is far inside the master's
+         *  3-strike retire scale. */
+        static final long CRASH_PORT_KILL_DELAY_MS = 200L;
 
         private final String engineName;
         private final String host;
@@ -720,6 +730,21 @@ public final class JavaMockEngineCluster {
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
         private volatile boolean stopped = false;
+        // ── crash_after true-crash semantics ──
+        // Epoch fence against in-flight scheduler callbacks: prefill batch
+        // start / completion callbacks, decode step ticks and delayed enqueue
+        // processing already queued on the shared scheduler when a crash hits
+        // CANNOT be unscheduled — they capture the epoch at trigger time and
+        // drop out once crashNow() bumps it, so a late callback can never
+        // resurrect state on the memory-wiped engine.
+        private final AtomicLong crashEpoch = new AtomicLong();
+        // This engine's own gRPC server (set at startEngine / control-plane
+        // start_engine time). crash_after shuts it down so the master's health
+        // poller hits a dead port and walks the same 3-strike retire path as
+        // stop_engine — the difference is what survives: stop_engine keeps
+        // every pool for in-place continuation, a crash wipes them (recovery
+        // == a reboot from zero).
+        private volatile Server grpcServer;
         // Set once by drainAndShutdown(): rejects new admissions and disables
         // checkLeakDrain so shutdown-time in-flight requests are not misreported
         // as leaks. Never reset (the process is exiting).
@@ -849,9 +874,17 @@ public final class JavaMockEngineCluster {
             int enqueueTotal = enqueueCount.incrementAndGet();
             if (faultConfig.getCrashAfterNRequests() > 0
                     && enqueueTotal >= faultConfig.getCrashAfterNRequests()) {
+                // True-crash semantics (process death, not a graceful stop):
+                // ack THIS batch first — the crash-triggering enqueue must
+                // surface as an EMPTY ack (neither successes nor errors) to
+                // preserve the master-side BATCH_ACK_UNCERTAIN fence contract —
+                // then die: wipe ALL per-engine memory and kill the gRPC port.
+                // The port-kill itself runs a beat later (CRASH_PORT_KILL_DELAY_MS)
+                // so the ack flushes to the wire while the socket is still open.
                 stopped = true;
                 observer.onNext(response.build());
                 observer.onCompleted();
+                crashNow();
                 return;
             }
 
@@ -946,7 +979,16 @@ public final class JavaMockEngineCluster {
             lastEnqueueTime.set(System.nanoTime());
 
             if (faultConfig.getEnqueueDelayMs() > 0) {
-                scheduler.schedule(process, faultConfig.getEnqueueDelayMs(), TimeUnit.MILLISECONDS);
+                // Crash fence on the delayed-process path (enqueue_delay and
+                // crash_after can be co-injected): if the engine crashed while
+                // this process sat in the scheduler queue, it must not admit
+                // anything into the wiped state.
+                final long epoch = crashEpoch.get();
+                scheduler.schedule(() -> {
+                    if (crashEpoch.get() == epoch) {
+                        process.run();
+                    }
+                }, faultConfig.getEnqueueDelayMs(), TimeUnit.MILLISECONDS);
             } else {
                 process.run();
             }
@@ -2126,16 +2168,26 @@ public final class JavaMockEngineCluster {
             // Per-engine prefill busy: one executionMs per scheduled batch (the
             // execution duration is known at schedule time in the mock model).
             busyMs.addAndGet(executionMs);
+            // Crash fence: callbacks queued before a crash_after must never
+            // touch the wiped state — capture the epoch at schedule time and
+            // drop out on mismatch (the late callback cannot be unscheduled).
+            final long epoch = crashEpoch.get();
             long startDelayNanos = Math.max(0, startNanos - now);
             if (startDelayNanos == 0) {
                 startPrefillBatch(shapes, batchId, dpRank);
             } else {
-                scheduler.schedule(() -> startPrefillBatch(shapes, batchId, dpRank),
-                        startDelayNanos, TimeUnit.NANOSECONDS);
+                scheduler.schedule(() -> {
+                    if (crashEpoch.get() == epoch) {
+                        startPrefillBatch(shapes, batchId, dpRank);
+                    }
+                }, startDelayNanos, TimeUnit.NANOSECONDS);
             }
 
             long delayNanos = Math.max(0, finishNanos - now);
             scheduler.schedule(() -> {
+                if (crashEpoch.get() != epoch) {
+                    return; // crashed mid-flight: this batch died with the process
+                }
                 int activeCount = 0;
                 // One wall-clock stamp for the whole batch: every member shares
                 // the same completion instant (the batch is the execution unit).
@@ -2558,7 +2610,14 @@ public final class JavaMockEngineCluster {
             long delayMs = performance.decodeStepDelayMs(decodeRunning.size());
             pendingStepDelayMs = delayMs; // lock in this step's price at arm time
             decodeStepScheduled = true;
-            scheduler.schedule(this::runDecodeStep, delayMs, TimeUnit.MILLISECONDS);
+            // Crash fence: a tick armed before a crash_after must not advance
+            // the wiped engine — the late callback drops out on epoch mismatch.
+            final long epoch = crashEpoch.get();
+            scheduler.schedule(() -> {
+                if (crashEpoch.get() == epoch) {
+                    runDecodeStep();
+                }
+            }, delayMs, TimeUnit.MILLISECONDS);
         }
 
         /**
@@ -3153,6 +3212,143 @@ public final class JavaMockEngineCluster {
         }
 
         /**
+         * crash_after true-crash semantics — the engine process "dies":
+         * <ol>
+         *   <li>{@code stopped = true} — control-plane parity flag (requests
+         *       that still reach the in-process service see the stopped
+         *       rejection while the port is gone).</li>
+         *   <li>Bump {@link #crashEpoch} — every in-flight scheduler callback
+         *       (delayed enqueue process, prefill batch start, prefill
+         *       completion, decode step tick) becomes a no-op: they cannot be
+         *       unscheduled, so they check the epoch they captured at trigger
+         *       time and drop out when it no longer matches.</li>
+         *   <li>Wipe ALL per-engine memory — running tasks, queues, response
+         *       streams, per-request states, KV block pool (held + LRU +
+         *       eviction history), leases, cross-engine P->D ownership
+         *       (bidirectional), bounded observability histories, and the
+         *       un-acked completion backlog. Recovery therefore means a
+         *       reboot from zero, exactly like a real engine process
+         *       restarting.</li>
+         *   <li>Reset the admission gauges, observability counters and
+         *       {@code enqueueCount} (a fresh process has served zero
+         *       requests — a crash_after N armed before the restart must not
+         *       re-fire instantly on the new incarnation).</li>
+         *   <li>Kill the gRPC port — same network-level death as stop_engine
+         *       (the master walks the 3-strike retire path either way); the
+         *       port-kill is scheduled a beat ahead so the crash-triggering
+         *       empty ack flushes first. The MockControlServer HTTP plane is
+         *       a separate server and stays up, so /start_engine can rebuild
+         *       the gRPC server on clean state (it also resets the fault
+         *       config and enqueue count).</li>
+         * </ol>
+         *
+         * <p>Contrast: {@code stop_engine} (MockControlServer.handleStopEngine)
+         * closes the port but deliberately KEEPS every pool and queue, so the
+         * engine resumes in place once restarted — a network-level outage, not
+         * a process death. {@link #drainAndShutdown()} is the graceful process
+         * EXIT path and cancels everything through the normal terminal
+         * machinery instead of discarding it.
+         */
+        void crashNow() {
+            stopped = true;
+            crashEpoch.incrementAndGet();
+            runningTasks.clear();
+            responseQueues.clear();
+            requestStates.clear();
+            activeBlockLeases.clear();
+            cancelledRequests.clear();
+            // Queued work dies with the process: pending prefill batches,
+            // direct-stream parks, decode wait queue and running streams.
+            synchronized (prefillQueueLock) {
+                prefillPendingQueue.clear();
+                directPrefillQueue.clear();
+            }
+            synchronized (decodeQueueLock) {
+                decodePendingQueue.clear();
+                decodeRunning.clear();
+                decodeStepScheduled = false;
+                pendingStepDelayMs = 0;
+            }
+            // Un-acked completion backlog dies too: finished-but-unreported
+            // work is lost, the master's poller will never see it again.
+            synchronized (completionLock) {
+                completions.clear();
+            }
+            // KV memory: every held block and LRU entry is gone with the process.
+            cache.clear();
+            cacheVersion.incrementAndGet();
+            statusVersion.incrementAndGet();
+            // Observability histories are process memory as well.
+            synchronized (requestLifecycles) {
+                requestLifecycles.clear();
+            }
+            synchronized (cancelledRidHistory) {
+                cancelledRidHistory.clear();
+            }
+            synchronized (priorityCancelTombstones) {
+                priorityCancelTombstones.clear();
+            }
+            synchronized (recentPrefillTimes) {
+                recentPrefillTimes.clear();
+            }
+            synchronized (recentDecodeTimes) {
+                recentDecodeTimes.clear();
+            }
+            // Cross-engine P->D ownership is bidirectional — clean both sides
+            // so neither this engine nor its peers keep dangling entries.
+            for (Map.Entry<Long, FastRpcService> entry : downstreamDecodeOwners.entrySet()) {
+                clearDecodeOwnership(entry.getKey(), entry.getValue());
+            }
+            for (Long requestId : List.copyOf(upstreamPrefillOwners.keySet())) {
+                clearUpstreamOwnership(requestId);
+            }
+            downstreamDecodeOwners.clear();
+            upstreamPrefillOwners.clear();
+            // Admission gauges: nothing is queued or running on a dead process.
+            pendingRequests.set(0);
+            waitingPrefillRequests.set(0);
+            activePrefillBatches.set(0);
+            activePrefillRequests.set(0);
+            activeDecodeRequests.set(0);
+            // Fresh process: lane time axes start from "available now" and the
+            // observability counters restart from zero.
+            nextPrefillAvailableNanosByDp.clear();
+            AtomicLong[] lanes = prefillLanes;
+            if (lanes != null) {
+                for (AtomicLong lane : lanes) {
+                    lane.set(0L);
+                }
+            }
+            enqueueCount.set(0);
+            rpcEnqueueBatch.set(0);
+            rpcGenerateStream.set(0);
+            rpcFetchResponse.set(0);
+            rpcCancel.set(0);
+            busyMs.set(0);
+            kvAdmissionFails.reset();
+            acceptedCount.set(0);
+            completedCount.set(0);
+            cancelledCount.set(0);
+            contextComputeTokens.set(0);
+            contextWithCacheTokens.set(0);
+            generateTokens.set(0);
+            hitTokensTotal.set(0);
+            lastWindowContextCompute.set(0);
+            lastWindowContextCache.set(0);
+            lastWindowGenerate.set(0);
+            leakDetected.set(false);
+            lastEnqueueTime.set(System.nanoTime());
+            // Kill the port (captured reference: a racing /start_engine that
+            // already rebuilt a new server must keep it; re-shutting the dead
+            // victim is a harmless no-op).
+            Server victim = this.grpcServer;
+            if (victim != null) {
+                scheduler.schedule(victim::shutdownNow,
+                        CRASH_PORT_KILL_DELAY_MS, TimeUnit.MILLISECONDS);
+            }
+        }
+
+        /**
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
@@ -3166,6 +3362,8 @@ public final class JavaMockEngineCluster {
         void clearFaultConfig() { this.faultConfig = FaultInjectionConfig.builder().build(); }
         void resetEnqueueCount() { this.enqueueCount.set(0); }
         void setStopped(boolean s) { this.stopped = s; }
+        void setGrpcServer(Server server) { this.grpcServer = server; }
+        long getCrashEpoch() { return crashEpoch.get(); }
         boolean isStopped() { return stopped; }
         int getGrpcPort() { return grpcPort; }
         int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }

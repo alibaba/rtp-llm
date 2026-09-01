@@ -15,7 +15,8 @@ Case map:
                                    recovery, TTFT regression gate)
     engine_fault_flap             rapid stop/start oscillation vs the
                                    3-strike eviction / re-discovery race
-    engine_fault_crash_after      enqueue-count triggered stop + the
+    engine_fault_crash_after      enqueue-count triggered TRUE CRASH
+                                   (memory wipe + port kill) + the
                                    empty-ack uncertain fence contract
     engine_fault_no_respond       prefills stop answering; the failed
                                    request surfaces, env recovers
@@ -34,8 +35,9 @@ Case map:
                                    engine's cache view from a FULL snapshot
                                    (with and without surviving KV memory)
     engine_fault_recovery_no_resurrect      E3 — inflight requests from
-                                   before the outage must not resurrect on
-                                   the recovered engine
+                                   before a true crash must not resurrect
+                                   on the recovered engine (which must
+                                   come back memory-empty)
     engine_fault_status_gap_no_bump          E4 — a short (2-tick) status
                                    gap must NOT retire the generation
     engine_fault_status_gap_long_retire      E5 — a long status gap must
@@ -476,15 +478,17 @@ def engine_flap(ctx: CaseContext):
 @case(
     "engine_fault_crash_after",
     profiles=["batch-window"],
-    source="gap G6/G7: /inject type=crash_after (enqueue-count triggered stop, not process death)",
+    source="gap G6/G7: /inject type=crash_after (enqueue-count triggered true crash)",
 )
 def inject_crash_after(ctx: CaseContext):
-    """crash_after n=1 flips the landing engine to stopped at its first
-    enqueue and answers that enqueue with an EMPTY ack (no errors, no
-    successes).  Single-JVM semantics: a stopped flag, not a dead process
-    — getWorkerStatus keeps answering alive=false, so the master marks it
-    down and routes around it; /start_engine clears the fault config,
-    resets the enqueue counter and rebinds the port.
+    """crash_after n=1 kills the landing engine at its first enqueue (TRUE
+    CRASH: all per-engine memory — running tasks, queues, KV leases, LRU —
+    is wiped and the gRPC port is shut down) and answers that enqueue with
+    an EMPTY ack (no errors, no successes) that flushes just before the
+    port dies.  The master's health poller then hits connection-refused,
+    accumulates the 3-strike failures and retires the endpoint, routing
+    around it; /start_engine rebuilds the gRPC server on clean state
+    (fresh fault config, zeroed enqueue counter, empty memory).
 
     Assertions: exactly one engine crashes, the master observes the loss
     (alive drops), traffic is served by the surviving engine (>=60% of a
@@ -496,8 +500,8 @@ def inject_crash_after(ctx: CaseContext):
     engine fence parks in quarantine forever (no cancel channel, and the
     engine never saw the request so no WorkerStatus terminal ever
     settles it) — verified in PriorityScheduler.handleEngineFenceOutcome /
-    cleanupInflight.  The engine side, which never registered the request,
-    must be fully clean.
+    cleanupInflight.  The engine side, which never registered the request
+    (and whose memory the crash wiped anyway), must be fully clean.
 
     Profile semantics (v2, task #55): the fault fires at the engine's
     EnqueueBatch entry (BATCH dispatcher only) and _fault_spec pins the
@@ -514,7 +518,8 @@ def inject_crash_after(ctx: CaseContext):
         inject_type_all(ops, names, "crash_after", n=1)
 
         # R1 triggers the crash wherever it lands; its own fate is the
-        # uncertain-reconcile path (empty ack) — reported, not asserted.
+        # uncertain-reconcile path (empty ack that flushes just before the
+        # port kill) — reported, not asserted.
         rid1 = ops.next_request_id(base)
         _, err1 = ops.run_one_request(rid1, stream_timeout_s=12.0)
 
@@ -804,6 +809,13 @@ def inject_generate_delay(ctx: CaseContext):
 RECOVERY_EVICT_S = 30.0
 # Engine restart channel-reconnect settle (engine_down Phase-4 precedent).
 RECOVERY_SETTLE_S = 3.0
+# E3 crash_after arming window: the crash only fires when a fresh
+# EnqueueBatch lands on the armed engine, so trigger requests are fired
+# until every target reports stopped.  The master may route several
+# triggers at a live/already-crashed peer before one lands on each armed
+# target (post-crash dispatch failures also re-route), so the window
+# covers a handful of 0.2s trigger rounds.
+CRASH_TRIGGER_WINDOW_S = 15.0
 # Status-gap shapes: E4 is a 2-tick (2 x 20ms poll) transient gap; E5 must
 # exceed the 3-consecutive-failure retire threshold with no_respond's
 # per-RPC 1s deadline (fault_env_config statusRpcTimeoutMs=1000) — 5s gives
@@ -1247,25 +1259,29 @@ def recovery_kv_resync(ctx: CaseContext):
 )
 def recovery_no_resurrect(ctx: CaseContext):
     """E3 — expected behaviour: requests that were in flight on an engine
-    when it went down must NOT leak into the recovered generation's
+    when it CRASHED must not leak into the recovered generation's
     bookkeeping:
 
       * the master's per-endpoint ledger for the recovered engines must
         read zero inflight (old entries fenced or TTL-settled), and the
         global inflight must drain to zero within the TTL cap;
-      * the engine side must not keep the old rids registered after the
-        drain;
-      * fresh traffic must schedule normally after recovery (the new
-        generation serves new requests).
+      * the engine side must come back EMPTY — a true crash wipes the
+        process memory, so after /start_engine the engine has no running
+        tasks, no held blocks and an empty KV cache (recovery == a reboot
+        from zero, not an in-place resume);
+      * the pre-outage rids must never complete — their engine-side state
+        is gone (no resurrection); they settle through the master's
+        fence/TTL paths, and fresh traffic must schedule normally on the
+        recovered engines.
 
-    MOCK-FIDELITY CAVEAT (recorded, not asserted): the mock's stop/start
-    pair keeps running tasks in memory (the SAME semantics E2's regime A
-    depends on), so pre-outage tasks finish executing after the restart —
-    that is engine-internal continuation, not a master-side re-dispatch,
-    and a zero-completion resurrection bar is therefore not assertable
-    against this mock.  The completion count is reported as an
-    observation; a true crash-loses-tasks injection would need a new mock
-    capability (TODO(mock-agent)).
+    Mechanism: crash_after with TRUE-CRASH semantics — each target engine
+    is armed to die on its NEXT EnqueueBatch (every queue, running task,
+    KV lease and LRU entry is wiped, the gRPC port is killed), then
+    trigger requests are fired until every target reports stopped.  The
+    master observes the dead port (3 consecutive gRPC failures) and
+    retires the endpoint; /start_engine rebuilds the gRPC server on clean
+    state (the mock control-plane HTTP server survives the crash, which
+    is what makes the restart path reachable).
 
     FINDING if the asserted master-side bars fail: F1 permanent-ledger-leak
     elastic variant — old generation requests surviving into the new one's
@@ -1296,10 +1312,33 @@ def recovery_no_resurrect(ctx: CaseContext):
         target_ips = {n: _engine_ip_port(ops, n) for n in targets}
         log_offset = _master_log_offset(env)
 
-        # Outage: stop every engine that holds fired inflight requests.
-        retired_all = True
+        # Crash: arm crash_after at each target's NEXT EnqueueBatch (the
+        # counter already includes the fired requests' batches), then fire
+        # trigger requests until every target reports stopped — the crash
+        # only fires when a fresh EnqueueBatch lands on the armed engine.
+        # The trigger requests are small and unconsumed; ones that land on
+        # an armed target become the crash-triggering empty ack (uncertain
+        # fence, TTL-settled by the inflight bar below).
         for n in targets:
-            ops.stop_engine(n)
+            snap = ops.snapshot_by_name().get(n, {})
+            n_batches = int(snap.get("rpc_counts", {}).get("enqueue_batch", 0))
+            inject_type(ops, n, "crash_after", n=n_batches + 1)
+        crashed_all = False
+        deadline = time.monotonic() + CRASH_TRIGGER_WINDOW_S
+        while time.monotonic() < deadline:
+            snaps = ops.snapshot_by_name()
+            if all(snaps.get(n, {}).get("stopped") for n in targets):
+                crashed_all = True
+                break
+            try:
+                ops.schedule(ops.next_request_id(base), input_len=64, output_len=2)
+            except Exception:
+                pass  # a trigger may hit an engine mid-crash; keep firing
+            time.sleep(0.2)
+
+        # The master observes the dead ports and retires the endpoints
+        # (same 3-strike transport path as stop_engine).
+        retired_all = True
         for n, ip in target_ips.items():
             if not wait_for(
                 lambda ip=ip: _retire_count(env, ip, log_offset) > 0,
@@ -1308,7 +1347,8 @@ def recovery_no_resurrect(ctx: CaseContext):
             ):
                 retired_all = False
 
-        # Recovery.
+        # Recovery: /start_engine rebuilds the gRPC server on CLEAN state
+        # (it also disarms the fault config and resets the enqueue count).
         for n in targets:
             ops.start_engine(n)
         alive_back = _wait_master_alive(
@@ -1329,11 +1369,35 @@ def recovery_no_resurrect(ctx: CaseContext):
             ledger_clean = ledger_clean and zero
             ledger_detail[n] = ledger
 
-        # Consume the fired requests to terminal states.  With the mock's
-        # memory-intact stop semantics, completions after restart are
-        # engine-internal continuation (observation, see docstring) — the
-        # master-side bars below are the asserted contract.
-        outcomes = _consume_fired(ops, fired, wait_s=5.0)
+        # True-crash wipe: the recovered engine must have NO memory of the
+        # pre-crash world — no running tasks, no held blocks, an empty LRU,
+        # zero inflight and a zeroed accept counter (a fresh process).
+        wipe_ok = True
+        wipe_detail = {}
+        for n in targets:
+            snap = ops.snapshot_by_name().get(n, {})
+            clean = (
+                int(snap.get("running", -1)) == 0
+                and int(snap.get("inflight", -1)) == 0
+                and list(snap.get("cache_key_set") or []) == []
+                and int(snap.get("held_blocks", -1)) == 0
+                and int(snap.get("accepted", -1)) == 0
+            )
+            wipe_ok = wipe_ok and clean
+            wipe_detail[n] = {
+                "running": snap.get("running"),
+                "inflight": snap.get("inflight"),
+                "cache_keys": len(snap.get("cache_key_set") or []),
+                "held_blocks": snap.get("held_blocks"),
+                "accepted": snap.get("accepted"),
+            }
+
+        # Consume the fired requests to terminal states: with the true
+        # crash their engine-side state is GONE, so NONE may complete — a
+        # completion would be a resurrection (asserted, no longer just an
+        # observation).  Their client streams fail against the wiped
+        # engine and settle through the master's fence/TTL.
+        outcomes = _consume_fired(ops, fired, wait_s=2.0)
         resurrected = [
             (rid, name)
             for rid, name, completed in outcomes
@@ -1351,19 +1415,23 @@ def recovery_no_resurrect(ctx: CaseContext):
         recovery_ok, recovery_msg = ops.verify_recovery()
 
         passed = (
-            retired_all
+            crashed_all
+            and retired_all
             and alive_back
             and ledger_clean
+            and wipe_ok
+            and not resurrected
             and engine_clean
             and inflight_ok
             and recovery_ok
         )
         return passed, (
-            f"fired={len(fired)} onto {targets}, retired_all={retired_all}, "
+            f"fired={len(fired)} onto {targets}, "
+            f"crashed_all={crashed_all}, retired_all={retired_all}, "
             f"alive_restored={alive_back}, "
             f"recovered_ledger_zero={ledger_clean}({ledger_detail}), "
-            f"post-restart_completions={len(resurrected)}/{len(fired)} "
-            f"(mock memory-intact continuation, observation only), "
+            f"engine_wipe_clean={wipe_ok}({wipe_detail}), "
+            f"resurrected={len(resurrected)}/{len(fired)} (bar: 0), "
             f"engine_inflight_clean={engine_clean}({engine_detail}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"recovery={recovery_msg}"
@@ -1371,6 +1439,14 @@ def recovery_no_resurrect(ctx: CaseContext):
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
+        # Disarm any undelivered crash_after before the hygiene restart
+        # (start_engine would clear it too, but the arm must not survive
+        # an early-exit path that skips the restart).
+        for n in names:
+            try:
+                inject_type(ops, n, "crash_after", enabled=False)
+            except Exception:
+                pass
         _ensure_started(ops, names)
         for n in names:
             try:

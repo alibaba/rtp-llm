@@ -310,6 +310,21 @@ final class MockLruBlockCache {
         return changed;
     }
 
+    // ─────────────────────────── process crash (crash_after) ───────────────────────────
+
+    /**
+     * Drop EVERYTHING — the crash_after true-crash semantics: a dead process
+     * leaves no KV memory behind, so on recovery the pool starts from zero
+     * (all keys gone, no held blocks, eviction history reset). Distinct from
+     * stop_engine, which only closes the port and keeps the pool intact for
+     * in-place continuation.
+     */
+    synchronized void clear() {
+        blocks.clear();
+        heldBlocks = 0;
+        evictions = 0;
+    }
+
     // ─────────────────────────── observation ───────────────────────────
 
     /** Total number of LRU evictions (capacity + forced). */
