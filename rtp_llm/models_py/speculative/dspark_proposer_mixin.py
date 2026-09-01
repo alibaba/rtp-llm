@@ -297,8 +297,10 @@ class DSparkProposerMixin:
         req, positions, commit_ctx = self.map_commit_rows(
             starts, lengths, committed_ends, row_count, inputs
         )
+        _dsmark('commit: rows mapped')
 
         main_x = self.combine_hidden_states(features)
+        _dsmark('commit: combined')
         if __import__("os").environ.get("DSV4_SKIP_DRAFT_COMMIT") == "1":
             # P0 slice 2 POSITIVE CONTROL (gate 0b): skip ONLY the draft
             # feature-KV write; keep the output shape so the C++ pipeline
@@ -315,6 +317,7 @@ class DSparkProposerMixin:
                 inputs,
                 commit_ctx=commit_ctx,
             )
+        _dsmark('commit: kv written')
         # The fixed-width commit CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
         return PyModelOutputs(main_x)

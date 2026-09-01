@@ -853,26 +853,19 @@ void MtpExecutor::convertCommitRoundToDecodeInputs(GptModelInputs&              
     // (PyWrappedModel::buildPyAttentionInputs: is_prefill =
     // !sequence_lengths.size(0), context_batch_size = prefix_lengths.size(0)).
     // A T=1 commit round is a decode round in disguise: the query token is the
-    // last accepted token at position seqLength()-1 — the same convention
-    // processDecodeStreams uses — attending [0, seqLength()-1] right after
-    // appending its KV (the same slot verify already wrote; the overwrite is
-    // idempotent). Fill the decode fields, empty the context fields, and the
-    // python dispatch runs forward_decode — eagerly or as a decode-graph replay.
-    auto seq_lens = torch::empty({model_input.input_lengths.size(0)},
-                                 torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    auto* seq_ptr = seq_lens.data_ptr<int32_t>();
-    int64_t row   = 0;
-    for (const auto& stream : streams) {
-        const auto n = stream->currentBatchSize();
-        for (auto i = 0; i < n; ++i) {
-            seq_ptr[row++] = static_cast<int32_t>(stream->seqLength()) - 1;
-        }
-    }
-    RTP_LLM_CHECK_WITH_INFO(row == model_input.input_lengths.size(0),
-                            "commit-as-decode row mismatch: filled %ld, expected %ld",
-                            (long)row,
-                            (long)model_input.input_lengths.size(0));
-    model_input.sequence_lengths = seq_lens;
+    // last accepted token at ABSOLUTE position Q = prefix_lengths[b] (the
+    // committed tokens before it), its KV slot is Q (verify already wrote it;
+    // the rewrite is idempotent), and attention reads [0, Q] — exactly the
+    // decode-path convention with sequence_lengths[b] = Q. NOTE:
+    // stream->seqLength() does NOT carry the prefix for these streams (it
+    // reads 1 mid-flight) — the gathered prefix_lengths is the only correct
+    // source. Dispatch is size-driven: fill sequence_lengths (decode count),
+    // empty prefix_lengths (context count).
+    RTP_LLM_CHECK_WITH_INFO(model_input.prefix_lengths.defined()
+                                && model_input.prefix_lengths.size(0)
+                                    == model_input.input_lengths.size(0),
+                            "commit-as-decode: gathered prefix_lengths must cover the batch");
+    model_input.sequence_lengths = model_input.prefix_lengths;
     model_input.prefix_lengths   = torch::empty(
         {0},
         model_input.prefix_lengths.defined() ? model_input.prefix_lengths.options()
@@ -951,8 +944,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         {
             // Geometry probe: every prefillStep target forward, unbuffered —
             // shows whether/when all-T=1 commit rounds actually occur.
-            static std::atomic<int> cadg_budget{400};
-            if (cadg_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            static std::atomic<int> cadg_budget{5000};
+            if (!model_input.is_fake_stream && cadg_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
                 const int64_t cadg_bsz = model_input.input_lengths.defined()
                                              ? (long long)model_input.input_lengths.size(0)
                                              : -1;
@@ -960,39 +953,71 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                ? (long long)model_input.combo_tokens.numel()
                                                : -1;
                 fprintf(stderr,
-                        "[CADG] bsz=%lld total=%lld route=%d\n",
+                        "[CADG] bsz=%lld total=%lld route=%d fake=%d\n",
                         (long long)cadg_bsz,
                         (long long)cadg_total,
-                        (int)commit_as_decode);
+                        (int)commit_as_decode,
+                        (int)model_input.is_fake_stream);
+                for (const auto& s : streams) {
+                    fprintf(stderr,
+                            "[CADG2] prefix=%d seq=%d in=%d\n",
+                            (int)s->prefixLength(),
+                            (int)s->seqLength(),
+                            (int)s->inputLength());
+                }
                 fflush(stderr);
             }
         }
         if (commit_as_decode) {
+            // Snapshot the prefill-shaped length fields: the downstream draft
+            // commit reuses this model_input and expects the ORIGINAL prefill
+            // geometry (validatePrefillDSparkCommitInput + the commit wrapper
+            // bind prefill-shaped prefix/input lengths).
+            torch::Tensor orig_seq    = model_input.sequence_lengths;
+            torch::Tensor orig_prefix = model_input.prefix_lengths;
             convertCommitRoundToDecodeInputs(model_input, streams);
             fprintf(stderr,
-                    "[CAD] routed bsz=%lld seq0=%lld\n",
+                    "[CAD] routed bsz=%lld seq_size=%lld\n",
                     (long long)model_input.input_lengths.size(0),
-                    (long long)model_input.sequence_lengths.size(0) > 0
-                        ? (long long)model_input.sequence_lengths.data_ptr<int32_t>()[0]
-                        : -1LL);
+                    (long long)model_input.sequence_lengths.size(0));
             fflush(stderr);
-        }
-        ModelBase& target_ref = commit_as_decode ? *target_sp_decode_model_ : *model_;
-        if (commit_as_decode) {
+            ModelBase& target_ref = *target_sp_decode_model_;
             try {
                 model_output = target_ref.forward(model_input);
+                // Graph-replay outputs live in the runner's STATIC buffers —
+                // the next replay overwrites them. The dispatch/scheduler may
+                // hold logits/all_hidden_states across steps (the eager path
+                // returns fresh allocations), so clone before handing them on.
+                if (model_output.logits.defined()) {
+                    model_output.logits = model_output.logits.clone();
+                }
+                if (model_output.all_hidden_states.defined()) {
+                    model_output.all_hidden_states = model_output.all_hidden_states.clone();
+                }
+                if (model_output.hidden_states.defined()) {
+                    model_output.hidden_states = model_output.hidden_states.clone();
+                }
                 fprintf(stderr, "[CAD] forward OK\n");
                 fflush(stderr);
-                // NOTE: the MTP-buffer override is deliberately SKIPPED on the
-                // decode route — it would overwrite the output with the
-                // verify-geometry buffer rows that the decode forward never
-                // wrote. The decode path returns its own hidden states.
+                // The decode path just wrote THIS round's aux rows into the
+                // shared MTP hidden buffer (decode/forward.py capture_ids
+                // branch); the override therefore returns the routed forward's
+                // own fresh rows for the draft commit — same protocol as the
+                // eager path.
+                maybeOverrideAllHiddenStatesWithMtpBuffer(
+                    model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
+                fprintf(stderr, "[CAD] override OK\n");
+                fflush(stderr);
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_ERROR("[commit-as-decode] routed post-forward failed: %s", e.what());
                 throw;
             }
+            // Restore prefill semantics for the draft-commit pipeline below.
+            model_input.sequence_lengths = orig_seq;
+            model_input.prefix_lengths   = orig_prefix;
         } else {
-            model_output = target_ref.forward(model_input);
+            ModelBase& target_ref = *model_;
+            model_output          = target_ref.forward(model_input);
             maybeOverrideAllHiddenStatesWithMtpBuffer(
                 model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
         }
@@ -1055,6 +1080,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         if (is_dspark_) {
             batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
+            fprintf(stderr, "[CAD] draft validate OK\n");
+            fflush(stderr);
             // Seeding = commit only: prompt-suffix feature rows into the
             // draft feature KV (the call keeps the target's own
             // incremental-prefill geometry; output intentionally unused).
@@ -1062,7 +1089,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // are not persisted in stream or PD state.
             RTP_LLM_CHECK_WITH_INFO(sp_prefill_draft_model_ != nullptr,
                                     "DSpARK prefill requires a draft prefill model");
-            (void)sp_prefill_draft_model_->forward(model_input);
+            try {
+                (void)sp_prefill_draft_model_->forward(model_input);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("[CAD] draft commit forward failed: %s", e.what());
+                throw;
+            }
+            fprintf(stderr, "[CAD] draft forward OK\n");
+            fflush(stderr);
             draft_model_output = GptModelOutputs();
         } else {
             draft_model_output = std::move(draft_model_->forward(model_input));
