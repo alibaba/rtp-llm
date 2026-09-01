@@ -3,6 +3,7 @@ package org.flexlb.service.grace;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
@@ -30,6 +31,7 @@ public class ApplicationLifecycle {
     private volatile boolean shutdownReceived;
     private volatile boolean shutdownCompletedSuccessfully;
 
+    @Autowired
     public ApplicationLifecycle(
             LBStatusConsistencyService consistency,
             ActiveRequestCounter activeRequests,
