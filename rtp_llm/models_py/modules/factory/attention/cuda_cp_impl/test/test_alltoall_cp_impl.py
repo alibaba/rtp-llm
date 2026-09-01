@@ -69,15 +69,14 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         new_lengths: List[int],
         cp_size: int,
         rank: int,
-        prefix_lengths: List[int] | None = None,
+        padded_lengths: List[int] | None = None,
         device: torch.device = torch.device("cuda"),
     ) -> torch.Tensor:
-        if prefix_lengths is None:
-            prefix_lengths = [0] * len(new_lengths)
+        if padded_lengths is None:
+            padded_lengths = new_lengths
         indices: List[int] = []
-        for new_len, pl in zip(new_lengths, prefix_lengths):
-            positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(p + pl for p in positions)
+        for padded_len in padded_lengths:
+            indices.extend(zigzag_positions_for_rank(padded_len, cp_size, rank))
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----
@@ -345,7 +344,6 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                 new_lengths,
                 cp_size,
                 r,
-                prefix_lengths=prefix_lengths,
                 device=self.device,
             )
             for r in range(cp_size)
@@ -506,6 +504,83 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             cp_rank=2,
             tokens_per_block=16,
         )
+
+    def test_cache_append_offsets_prefix_and_filters_production_padding(self):
+        cp_size = 4
+        actual_lengths = [1, 257]
+        prefix_lengths = [64, 128]
+        sequence_lengths = [
+            prefix + actual
+            for prefix, actual in zip(prefix_lengths, actual_lengths)
+        ]
+        chunk_lengths = [128, 128]
+        padded_lengths = [chunk * cp_size for chunk in chunk_lengths]
+        all_shuffle = [
+            self._build_shuffle_indices(
+                actual_lengths,
+                cp_size,
+                rank,
+                padded_lengths=padded_lengths,
+                device=self.device,
+            )
+            for rank in range(cp_size)
+        ]
+        attn_cfg, par_cfg = make_configs(cp_size=cp_size, cp_rank=0)
+        attn_inputs = build_cp_attn_inputs(
+            sequence_lengths,
+            chunk_lengths,
+            cp_size,
+            tokens_per_block=16,
+            prefix_lengths=prefix_lengths,
+            device=self.device,
+        )
+        attn_inputs.context_parallel_info.prefill_shuffle_indices = all_shuffle[
+            0
+        ]
+
+        with patch(
+            f"{_A2A_MODULE}.all_gather",
+            return_value=torch.cat(all_shuffle),
+        ), patch(
+            f"{_A2A_MODULE}.get_user_buffers_communicator",
+            return_value=None,
+        ):
+            op = PCPAll2AllAttnOp(attn_cfg, attn_inputs, par_cfg)
+            params = op.prepare(attn_inputs)
+
+        expected_counts = [65, 64, 64, 65]
+        keys = torch.arange(
+            sum(chunk_lengths), dtype=torch.float32, device=self.device
+        ).reshape(-1, 1, 1)
+        values = -keys
+        for rank, expected_count in enumerate(expected_counts):
+            batch_indices = op.cache_append_batch_indices[rank]
+            positions = op.cache_append_positions[rank]
+            self.assertEqual(positions.numel(), expected_count)
+            for batch, (prefix, actual) in enumerate(
+                zip(prefix_lengths, actual_lengths)
+            ):
+                batch_positions = positions[batch_indices == batch]
+                self.assertTrue(torch.all(batch_positions >= prefix))
+                self.assertTrue(torch.all(batch_positions < prefix + actual))
+
+            with patch(f"{_A2A_MODULE}.append_paged_kv_cache") as append_mock:
+                op._append_kv_cache(
+                    keys,
+                    values,
+                    rank,
+                    torch.empty(0, device=self.device),
+                    params,
+                )
+            append_mock.assert_called_once()
+            kwargs = append_mock.call_args.kwargs
+            expected_indices = op.cache_append_indices[rank]
+            self.assertTrue(
+                torch.equal(kwargs["append_key"], keys[expected_indices])
+            )
+            self.assertTrue(
+                torch.equal(kwargs["append_value"], values[expected_indices])
+            )
 
 
 if __name__ == "__main__":

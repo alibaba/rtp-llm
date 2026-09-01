@@ -29,13 +29,16 @@ enum class CPRotateMethod {
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
-    bool           is_enabled() const {
+    // Token alignment required by one of the 2 * CP zigzag segments.
+    size_t segment_size_alignment = 1;
+    bool   is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
     bool is_prefill_enabled() const {
         return method == CPRotateMethod::PREFILL_CP;
     }
+    size_t      padded_sequence_length(size_t input_length, size_t cp_size) const;
     std::string to_string() const;
 };
 struct FfnDisAggregateConfig {

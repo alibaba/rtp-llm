@@ -10,10 +10,54 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import HybridAttentionType, ParallelismConfig, RoleType
 
 
 class Qwen3NextBase(BaseModel):
+    @classmethod
+    def prefill_cp_segment_size_alignment(cls) -> int:
+        return 64
+
+    @classmethod
+    def prefill_cp_cache_block_size_alignment(cls) -> int:
+        return 64
+
+    @classmethod
+    def validate_prefill_cp_topology(
+        cls,
+        parallelism_config: ParallelismConfig,
+        role_type: RoleType,
+        ffn_disaggregate_enabled: bool,
+    ) -> None:
+        valid = (
+            parallelism_config.tp_size >= 2
+            and parallelism_config.world_size == parallelism_config.tp_size
+            and parallelism_config.dp_size == 1
+            and parallelism_config.ep_size == 1
+            and parallelism_config.pp_size == 1
+            and parallelism_config.ffn_sp_size == 1
+            and role_type == RoleType.PDFUSION
+            and not ffn_disaggregate_enabled
+        )
+        if valid:
+            return
+
+        raise ValueError(
+            "Qwen3-Next/Qwen3.5 prefill CP requires "
+            "TP_SIZE=WORLD_SIZE>=2, DP_SIZE=1, EP_SIZE=1, PP_SIZE=1, "
+            "FFN_SP_SIZE=1, ROLE_TYPE=PDFUSION, and FFN disaggregation disabled; "
+            "set EP_SIZE=1 explicitly because the default EP_SIZE=0 expands to "
+            "TP_SIZE*DP_SIZE; "
+            f"got TP_SIZE={parallelism_config.tp_size}, "
+            f"WORLD_SIZE={parallelism_config.world_size}, "
+            f"DP_SIZE={parallelism_config.dp_size}, "
+            f"EP_SIZE={parallelism_config.ep_size}, "
+            f"PP_SIZE={parallelism_config.pp_size}, "
+            f"FFN_SP_SIZE={parallelism_config.ffn_sp_size}, "
+            f"ROLE_TYPE={role_type.name}, "
+            f"ENABLE_FFN_DISAGGREGATE={int(ffn_disaggregate_enabled)}"
+        )
+
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config

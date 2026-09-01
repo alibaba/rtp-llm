@@ -178,7 +178,17 @@ class UserBufferCommunicator:
         if not self.can_handle_tensor(tensor):
             return False
 
+        current_stream = torch.cuda.current_stream()
+        send_stream = self._enqueue_send(tensor, dst, current_stream)
+        current_stream.wait_stream(send_stream)
+        return True
+
+    def _enqueue_send(
+        self, tensor: torch.Tensor, dst: int, source_stream: torch.cuda.Stream
+    ) -> torch.cuda.Stream:
         data_bytes = tensor.numel() * tensor.element_size()
+        send_stream = self._send_streams[dst]
+        send_stream.wait_stream(source_stream)
         userbuffers_send(
             tensor,
             self._ub_handle,
@@ -187,10 +197,9 @@ class UserBufferCommunicator:
             data_bytes,
             self._communicator_ptr,
             dst,
-            self._send_streams[dst].cuda_stream,
+            send_stream.cuda_stream,
         )
-        torch.cuda.current_stream().wait_stream(self._send_streams[dst])
-        return True
+        return send_stream
 
     def recv(
         self,
@@ -213,6 +222,15 @@ class UserBufferCommunicator:
         if not self.can_handle_tensor(tensor):
             return False
 
+        current_stream = torch.cuda.current_stream()
+        recv_stream = self._enqueue_recv(tensor, src, current_stream)
+        current_stream.wait_stream(recv_stream)
+        return True
+
+    def _enqueue_recv(
+        self, tensor: torch.Tensor, src: int, target_stream: torch.cuda.Stream
+    ) -> torch.cuda.Stream:
+        self._recv_stream.wait_stream(target_stream)
         userbuffers_recv(
             tensor,
             self._ub_handle,
@@ -222,7 +240,26 @@ class UserBufferCommunicator:
             src,
             self._recv_stream.cuda_stream,
         )
-        torch.cuda.current_stream().wait_stream(self._recv_stream)
+        return self._recv_stream
+
+    def send_recv(
+        self,
+        send_tensor: torch.Tensor,
+        dst: int,
+        recv_tensor: torch.Tensor,
+        src: int,
+    ) -> bool:
+        """Enqueue a full-duplex exchange without serializing receive after send."""
+        if not self.can_handle_tensor(send_tensor) or not self.can_handle_tensor(
+            recv_tensor
+        ):
+            return False
+
+        current_stream = torch.cuda.current_stream()
+        send_stream = self._enqueue_send(send_tensor, dst, current_stream)
+        recv_stream = self._enqueue_recv(recv_tensor, src, current_stream)
+        current_stream.wait_stream(send_stream)
+        current_stream.wait_stream(recv_stream)
         return True
 
     def all_gather(

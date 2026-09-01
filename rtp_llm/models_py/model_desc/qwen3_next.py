@@ -8,7 +8,12 @@ from torch import nn
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    all_reduce,
+    broadcast,
+)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -21,7 +26,10 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.linear_attn_utils import (
+    ZigzagCPPlan,
+    get_segment_valid_lengths,
+)
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -64,26 +72,26 @@ class Qwen3NextMetadata(object):
         is_target_verify: bool = False,
         full_prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
         full_prefill_cu_seqlens: Optional[torch.Tensor] = None,
-        cp_restore_indices: Optional[torch.Tensor] = None,
+        cp_local_conv1d_meta: Optional[CausalConv1dMetadata] = None,
+        cp_local_conv_cu_seqlens: Optional[torch.Tensor] = None,
+        cp_local_conv_prefix_lengths: Optional[torch.Tensor] = None,
+        is_cp_linear_attn: bool = False,
         cp_local_extract_indices: Optional[torch.Tensor] = None,
         cp_local_valid_mask: Optional[torch.Tensor] = None,
-        cp_write_cache_store_impl: Optional[WriteCacheStoreOp] = None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
         self.full_prefill_conv1d_meta = full_prefill_conv1d_meta
         self.full_prefill_cu_seqlens = full_prefill_cu_seqlens
-        self.cp_restore_indices = cp_restore_indices
+        self.cp_local_conv1d_meta = cp_local_conv1d_meta
+        self.cp_local_conv_cu_seqlens = cp_local_conv_cu_seqlens
+        self.cp_local_conv_prefix_lengths = cp_local_conv_prefix_lengths
+        self.is_cp_linear_attn = is_cp_linear_attn
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
-        self.cp_write_cache_store_impl = cp_write_cache_store_impl
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
-
-    @property
-    def is_cp_linear_attn(self) -> bool:
-        return self.cp_restore_indices is not None
 
 
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
@@ -201,6 +209,49 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         ).transpose(0, 1)
         return out
 
+    def _run_chunk_gdn(
+        self,
+        mixed_qkv: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: Optional[torch.Tensor],
+        cu_seqlens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the shared prefill GDN kernel from an explicit boundary state."""
+        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+            query, key, value = scatter_qkv(
+                mixed_qkv,
+                self.local_num_k_heads,
+                self.local_num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+            )
+        else:
+            query, key, value = torch.split(
+                mixed_qkv,
+                [
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_k_heads * self.head_k_dim,
+                    self.local_num_v_heads * self.head_v_dim,
+                ],
+                dim=-1,
+            )
+            query = query.view(1, -1, self.local_num_k_heads, self.head_k_dim)
+            key = key.view(1, -1, self.local_num_k_heads, self.head_k_dim)
+            value = value.view(1, -1, self.local_num_v_heads, self.head_v_dim)
+
+        return chunk_gated_delta_rule(
+            query,
+            key,
+            value,
+            g,
+            beta,
+            initial_state=initial_state,
+            output_final_state=True,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=True,
+        )
+
     def _fla(
         self,
         mixed_qkv: torch.Tensor,
@@ -237,44 +288,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 initial_states,
                 seq_size_per_block,
             )
-        # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
-        # .contiguous() copies that torch.split + view triggers. Below 2048,
-        # kernel launch overhead beats the savings (microbench measured).
-        if mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
-            query, key, value = scatter_qkv(
-                mixed_qkv,
-                self.local_num_k_heads,
-                self.local_num_v_heads,
-                self.head_k_dim,
-                self.head_v_dim,
-            )
-        else:
-            query, key, value = torch.split(
-                mixed_qkv,
-                [
-                    self.local_num_k_heads * self.head_k_dim,
-                    self.local_num_k_heads * self.head_k_dim,
-                    self.local_num_v_heads * self.head_v_dim,
-                ],
-                dim=-1,
-            )
-            query = query.view(
-                1, query.shape[0], self.local_num_k_heads, self.head_k_dim
-            )
-            key = key.view(1, key.shape[0], self.local_num_k_heads, self.head_k_dim)
-            value = value.view(
-                1, value.shape[0], self.local_num_v_heads, self.head_v_dim
-            )
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
+        attn_out, h, final_state = self._run_chunk_gdn(
+            mixed_qkv,
             g,
             beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens_without_padding,
-            use_qk_l2norm_in_kernel=True,
+            initial_states,
+            cu_seqlens_without_padding,
         )
         if ssm_states is not None:
             store_ssm_state_to_block_map(
@@ -478,6 +497,7 @@ class Qwen3NextAttention(CausalAttention):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        layer_idx: int = 0,
     ):
         super().__init__(
             attn_config,
@@ -486,6 +506,7 @@ class Qwen3NextAttention(CausalAttention):
             layernorm_eps,
             quant_config,
             hw_kernel_config=hw_kernel_config,
+            layer_idx=layer_idx,
         )
         # maybe fuse gate in qkv_proj later
         self.gate = LinearFactory.create_linear_from_weights(
@@ -511,6 +532,19 @@ class Qwen3NextAttention(CausalAttention):
 
 
 class Qwen3NextGatedDeltaNet(nn.Module):
+    _linear_cp_relay_logged = False
+    _linear_cp_prefix_reuse_logged = False
+    _linear_cp_fallback_reasons_logged: set[str] = set()
+    _linear_cp_fatal_reasons = frozenset(
+        {
+            "missing_prefix_cache",
+            "unaligned_internal_prefix",
+            "missing_prefix_block_map",
+            "prefix_block_out_of_range",
+            "missing_prefix_boundary_state",
+        }
+    )
+
     def __init__(
         self,
         linear_attn_config: LinearAttentionConfig,
@@ -595,8 +629,458 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # b,a should be contiguous for fused_gdn_gating
         return mixed_qkv, z, b, a
 
-    # TODO: extract shared conv1d/FLA/ssm-state logic with Qwen3NextGatedDeltaNetPrefill
-    # to eliminate duplication
+    @staticmethod
+    def _get_linear_cp_relay_fallback_reason(
+        attention_inputs: PyAttentionInputs,
+        kv_cache_tensor: Optional[torch.Tensor],
+        seq_size_per_block: int,
+        attn_meta: Qwen3NextMetadata,
+    ) -> Optional[str]:
+        """Return why the linear-attention CP relay cannot run, if applicable."""
+        if attention_inputs.input_lengths.shape[0] != 1:
+            return "unsupported_context_batch_size"
+        if attention_inputs.is_cuda_graph:
+            return "cuda_graph"
+
+        prefix_len = int(attention_inputs.prefix_lengths[0].item())
+        if prefix_len > 0:
+            block_map = attention_inputs.kv_cache_kernel_block_id_host
+            if kv_cache_tensor is None:
+                return "missing_prefix_cache"
+            if prefix_len % seq_size_per_block != 0:
+                return "unaligned_internal_prefix"
+            if block_map is None:
+                return "missing_prefix_block_map"
+            prefix_block_pos = prefix_len // seq_size_per_block - 1
+            if prefix_block_pos >= block_map.shape[1]:
+                return "prefix_block_out_of_range"
+            if int(block_map[0, prefix_block_pos].item()) <= 0:
+                return "missing_prefix_boundary_state"
+        if (
+            attn_meta.cp_local_conv1d_meta is None
+            or attn_meta.cp_local_conv_cu_seqlens is None
+            or attn_meta.cp_local_conv_prefix_lengths is None
+        ):
+            return "missing_local_conv_metadata"
+        return None
+
+    def _log_linear_cp_fallback_once(
+        self, reason: str, attention_inputs: PyAttentionInputs
+    ) -> None:
+        logged_reasons = type(self)._linear_cp_fallback_reasons_logged
+        if reason in logged_reasons:
+            return
+        logged_reasons.add(reason)
+        prefix_len = int(attention_inputs.prefix_lengths[0].item())
+        logging.info(
+            "Qwen3.5 linear CP relay fallback: cp_size=%d, reason=%s, "
+            "prefix_len=%d. "
+            "The general path still preserves allocator prefix reuse.",
+            self.parallelism_config.tp_size,
+            reason,
+            prefix_len,
+        )
+
+    @classmethod
+    def _raise_for_invalid_cp_state(
+        cls, reason: Optional[str], prefix_len: int
+    ) -> None:
+        if reason not in cls._linear_cp_fatal_reasons:
+            return
+        raise RuntimeError(
+            "Qwen3.5 CP prefill invariant violated: "
+            f"reason={reason}, prefix_len={prefix_len}. "
+            "The general path cannot safely reconstruct this input."
+        )
+
+    def _run_linear_cp_gdn_segment(
+        self,
+        mixed_qkv: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run one contiguous GDN segment from an explicit FP32 boundary state."""
+        gdn = self.prefill_gdn
+        cu_seqlens = torch.tensor(
+            [0, mixed_qkv.shape[0]],
+            dtype=torch.int32,
+            device=mixed_qkv.device,
+        )
+        attn_out, chunk_states, final_state = gdn._run_chunk_gdn(
+            mixed_qkv,
+            g,
+            beta,
+            initial_state,
+            cu_seqlens,
+        )
+        return attn_out.squeeze_(0), chunk_states, final_state
+
+    @staticmethod
+    def _get_linear_cp_cache_blocks(
+        attention_inputs: PyAttentionInputs,
+        seq_size_per_block: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return new-token block ends and their layer-local cache block IDs."""
+        new_len = int(
+            attention_inputs.context_parallel_info.prefill_actual_input_lengths_cpu[
+                0
+            ].item()
+        )
+        prefix_len = int(attention_inputs.prefix_lengths[0].item())
+        total_len = prefix_len + new_len
+        device = attention_inputs.kv_cache_kernel_block_id_device.device
+        first_full_block_end = prefix_len + seq_size_per_block
+        absolute_block_ends = torch.arange(
+            first_full_block_end,
+            max(first_full_block_end, total_len),
+            seq_size_per_block,
+            dtype=torch.long,
+            device=device,
+        )
+        absolute_block_ends = torch.cat(
+            [
+                absolute_block_ends,
+                torch.tensor([total_len], dtype=torch.long, device=device),
+            ]
+        )
+        block_positions = (absolute_block_ends - 1) // seq_size_per_block
+        block_ids = attention_inputs.kv_cache_kernel_block_id_device[
+            0, block_positions
+        ].long()
+        return absolute_block_ends - prefix_len, block_ids
+
+    @staticmethod
+    def _copy_linear_cp_prefix_ssm_state(
+        ssm_states: torch.Tensor, prefix_block_id: int
+    ) -> torch.Tensor:
+        """Copy a cached boundary into the FP32 relay buffer."""
+        return (
+            ssm_states[prefix_block_id].to(dtype=torch.float32, copy=True).unsqueeze(0)
+        )
+
+    @staticmethod
+    def _sync_linear_cp_cache_states(
+        local_states: torch.Tensor,
+        cache_states: torch.Tensor,
+        block_ids: torch.Tensor,
+    ) -> None:
+        """Merge rank-owned states and write valid allocated cache blocks."""
+        local_states = all_reduce(local_states, group=Group.TP)
+        valid_positions = torch.nonzero(block_ids > 0, as_tuple=False).flatten()
+        if valid_positions.numel() == 0:
+            return
+        cache_states.index_copy_(
+            0,
+            block_ids[valid_positions],
+            local_states[valid_positions].to(cache_states.dtype),
+        )
+
+    @staticmethod
+    def _record_linear_cp_segment_ssm_states(
+        local_block_states: torch.Tensor,
+        block_ends: torch.Tensor,
+        segment_start: int,
+        segment_end: int,
+        chunk_states: torch.Tensor,
+        final_state: torch.Tensor,
+    ) -> None:
+        """Record cache boundaries owned by one contiguous 64-aligned segment."""
+        block_positions = torch.nonzero(
+            (block_ends > segment_start) & (block_ends <= segment_end),
+            as_tuple=False,
+        ).flatten()
+        if block_positions.numel() == 0:
+            return
+
+        offsets = block_ends[block_positions] - segment_start
+        chunk_indices = offsets // 64
+        selected_states = chunk_states[
+            0, chunk_indices.clamp_max(chunk_states.shape[1] - 1)
+        ]
+        ends_at_segment = offsets == segment_end - segment_start
+        selected_states = torch.where(
+            ends_at_segment[:, None, None, None], final_state[0], selected_states
+        )
+        local_block_states.index_copy_(
+            0, block_positions, selected_states.to(local_block_states.dtype)
+        )
+
+    @staticmethod
+    def _record_linear_cp_segment_conv_states(
+        local_block_states: torch.Tensor,
+        block_ends: torch.Tensor,
+        segment_start: int,
+        segment_valid_length: int,
+        segment_with_halo: torch.Tensor,
+    ) -> None:
+        """Record real conv tails, using the predecessor halo at segment start."""
+        if segment_valid_length == 0:
+            return
+        segment_end = segment_start + segment_valid_length
+        block_positions = torch.nonzero(
+            (block_ends > segment_start) & (block_ends <= segment_end),
+            as_tuple=False,
+        ).flatten()
+        if block_positions.numel() == 0:
+            return
+
+        state_len = local_block_states.shape[1]
+        offsets = block_ends[block_positions] - segment_start
+        state_offsets = torch.arange(
+            state_len, dtype=torch.long, device=segment_with_halo.device
+        )
+        state_indices = offsets[:, None] + state_offsets[None, :]
+        local_block_states.index_copy_(
+            0, block_positions, segment_with_halo[state_indices]
+        )
+
+    def _forward_linear_cp_conv(
+        self,
+        mixed_qkv: torch.Tensor,
+        prefix_conv_state: Optional[torch.Tensor],
+        kv_cache_tensor: Optional[torch.Tensor],
+        cache_block_ends: Optional[torch.Tensor],
+        cache_block_ids: Optional[torch.Tensor],
+        attn_meta: Qwen3NextMetadata,
+        cp_plan: ZigzagCPPlan,
+        segment_valid_lengths: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Run local causal conv using fixed-size zigzag predecessor halos."""
+        gdn = self.prefill_gdn
+        state_len = gdn.linear_conv_kernel_dim - 1
+        segment_tokens = mixed_qkv.shape[0] // 2
+        local_segments = mixed_qkv.reshape(2, segment_tokens, -1)
+        local_tails = local_segments[:, -state_len:, :].contiguous()
+
+        gathered_tails = all_gather(local_tails.flatten(0, 1), group=Group.TP).reshape(
+            cp_plan.cp_size, 2, state_len, -1
+        )
+        front_source, back_source = cp_plan.halo_sources
+        first_halo = (
+            prefix_conv_state
+            if prefix_conv_state is not None
+            else torch.zeros_like(local_tails[0])
+        )
+        if front_source is not None:
+            first_halo = gathered_tails[front_source]
+        second_halo = gathered_tails[back_source]
+        local_segment_halos = first_halo, second_halo
+
+        haloed_qkv = torch.cat(
+            [
+                first_halo,
+                local_segments[0],
+                second_halo,
+                local_segments[1],
+            ],
+            dim=0,
+        )
+        haloed_out = causal_conv1d_fn(
+            x=haloed_qkv.transpose(0, 1),
+            weight=gdn.conv_weights,
+            bias=None,
+            conv_states=None,
+            query_start_loc=attn_meta.cp_local_conv_cu_seqlens,
+            block_map=None,
+            prefix_lengths=attn_meta.cp_local_conv_prefix_lengths,
+            seq_size_per_block=1,
+            metadata=attn_meta.cp_local_conv1d_meta,
+        ).transpose(0, 1)
+
+        haloed_segment_tokens = segment_tokens + state_len
+        local_out = torch.cat(
+            [
+                haloed_out[state_len:haloed_segment_tokens],
+                haloed_out[
+                    haloed_segment_tokens + state_len : 2 * haloed_segment_tokens
+                ],
+            ],
+            dim=0,
+        )
+
+        if (
+            kv_cache_tensor is not None
+            and cache_block_ends is not None
+            and cache_block_ids is not None
+        ):
+            conv_states = gdn._get_conv_states(kv_cache_tensor)
+            local_block_states = conv_states.new_zeros(
+                cache_block_ends.shape[0], state_len, mixed_qkv.shape[-1]
+            )
+            for local_segment_id, global_segment_id in enumerate(
+                cp_plan.local_global_segments
+            ):
+                segment_with_halo = torch.cat(
+                    [
+                        local_segment_halos[local_segment_id],
+                        local_segments[local_segment_id],
+                    ],
+                    dim=0,
+                )
+                self._record_linear_cp_segment_conv_states(
+                    local_block_states,
+                    cache_block_ends,
+                    global_segment_id * segment_tokens,
+                    segment_valid_lengths[global_segment_id],
+                    segment_with_halo,
+                )
+            self._sync_linear_cp_cache_states(
+                local_block_states, conv_states, cache_block_ids
+            )
+        return local_out
+
+    def _forward_linear_cp_relay(
+        self,
+        local_mixed_qkv: torch.Tensor,
+        z: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        prefix_ssm_state: Optional[torch.Tensor],
+        kv_cache_tensor: Optional[torch.Tensor],
+        cache_block_ends: Optional[torch.Tensor],
+        cache_block_ids: Optional[torch.Tensor],
+        cp_plan: ZigzagCPPlan,
+        segment_valid_lengths: tuple[int, ...],
+    ) -> torch.Tensor:
+        """Compute each GDN token once using ordered FP32 state broadcasts."""
+        if not type(self)._linear_cp_relay_logged:
+            logging.info(
+                "Qwen3.5 linear CP relay enabled: cp_size=%d; GDN is partitioned; "
+                "causal conv uses fixed-size CP halos; "
+                "block-aligned prefix reuse is supported",
+                cp_plan.cp_size,
+            )
+            type(self)._linear_cp_relay_logged = True
+
+        gdn = self.prefill_gdn
+        g, beta = fused_gdn_gating(gdn.alog, a, b, gdn.dt_bias)
+
+        local_tokens = local_mixed_qkv.shape[0]
+        segment_tokens = local_tokens // 2
+        rank = cp_plan.cp_rank
+        state = (
+            prefix_ssm_state
+            if prefix_ssm_state is not None
+            else torch.zeros(
+                1,
+                gdn.local_num_v_heads,
+                gdn.head_k_dim,
+                gdn.head_v_dim,
+                dtype=torch.float32,
+                device=local_mixed_qkv.device,
+            )
+        )
+        local_attn_out = torch.zeros(
+            local_tokens,
+            gdn.local_num_v_heads,
+            gdn.head_v_dim,
+            dtype=local_mixed_qkv.dtype,
+            device=local_mixed_qkv.device,
+        )
+        ssm_states = (
+            gdn._get_ssm_states(kv_cache_tensor)
+            if kv_cache_tensor is not None
+            else None
+        )
+        local_block_states = (
+            ssm_states.new_zeros(cache_block_ends.shape[0], *ssm_states.shape[1:])
+            if ssm_states is not None and cache_block_ends is not None
+            else None
+        )
+
+        relay_steps = cp_plan.relay_steps
+        ub_communicator = None
+        if getattr(self.parallelism_config, "use_ub_comm", False):
+            from rtp_llm.models_py.distributed.user_buffers import (
+                get_user_buffers_communicator,
+            )
+
+            ub_communicator = get_user_buffers_communicator()
+        # The user-buffer communicator must cover exactly the CP ranks.
+        use_ub_relay = (
+            ub_communicator is not None
+            and getattr(ub_communicator, "world_size", cp_plan.cp_size)
+            == cp_plan.cp_size
+            and ub_communicator.can_handle_tensor(state)
+        )
+        for step_index, step in enumerate(relay_steps):
+            valid_tokens = step.valid_token_count(segment_valid_lengths)
+            if rank == step.owner_rank and valid_tokens > 0:
+                local_start = step.first_local_segment * segment_tokens
+                local_end = local_start + valid_tokens
+                global_start = step.first_global_segment * segment_tokens
+                local_attn_out[local_start:local_end], chunk_states, state = (
+                    self._run_linear_cp_gdn_segment(
+                        local_mixed_qkv[local_start:local_end],
+                        g[:, local_start:local_end].contiguous(),
+                        beta[:, local_start:local_end].contiguous(),
+                        state,
+                    )
+                )
+                if local_block_states is not None:
+                    self._record_linear_cp_segment_ssm_states(
+                        local_block_states,
+                        cache_block_ends,
+                        global_start,
+                        global_start + valid_tokens,
+                        chunk_states,
+                        state,
+                    )
+            if step_index + 1 >= len(relay_steps):
+                continue
+
+            next_step = relay_steps[step_index + 1]
+            if use_ub_relay:
+                if rank == step.owner_rank:
+                    if not ub_communicator.send(state, dst=next_step.owner_rank):
+                        raise RuntimeError(
+                            "Qwen3.5 CP relay state does not fit the user-buffer "
+                            "communication capacity"
+                        )
+                elif rank == next_step.owner_rank:
+                    if not ub_communicator.recv(state, src=step.owner_rank):
+                        raise RuntimeError(
+                            "Qwen3.5 CP relay state receive failed in user-buffer "
+                            "communication"
+                        )
+            else:
+                broadcast(state, src=step.owner_rank, group=Group.TP)
+
+        if (
+            local_block_states is not None
+            and ssm_states is not None
+            and cache_block_ids is not None
+        ):
+            self._sync_linear_cp_cache_states(
+                local_block_states, ssm_states, cache_block_ids
+            )
+
+        local_attn_out = self.norm(
+            local_attn_out.reshape(-1, self.head_v_dim),
+            z.reshape(-1, self.head_v_dim),
+        )
+        local_attn_out = local_attn_out.reshape(
+            -1, self.local_num_v_heads * self.head_v_dim
+        )
+        local_attn_out = self.out_proj(local_attn_out)
+        local_segment_valid_lengths = tuple(
+            segment_valid_lengths[segment_id]
+            for segment_id in cp_plan.local_global_segments
+        )
+        local_valid_mask = torch.cat(
+            [
+                torch.arange(segment_tokens, device=local_attn_out.device)
+                < valid_length
+                for valid_length in local_segment_valid_lengths
+            ]
+        )
+        return torch.where(
+            local_valid_mask[:, None],
+            local_attn_out,
+            torch.zeros_like(local_attn_out),
+        )
+
     def _forward_cp_prefill(
         self,
         mixed_qkv: torch.Tensor,
@@ -607,9 +1091,97 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
-        """CP prefill path: all-gather projected states, compute on full sequence,
-        extract local zigzag tokens."""
+        """CP prefill path with a partitioned GDN relay and general fallback."""
         cp_info = attention_inputs.context_parallel_info
+
+        kv_cache_tensor: Optional[torch.Tensor] = None
+        seq_size_per_block = 1
+        if kv_cache is not None:
+            kv_cache_tensor = kv_cache.kv_cache_base.reshape(
+                kv_cache.kv_cache_base.shape[0], -1
+            )
+            seq_size_per_block = kv_cache.seq_size_per_block
+
+        fallback_reason = self._get_linear_cp_relay_fallback_reason(
+            attention_inputs,
+            kv_cache_tensor,
+            seq_size_per_block,
+            attn_meta,
+        )
+        use_linear_cp_relay = fallback_reason is None
+        if fallback_reason is not None:
+            self._raise_for_invalid_cp_state(
+                fallback_reason,
+                int(attention_inputs.prefix_lengths[0].item()),
+            )
+            self._log_linear_cp_fallback_once(fallback_reason, attention_inputs)
+
+        if use_linear_cp_relay:
+            cp_plan = ZigzagCPPlan(
+                cp_size=self.parallelism_config.tp_size,
+                cp_rank=self.parallelism_config.tp_rank,
+            )
+            segment_tokens = mixed_qkv.shape[0] // 2
+            actual_tokens = int(cp_info.prefill_actual_input_lengths_cpu[0].item())
+            segment_valid_lengths = get_segment_valid_lengths(
+                actual_tokens, segment_tokens, cp_plan.cp_size
+            )
+            cache_block_ends: Optional[torch.Tensor] = None
+            cache_block_ids: Optional[torch.Tensor] = None
+            prefix_conv_state: Optional[torch.Tensor] = None
+            prefix_ssm_state: Optional[torch.Tensor] = None
+            if kv_cache_tensor is not None:
+                cache_block_ends, cache_block_ids = self._get_linear_cp_cache_blocks(
+                    attention_inputs, seq_size_per_block
+                )
+                prefix_len = int(attention_inputs.prefix_lengths[0].item())
+                if prefix_len > 0:
+                    prefix_block_pos = prefix_len // seq_size_per_block - 1
+                    prefix_block_id = int(
+                        attention_inputs.kv_cache_kernel_block_id_host[
+                            0, prefix_block_pos
+                        ].item()
+                    )
+                    prefix_conv_state = self.prefill_gdn._get_conv_states(
+                        kv_cache_tensor
+                    )[prefix_block_id]
+                    prefix_ssm_state = self._copy_linear_cp_prefix_ssm_state(
+                        self.prefill_gdn._get_ssm_states(kv_cache_tensor),
+                        prefix_block_id,
+                    )
+                    if not type(self)._linear_cp_prefix_reuse_logged:
+                        logging.info(
+                            "Qwen3.5 linear CP prefix state restored: cp_size=%d, "
+                            "prefix_len=%d, seq_size_per_block=%d, block_id=%d",
+                            cp_plan.cp_size,
+                            prefix_len,
+                            seq_size_per_block,
+                            prefix_block_id,
+                        )
+                        type(self)._linear_cp_prefix_reuse_logged = True
+            local_mixed_qkv = self._forward_linear_cp_conv(
+                mixed_qkv,
+                prefix_conv_state,
+                kv_cache_tensor,
+                cache_block_ends,
+                cache_block_ids,
+                attn_meta,
+                cp_plan,
+                segment_valid_lengths,
+            )
+            local_attn_out = self._forward_linear_cp_relay(
+                local_mixed_qkv,
+                z,
+                b,
+                a,
+                prefix_ssm_state,
+                kv_cache_tensor,
+                cache_block_ends,
+                cache_block_ids,
+                cp_plan,
+                segment_valid_lengths,
+            )
+            return local_attn_out
 
         packed = torch.cat([mixed_qkv, b, a], dim=-1)
         full_packed = all_gather(packed, group=Group.TP)
@@ -628,14 +1200,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         gdn = self.prefill_gdn
         full_cu = attn_meta.full_prefill_cu_seqlens
         full_conv_meta = attn_meta.full_prefill_conv1d_meta
-
-        kv_cache_tensor: Optional[torch.Tensor] = None
-        seq_size_per_block = 1
-        if kv_cache is not None:
-            kv_cache_tensor = kv_cache.kv_cache_base.reshape(
-                kv_cache.kv_cache_base.shape[0], -1
-            )
-            seq_size_per_block = kv_cache.seq_size_per_block
 
         conv_states = (
             gdn._get_conv_states(kv_cache_tensor).transpose(1, 2)
@@ -679,38 +1243,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
             )
 
-        if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
-            query, key, value = scatter_qkv(
-                full_mixed_qkv,
-                gdn.local_num_k_heads,
-                gdn.local_num_v_heads,
-                gdn.head_k_dim,
-                gdn.head_v_dim,
-            )
-        else:
-            query, key, value = torch.split(
-                full_mixed_qkv,
-                [
-                    gdn.local_num_k_heads * gdn.head_k_dim,
-                    gdn.local_num_k_heads * gdn.head_k_dim,
-                    gdn.local_num_v_heads * gdn.head_v_dim,
-                ],
-                dim=-1,
-            )
-            query = query.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
-            key = key.view(1, -1, gdn.local_num_k_heads, gdn.head_k_dim)
-            value = value.view(1, -1, gdn.local_num_v_heads, gdn.head_v_dim)
-
-        attn_out, h, final_state = chunk_gated_delta_rule(
-            query,
-            key,
-            value,
+        attn_out, h, final_state = gdn._run_chunk_gdn(
+            full_mixed_qkv,
             g,
             beta,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=full_cu,
-            use_qk_l2norm_in_kernel=True,
+            initial_states,
+            full_cu,
         )
 
         if ssm_states is not None:
@@ -724,9 +1262,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 seq_size_per_block,
                 chunk_size=64,
             )
-
-        if kv_cache is not None and attn_meta.cp_write_cache_store_impl is not None:
-            attn_meta.cp_write_cache_store_impl(kv_cache)
 
         full_attn_out = attn_out.squeeze_(0)
 
@@ -830,6 +1365,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                layer_idx=layer_idx,
             )
 
         if config.moe_style == 2:
@@ -940,18 +1476,18 @@ class Qwen3NextModel(GptModelBase):
     ) -> tuple[
         Optional[CausalConv1dMetadata],
         Optional[torch.Tensor],
+        Optional[CausalConv1dMetadata],
+        Optional[torch.Tensor],
         Optional[torch.Tensor],
         Optional[torch.Tensor],
         Optional[torch.Tensor],
     ]:
-        """Precompute metadata for CP linear attention (per-layer all-gather path).
+        """Precompute metadata for CP linear-attention prefill paths.
 
-        Returns (full_conv1d_meta, full_cu_seqlens, restore_indices,
-                 local_extract_indices, local_valid_mask).
+        Returns full-sequence fallback metadata, local halo-conv metadata,
+        and local extraction indices.
         """
         cp_info = attention_inputs.context_parallel_info
-        if cp_info is None:
-            return None, None, None, None, None
 
         # In CP mode the TP group is repurposed as the CP group, so tp_size == cp_size.
         cp_size = self.parallelism_config.tp_size
@@ -969,9 +1505,30 @@ class Qwen3NextModel(GptModelBase):
         restore_indices = cp_info.prefill_qkv_restore_indice
         padding_mask = cp_info.prefill_qkv_padding_mask
         unpad_restore = restore_indices[padding_mask == 1]
-
         total_ag = padding_mask.shape[0]
         local_chunk_total = total_ag // cp_size
+
+        cp_local_conv1d_meta = None
+        cp_local_conv_cu_seqlens = None
+        cp_local_conv_prefix_lengths = None
+        if cp_size >= 2 and full_new_lengths.shape[0] == 1:
+            state_len = self.config.linear_attention_config.linear_conv_kernel_dim - 1
+            segment_tokens = local_chunk_total // 2
+            if local_chunk_total % 2 == 0 and segment_tokens >= state_len:
+                haloed_segment_tokens = segment_tokens + state_len
+                cp_local_conv_cu_seqlens = torch.tensor(
+                    [0, haloed_segment_tokens, 2 * haloed_segment_tokens],
+                    dtype=torch.int32,
+                    device=device,
+                )
+                cp_local_conv_prefix_lengths = torch.zeros(
+                    2, dtype=torch.int32, device=device
+                )
+                cp_local_conv1d_meta = prepare_causal_conv1d_metadata(
+                    query_start_loc=cp_local_conv_cu_seqlens,
+                    device=device,
+                )
+
         local_start = cp_rank * local_chunk_total
 
         inv_restore = torch.full((total_ag,), -1, dtype=torch.long, device=device)
@@ -986,7 +1543,9 @@ class Qwen3NextModel(GptModelBase):
         return (
             full_conv1d_meta,
             full_cu,
-            restore_indices,
+            cp_local_conv1d_meta,
+            cp_local_conv_cu_seqlens,
+            cp_local_conv_prefix_lengths,
             cp_local_extract_indices,
             cp_local_valid_mask,
         )
@@ -999,34 +1558,29 @@ class Qwen3NextModel(GptModelBase):
         attention_inputs: PyAttentionInputs = inputs.attention_inputs
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
-        is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
+        is_cp = attention_inputs.context_parallel_info is not None
 
         full_prefill_conv1d_meta = None
         full_prefill_cu_seqlens = None
-        cp_restore_indices = None
+        cp_local_conv1d_meta = None
+        cp_local_conv_cu_seqlens = None
+        cp_local_conv_prefix_lengths = None
         cp_local_extract_indices = None
         cp_local_valid_mask = None
-        cp_write_cache_store_impl = None
 
         if attention_inputs.is_prefill and not is_target_verify:
             if is_cp:
                 (
                     full_prefill_conv1d_meta,
                     full_prefill_cu_seqlens,
-                    cp_restore_indices,
+                    cp_local_conv1d_meta,
+                    cp_local_conv_cu_seqlens,
+                    cp_local_conv_prefix_lengths,
                     cp_local_extract_indices,
                     cp_local_valid_mask,
                 ) = self._build_cp_linear_attn_metadata(
                     attention_inputs, hidden_states.device
                 )
-                if attention_inputs.cache_store_inputs:
-                    cp_info = attention_inputs.context_parallel_info
-                    cp_write_cache_store_impl = WriteCacheStoreOp(
-                        cp_info.prefill_actual_input_lengths_cpu,
-                        attention_inputs.prefix_lengths,
-                        attention_inputs.kv_cache_block_id_host,
-                        attention_inputs.cache_store_inputs,
-                    )
             else:
                 cu_seqlen_without_padding = attention_inputs.cu_seqlens
                 prefill_conv1d_meta = prepare_causal_conv1d_metadata(
@@ -1039,10 +1593,12 @@ class Qwen3NextModel(GptModelBase):
             is_target_verify=is_target_verify,
             full_prefill_conv1d_meta=full_prefill_conv1d_meta,
             full_prefill_cu_seqlens=full_prefill_cu_seqlens,
-            cp_restore_indices=cp_restore_indices,
+            cp_local_conv1d_meta=cp_local_conv1d_meta,
+            cp_local_conv_cu_seqlens=cp_local_conv_cu_seqlens,
+            cp_local_conv_prefix_lengths=cp_local_conv_prefix_lengths,
+            is_cp_linear_attn=is_cp,
             cp_local_extract_indices=cp_local_extract_indices,
             cp_local_valid_mask=cp_local_valid_mask,
-            cp_write_cache_store_impl=cp_write_cache_store_impl,
         )
 
         if fmha_impl is None:

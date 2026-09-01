@@ -42,6 +42,8 @@ public:
     void            releaseBuffers() override;
 
 private:
+    static bool shouldUseContextParallel(const GptModelInputs& inputs, bool enable_prefill_cp);
+
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:

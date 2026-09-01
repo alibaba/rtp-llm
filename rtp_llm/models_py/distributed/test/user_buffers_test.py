@@ -106,6 +106,7 @@ def _test_send_recv_tensor(comm: UserBufferCommunicator, rank: int, world_size: 
         [1024, 4096], dtype=torch.float32, device=src_tensor.device
     )
     assert torch.equal(expect_tensor, dst_tensor)
+
     logging.info(f"Rank {rank}: send recv valid tensor test passed")
 
 
@@ -176,6 +177,51 @@ class TestUserBufferCommunicator(unittest.TestCase):
         except RuntimeError:
             pass  # Already set
         self.port_manager = PortManager()
+
+    @mock.patch("rtp_llm.models_py.distributed.user_buffers.userbuffers_send")
+    def test_send_waits_for_tensor_producer(self, mock_send):
+        comm = object.__new__(UserBufferCommunicator)
+        comm.local_rank = 0
+        comm.per_rank_buffer_size = 1024
+        comm._ub_handle = 1
+        comm._communicator_ptr = 2
+        comm._rank_offsets = {0: 0}
+        comm._send_streams = {1: mock.Mock(cuda_stream=3)}
+        comm.cleanup = mock.Mock()
+        current_stream = mock.Mock()
+        tensor = torch.empty(4, device="cuda")
+
+        with mock.patch.object(
+            torch.cuda, "current_stream", return_value=current_stream
+        ):
+            self.assertTrue(comm.send(tensor, dst=1))
+
+        send_stream = comm._send_streams[1]
+        send_stream.wait_stream.assert_called_once_with(current_stream)
+        current_stream.wait_stream.assert_called_once_with(send_stream)
+        mock_send.assert_called_once()
+
+    @mock.patch("rtp_llm.models_py.distributed.user_buffers.userbuffers_recv")
+    def test_recv_waits_for_tensor_consumer(self, mock_recv):
+        comm = object.__new__(UserBufferCommunicator)
+        comm.local_rank = 0
+        comm.per_rank_buffer_size = 1024
+        comm._ub_handle = 1
+        comm._communicator_ptr = 2
+        comm._rank_offsets = {1: 0}
+        comm._recv_stream = mock.Mock(cuda_stream=3)
+        comm.cleanup = mock.Mock()
+        current_stream = mock.Mock()
+        tensor = torch.empty(4, device="cuda")
+
+        with mock.patch.object(
+            torch.cuda, "current_stream", return_value=current_stream
+        ):
+            self.assertTrue(comm.recv(tensor, src=1))
+
+        comm._recv_stream.wait_stream.assert_called_once_with(current_stream)
+        current_stream.wait_stream.assert_called_once_with(comm._recv_stream)
+        mock_recv.assert_called_once()
 
     def _run_multi_process_test(self, worker_func, world_size: int, test_name: str):
         """Helper to run a multi-process test"""

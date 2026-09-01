@@ -7,6 +7,12 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+flashinfer_compatible_with = select({
+    "@//:using_cuda12_9_x86": [],
+    "@//:cuda_pre_12_9": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 py_library(
     name = "cp_test_utils",
     srcs = ["cp_test_utils.py"],
@@ -27,6 +33,39 @@ py_test(
     }),
     tags = ["A10"],
     exec_properties = {'gpu': 'A10'},
+)
+
+py_test(
+    name = "test_linear_attn_utils",
+    srcs = ["test_linear_attn_utils.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    target_compatible_with = flashinfer_compatible_with,
+)
+
+py_test(
+    name = "test_attn_factory_cp_selection",
+    srcs = ["test_attn_factory_cp_selection.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    target_compatible_with = flashinfer_compatible_with,
+)
+
+py_test(
+    name = "test_prefill_cp_flashinfer_contract",
+    srcs = ["test_prefill_cp_flashinfer_contract.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    target_compatible_with = flashinfer_compatible_with,
 )
 
 py_test(
@@ -73,6 +112,21 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["manual"],
+    tags = ["H20"],
     exec_properties = {'gpu': 'H20'},
+    timeout = "long",
+)
+
+py_test(
+    name = "test_cp_relay_distributed",
+    srcs = ["test_cp_relay_distributed.py"],
+    deps = py_test_deps + [":cp_test_utils"] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    env = {"GPU_COUNT": "2"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '2'},
+    timeout = "moderate",
 )
