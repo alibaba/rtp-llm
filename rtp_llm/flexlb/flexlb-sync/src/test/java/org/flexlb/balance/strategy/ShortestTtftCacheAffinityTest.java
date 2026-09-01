@@ -6,6 +6,7 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DirectSchedulerConfig;
@@ -45,6 +46,7 @@ class ShortestTtftCacheAffinityTest {
     private EngineHealthReporter engineHealthReporter;
     private EndpointRegistry endpointRegistry;
     private ShortestTTFTStrategy strategy;
+    private SessionPlacementStore sessionPlacementStore;
 
     @BeforeEach
     void setUp() {
@@ -54,6 +56,7 @@ class ShortestTtftCacheAffinityTest {
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        sessionPlacementStore = new SessionPlacementStore();
         PriorityScheduler batchScheduler = Mockito.mock(PriorityScheduler.class);
 
         endpointRegistry = new EndpointRegistry(
@@ -72,7 +75,64 @@ class ShortestTtftCacheAffinityTest {
                 engineWorkerStatus,
                 cacheAwareService,
                 resourceMeasureFactory,
-                engineHealthReporter);
+                engineHealthReporter,
+                sessionPlacementStore);
+    }
+
+    @Test
+    void establishedSessionSelectsKnownEndpointInsideTtftBound() {
+        FlexlbConfig config = sessionAffinityConfig(100);
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        BalanceContext context = buildContext(1000, 101L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void exactCacheEvidenceOutranksSessionPlacement() {
+        FlexlbConfig config = sessionAffinityConfig(1_000);
+        RoutingConfig.CacheAffinityConfig cacheAffinity = new RoutingConfig.CacheAffinityConfig();
+        cacheAffinity.setMaxExtraTtftMs(1_000);
+        cacheAffinity.setMinPrefixHitPercent(0);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(cacheAffinity);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 0);
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.1:8080", 1L);
+        stubCacheMatches(Map.of("10.0.0.2:8080", 3));
+        BalanceContext context = buildContext(1000, 102L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void newSessionInvalidatesStalePlacement() {
+        FlexlbConfig config = sessionAffinityConfig(1_000);
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        BalanceContext context = buildContext(1000, 103L, config);
+        Request request = context.getRequest();
+        request.setModel("kimi-k3");
+        request.setInferenceSessionId("session-1");
+        request.setInferenceSessionState(Request.SessionState.NEW);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        assertTrue(sessionPlacementStore.find("kimi-k3", "session-1", 1_000).isEmpty());
     }
 
     @Test
@@ -370,6 +430,21 @@ class ShortestTtftCacheAffinityTest {
         affinity.setMinPrefixHitPercent(minHitRate);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
         return config;
+    }
+
+    private FlexlbConfig sessionAffinityConfig(long maxExtraTtftMs) {
+        FlexlbConfig config = new FlexlbConfig();
+        RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
+        affinity.setTtlMs(1_800_000L);
+        affinity.setMaxExtraTtftMs(maxExtraTtftMs);
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        return config;
+    }
+
+    private static void markEstablished(BalanceContext context, String model, String sessionId) {
+        context.getRequest().setModel(model);
+        context.getRequest().setInferenceSessionId(sessionId);
+        context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
     }
 
     private void stubCacheMatches(Map<String, Integer> matches) {

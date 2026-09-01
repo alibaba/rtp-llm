@@ -7,6 +7,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiConsumer;
@@ -46,6 +48,7 @@ class FlexlbServiceImplTest {
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
     private ActiveRequestCounter.RequestToken requestToken;
+    private SessionPlacementStore sessionPlacementStore;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
@@ -59,9 +62,14 @@ class FlexlbServiceImplTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
+        sessionPlacementStore = mock(SessionPlacementStore.class);
 
         configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
+        var sessionAffinity = new org.flexlb.config.RoutingConfig.SessionAffinityConfig();
+        sessionAffinity.setTtlMs(1_800_000L);
+        sessionAffinity.setMaxExtraTtftMs(40L);
+        flexlbConfig.getRouter().getRoles().getPrefill().setSessionAffinity(sessionAffinity);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
@@ -76,7 +84,8 @@ class FlexlbServiceImplTest {
                 configService,
                 batchSchedulerReporter,
                 serverLatencyRecorder,
-                mock(PrioritySchedulerReporter.class)
+                mock(PrioritySchedulerReporter.class),
+                sessionPlacementStore
         );
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
@@ -561,6 +570,40 @@ class FlexlbServiceImplTest {
         assertEquals(0, captured.getSessionSchemaVersion());
         assertEquals("", captured.getInferenceSessionId());
         assertEquals(Request.SessionState.UNSPECIFIED, captured.getInferenceSessionState());
+    }
+
+    @Test
+    void successfulLocalDeliveryRecordsPrefillSessionPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.2");
+        prefill.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(prefill));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(configService.loadBalanceConfig());
+                    return CompletableFuture.completedFuture(response);
+                });
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_003L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.NEW))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080", 100_003L);
     }
 
     @Test

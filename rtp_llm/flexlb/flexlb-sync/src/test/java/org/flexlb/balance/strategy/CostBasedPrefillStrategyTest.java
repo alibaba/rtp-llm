@@ -7,6 +7,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
@@ -55,6 +56,7 @@ class CostBasedPrefillStrategyTest {
     private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
     private FlexlbConfig endpointConfig;
+    private SessionPlacementStore sessionPlacementStore;
 
     @BeforeEach
     void setUp() {
@@ -66,6 +68,7 @@ class CostBasedPrefillStrategyTest {
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        sessionPlacementStore = new SessionPlacementStore();
         batchScheduler = Mockito.mock(PriorityScheduler.class);
 
         // Create registry first to break circular dependency
@@ -80,7 +83,7 @@ class CostBasedPrefillStrategyTest {
 
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
-                engineHealthReporter);
+                engineHealthReporter, sessionPlacementStore);
     }
 
     @AfterEach
@@ -106,6 +109,30 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
 
         ServerStatus result = strategy.select(buildContext(1000, 1L), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void establishedSessionSelectsKnownEndpointInsideCostBound() {
+        Map<String, WorkerStatus> prefillMap =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
+        FlexlbConfig config = new FlexlbConfig();
+        useBestOnly(config);
+        RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
+        affinity.setTtlMs(1_800_000L);
+        affinity.setMaxExtraTtftMs(100L);
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        BalanceContext context = buildContext(1000, 101L, config);
+        context.getRequest().setModel("kimi-k3");
+        context.getRequest().setInferenceSessionId("session-1");
+        context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
