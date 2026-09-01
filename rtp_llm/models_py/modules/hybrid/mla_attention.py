@@ -31,6 +31,30 @@ else:
     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
 
 
+def _infer_gated_mla_type(
+    gate_weight: torch.Tensor,
+    num_heads: int,
+    v_head_dim: int,
+) -> str:
+    """Infer the gate kind from BF16-transposed or FP8 checkpoint layout."""
+    if gate_weight.dim() != 2:
+        raise ValueError(
+            f"gated MLA weight must be 2D, got {tuple(gate_weight.shape)}"
+        )
+    shape = tuple(gate_weight.shape)
+    elementwise_width = num_heads * v_head_dim
+    elementwise = elementwise_width in shape
+    headwise = num_heads in shape
+    if elementwise and not headwise:
+        return "elementwise"
+    if headwise and not elementwise:
+        return "headwise"
+    raise ValueError(
+        f"invalid or ambiguous gated MLA shape {shape}; expected one dimension "
+        f"to equal {num_heads} (headwise) or {elementwise_width} (elementwise)"
+    )
+
+
 class MlaAttention(nn.Module):
     """MLA attention. Supports both dense and sparse (indexer/top-k) modes.
     Whether to use Indexer is determined by attn_config.is_sparse.
@@ -125,6 +149,36 @@ class MlaAttention(nn.Module):
             quant_config=quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+
+        # HY V4 opt-in extensions.  Presence of the HY-specific loader keys is
+        # the runtime contract, so other MLA models keep the exact old path.
+        self.gate_proj = None
+        self.gating_type = None
+        gate_weight = weights.get(W.attn_gate_w)
+        if gate_weight is not None:
+            self.gate_proj = LinearFactory.create_linear_from_weights(
+                weights,
+                W.attn_gate_w,
+                W.attn_gate_s,
+                None,
+                quant_config=quant_config,
+                hw_kernel_config=hw_kernel_config,
+            )
+            self.gating_type = _infer_gated_mla_type(
+                gate_weight, self.num_heads, self.v_head_dim
+            )
+
+        self.attn_sink = weights.get(W.hy4_attn_sink)
+        if self.attn_sink is not None:
+            if self.attn_sink.dtype != torch.float32:
+                raise TypeError(
+                    f"HY V4 attention sink must be fp32, got {self.attn_sink.dtype}"
+                )
+            if self.attn_sink.dim() != 1 or self.attn_sink.numel() != self.num_heads:
+                raise ValueError(
+                    f"HY V4 attention sink at layer {layer_idx} must have shape "
+                    f"({self.num_heads},), got {tuple(self.attn_sink.shape)}"
+                )
 
         # ------------------------------------------------------------------
         # Fusion detection (DSV3.2 MLA path).
@@ -305,9 +359,24 @@ class MlaAttention(nn.Module):
         # the local references here lets SparseMLA reuse their blocks;
         # q_view, compressed_kv and k_pe must stay live through attention.
         del q_c, q_c_fp8, q_c_scale
-        attn_output = fmha_impl.forward(
-            q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
-        )
+        if self.attn_sink is None:
+            attn_output = fmha_impl.forward(
+                q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
+            )
+        else:
+            if not fmha_impl.is_sparse():
+                raise RuntimeError(
+                    "HY V4 learnable attention sink requires a sparse MLA backend"
+                )
+            attn_output = fmha_impl.forward(
+                q_view,
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                self.layer_idx,
+                topk_indices,
+                attn_sink=self.attn_sink,
+            )
 
         # The sparse-attention launch has consumed these projections. PyTorch's
         # stream-aware allocator delays physical reuse until the launch is safe.
@@ -321,6 +390,16 @@ class MlaAttention(nn.Module):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
+        if self.gate_proj is not None:
+            gate = torch.sigmoid(self.gate_proj(hidden_states))
+            if self.gating_type == "headwise":
+                attn_output = attn_output.reshape(
+                    *input_shape, self.num_heads, self.v_head_dim
+                )
+                attn_output = attn_output * gate.unsqueeze(-1)
+                attn_output = attn_output.reshape(*input_shape, -1)
+            else:
+                attn_output = attn_output * gate
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)

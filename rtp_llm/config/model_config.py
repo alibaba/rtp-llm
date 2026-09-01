@@ -91,6 +91,17 @@ class ModelConfig(CppModelConfig):
         "index_skip_topk_offset",
         "index_topk_pattern",
         "indexer_types",
+        # HY V4 Python execution fields. The generic C++ model does not
+        # consume the iHC/gated-MLA schedule.
+        "enable_ihc",
+        "hc_magnitude",
+        "gated_mla",
+        "gating_type",
+        "learnable_sink",
+        "learnable_sink_init",
+        "dense_inter_size",
+        "mlp_layer_types",
+        "force_sparse_mla",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -275,7 +286,12 @@ class ModelConfig(CppModelConfig):
 
     def _eval_runtime_buffer_mem_size(self) -> float:
         """Evaluate runtime buffer memory size."""
-        input_buffer = self.max_seq_len * self.hidden_size
+        # HY V4 carries four residual channels between sub-blocks. Account for
+        # that persistent activation instead of sizing it as a single stream.
+        residual_width = self.hidden_size * (
+            self.hc_mult if getattr(self, "enable_ihc", False) else 1
+        )
+        input_buffer = self.max_seq_len * residual_width
         qkv_gemm_buffer_size = (
             self.max_seq_len
             * (self.attn_config.kv_head_num * 2 + self.attn_config.kv_head_num)
@@ -412,6 +428,17 @@ class ModelConfig(CppModelConfig):
                 * ffn_w_count
                 * ffn_expert_num
             )
+            # Architectures such as HY V4 have a dense prefix whose width is
+            # independent of the shared-expert width stored in inter_size.
+            dense_layer_count = self.num_layers - len(self.moe_layer_index)
+            dense_inter_size = self.dense_inter_size or self.inter_size
+            layer_weight_param_count = (
+                layer_weight_param_count
+                + dense_layer_count
+                * dense_inter_size
+                * hidden_size
+                * ffn_w_count
+            )
         else:
             # No MOE: all layers use regular FFN with inter_size
             layer_weight_param_count = (
@@ -423,6 +450,27 @@ class ModelConfig(CppModelConfig):
         layer_weight_param_count = (
             layer_weight_param_count + self.num_layers * hidden_size * 11
         )
+
+        if getattr(self, "model_type", "") in ("hy_v4", "hy_v4_mtp"):
+            # Elementwise MLA gate [H, local_heads*V] (global count here).
+            layer_weight_param_count += (
+                self.num_layers
+                * hidden_size
+                * self.attn_config.head_num
+                * self.attn_config.v_head_dim
+            )
+            if self.enable_ihc:
+                # Two iHC boundaries per layer; each hc_fn is
+                # [2*hc, hc*H], plus the final [hc, hc*H] head projection.
+                layer_weight_param_count += (
+                    self.num_layers
+                    * 2
+                    * (2 * self.hc_mult)
+                    * (self.hc_mult * hidden_size)
+                )
+                layer_weight_param_count += self.hc_mult * (
+                    self.hc_mult * hidden_size
+                )
         return layer_weight_param_count
 
     def apply_rope_scaling_override(self, model_override_args: Dict[str, Any]) -> None:
@@ -529,6 +577,18 @@ class ModelConfig(CppModelConfig):
         self.moe_inter_size: int = (
             0  # MOE intermediate size (for MOE expert FFN layers)
         )
+        self.dense_inter_size: int = 0
+
+        # HY V4 defaults keep existing models on the single-residual,
+        # ungated attention path.
+        self.enable_ihc: bool = False
+        self.hc_magnitude: float = 2.0
+        self.gated_mla: bool = False
+        self.gating_type: str = "elementwise"
+        self.learnable_sink: bool = False
+        self.learnable_sink_init: float = 0.0
+        self.mlp_layer_types: list[str] = []
+        self.force_sparse_mla: bool = False
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (

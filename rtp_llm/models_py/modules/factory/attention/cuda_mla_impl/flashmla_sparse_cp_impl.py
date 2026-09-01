@@ -782,6 +782,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         batch_indice_d: torch.Tensor,
         kv_cache=None,
         layer_id: int = 0,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
         owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
@@ -832,9 +833,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         else:
             q0 = q[self.total_local_ids].contiguous()
         if self._gather is not None:
-            out0 = self._attend_gather(q0, kv_cache, topk)
+            out0 = self._attend_gather(q0, kv_cache, topk, attn_sink)
         else:
-            out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
+            out0 = self._attend_with_kvcache(
+                q0, kv_cache, topk, layer_id, attn_sink
+            )
 
         if use_identity_q:
             return out0
@@ -931,10 +934,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache,
         topk: torch.Tensor,
         layer_id: int,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """flash_mla_with_kvcache on FP8 paged cache (CP equivalent of non-CP baseline)."""
         if self.kv_cache_sharded:
-            return self._attend_gather(q0, kv_cache, topk)
+            return self._attend_gather(q0, kv_cache, topk, attn_sink)
+        q0, attn_sink, actual_heads = self._pad_query_and_sink(q0, attn_sink)
         kv_cache_flat = _as_uint8(
             kv_cache.kv_cache_base.view(-1, 1, kv_cache.kv_cache_base.size(-1))
         )
@@ -942,6 +947,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             kv_cache_flat = kv_cache_flat.unsqueeze(-2)
         global_topk = self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0)
         meta = self._fp8_kernel_metadata_q0
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         attn_out, _ = flash_mla_with_kvcache(
             q=q0.unsqueeze(0),
             k_cache=kv_cache_flat,
@@ -953,18 +959,21 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             is_fp8_kvcache=True,
             indices=global_topk,
             softmax_scale=self.scale,
+            **sink_kwargs,
         )
-        return attn_out.squeeze(0)
+        return attn_out.squeeze(0)[:, :actual_heads]
 
     def _attend_gather(
         self,
         q0: torch.Tensor,
         kv_cache,
         topk: torch.Tensor,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the only CP-specific bit is using
         precomputed_req_ids (req id per global q token) for the offset lookup."""
+        q0, attn_sink, actual_heads = self._pad_query_and_sink(q0, attn_sink)
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
         fused_kv = self._allocate_fused_kv()
@@ -993,14 +1002,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         padding_mask = topk_2d < 0
         raw_global = topk_2d + offsets.unsqueeze(1)
         global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
+        sink_kwargs = {} if attn_sink is None else {"attn_sink": attn_sink}
         out, _, _ = flash_mla_sparse_fwd(
             q0,
             fused_kv.unsqueeze(1),
             global_indices,
             self.scale,
             d_v=self.kv_lora_rank,
+            **sink_kwargs,
         )
-        return out
+        return out[:, :actual_heads]
 
 
 class SparseMlaCpImpl(SparseMlaImpl):
@@ -1212,6 +1223,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
         kv_cache: Optional[KVCache],
         layer_id: int,
         topk_indices: Optional[torch.Tensor],
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """CP sparse MLA forward. q: [total_q_len, H, qk_head_dim]; topk_indices
         is request-local. Returns [total_q_len, H, nope_head_dim]."""
@@ -1238,6 +1250,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             self.fmha_params.batch_indice_d,
             kv_cache,
             layer_id=layer_id,
+            attn_sink=attn_sink,
         )
         if attn_output is None:
             return None

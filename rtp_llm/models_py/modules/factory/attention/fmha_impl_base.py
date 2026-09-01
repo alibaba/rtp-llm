@@ -91,6 +91,7 @@ class MlaImplBase(object):
         kv_cache: Optional[LayerKVCache],
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
+        attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass for attention computation."""
         raise NotImplementedError("forward method must be implemented by subclass")
