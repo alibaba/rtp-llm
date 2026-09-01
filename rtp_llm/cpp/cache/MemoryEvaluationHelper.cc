@@ -50,17 +50,10 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
     size_t reserve_runtime_mem_bytes = runtime_config.reserve_runtime_mem_mb * 1024 * 1024;
     RTP_LLM_LOG_INFO("RuntimeConfig has reserve_runtime_mem_mb=%ld", runtime_config.reserve_runtime_mem_mb);
 
-    // Reserve at least 5% of total GPU memory for runtime (forward pass intermediates, cublas workspace, etc.)
-    // with a minimum floor of 2048 MiB. This is needed because KV cache is pre-allocated as a fixed block,
-    // and the remaining GPU memory must be sufficient for model forward passes.
-    size_t                  total_gpu_bytes = 0;
-    [[maybe_unused]] size_t free_gpu_bytes  = 0;
-#if USING_CUDA
-    check_cuda_value(cudaMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#elif USING_ROCM
-    ROCM_CHECK(hipMemGetInfo(&free_gpu_bytes, &total_gpu_bytes));
-#endif
-    const auto minimal_runtime_bytes = std::max(2048L * 1024 * 1024, (long)(total_gpu_bytes * 0.05));
+    // Keep a fixed 2048 MiB runtime floor for forward intermediates and library workspaces.
+    // Do not scale this floor with total GPU memory: callers can explicitly reserve more
+    // through reserve_runtime_mem_mb for model-specific runtime requirements.
+    const auto minimal_runtime_bytes = 2048L * 1024 * 1024;
     if (reserve_runtime_mem_bytes < minimal_runtime_bytes) {
         RTP_LLM_LOG_INFO("tp_size %d needs at least %ld MiB memory for runtime by default, "
                          "but only %ld MiB reserved memory set by config. adjust to minimal value.",
