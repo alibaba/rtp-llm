@@ -32,7 +32,6 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -70,7 +69,12 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 # ---------------------------------------------------------------------------
 
 _FLASHMLA_TOPK_ALIGNMENT = 128
-_FLASHMLA_SPARSE_Q_HEADS = frozenset((64, 128))
+_FLASHMLA_SPARSE_Q_HEADS = (64, 128)
+_GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV = "GLM5_FLASH_MLA_SPARSE_Q_CHUNK"
+# GLM's semantic top-k=2051 is padded to 2176. With kv_lora_rank=512,
+# 4096 rows materialize an 8.5 GiB BF16 selected-KV workspace; the default
+# keeps each chunk bounded to roughly 544 MiB.
+_DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK = 256
 
 
 def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
@@ -117,6 +121,29 @@ def _allocate_prefill_fused_kv(
     return torch.empty((total_kv_len, width), dtype=torch.bfloat16, device=device)
 
 
+def _glm5_sparse_q_chunk_rows() -> int:
+    raw_value = os.environ.get(
+        _GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV,
+        str(_DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK),
+    )
+    try:
+        chunk_rows = int(raw_value)
+    except (TypeError, ValueError):
+        logging.warning(
+            "invalid %s=%r; using default=%d",
+            _GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV,
+            raw_value,
+            _DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK,
+        )
+        chunk_rows = _DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK
+    if chunk_rows <= 0:
+        raise ValueError(
+            f"{_GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV} must be positive, "
+            f"got {chunk_rows}"
+        )
+    return chunk_rows
+
+
 # ---------------------------------------------------------------------------
 # BF16 sparse MLA operator
 # ---------------------------------------------------------------------------
@@ -156,20 +183,19 @@ class SparseMlaOp(object):
         ) * _FLASHMLA_TOPK_ALIGNMENT
         self.indexer_top_k = top_k if indexer_top_k is None else indexer_top_k
         self.indexer_group_size = indexer_group_size
-        self.attn_tp_size = (
-            int(parallelism_config.get_attn_tp_size())
-            if parallelism_config is not None
-            else 1
+        self.kernel_num_heads = next(
+            (
+                supported_heads
+                for supported_heads in _FLASHMLA_SPARSE_Q_HEADS
+                if supported_heads >= self.num_heads
+            ),
+            None,
         )
-        self.attn_tp_rank = (
-            int(
-                parallelism_config.get_attn_tp_rank()
-                if hasattr(parallelism_config, "get_attn_tp_rank")
-                else getattr(parallelism_config, "tp_rank", 0)
+        if self.kernel_num_heads is None:
+            raise RuntimeError(
+                "FlashMLA sparse attention supports at most "
+                f"{max(_FLASHMLA_SPARSE_Q_HEADS)} query heads, got {self.num_heads}"
             )
-            if parallelism_config is not None
-            else 0
-        )
         IndexerGroupingGeometry(
             self.indexer_top_k, self.indexer_group_size, self.top_k
         ).validate()
@@ -280,37 +306,26 @@ class SparseMlaOp(object):
         kv: torch.Tensor,
         global_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Run the BF16 sparse kernel and handle TP-sharded query heads."""
-        if self.num_heads not in _FLASHMLA_SPARSE_Q_HEADS:
-            # FlashMLA sparse prefill only instantiates Hq=64/128. Tensor
-            # parallelism shards GLM-5.3-Flash's 64 heads to 16 (TP4) or 8
-            # (TP8). Gather rank-major head shards into the checkpoint's 64
-            # heads, run the supported kernel, then return this rank's shard.
-            # Packing as [H_local, T, D] makes all_gather concatenate heads,
-            # rather than concatenating query tokens.
-            gathered_heads = self.num_heads * self.attn_tp_size
-            if gathered_heads not in _FLASHMLA_SPARSE_Q_HEADS:
-                raise RuntimeError(
-                    "FlashMLA sparse attention cannot reconstruct a supported "
-                    f"query-head width: local={self.num_heads}, "
-                    f"attn_tp_size={self.attn_tp_size}, full={gathered_heads}"
-                )
-            q_by_head = q.transpose(0, 1).contiguous()
-            q = (
-                all_gather(q_by_head, group=Group.TP)
-                .view(gathered_heads, q.shape[0], q.shape[2])
-                .transpose(0, 1)
-                .contiguous()
+        """Run sparse attention after padding TP-local heads for FlashMLA."""
+        local_heads = int(q.shape[1])
+        if local_heads != self.num_heads:
+            raise ValueError(
+                f"query head count {local_heads} does not match configured "
+                f"local head count {self.num_heads}"
             )
+        if self.kernel_num_heads != local_heads:
+            q_padded = q.new_zeros(
+                q.shape[0], self.kernel_num_heads, q.shape[2]
+            )
+            q_padded[:, :local_heads].copy_(q)
+            q = q_padded
 
         global_indices = _pad_flashmla_topk(global_indices, self.kernel_top_k)
         out, _, _ = flash_mla_sparse_fwd(
             q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
         )
-        if self.num_heads not in _FLASHMLA_SPARSE_Q_HEADS:
-            out = out.narrow(
-                1, self.attn_tp_rank * self.num_heads, self.num_heads
-            ).contiguous()
+        if self.kernel_num_heads != local_heads:
+            out = out.narrow(1, 0, local_heads).contiguous()
         return out
 
 
@@ -353,6 +368,7 @@ class SparseMlaFp8Op(SparseMlaOp):
 
     def __init__(self, *args, **kwargs):
         self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
+        self._sparse_q_chunk_rows = _glm5_sparse_q_chunk_rows()
         super().__init__(*args, **kwargs)
         # In CUDA graph mode the captured kernels keep the scheduler storage
         # address. Replacing this object during replay leaves the graph with a
@@ -517,32 +533,47 @@ class SparseMlaFp8Op(SparseMlaOp):
         kv: torch.Tensor,
         topk_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Dequantize only GLM-5.3's selected 528-byte NoPE cache entries."""
-        global_indices = _pad_flashmla_topk(
-            self._convert_topk_indices_to_global(topk_indices),
-            self.kernel_top_k,
-        )
-        physical_indices = global_indices.reshape(-1).contiguous()
-        fused_kv = torch.empty(
-            (physical_indices.numel(), self.kv_lora_rank),
-            dtype=torch.bfloat16,
-            device=kv.device,
-        )
-
+        """Dequantize selected NoPE cache entries in bounded query chunks."""
+        global_indices = self._convert_topk_indices_to_global(topk_indices)
         src = _as_uint8(kv)
         if src.ndim == 4:
             src = src.squeeze(2)
-        rtp_llm_ops.gather_selected_glm53_fp8_mla_kv(
-            src, fused_kv, physical_indices
-        )
 
-        local_indices = torch.arange(
-            physical_indices.numel(),
-            dtype=torch.int32,
-            device=physical_indices.device,
-        ).view_as(global_indices)
-        local_indices.masked_fill_(global_indices < 0, -1)
-        return self._forward_sparse(q, fused_kv.unsqueeze(1), local_indices)
+        output = q.new_empty(
+            (q.shape[0], self.num_heads, self.kv_lora_rank),
+            dtype=torch.bfloat16,
+        )
+        max_workspace_rows = (
+            min(q.shape[0], self._sparse_q_chunk_rows) * self.kernel_top_k
+        )
+        fused_kv_workspace = torch.empty(
+            (max_workspace_rows, self.kv_lora_rank),
+            dtype=torch.bfloat16,
+            device=kv.device,
+        )
+        for start in range(0, q.shape[0], self._sparse_q_chunk_rows):
+            end = min(start + self._sparse_q_chunk_rows, q.shape[0])
+            chunk_indices = _pad_flashmla_topk(
+                global_indices[start:end], self.kernel_top_k
+            )
+            physical_indices = chunk_indices.reshape(-1).contiguous()
+            fused_kv = fused_kv_workspace[: physical_indices.numel()]
+            rtp_llm_ops.gather_selected_glm53_fp8_mla_kv(
+                src, fused_kv, physical_indices
+            )
+
+            local_indices = torch.arange(
+                physical_indices.numel(),
+                dtype=torch.int32,
+                device=physical_indices.device,
+            ).view_as(chunk_indices)
+            local_indices.masked_fill_(chunk_indices < 0, -1)
+            output[start:end].copy_(
+                self._forward_sparse(
+                    q[start:end], fused_kv.unsqueeze(1), local_indices
+                )
+            )
+        return output
 
     def _forward_with_kvcache(
         self,

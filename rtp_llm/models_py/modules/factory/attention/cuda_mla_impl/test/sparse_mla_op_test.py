@@ -3,6 +3,7 @@
 """
 
 import math
+import os
 from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main, skipIf
 from unittest.mock import patch
@@ -546,28 +547,11 @@ class SparseMlaOpTest(TestCase):
                         page_size=page_size,
                         softmax_extra_scale=1.0,
                         top_k=2051,
-                        parallelism_config=(
-                            SimpleNamespace(
-                                get_attn_tp_size=lambda: 4,
-                                get_attn_tp_rank=lambda: 2,
-                                tp_rank=0,
-                            )
-                            if num_heads == 16
-                            else None
-                        ),
                         indexer_top_k=512,
                         indexer_group_size=4,
                     )
                     op.plan(mla_params, block_table_device)
-                    if num_heads == 16:
-                        with patch(
-                            "rtp_llm.models_py.modules.factory.attention."
-                            "cuda_mla_impl.flashmla_sparse_impl.all_gather",
-                            side_effect=lambda tensor, group: tensor.repeat(4, 1, 1),
-                        ):
-                            output = op.forward(q, kv, topk_indices)
-                    else:
-                        output = op.forward(q, kv, topk_indices)
+                    output = op.forward(q, kv, topk_indices)
                     global_indices = op._convert_topk_indices_to_global(topk_indices)[
                         :, 0, :
                     ]
@@ -755,9 +739,140 @@ class SparseMlaOpTest(TestCase):
             0.99,
         )
 
+    def test_nope_fp8_sparse_attention_caches_chunk_rows_at_init(self):
+        """Selected-KV chunking is bounded by the startup configuration."""
+        num_tokens = 5
+        top_k = 128
+        kv_lora_rank = 512
+        num_heads = 64
+        q = torch.empty(
+            num_tokens,
+            num_heads,
+            256,
+            dtype=torch.bfloat16,
+            device="cpu",
+        )
+        kv = torch.empty(1, 128, 528, dtype=torch.uint8, device="cpu")
+        topk_indices = torch.zeros(
+            num_tokens, 1, top_k, dtype=torch.int32, device="cpu"
+        )
+        global_indices = torch.arange(
+            num_tokens * top_k, dtype=torch.int32, device="cpu"
+        ).view(num_tokens, 1, top_k)
+        workspace_rows = []
+        workspace_storage_ptrs = []
+        q_chunk_rows = []
+
+        def fake_forward_sparse(q_part, kv_part, local_indices):
+            workspace_rows.append(int(kv_part.shape[0]))
+            workspace_storage_ptrs.append(kv_part.untyped_storage().data_ptr())
+            q_chunk_rows.append(int(q_part.shape[0]))
+            return torch.full(
+                (q_part.shape[0], num_heads, kv_lora_rank),
+                len(q_chunk_rows),
+                dtype=torch.bfloat16,
+                device="cpu",
+            )
+
+        with patch.dict(
+            os.environ, {"GLM5_FLASH_MLA_SPARSE_Q_CHUNK": "2"}, clear=False
+        ):
+            op = SparseMlaFp8Op(
+                num_heads=num_heads,
+                kv_lora_rank=kv_lora_rank,
+                qk_rope_head_dim=0,
+                qk_nope_head_dim=256,
+                page_size=128,
+                softmax_extra_scale=1.0,
+                top_k=top_k,
+            )
+            op._convert_topk_indices_to_global = lambda _: global_indices
+            op._forward_sparse = fake_forward_sparse
+            os.environ["GLM5_FLASH_MLA_SPARSE_Q_CHUNK"] = "1"
+            with patch.object(
+                rtp_llm_ops,
+                "gather_selected_glm53_fp8_mla_kv",
+                return_value=None,
+            ) as gather:
+                output = op._forward_nope_selected(q, kv, topk_indices)
+
+        self.assertEqual(q_chunk_rows, [2, 2, 1])
+        self.assertEqual(workspace_rows, [2 * top_k, 2 * top_k, top_k])
+        self.assertEqual(len(set(workspace_storage_ptrs)), 1)
+        self.assertEqual(gather.call_count, 3)
+        self.assertEqual(tuple(output.shape), (num_tokens, num_heads, kv_lora_rank))
+        torch.testing.assert_close(
+            output[:2, 0, 0],
+            torch.ones(2, dtype=torch.bfloat16, device="cpu"),
+        )
+        self.assertEqual(output[-1, 0, 0].item(), 3)
+
+    def test_tp_local_q_heads_are_zero_padded_for_flashmla(self):
+        """TP-local heads are padded for FlashMLA and sliced back afterward."""
+        num_tokens = 2
+        local_heads = 16
+        kernel_heads = 64
+        head_dim = 8
+        top_k = 128
+        op = SparseMlaOp(
+            num_heads=local_heads,
+            kv_lora_rank=head_dim,
+            qk_rope_head_dim=0,
+            qk_nope_head_dim=head_dim,
+            page_size=128,
+            softmax_extra_scale=1.0,
+            top_k=top_k,
+        )
+        q = torch.arange(
+            num_tokens * local_heads * head_dim,
+            dtype=torch.float32,
+            device="cpu",
+        ).view(num_tokens, local_heads, head_dim)
+        q = q.to(torch.bfloat16)
+        kv = torch.zeros(
+            num_tokens * top_k,
+            1,
+            head_dim,
+            dtype=torch.bfloat16,
+            device="cpu",
+        )
+        global_indices = torch.arange(
+            num_tokens * top_k,
+            dtype=torch.int32,
+            device="cpu",
+        ).view(num_tokens, 1, top_k)
+        captured_q = []
+
+        def fake_sparse_fwd(q_arg, kv_arg, indices_arg, scale, d_v):
+            captured_q.append(q_arg.clone())
+            return q_arg.clone(), None, None
+
+        module = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
+            "flashmla_sparse_impl"
+        )
+        with patch(
+            f"{module}.flash_mla_sparse_fwd",
+            side_effect=fake_sparse_fwd,
+            create=True,
+        ):
+            output = op._forward_sparse(q, kv, global_indices)
+
+        self.assertEqual(len(captured_q), 1)
+        self.assertEqual(
+            tuple(captured_q[0].shape), (num_tokens, kernel_heads, head_dim)
+        )
+        torch.testing.assert_close(captured_q[0][:, :local_heads], q)
+        self.assertEqual(
+            torch.count_nonzero(captured_q[0][:, local_heads:]).item(), 0
+        )
+        self.assertEqual(tuple(output.shape), tuple(q.shape))
+        torch.testing.assert_close(output, q)
+
     def test_nope_fp8_cache_write_then_sparse_attention_page128(self):
-        """GLM-5.3 sparse attention consumes its 528-byte FP8 NoPE cache."""
+        """GLM-5.3 chunked sparse attention consumes its FP8 NoPE cache."""
         seq_len = top_k = page_size = 128
+        num_tokens = 3
         kv_lora_rank = 512
         num_heads = 64
         set_seed(42)
@@ -781,7 +896,7 @@ class SparseMlaOpTest(TestCase):
         )
 
         params = TestParam(
-            num_tokens=1,
+            num_tokens=num_tokens,
             total_cache_len=seq_len,
             num_heads=num_heads,
             kv_lora_rank=kv_lora_rank,
@@ -795,43 +910,62 @@ class SparseMlaOpTest(TestCase):
         # request-local to physical-index translator.
         testcase.block_table.fill_(1)
         q = torch.randn(
-            1, num_heads, kv_lora_rank, dtype=torch.bfloat16, device="cuda"
+            num_tokens,
+            num_heads,
+            kv_lora_rank,
+            dtype=torch.bfloat16,
+            device="cuda",
         )
         topk_indices = torch.arange(
             top_k, dtype=torch.int32, device="cuda"
-        ).view(1, 1, top_k)
-        op = SparseMlaFp8Op(
-            num_heads=num_heads,
-            kv_lora_rank=kv_lora_rank,
-            qk_rope_head_dim=0,
-            qk_nope_head_dim=256,
-            page_size=page_size,
-            softmax_extra_scale=1.0,
-            top_k=top_k,
-        )
+        ).view(1, 1, top_k).expand(num_tokens, 1, top_k)
+        with patch.dict(
+            os.environ, {"GLM5_FLASH_MLA_SPARSE_Q_CHUNK": "2"}, clear=False
+        ):
+            op = SparseMlaFp8Op(
+                num_heads=num_heads,
+                kv_lora_rank=kv_lora_rank,
+                qk_rope_head_dim=0,
+                qk_nope_head_dim=256,
+                page_size=page_size,
+                softmax_extra_scale=1.0,
+                top_k=top_k,
+            )
         op.plan(testcase.mla_params, testcase.block_table)
         global_indices = op._convert_topk_indices_to_global(topk_indices)[:, 0, :]
         torch.testing.assert_close(
             global_indices,
             torch.arange(
                 page_size, page_size + top_k, dtype=torch.int32, device="cuda"
-            ).view(1, top_k),
+            ).view(1, top_k).expand(num_tokens, top_k),
         )
-        gathered_kv = torch.empty_like(compressed_kv)
+        gathered_kv = compressed_kv.new_empty(num_tokens * top_k, kv_lora_rank)
         rtp_llm_ops.gather_selected_glm53_fp8_mla_kv(
             kv_cache.kv_cache_base,
             gathered_kv,
             global_indices.reshape(-1).contiguous(),
         )
         torch.testing.assert_close(
-            gathered_kv.float(), compressed_kv.float(), rtol=0.13, atol=0.03
+            gathered_kv.float(),
+            compressed_kv.repeat(num_tokens, 1).float(),
+            rtol=0.13,
+            atol=0.03,
         )
 
-        output = op.forward(q, kv_cache.kv_cache_base, topk_indices)
+        real_gather = rtp_llm_ops.gather_selected_glm53_fp8_mla_kv
+        with patch.object(
+            rtp_llm_ops,
+            "gather_selected_glm53_fp8_mla_kv",
+            wraps=real_gather,
+        ) as gather:
+            output = op.forward(q, kv_cache.kv_cache_base, topk_indices)
+        self.assertEqual(gather.call_count, 2)
         expected = ref_sparse_mla_forward(
             q,
             gathered_kv.unsqueeze(1),
-            torch.arange(top_k, dtype=torch.int32, device="cuda").view(1, top_k),
+            torch.arange(
+                num_tokens * top_k, dtype=torch.int32, device="cuda"
+            ).view(num_tokens, top_k),
             256**-0.5,
             kv_lora_rank,
         )
