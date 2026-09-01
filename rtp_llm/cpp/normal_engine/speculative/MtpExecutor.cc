@@ -481,12 +481,6 @@ bool isCpContextRequest(const ParallelismConfig& parallelism_config, const GptMo
 
 }  // namespace
 
-bool MtpExecutor::canUseCpLocalMtpHidden(const GptModelInputs& model_input,
-                                         bool                  cp_request,
-                                         bool                  supports_mtp_target_hidden_states) {
-    return cp_request && !hasMultimodalModelInputs(model_input) && supports_mtp_target_hidden_states;
-}
-
 void MtpExecutor::notifyStop() {
     stop_requested_.store(true, std::memory_order_release);
 }
@@ -1168,39 +1162,48 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     releaseAllModelBuffers();
 
-    // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES
-    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` in
-    // place to the rank-local zigzag chunk layout for the target forward.
-    // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
-    // draft re-CP-slice) needs the FULL/global view, so snapshot both
-    // tensors here while they still hold the global sequence and restore
-    // on rank 0 before the second tpSync (which then broadcasts the
-    // restored full view to every rank for the draft pass).
-    const bool    cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
-    torch::Tensor saved_combo_tokens;
-    torch::Tensor saved_input_lengths;
+    // CP+MTP: the CP processor (handleInputs) rewrites model_input in place
+    // to the rank-local zigzag layout for the target forward. The post-target
+    // MTP pipeline needs the original global request view, including all
+    // multimodal metadata, so snapshot every field that CP can rewrite.
+    const bool                                cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
+    torch::Tensor                             saved_combo_tokens;
+    torch::Tensor                             saved_input_lengths;
+    torch::Tensor                             saved_sequence_lengths;
+    torch::Tensor                             saved_combo_tokens_type_ids;
+    torch::Tensor                             saved_combo_position_ids;
+    torch::Tensor                             saved_text_tokens_mask;
+    torch::Tensor                             saved_mm_features_locs;
+    std::optional<std::vector<torch::Tensor>> saved_multimodal_features;
+    std::optional<std::vector<torch::Tensor>> saved_mm_extra_input;
     if (cp_enabled) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_combo_tokens          = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
+        saved_input_lengths         = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        saved_sequence_lengths      = model_input.sequence_lengths;
+        saved_combo_tokens_type_ids = model_input.combo_tokens_type_ids;
+        saved_combo_position_ids    = model_input.combo_position_ids;
+        saved_text_tokens_mask      = model_input.text_tokens_mask;
+        saved_mm_features_locs      = model_input.mm_features_locs;
+        saved_multimodal_features   = model_input.multimodal_features;
+        saved_mm_extra_input        = model_input.mm_extra_input;
     }
+    auto restoreCpGlobalModelInput = [&]() {
+        if (!cp_enabled) {
+            return;
+        }
+        model_input.combo_tokens          = saved_combo_tokens;
+        model_input.input_lengths         = saved_input_lengths;
+        model_input.sequence_lengths      = saved_sequence_lengths;
+        model_input.combo_tokens_type_ids = saved_combo_tokens_type_ids;
+        model_input.combo_position_ids    = saved_combo_position_ids;
+        model_input.text_tokens_mask      = saved_text_tokens_mask;
+        model_input.mm_features_locs      = saved_mm_features_locs;
+        model_input.multimodal_features   = saved_multimodal_features;
+        model_input.mm_extra_input        = saved_mm_extra_input;
+    };
     const bool saved_need_all_hidden_states = model_input.need_all_hidden_states;
-    // A multimodal CP forward owns a request-local copy of the token-side
-    // metadata and is not required to publish the native MTP residual buffer
-    // on every path. Do not select the compact CP-local handoff for it: the
-    // draft model needs a complete GLOBAL hidden sequence aligned with the
-    // original multimodal token layout. Text-only native MTP keeps the compact
-    // rank-local buffer path.
-    const bool use_cp_local_mtp_hidden =
-        canUseCpLocalMtpHidden(model_input, cp_enabled, model_->supportsMtpTargetHiddenStates())
-        && !model_input.need_all_logits && !saved_need_all_hidden_states;
-    if (cp_enabled && !use_cp_local_mtp_hidden) {
-        // Generic CP+MTP models feed the target model's per-token output into
-        // the draft model. Force a full hidden result for that hand-off. Models
-        // with a declared rank-local MTP buffer bypass this: their draft input
-        // is already in CP-local layout, so materializing a second global
-        // sequence would only increase peak memory.
-        model_input.need_all_hidden_states = true;
-    }
+    const bool use_cp_local_mtp_hidden = cp_enabled && !model_input.need_all_logits && !saved_need_all_hidden_states
+                                         && model_->supportsMtpTargetHiddenStates();
 
     // target model prefill
     {
@@ -1212,6 +1215,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     model_input.need_all_hidden_states = saved_need_all_hidden_states;
+    restoreCpGlobalModelInput();
 
     // eplb
     if (expert_balancer_) {
@@ -1224,25 +1228,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // target model sample
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
-        if (model_input.is_fake_stream) {
-            if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
-            }
-        } else {
+        if (!model_input.is_fake_stream) {
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output = std::move(sampler_->forward(sampler_input));
-            // Restore the full combo_tokens / input_lengths before the MTP
-            // shift logic — under CP both were mutated to rank-local by the
-            // target forward's handleInputs and the shift formula assumes a
-            // contiguous full sequence (offset += input_length, last token
-            // overwrite at offset+input_length-1).
-            if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
-            }
             batch_stream_processor_->updatePrefillPostDraftModelInput(
                 model_input, model_output, sampler_output, buffer_holder_);
         }
@@ -1626,13 +1616,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                             "input_batch=%ld decode_batch=%ld",
                             model_input.input_lengths.defined() ? model_input.input_lengths.size(0) : -1,
                             model_input.sequence_lengths.defined() ? model_input.sequence_lengths.size(0) : -1);
-    // Multimodal CP context verification must use the full GLOBAL hidden
-    // sequence.  The target model is not required to publish a rank-local
-    // native-MTP buffer after every multimodal forward, and selecting
-    // CP_LOCAL here would make the draft-prefill hand-off assert when that
-    // buffer is empty.  Text-only native MTP keeps the compact fast path.
-    const bool use_cp_local_decode_hidden =
-        canUseCpLocalMtpHidden(model_input, cp_context_request, model_->supportsMtpTargetHiddenStates());
+    const bool use_cp_local_decode_hidden = cp_context_request && model_->supportsMtpTargetHiddenStates();
     if (useAsyncPrepare()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_target_verify_prepare)");
         target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());

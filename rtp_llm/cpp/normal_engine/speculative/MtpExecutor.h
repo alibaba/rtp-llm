@@ -155,11 +155,6 @@ protected:
                                               int64_t               requested_rows = -1);
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
 
-    // CP-local MTP hidden states are valid only for text-only context input.
-    // Multimodal context needs the complete GLOBAL sequence for draft handoff.
-    static bool
-    canUseCpLocalMtpHidden(const GptModelInputs& model_input, bool cp_request, bool supports_mtp_target_hidden_states);
-
     // Env-gated stream-async switch. Default off unless
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
