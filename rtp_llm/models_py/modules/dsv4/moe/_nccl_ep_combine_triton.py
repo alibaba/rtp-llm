@@ -37,6 +37,7 @@ def mxfp8_dequant_peer_sum(
     n_rows: int,
     hidden_size: int,
     world_size: int,
+    out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     if returned_payload.dtype != torch.uint8 or not returned_payload.is_contiguous():
         raise ValueError("returned_payload must be contiguous uint8")
@@ -48,7 +49,7 @@ def mxfp8_dequant_peer_sum(
             f"expected {(world_size * n_rows, payload_cols)}"
         )
     output = torch.empty(
-        (n_rows, hidden_size), dtype=torch.float32, device=returned_payload.device
+        (n_rows, hidden_size), dtype=out_dtype, device=returned_payload.device
     )
     block_d = 256
     _mxfp8_peer_sum_kernel[(n_rows, triton.cdiv(hidden_size, block_d))](

@@ -17,6 +17,24 @@ from dataclasses import replace
 from typing import Dict, Optional, Tuple
 
 import torch
+_DIAG_CT = [0]
+_DIAG_ATA = [0]
+_SERVE_PATH_CT = {"__total": 0}
+_DIAG_FE = [0]
+def _stream_is_capturing() -> bool:
+    # Driver-level capture check: raw C++ cudaStreamBeginCapture does not update
+    # torch's per-stream capture cache, so torch.cuda.is_current_stream_capturing()
+    # can return False during an active capture (mismatched collectives -> garbage).
+    try:
+        import ctypes
+        _rt = ctypes.CDLL("libcudart.so")
+        cap = ctypes.c_int(0)
+        _rt.cudaStreamIsCapturing(ctypes.c_void_p(torch.cuda.current_stream().cuda_stream), ctypes.byref(cap))
+        return cap.value != 0
+    except Exception:
+        return torch.cuda.is_current_stream_capturing()
+
+
 
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from .local_loop import LocalLoopStrategy
@@ -120,15 +138,54 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                     dist.get_world_size(dist.group.WORLD),
                 )
             )
+            _capturing = _stream_is_capturing()
+            _symbolic = isinstance(x.size(0), torch.SymInt)
+            _use_fixed = not replicated_tp_tokens and (_capturing or _symbolic)
+            _diag_path = "fixed_ep" if _use_fixed else ("all_to_all" if not replicated_tp_tokens else "collective")
+            try:
+                _diag_x0 = int(x.size(0))
+            except Exception:
+                _diag_x0 = -1
+            if os.environ.get("DSV4_DIAG") and _DIAG_CT[0] < 40 and (
+                    _diag_x0 > 4 or _diag_path != "all_to_all"):
+                _DIAG_CT[0] += 1
+                import sys
+                print("[DIAG] rank=%d x0=%r type=%s cap=%s sym=%s path=%s x.shape=%s" % (
+                    dist.get_rank(dist.group.WORLD) if dist.is_initialized() else -1,
+                    x.size(0), type(x.size(0)).__name__,
+                    _capturing, _symbolic, _diag_path,
+                    tuple(x.shape)), file=sys.stderr, flush=True)
+            if os.environ.get("DSV4_DIAG") and _capturing:
+                # Capture-time ground truth: print EVERY call taken during a
+                # graph capture (boot-only, ~45 lines/rank — no budget issue).
+                import sys as _sys
+                print("[DIAGCAP] rank=%d strat=%d x0=%r cap=%s sym=%s path=%s grouped=%r" % (
+                    dist.get_rank(dist.group.WORLD) if dist.is_initialized() else -1,
+                    id(self) % 100000, x.size(0), _capturing, _symbolic,
+                    _diag_path, self._sm120_grouped is not None), file=_sys.stderr, flush=True)
+            if os.environ.get("DSV4_DIAG") and not _capturing and not _symbolic and _diag_x0 <= 64:
+                # Serve-time path distribution for small (decode-sized) calls:
+                # count and dump every 5000 calls — proves eager-vs-replay mix.
+                global _SERVE_PATH_CT
+                try:
+                    _SERVE_PATH_CT[_diag_path] += 1
+                except KeyError:
+                    _SERVE_PATH_CT[_diag_path] = 1
+                if _SERVE_PATH_CT["__total"] % 5000 == 0:
+                    import sys as _sys
+                    print("[DIAGSERVE] rank=%d totals=%r" % (
+                        dist.get_rank(dist.group.WORLD) if dist.is_initialized() else -1,
+                        {k: v for k, v in _SERVE_PATH_CT.items() if k != "__total"}),
+                        file=_sys.stderr, flush=True)
+                _SERVE_PATH_CT["__total"] += 1
             if (
-                not replicated_tp_tokens
-                and torch.cuda.is_current_stream_capturing()
+                _use_fixed
                 and self._sm120_grouped is not None
-                and x.size(0) <= 4
             ):
-                return self._forward_sm120_fixed_ep(x, weights, indices)
+                return self._forward_sm120_fixed_ep(x, weights, indices, pad_floor=4)
             if (
-                not torch.cuda.is_current_stream_capturing()
+                not _capturing
+                and not _symbolic
                 and not replicated_tp_tokens
                 and self._sm120_grouped is not None
             ):
@@ -223,7 +280,20 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             handle,
         )
         return y_combined.float()
-    def _forward_sm120_fixed_ep(self, x, weights, indices) -> torch.Tensor:
+    def _forward_sm120_fixed_ep(
+        self, x, weights, indices, pad_floor: int | None = None
+    ) -> torch.Tensor:
+        if os.environ.get("DSV4_DIAG") and _DIAG_FE[0] < 10:
+            try:
+                if int(x.size(0)) > 4:
+                    _DIAG_FE[0] += 1
+                    import sys
+                    print("[DIAG6] fixed_ep rank=%d x0=%r type=%s" % (
+                        torch.distributed.get_rank(torch.distributed.group.WORLD)
+                        if torch.distributed.is_initialized() else -1,
+                        x.size(0), type(x.size(0)).__name__), file=sys.stderr, flush=True)
+            except Exception:
+                pass
         dist = torch.distributed
         group = dist.group.WORLD; world = dist.get_world_size(group)
         rank = dist.get_rank(group)
@@ -231,107 +301,206 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         topk = indices.size(1)
         x_bytes = d * x.element_size()
         weight_bytes = topk * weights.element_size()
+        # Pad every rank's payload to a rank-invariant token count so the
+        # all_reduce shapes always match, even when some ranks execute the
+        # forward during a CUDA graph capture while others run it eagerly
+        # (mismatched collectives would otherwise hang or read garbage).
+        # pad_floor: capture callers pass a small floor — decode graphs capture
+        # with n = bs*(sp+1) rows (4 at bs=1), and padding those to
+        # max_tokens_per_rank (4096) multiplied every replayed MoE into two
+        # ~70/268 MB all-reduces per layer (~43 GB/step) and dominated decode
+        # GPU time. Captured n is uniform across ranks, so a pad derived from
+        # max(floor, n) stays rank-invariant there; the eager fallback (default
+        # floor) keeps the config floor for its mixed-shape safety contract.
+        floor = int(pad_floor) if pad_floor is not None else int(self.cfg.max_tokens_per_rank)
+        n_pad = max(floor, n)
         local_payload = torch.cat((x.contiguous().view(torch.uint8),
             weights.contiguous().view(torch.uint8).reshape(n, weight_bytes),
             indices.to(torch.int32).contiguous().view(torch.uint8).reshape(n, topk * 4)), dim=1)
-        payload = torch.zeros((world, *local_payload.shape),
-                              dtype=torch.uint8, device=x.device)
-        payload[rank].copy_(local_payload)
-        dist.all_reduce(payload.view(torch.int32), op=dist.ReduceOp.SUM, group=group)
-        gathered = payload.view(world * n, -1)
-        all_x = gathered[:, :x_bytes].contiguous().view(x.dtype).reshape(world * n, d)
+        if n < n_pad:
+            local_payload = torch.cat((local_payload,
+                local_payload.new_zeros(n_pad - n, local_payload.size(1))), dim=0)
+        # All-gather the rank-ordered payloads directly (was: zero-slot buffer
+        # + AllReduce(SUM) as a gather — the AR moves 2x the bytes of an AG and
+        # needed a world-sized zero-fill + copy_ per layer).
+        gathered = torch.empty((world * n_pad, local_payload.size(1)),
+                               dtype=torch.uint8, device=x.device)
+        dist.all_gather_into_tensor(gathered, local_payload, group=group)
+        all_x = gathered[:, :x_bytes].contiguous().view(x.dtype).reshape(world * n_pad, d)
         all_w = gathered[:, x_bytes:x_bytes + weight_bytes].contiguous() \
-            .view(weights.dtype).reshape(world * n, topk)
+            .view(weights.dtype).reshape(world * n_pad, topk)
         all_i = gathered[:, x_bytes + weight_bytes:].contiguous().view(torch.int32) \
-            .to(torch.int64).reshape(world * n, topk)
+            .to(torch.int64).reshape(world * n_pad, topk)
         local_i = all_i - self.cfg.local_expert_start
         valid = (local_i >= 0) & (local_i < self.cfg.n_local_experts)
         local_w = all_w * valid.to(all_w.dtype)
         local_i.clamp_(0, self.cfg.n_local_experts - 1)
-        partial = self._sm120_grouped._forward_capture_sm120(all_x, local_w, local_i) \
-            .to(x.dtype).contiguous()
+        # Tile the grouped GEMM into 512-row chunks so the flashinfer workspace
+        # (sized for max_tokens_per_rank up to 512) does not balloon.  With the
+        # capture pad floor of 64 the loop runs ceil(world*64/512) = 1 tile for
+        # decode graphs; prefill-fallback pads still tile at 512-row chunks.
+        MAX_TILES = 512
+        total_rows = world * n_pad
+        partial = torch.empty(total_rows, d, dtype=torch.float32, device=x.device)
+        for offset in range(0, total_rows, MAX_TILES):
+            end = min(offset + MAX_TILES, total_rows)
+            chunk_x = all_x[offset:end]
+            chunk_w = all_w[offset:end]
+            chunk_i = all_i[offset:end]
+            cli = chunk_i - self.cfg.local_expert_start
+            cv = (cli >= 0) & (cli < self.cfg.n_local_experts)
+            cw = chunk_w * cv.to(chunk_w.dtype)
+            cli.clamp_(0, self.cfg.n_local_experts - 1)
+            partial[offset:end] = self._sm120_grouped._forward_capture_sm120(
+                chunk_x, cw, cli).to(x.dtype).contiguous()
         dist.all_reduce(partial, op=dist.ReduceOp.SUM, group=group)
-        return partial.view(world, n, d)[rank].float()
+        return partial.view(world, n_pad, d)[rank][:n].float()
     def _forward_sm120_all_to_all(self, x, weights, indices) -> torch.Tensor:
+        try:
+            return self._forward_sm120_all_to_all_impl(x, weights, indices)
+        except Exception:
+            import sys as _sys, traceback as _tb
+            try:
+                def _t(v):
+                    if v is None:
+                        return "None"
+                    try:
+                        return "%s size=%s type0=%s" % (type(v).__name__, tuple(v.shape), type(v.size(0)).__name__)
+                    except Exception:
+                        return "%s" % type(v).__name__
+                print("[DIAG4] all_to_all EXC rank=%d x=%s w=%s i=%s" % (
+                    torch.distributed.get_rank(torch.distributed.group.WORLD)
+                    if torch.distributed.is_initialized() else -1,
+                    _t(x), _t(weights), _t(indices)), file=_sys.stderr, flush=True)
+                _tb.print_exc(file=_sys.stderr)
+            except Exception:
+                pass
+            raise
+
+    def _forward_sm120_all_to_all_impl(self, x, weights, indices) -> torch.Tensor:
         dist = torch.distributed
         group = dist.group.WORLD; world = dist.get_world_size(group)
         cfg = self.cfg
         experts_per_rank = cfg.n_routed_experts // world
         from flashinfer import mxfp8_quantize
         x_fp8, x_scale = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
-        scale_cols = x.size(1) // 32
+        scale_cols = int(x.size(1)) // 32
         x_scale = x_scale.reshape(x.size(0), scale_cols)
         topk = weights.size(1)
-        x_end = x.size(1)
+        x_end = int(x.size(1))
         scale_end = x_end + scale_cols
         weight_end = scale_end + topk * 4
-        payload_cols = weight_end + topk * 4
+        payload_cols = int(weight_end + topk * 4)
         indices_i32 = indices.to(torch.int32)
-        send_counts = [x.size(0)] * world
-        long_cp_allgather = x.size(0) > 4096
-        if long_cp_allgather:
-            local_payload = torch.cat([x_fp8.view(torch.uint8), x_scale,
-                weights.contiguous().view(torch.uint8).reshape(x.size(0), topk * 4),
-                indices_i32.contiguous().view(torch.uint8).reshape(x.size(0), topk * 4)], dim=1)
-            recv_counts = send_counts
-            recv_payload = torch.empty((world * x.size(0), payload_cols),
-                                       dtype=torch.uint8, device=x.device)
-            dist.all_gather_into_tensor(recv_payload, local_payload, group=group)
-        else:
-            local_count = torch.full((1,), x.size(0), dtype=torch.int64, device=x.device)
-            gathered_counts = torch.empty(world, dtype=torch.int64, device=x.device)
-            dist.all_gather_into_tensor(gathered_counts, local_count, group=group)
-            recv_counts = [int(v) for v in gathered_counts.cpu().tolist()]
-            recv_payload = torch.empty((sum(recv_counts), payload_cols),
-                                       dtype=torch.uint8, device=x.device)
+        # Single-round count exchange: every rank issues exactly ONE
+        # count-AllGather + payload all_to_all + combine all_to_all per MoE
+        # layer, whatever its local token count. The designs this replaces
+        # were rank-asymmetric and deadlocked fused >= 8K ISL prefills:
+        # chunking the owner's tokens multiplied its collective rounds
+        # (1-token peers could not match them), and the plain
+        # all_gather_into_tensor "long" branch required equal row counts on
+        # every rank. Each rank now broadcasts its FULL local token count;
+        # recv_counts is simply every rank's total ([1, T, 1, 1] for a
+        # T-token owner with 1-placeholder peers), so the a2a split sizes
+        # stay consistent on all ranks for any owner (it rotates per
+        # request). The per-rank GEMM stays tiled further below, keeping
+        # the flashinfer workspace bounded regardless of T.
+        send_counts = [int(x.size(0))] * world
+        pair = torch.tensor([send_counts[0]], dtype=torch.int64, device=x.device)
+        gathered = torch.empty(world, 1, dtype=torch.int64, device=x.device)
+        dist.all_gather_into_tensor(gathered, pair, group=group)
+        recv_counts = [int(v) for v in gathered.view(-1).cpu().tolist()]
+        try:
+            _bad = (sum(recv_counts) > 65536) or any((c < 0) or (c > 65536) for c in recv_counts)
+        except Exception:
+            _bad = True
+        if _bad:
+            if os.environ.get("DSV4_DIAG"):
+                import sys
+                print("[DIAG5] rank=%d FALLBACK->fixed_ep counts=%r" % (
+                    torch.distributed.get_rank(torch.distributed.group.WORLD)
+                    if torch.distributed.is_initialized() else -1,
+                    recv_counts), file=sys.stderr, flush=True)
+            return self._forward_sm120_fixed_ep(x, weights, indices)
+        try:
+            _sz = int(x.size(0))
+        except Exception:
+            _sz = -1
+        if os.environ.get("DSV4_DIAG") and _sz > 4 and _DIAG_ATA[0] < 400:
+            _DIAG_ATA[0] += 1
+            import sys
+            try:
+                print("[DIAG2] rank=%d x0=%r(%s) topk=%r pcols=%r counts=%r sum=%d path=single_round" % (
+                    dist.get_rank(dist.group.WORLD) if dist.is_initialized() else -1,
+                    x.size(0), type(x.size(0)).__name__,
+                    weights.size(1), payload_cols,
+                    recv_counts, sum(recv_counts)),
+                    file=sys.stderr, flush=True)
+            except Exception as _e3:
+                print("[DIAG2] print-fail %r" % (_e3,), file=sys.stderr, flush=True)
+        recv_payload = torch.empty((sum(recv_counts), payload_cols),
+                                   dtype=torch.uint8, device=x.device)
         destination = torch.div(indices, experts_per_rank,
                                 rounding_mode="floor").clamp_(0, world - 1)
-        if not long_cp_allgather:
-            send_payload_by_peer = torch.empty((world, x.size(0), payload_cols),
-                                               dtype=torch.uint8, device=x.device)
-            send_payload_by_peer[:, :, :x_end].copy_(x_fp8.view(torch.uint8))
-            send_payload_by_peer[:, :, x_end:scale_end].copy_(x_scale)
-            send_weights = send_payload_by_peer[:, :, scale_end:weight_end].view(torch.float32)
-            send_indices = send_payload_by_peer[:, :, weight_end:].view(torch.int32)
-            for dst in range(world):
-                owned = (destination == dst) & (indices >= 0)
-                torch.where(owned, weights, torch.zeros_like(weights), out=send_weights[dst])
-                torch.where(owned, indices_i32, torch.full_like(indices_i32, -1),
-                            out=send_indices[dst])
-            send_payload = send_payload_by_peer.view(-1, payload_cols)
-            dist.all_to_all_single(recv_payload, send_payload,
-                output_split_sizes=recv_counts, input_split_sizes=send_counts, group=group)
+        send_payload_by_peer = torch.empty((world, int(x.size(0)), payload_cols),
+                                           dtype=torch.uint8, device=x.device)
+        send_payload_by_peer[:, :, :x_end].copy_(x_fp8.view(torch.uint8))
+        send_payload_by_peer[:, :, x_end:scale_end].copy_(x_scale)
+        del x_fp8, x_scale  # copied into the send payload; free before the a2a
+        send_weights = send_payload_by_peer[:, :, scale_end:weight_end].view(torch.float32)
+        send_indices = send_payload_by_peer[:, :, weight_end:].view(torch.int32)
+        for dst in range(world):
+            owned = (destination == dst) & (indices >= 0)
+            torch.where(owned, weights, torch.zeros_like(weights), out=send_weights[dst])
+            torch.where(owned, indices_i32, torch.full_like(indices_i32, -1),
+                        out=send_indices[dst])
+        send_payload = send_payload_by_peer.view(-1, payload_cols)
+        dist.all_to_all_single(recv_payload, send_payload,
+            output_split_sizes=recv_counts, input_split_sizes=send_counts, group=group)
+        # The dispatch payload is the largest transient (world x T rows ~0.5
+        # GiB at 32K ISL) — release it before the local GEMM allocations.
+        del send_payload_by_peer, send_payload
         recv_tokens = sum(recv_counts)
         recv_x = recv_payload[:, :x_end].contiguous().view(torch.float8_e4m3fn)
         recv_scale = recv_payload[:, x_end:scale_end].contiguous()
         recv_w = recv_payload[:, scale_end:weight_end].contiguous().view(torch.float32)
         recv_i = recv_payload[:, weight_end:].contiguous().view(torch.int32).to(torch.int64)
+        del recv_payload  # recv_* hold contiguous copies
         local_i = recv_i - cfg.local_expert_start
         valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
         local_w = recv_w * valid.to(recv_w.dtype)
         local_i = torch.where(valid, local_i, 0)
         if self._sm120_grouped is not None:
-            output_parts = []
             chunk_tokens = int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "4096"))
+            # Preallocate the full output instead of cat(output_parts): the
+            # cat held both the parts list and the result simultaneously.
+            recv_output = torch.empty((recv_tokens, int(x.size(1))),
+                                      dtype=x.dtype, device=x.device)
             for begin in range(0, recv_tokens, chunk_tokens):
                 end = min(begin + chunk_tokens, recv_tokens)
-                output_parts.append(self._sm120_grouped._forward_sm120(
+                recv_output[begin:end] = self._sm120_grouped._forward_sm120(
                     recv_x[begin:end], local_w[begin:end], local_i[begin:end],
-                    input_scale=recv_scale[begin:end]).to(x.dtype))
-            recv_output = torch.cat(output_parts, dim=0) if output_parts else \
-                torch.empty((0, x.size(1)), dtype=x.dtype, device=x.device)
+                    input_scale=recv_scale[begin:end]).to(x.dtype)
+            del recv_x, recv_scale, recv_w, recv_i, local_w, local_i, valid
         else:
             raise RuntimeError("SM120 MXFP8 dispatch requires grouped FP4 MoE")
         combine_q, combine_scale = mxfp8_quantize(
             recv_output.contiguous(), is_sf_swizzled_layout=False)
         combine_scale = combine_scale.reshape(recv_tokens, scale_cols)
         combine_payload = torch.cat([combine_q.view(torch.uint8), combine_scale], dim=1).contiguous()
-        returned_payload = torch.empty((world * x.size(0), combine_payload.size(1)),
+        del recv_output, combine_q, combine_scale  # folded into combine_payload
+        returned_payload = torch.empty((world * int(x.size(0)), int(combine_payload.size(1))),
             dtype=torch.uint8, device=x.device)
         dist.all_to_all_single(returned_payload, combine_payload,
             output_split_sizes=send_counts, input_split_sizes=recv_counts, group=group)
+        del combine_payload
         from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
-        return mxfp8_dequant_peer_sum(returned_payload, x.size(0), x.size(1), world)
+        # bf16 result (single rounding from the fp32 accumulator — the caller
+        # casts to bf16 anyway): halves the largest post-combine buffer
+        # (512 -> 256 MiB at 32K rows).
+        result = mxfp8_dequant_peer_sum(returned_payload, x.size(0), x.size(1), world,
+                                        out_dtype=x.dtype)
+        return result
 
     def _forward_sm120_collective(self, x, weights, indices) -> torch.Tensor:
         dist = torch.distributed

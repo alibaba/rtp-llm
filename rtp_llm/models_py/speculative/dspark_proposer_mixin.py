@@ -209,6 +209,7 @@ class DSparkProposerMixin:
         inputs: PyModelInputs,
         device: torch.device,
     ) -> PyModelOutputs:
+        _dsmark('mixin.commit enter')
         """Commit target feature rows into the draft KV cache.
 
         A standard incremental-prefill call: ``input_lengths`` is the number
@@ -300,6 +301,7 @@ class DSparkProposerMixin:
         fmha_impl: Any,
         device: torch.device,
     ) -> PyModelOutputs:
+        _dsmark('mixin.propose enter')
         """Evaluate one fixed-width proposal block on an initialized model.
 
         The query block reads the committed feature KV written by

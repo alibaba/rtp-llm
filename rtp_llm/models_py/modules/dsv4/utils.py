@@ -13,7 +13,9 @@ def _decode_ue8m0(scale: torch.Tensor, groups: int) -> torch.Tensor:
     if scale.dtype != torch.int32:
         return scale.float().contiguous()
     raw = scale.contiguous().view(torch.uint8).reshape(*scale.shape[:-1], -1)
-    return (raw[..., :groups].to(torch.int32) - 127).float().exp2()
+    # P1b: uint8 -> float32 directly, then in-place sub/exp2 — identical
+    # values (exponents <= 255 are exact in fp32), 3 kernels instead of 5.
+    return raw[..., :groups].float().sub_(127).exp2_()
 def _sm120_forward_quantized(
     self,
     input_fp8: torch.Tensor,
@@ -31,10 +33,16 @@ def _sm120_forward_quantized(
     if padded == rows:
         a, gemm_out = input_fp8.contiguous(), output
     else:
-        a = torch.zeros((padded, self.K), dtype=input_fp8.dtype, device=input_fp8.device)
+        # P1a: pad rows are computed per-row and discarded by result[:rows] —
+        # init only the <=3-row pad tail instead of full-buffer zeros/ones.
+        a = torch.empty((padded, self.K), dtype=input_fp8.dtype, device=input_fp8.device)
         a[:rows].copy_(input_fp8)
-        padded_scale = torch.ones((padded, groups), dtype=torch.float32, device=input_fp8.device)
+        a[rows:].zero_()
+        padded_scale = torch.empty(
+            (padded, groups), dtype=torch.float32, device=input_fp8.device
+        )
         padded_scale[:rows].copy_(a_scale)
+        padded_scale[rows:].fill_(1.0)
         a_scale, gemm_out = padded_scale, None
     result = gemm_fp8_nt_groupwise(
         a,

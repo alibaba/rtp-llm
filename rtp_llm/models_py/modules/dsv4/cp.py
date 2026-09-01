@@ -377,6 +377,7 @@ def build_cp_context(
     )
     input_lengths_global: Optional[torch.Tensor] = None
     cu_seqlens_global: Optional[torch.Tensor] = None
+    input_lengths_host: Optional[list] = None
     if actual_input_lengths_cpu is not None and actual_input_lengths_cpu.numel() > 0:
         input_lengths_global = actual_input_lengths_cpu.to(
             device=device, dtype=torch.int32
@@ -385,6 +386,12 @@ def build_cp_context(
         cu_seqlens_global = torch.cat(
             [zero, torch.cumsum(input_lengths_global, dim=0).to(torch.int32)]
         ).contiguous()
+        # Host mirror of the same lengths: the source is already a CPU tensor,
+        # so every downstream host decision (clamps, sums, prefix math) reads
+        # this list instead of .item()/.cpu() syncs on the GPU copy — each of
+        # those drained the full queued layer work (~30 ms per prefill
+        # forward at 8K; see the test-report Addendum 11 op census).
+        input_lengths_host = [int(v) for v in actual_input_lengths_cpu.tolist()]
 
     chunk_lengths_obj = getattr(cp_info, "prefill_cp_chunk_lengths", None)
     if chunk_lengths_obj is not None and chunk_lengths_obj.numel() > 0:
@@ -459,7 +466,9 @@ def build_cp_context(
         req_relative = torch.cat(
             [even_padded - padded_seq_offset, odd_padded - padded_seq_offset]
         )
-        if req_id < int(real_lengths.numel()):
+        if input_lengths_host is not None and req_id < len(input_lengths_host):
+            max_real_pos = max(input_lengths_host[req_id] - 1, 0)
+        elif req_id < int(real_lengths.numel()):
             max_real_pos = max(int(real_lengths[req_id].item()) - 1, 0)
         else:
             max_real_pos = max(padded_len - 1, 0)
@@ -476,7 +485,9 @@ def build_cp_context(
 
     local_is_real = padding_mask[relative_positions] == 1  # [chunk_length] bool
     unpad_restore_is_prefix = False
-    if input_lengths_global is not None:
+    if input_lengths_host is not None:
+        seq_len_full = sum(input_lengths_host)
+    elif input_lengths_global is not None:
         seq_len_full = int(input_lengths_global.to(torch.long).sum().item())
     else:
         seq_len_full = int((padding_mask == 1).sum().item())
@@ -497,8 +508,17 @@ def build_cp_context(
         seq_len_full = int(unpad_restore.shape[0])
     prefix_per_token = prefix_lengths.gather(0, req_id_per_token.to(torch.long))
     global_positions = (prefix_per_token + local_positions).contiguous()
-    prefix_length = int(prefix_lengths[0].item()) if prefix_lengths.numel() > 0 else 0
-    if input_lengths_global is not None:
+    if isinstance(position_offset, torch.Tensor):
+        prefix_length = int(prefix_lengths[0].item()) if prefix_lengths.numel() > 0 else 0
+    else:
+        prefix_length = int(position_offset)  # host-known: no GPU sync needed
+    if input_lengths_host is not None:
+        seq_len_total = max(
+            (int(position_offset) if not isinstance(position_offset, torch.Tensor)
+             else prefix_lengths[r].item()) + input_lengths_host[r]
+            for r in range(min(B, len(input_lengths_host)))
+        )
+    elif input_lengths_global is not None:
         seq_len_total = int((prefix_lengths + real_lengths[:B]).max().item())
     else:
         seq_len_total = prefix_length + seq_len_full

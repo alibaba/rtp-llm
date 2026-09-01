@@ -372,8 +372,10 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             return torch.zeros((n, d), dtype=torch.float32, device=device)
         aligned = torch.tensor(aligned_list, dtype=torch.int32,
                                pin_memory=True).to(device, non_blocking=True)
-        indptr = torch.cat((torch.zeros(1, dtype=torch.int32, device=device),
-                            aligned.cumsum(0).to(torch.int32)))
+        # P1a tranche 2: was torch.cat((zeros(1), cumsum)) — 3 ops + 2 allocs
+        # per layer per forward; now one small memset + one cumsum.
+        indptr = torch.zeros(e + 1, dtype=torch.int32, device=device)
+        torch.cumsum(aligned, 0, dtype=torch.int32, out=indptr[1:])
         expert_start = torch.empty_like(aligned)
         m_indices = torch.empty(align(total_rows, 128),
                                 dtype=torch.int32, device=device)

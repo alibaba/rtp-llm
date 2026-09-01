@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Optional, Sequence
 import torch
+from rtp_llm.models_py.modules.dsv4.const_cache import cached_arange
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
 def workspace(device: torch.device) -> torch.Tensor:
     result = _WORKSPACES.get(device)
@@ -56,9 +57,11 @@ def pack_logical_workspace(
         dtype=pool.dtype,
         device=pool.device,
     )
-    local_slots = torch.arange(slot_count, dtype=torch.int64, device=pool.device)
+    local_slots = cached_arange(slot_count, dtype=torch.int64, device=pool.device)
     insert_packed_k_cache_flat(packed_rows, packed, local_slots)
-    remapped = local_slots.to(torch.int32).masked_fill(flat_indices < 0, 0)
+    remapped = cached_arange(slot_count, dtype=torch.int32, device=pool.device).masked_fill(
+        flat_indices < 0, 0
+    )
     return packed, remapped.view_as(indices)
 def run(
     *,
@@ -82,6 +85,11 @@ def run(
         kernel_query = torch.cat((kernel_query, torch.zeros_like(kernel_query)), dim=-2)
         kernel_sinks = torch.cat((kernel_sinks, torch.zeros_like(kernel_sinks)), dim=-1)
         kernel_out = torch.empty_like(kernel_query)
+    import os as _os, sys as _sys
+    if _os.environ.get("DSV4_DIAG") and int(query.shape[0]) > 2048:
+        print("[ATTN-K] go q=%s topk=%d extra=%s" % (
+            tuple(kernel_query.shape), int(swa_indices.shape[-1]),
+            "yes" if extra_cache is not None else "no"), file=_sys.stderr, flush=True)
     trtllm_batch_decode_sparse_mla_dsv4(
         query=kernel_query,
         swa_kv_cache=swa_cache.unsqueeze(-2),
@@ -98,5 +106,7 @@ def run(
         extra_sparse_indices=extra_indices,
         extra_sparse_topk_lens=extra_lens,
     )
+    if _os.environ.get("DSV4_DIAG") and int(query.shape[0]) > 2048:
+        print("[ATTN-K] done", file=_sys.stderr, flush=True)
     if kernel_out is not out:
         out.copy_(kernel_out[..., :original_heads, :])

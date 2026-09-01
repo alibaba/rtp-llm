@@ -518,7 +518,22 @@ def _run_shared_expert(
         raise RuntimeError(
             "DSV4_MOE_STRICT_FUSED=1 forbids generic Expert.forward shared path"
         )
-    return shared_experts(x).float()
+    try:
+        out = shared_experts(x)
+        # Small/decode paths keep the fp32 upcast (captured-graph consistency);
+        # at big T return the module dtype — the combine epilogue upcasts, and
+        # halving the held shared buffer (256 -> 128 MiB @16K) matters when the
+        # routed a2a transients run alongside it.
+        return out.float() if int(x.size(0)) <= 8192 else out
+    except torch.OutOfMemoryError:
+        if os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") != "all":
+            raise
+        # At big T the routed path's freed a2a transients sit in the cache
+        # too fragmented for this layer's [T, dim] output. The shared expert
+        # is collective-free at tp_size <= 1 — flush and re-run once; the DP
+        # peers simply wait at the next MoE count-AllGather.
+        torch.cuda.empty_cache()
+        return shared_experts(x).float()
 
 
 def get_shared_expert_executor(

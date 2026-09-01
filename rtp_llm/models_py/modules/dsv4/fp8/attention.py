@@ -49,6 +49,7 @@ from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
+from rtp_llm.models_py.modules.dsv4.const_cache import cached_arange, cached_zeroed
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
@@ -372,6 +373,8 @@ _FLASH_MLA_SPARSE_Q_CHUNK = dsv4_chunk_tokens_from_env(
     "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
     min_value=0,
 )
+_ATTN_MARK = {"n": 0}
+
 if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
     raise ValueError(
         "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for streaming "
@@ -2077,13 +2080,25 @@ class AttentionFP8(nn.Module):
                 )
                 return (scale_bytes.to(torch.int32) - 127).float().exp2()
             padded_m = (M + 3) & ~3
-            a = torch.zeros((G, padded_m, _K), dtype=o_fp8.dtype, device=o_fp8.device)
+            # P1a: pad rows are computed per-row and discarded by the [:, :M]
+            # consumer — init only the <=3-row pad tail, not the full buffer.
+            a = torch.empty((G, padded_m, _K), dtype=o_fp8.dtype, device=o_fp8.device)
             a[:, :M].copy_(o_fp8.transpose(0, 1))
-            a_scale = torch.ones(
+            a_scale = torch.empty(
                 (G, padded_m, _K // 128), dtype=torch.float32, device=o_fp8.device
             )
             a_scale[:, :M].copy_(_ue8m0_to_fp32(o_scale).transpose(0, 1))
-            w_scale = self.wo_a_s.float().view(G, R // 128, _K // 128).contiguous()
+            if padded_m != M:
+                a[:, M:].zero_()
+                a_scale[:, M:].fill_(1.0)
+            # P1a: weight-derived — compute once, reuse (was per-call
+            # .float().contiguous() on every layer every forward).
+            w_scale = getattr(self, "_wo_a_s_f32", None)
+            if w_scale is None:
+                w_scale = self.wo_a_s.float().view(
+                    G, R // 128, _K // 128
+                ).contiguous()
+                self._wo_a_s_f32 = w_scale
             projected = torch.stack(
                 [
                     gemm_fp8_nt_groupwise(
@@ -3523,8 +3538,9 @@ class AttentionFP8(nn.Module):
                 sm120_extra_lens = is_extra.sum(dim=1, dtype=torch.int32)
                 sm120_swa_lens = combined_lens.to(torch.int32) - sm120_extra_lens
                 extra_width = max(int(cmp_topk.shape[-1]), 1)
-                extra_cols = torch.arange(extra_width, device=qkv.q.device,
-                                          dtype=torch.int64).unsqueeze(0)
+                extra_cols = cached_arange(
+                    extra_width, dtype=torch.int64, device=qkv.q.device
+                ).unsqueeze(0)
                 extra_src = combined_2d[:, :extra_width]
                 extra_req = request_ids[:, :extra_width]
                 extra_local = local_slots[:, :extra_width]
@@ -3534,13 +3550,16 @@ class AttentionFP8(nn.Module):
                 sm120_extra_indices.masked_fill_(extra_src < 0, 0)
                 aligned_extra_width = (extra_width + 63) // 64 * 64
                 if aligned_extra_width != extra_width:
-                    padded_extra = torch.zeros(
+                    # P1a: only the pad tail needs zeroing, not the full buffer.
+                    padded_extra = torch.empty(
                         (combined_2d.shape[0], aligned_extra_width),
                         dtype=torch.int32, device=qkv.q.device)
                     padded_extra[:, :extra_width] = sm120_extra_indices
+                    padded_extra[:, extra_width:].zero_()
                     sm120_extra_indices = padded_extra
-                swa_cols = torch.arange(self.window_size, device=qkv.q.device,
-                                        dtype=torch.int64).unsqueeze(0)
+                swa_cols = cached_arange(
+                    self.window_size, dtype=torch.int64, device=qkv.q.device
+                ).unsqueeze(0)
                 swa_src_cols = sm120_extra_lens.to(torch.int64).unsqueeze(1) + swa_cols
                 safe_cols = swa_src_cols.clamp_max(int(combined_2d.shape[1]) - 1)
                 swa_src = combined_2d.gather(1, safe_cols)
@@ -5363,6 +5382,10 @@ class AttentionFP8(nn.Module):
         """
         assert prefill_workspace is not None, "prefill workspace not bound"
         s_q = int(q.shape[0])
+        if os.environ.get("DSV4_DIAG") and s_q > 2048 and _ATTN_MARK["n"] < 12:
+            _ATTN_MARK["n"] += 1
+            import sys as _s
+            print("[ATTN] enter s_q=%d chunk=%d" % (s_q, min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)), file=_s.stderr, flush=True)
         assert s_q > 0, "streaming FlashMLA prefill requires at least one Q row"
         q_workspace = prefill_workspace.prefill_q(s_q)
         assert q.dtype == torch.bfloat16, f"prefill Q must be bf16, got {q.dtype}"
@@ -5401,23 +5424,31 @@ class AttentionFP8(nn.Module):
             logical_kv = (sm120_swa_kv if sm120_swa_kv is not None else
                           kv.reshape(-1, self.head_dim)).to(torch.bfloat16).contiguous()
             token_count = int(logical_kv.shape[0])
-            sm120_cache = torch.zeros((max((token_count + 63) // 64, 1), 64,
-                _DSV4_FP8_KV_ENTRY_BYTES), dtype=torch.uint8, device=q.device)
+            # P1a tranche 2: kernel-audited — quantize_and_insert writes all
+            # 584 B of every entry; only the never-written page tail relies on
+            # zeros, so a cached buffer is safe (single-stream FIFO ordering).
+            sm120_cache = cached_zeroed(
+                (max((token_count + 63) // 64, 1), 64, _DSV4_FP8_KV_ENTRY_BYTES),
+                dtype=torch.uint8, device=q.device)
             quantize_and_insert_k_cache(logical_kv, sm120_cache,
-                torch.arange(token_count, dtype=torch.int64, device=q.device))
+                cached_arange(token_count, dtype=torch.int64, device=q.device))
             if sm120_extra_kv is not None:
                 assert sm120_extra_page_size in (2, 64)
                 extra_page_size = int(sm120_extra_page_size)
                 extra_kv = sm120_extra_kv.to(torch.bfloat16).contiguous()
                 extra_tokens = int(extra_kv.shape[0])
-                sm120_extra_cache = torch.zeros((max(
+                sm120_extra_cache = cached_zeroed((max(
                     (extra_tokens + extra_page_size - 1) // extra_page_size, 1),
                     extra_page_size, _DSV4_FP8_KV_ENTRY_BYTES),
                     dtype=torch.uint8, device=q.device)
                 quantize_and_insert_k_cache(extra_kv, sm120_extra_cache,
-                    torch.arange(extra_tokens, dtype=torch.int64, device=q.device))
+                    cached_arange(extra_tokens, dtype=torch.int64, device=q.device))
         else:
             from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        if os.environ.get("DSV4_DIAG") and s_q > 2048 and _ATTN_MARK["n"] <= 12:
+            import sys as _s
+            print("[ATTN] kv built tokens=%d" % int(sm120_cache.shape[0] * 64), file=_s.stderr, flush=True)
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:
@@ -5473,13 +5504,20 @@ class AttentionFP8(nn.Module):
                     )
                     chunk_indices.clamp_min_(0)
                     o_part = torch.empty_like(q[start:end])
+                    if os.environ.get("DSV4_DIAG") and s_q > 2048 and _ATTN_MARK["n"] <= 12:
+                        import sys as _s
+                        print("[ATTN] chunk %d:%d kernel go" % (start, end), file=_s.stderr, flush=True)
+                    if not hasattr(self, "_attn_sink_f32"):
+                        # P1b: static parameter — cast once, reuse (was per
+                        # chunk per layer per forward).
+                        self._attn_sink_f32 = self.attn_sink.float()
                     run_sm120_sparse_mla(
                         query=q[start:end].contiguous(),
                         swa_cache=sm120_cache,
                         swa_indices=chunk_indices,
                         out=o_part,
                         scale=self.softmax_scale,
-                        sinks=self.attn_sink.float(),
+                        sinks=self._attn_sink_f32,
                         swa_lens=chunk_lens,
                         extra_cache=sm120_extra_cache if dual_cache else None,
                         extra_indices=(
@@ -5502,12 +5540,18 @@ class AttentionFP8(nn.Module):
                         attn_sink=self.attn_sink,
                         topk_length=topk_length[start:end],
                     )
+            if os.environ.get("DSV4_DIAG") and s_q > 2048 and _ATTN_MARK["n"] <= 12:
+                import sys as _s
+                print("[ATTN] chunk %d:%d kernel done" % (start, end), file=_s.stderr, flush=True)
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(
                     o_part,
                     freqs_cis[start:end],
                     out=out[start:end, :],
                 )
+            if os.environ.get("DSV4_DIAG") and s_q > 2048 and _ATTN_MARK["n"] <= 12:
+                import sys as _s
+                print("[ATTN] chunk %d:%d proj done" % (start, end), file=_s.stderr, flush=True)
             dispose_tensor(o_part)
 
         self._prefill_output_all_reduce(out)
@@ -5563,15 +5607,36 @@ class AttentionFP8(nn.Module):
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
 
-        out = self._flash_mla_sparse_fwd_chunked_projected(
-            q=qkv.q,
-            kv=qkv.kv_full.unsqueeze(1),
-            indices=indices,
-            topk_length=meta.topk_length_kv_full,
-            freqs_cis=common.freqs_cis,
-            prefill_workspace=common.workspace,
-            profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
-        )
+        try:
+            out = self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=indices,
+                topk_length=meta.topk_length_kv_full,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
+            )
+        except torch.OutOfMemoryError:
+            if os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") != "all":
+                raise
+            # Big-T prefills interleave large transients (q/kv_full, per-chunk
+            # o_part) with the MoE stage's; freed blocks sit in the allocator
+            # cache too fragmented for the next 128+ MiB request while the
+            # device itself is out of memory. This path is collective-free at
+            # tp_size <= 1, so flushing the cache and re-running attention
+            # cannot desynchronize the DP ranks (peers simply wait at the
+            # next MoE count-AllGather). One retry only.
+            torch.cuda.empty_cache()
+            out = self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=qkv.kv_full.unsqueeze(1),
+                indices=indices,
+                topk_length=meta.topk_length_kv_full,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
+            )
         # kv_full has no remaining consumer after all attention chunks drain.
         dispose_tensor(qkv.kv_full)
         return out

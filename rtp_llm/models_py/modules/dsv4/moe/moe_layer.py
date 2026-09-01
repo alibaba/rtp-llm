@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+_MOE_MARK = [0]
 from typing import Dict, Optional
 
 import torch
@@ -362,35 +363,82 @@ class MoE(nn.Module):
         shape: torch.Size,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
-        T = x.size(0)
-        chunk_tokens = int(self.max_tokens_per_rank)
-        assert (
-            chunk_tokens > 0
-        ), f"max_tokens_per_rank must be positive, got {chunk_tokens}"
+        T = int(x.size(0))
+        if os.environ.get("DSV4_MEMDUMP") and _MOE_MARK[0] == 1:
+            import sys as _s
+            print("[MEMDUMP] after-capture allocator state:", file=_s.stderr, flush=True)
+            print(torch.cuda.memory_summary(0, abbreviated=False), file=_s.stderr, flush=True)
+            # NOTE: torch.cuda.memory_snapshot() is NOT usable here — this build
+            # runs expandable_segments:True and the snapshot call raises, killing
+            # the rank. Itemize via memory_summary totals + config arithmetic.
+        if os.environ.get("DSV4_DIAG") and _MOE_MARK[0] < 60:
+            _MOE_MARK[0] += 1
+            import sys as _s
+            print("[MOE] fwd layer=%s T=%d" % (getattr(self, "layer_id", "?"), T), file=_s.stderr, flush=True)
         if not _CHUNKED_MOE_LOGGED:
             _CHUNKED_MOE_LOGGED = True
             logging.info(
-                "[DSV4 MoE] chunked forward enabled: layer=%d tokens=%d "
-                "chunk_tokens=%d chunks=%d dim=%d device=%s",
+                "[DSV4 MoE] single-round EP forward: layer=%d tokens=%d "
+                "dim=%d device=%s (one count-AG + dispatch/combine a2a per "
+                "layer on every rank; per-rank GEMM tiled at %d)",
                 self.layer_id,
                 T,
-                chunk_tokens,
-                (T + chunk_tokens - 1) // chunk_tokens,
                 self.dim,
                 x.device,
+                self.max_tokens_per_rank,
             )
         out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
-        for token_start in range(0, T, chunk_tokens):
-            token_end = min(token_start + chunk_tokens, T)
-            self._run_chunk(
-                x[token_start:token_end],
-                input_ids_flat[token_start:token_end],
-                out[token_start:token_end],
-            )
+        # Single collective round over ALL local tokens. The token-dim chunk
+        # loop this replaced made the per-layer EP collective count depend on
+        # the rank's token count (owner ran ceil(T/chunk) rounds while
+        # 1-token peers ran one) and deadlocked fused >= 8K ISL prefills:
+        # the owner's later-round count-AllGather had no matching peer
+        # collectives. One round per rank keeps the NCCL op sequence
+        # identical on every rank for any token distribution (including
+        # T == 0 and the rotating per-request owner); DeepEPStrategy tiles
+        # its GEMM internally, so workspace stays bounded.
+        if (
+            T > 8192
+            and self._shared_executor is not None
+            and not self._routed_includes_shared
+        ):
+            # Big-T memory sequencing: routed experts FIRST, shared expert
+            # after. Holding the shared expert's fp32 output (~512 MiB at 32K
+            # tokens) across the routed path's a2a transients (~1 GiB) OOM'd
+            # 32K prefills at layer 0; sequencing drops the MoE-stage peak to
+            # max(routed, shared) plus the small surviving routed result.
+            _free_b, _ = torch.cuda.mem_get_info()
+            if _free_b < 1_500_000_000 and os.environ.get("DSV4_EMPTY_CACHE_MODE", "all") == "all":
+                # Attention just freed its transients as allocator-cached
+                # fragments; the a2a needs large contiguous buffers — flush
+                # the cache rather than OOM with free memory held hostage.
+                torch.cuda.empty_cache()
+            if self._gate_pack_static:
+                routed = self._strategy.forward_with_gate_pack(
+                    x, self.gate, input_ids_flat
+                )
+            else:
+                _w, _idx = self.gate(x, input_ids_flat)
+                routed = self._strategy(x, _w, _idx)
+            self._shared_executor.start(self.shared_experts, x)
+            shared = self._shared_executor.finish()
+            combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+            if combined.data_ptr() != out.data_ptr():
+                out.copy_(combined)
+            return out.view(shape)
+        self._run_chunk(x, input_ids_flat, out)
         return out.view(shape)
 
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        if os.environ.get("DSV4_MEMDUMP") and _MOE_MARK[0] == 0:
+            import sys as _s
+            _MOE_MARK[0] = 1
+            print("[MEMDUMP] after-capture allocator state:", file=_s.stderr, flush=True)
+            print(torch.cuda.memory_summary(0, abbreviated=False), file=_s.stderr, flush=True)
+            # NOTE: torch.cuda.memory_snapshot() is NOT usable here — this build
+            # runs expandable_segments:True and the snapshot call raises, killing
+            # the rank. Itemize via memory_summary totals + config arithmetic.
 
         # Master switch: when MOEDBG=0 the AND short-circuits so neither the
         # layer_id compare nor any record_if_level call site below runs.

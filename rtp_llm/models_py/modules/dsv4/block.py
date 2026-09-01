@@ -6,6 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
+_BLK_MARK = {"n": 0, "attn": 0, "ffn": 0}
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
@@ -400,6 +401,10 @@ class Block(nn.Module):
             ffn_hc_post,
         ) = self._prefill_fast_hc_impls()
 
+        if os.environ.get("DSV4_DIAG") and _BLK_MARK["n"] < 40:
+            _BLK_MARK["n"] += 1
+            import sys as _s
+            print("[BLK] enter layer=%s T=%s" % (getattr(self, "layer_id", "?"), int(x.shape[0])), file=_s.stderr, flush=True)
         residual = x
         x_pre, post, comb = attn_hc_pre(x)
         if self.attn.can_fuse_prefill_attn_norm_input_quant(
@@ -428,10 +433,18 @@ class Block(nn.Module):
         x = attn_hc_post(attn_out, residual, post, comb)
         self._sync_after_first_cp_prefill_attention()
 
+        if os.environ.get("DSV4_DIAG") and _BLK_MARK["attn"] < 40:
+            _BLK_MARK["attn"] += 1
+            import sys as _s
+            print("[BLK] attn done layer=%s" % (getattr(self, "layer_id", "?"),), file=_s.stderr, flush=True)
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
         x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         ffn_out = self.ffn(x_pre, input_ids)
+        if os.environ.get("DSV4_DIAG") and _BLK_MARK["ffn"] < 40:
+            _BLK_MARK["ffn"] += 1
+            import sys as _s
+            print("[BLK] ffn done layer=%s" % (getattr(self, "layer_id", "?"),), file=_s.stderr, flush=True)
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward(
