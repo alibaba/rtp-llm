@@ -515,6 +515,55 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void testSchedule_buildContextPreservesSessionRoutingHint() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(ctxCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_001L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        Request captured = ctxCaptor.getValue().getRequest();
+        assertEquals(1, captured.getSessionSchemaVersion());
+        assertEquals("isess_v1_example", captured.getInferenceSessionId());
+        assertEquals(Request.SessionState.ESTABLISHED, captured.getInferenceSessionState());
+    }
+
+    @Test
+    void testSchedule_missingSessionHintKeepsAffinityDisabled() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(ctxCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(100_002L)
+                .build(), mock(StreamObserver.class));
+
+        Request captured = ctxCaptor.getValue().getRequest();
+        assertEquals(0, captured.getSessionSchemaVersion());
+        assertEquals("", captured.getInferenceSessionId());
+        assertEquals(Request.SessionState.UNSPECIFIED, captured.getInferenceSessionState());
+    }
+
+    @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
         FlexlbConfig queueConfig = ConfigService.parse("""
                 {
