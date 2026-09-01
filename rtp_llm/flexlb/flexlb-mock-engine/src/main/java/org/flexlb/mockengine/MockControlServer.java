@@ -239,6 +239,44 @@ final class MockControlServer {
                     case "crash_after" -> builder.crashAfterNRequests(enabled ? body.path("n").asInt(5) : 0);
                     case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
+                    // ── Status-report fault family (getWorkerStatus output layer) ──
+                    case "status_suppress_finished" -> builder.statusSuppressFinished(enabled);
+                    case "status_suppress_running" -> builder.statusSuppressRunning(enabled);
+                    case "status_suppress_rids" -> builder.statusSuppressRids(
+                            enabled ? readLongList(body.path("rids")) : List.of());
+                    case "status_no_respond" -> builder.statusNoRespond(enabled);
+                    case "status_fake_task" -> {
+                        // Append-on-inject / clear-on-disable: multiple injects
+                        // accumulate into a continuously reported synthetic set.
+                        if (enabled) {
+                            long rid = body.path("rid").asLong(0);
+                            if (rid == 0) {
+                                throw new ApiException(400, "status_fake_task requires 'rid'");
+                            }
+                            List<FaultInjectionConfig.StatusFakeTask> fakeTasks =
+                                    new ArrayList<>(service.getFaultConfig().getStatusFakeTasks());
+                            fakeTasks.add(new FaultInjectionConfig.StatusFakeTask(
+                                    rid,
+                                    body.path("batch_id").asLong(0),
+                                    body.path("phase").asText("RUNNING"),
+                                    body.path("error_code").asLong(0)));
+                            builder.statusFakeTasks(fakeTasks);
+                        } else {
+                            builder.statusFakeTasks(List.of());
+                        }
+                    }
+                    case "status_duplicate_finished" -> builder.statusDuplicateFinished(enabled);
+                    case "status_cursor_regress" -> builder.statusCursorRegress(
+                            enabled ? body.path("n").asInt(1) : 0);
+                    case "status_version_regress" -> builder.statusVersionRegress(enabled);
+                    case "status_zombie_running" -> builder.statusZombieRunning(enabled);
+                    // ── EnqueueBatch ack fault family (ack content corruption;
+                    // engine-side processing is untouched) ──
+                    case "enqueue_ack_partial_fail" -> builder.enqueueAckPartialFail(
+                            enabled ? body.path("k").asInt(1) : 0);
+                    case "enqueue_ack_error_code" -> builder.enqueueAckErrorCode(
+                            enabled ? body.path("code").asLong(0) : 0);
+                    case "enqueue_ack_drop" -> builder.enqueueAckDrop(enabled);
                     default -> throw new ApiException(
                             400, "unknown injection type: " + type);
                 }
@@ -262,6 +300,15 @@ final class MockControlServer {
             service.setFaultConfig(injected);
             return successResponse(service);
         });
+    }
+
+    /** Read a JSON array of integers into a Long list (status_suppress_rids). */
+    private static List<Long> readLongList(JsonNode node) {
+        List<Long> values = new ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(item -> values.add(item.asLong()));
+        }
+        return values;
     }
 
     private void handleClearInject(HttpExchange exchange) throws IOException {

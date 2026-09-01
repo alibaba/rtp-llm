@@ -825,6 +825,21 @@ public final class JavaMockEngineCluster {
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
                     }
                 }
+                // ── EnqueueBatch ack fault injections: all phases above ran
+                // exactly as usual (the engine really admitted and will
+                // execute every member); only the ACK content is corrupted,
+                // so the master must tolerate an ack that lies. ──
+                if (faultConfig.isEnqueueAckDrop()) {
+                    // enqueue_ack_drop: empty ack — no successes, no errors,
+                    // stopped stays false (unlike crash_after) so the engine
+                    // keeps serving subsequent RPCs normally.
+                    observer.onNext(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                            .setBatchId(request.getBatchId())
+                            .build());
+                    observer.onCompleted();
+                    return;
+                }
+                applyEnqueueAckFaults(response);
                 observer.onNext(response.build());
                 observer.onCompleted();
             };
@@ -838,10 +853,49 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        /**
+         * EnqueueBatch ack fault application (enqueue_ack_partial_fail +
+         * enqueue_ack_error_code): move the first k admitted members from
+         * successes to errors in the ACK only — the engine still executes all
+         * of them, so their completions surface later via getWorkerStatus.
+         * The error code defaults to 13 unless enqueue_ack_error_code
+         * overrides it (per-request: each moved member's error_info entry
+         * carries the code).
+         */
+        private void applyEnqueueAckFaults(EngineRpcService.EnqueueBatchResponsePB.Builder response) {
+            int k = faultConfig.getEnqueueAckPartialFail();
+            if (k <= 0 || response.getSuccessesCount() == 0) {
+                return;
+            }
+            long errorCode = faultConfig.getEnqueueAckErrorCode() != 0
+                    ? faultConfig.getEnqueueAckErrorCode() : 13L;
+            int moves = Math.min(k, response.getSuccessesCount());
+            List<Long> moved = new ArrayList<>(moves);
+            for (int i = 0; i < moves; i++) {
+                moved.add(response.getSuccesses(i).getRequestId());
+            }
+            for (int i = 0; i < moves; i++) {
+                response.removeSuccesses(0);
+            }
+            for (long requestId : moved) {
+                response.addErrorsBuilder()
+                        .setRequestId(requestId)
+                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                .setErrorCode(errorCode)
+                                .setErrorMessage("injected enqueue_ack_partial_fail")
+                                .build());
+            }
+        }
+
         @Override
         public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
                                     StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
             stats.statusRpcs.increment();
+            // status_no_respond: hang the RPC — no onNext/onCompleted ever,
+            // mirroring generateStreamCall's noRespond handling.
+            if (faultConfig.isStatusNoRespond()) {
+                return;
+            }
             long requestedVersion = request.getLatestFinishedVersion();
             long latestVersion;
             List<VersionedTask> visibleCompletions = new ArrayList<>();
@@ -898,8 +952,112 @@ public final class JavaMockEngineCluster {
             for (VersionedTask completion : visibleCompletions) {
                 status.addFinishedTaskList(withLegacyTaskState(completion.task));
             }
+            // ── Status-report fault injections: pure output-layer filters on
+            // the assembled status. The completion queue, its head-trim and
+            // the version bookkeeping above are untouched — a completion
+            // suppressed here is permanently lost once the (real) cursor
+            // advances past it, which is exactly the fault under test. ──
+            applyStatusReportFaults(status);
             observer.onNext(status.build());
             observer.onCompleted();
+        }
+
+        /**
+         * Apply the status-report fault family to an assembled WorkerStatusPB
+         * (output layer only; the completion queue and version protocol are
+         * never touched here):
+         * <ul>
+         *   <li>status_suppress_finished / status_suppress_running — clear the
+         *       finished/running task lists while scalars (latestFinishedVersion,
+         *       runningQueryLen, ...) stay REAL, so the master observes a
+         *       self-inconsistent report;</li>
+         *   <li>status_suppress_rids — drop specific rids from BOTH lists
+         *       (a request the engine selectively stops reporting);</li>
+         *   <li>status_fake_task — append synthetic tasks that never existed
+         *       (running-form TaskInfoPB / finished-form completion with
+         *       optional errorCode) on EVERY poll until cleared;</li>
+         *   <li>status_cursor_regress — report latestFinishedVersion n below
+         *       reality (replaying an already-consumed interval);</li>
+         *   <li>status_version_regress — report a statusVersion that DECREASES
+         *       by one per poll: addAndGet(-2) undoes the incrementAndGet in
+         *       the builder chain above and steps one further down (engine
+         *       restart with version reset).</li>
+         * </ul>
+         */
+        private void applyStatusReportFaults(EngineRpcService.WorkerStatusPB.Builder status) {
+            if (faultConfig.isStatusSuppressRunning()) {
+                status.clearRunningTaskInfo();
+            }
+            if (faultConfig.isStatusSuppressFinished()) {
+                status.clearFinishedTaskList();
+            }
+            List<Long> suppressRids = faultConfig.getStatusSuppressRids();
+            if (!suppressRids.isEmpty()) {
+                for (long rid : suppressRids) {
+                    for (int i = status.getRunningTaskInfoCount() - 1; i >= 0; i--) {
+                        if (status.getRunningTaskInfo(i).getRequestId() == rid) {
+                            status.removeRunningTaskInfo(i);
+                        }
+                    }
+                    for (int i = status.getFinishedTaskListCount() - 1; i >= 0; i--) {
+                        if (status.getFinishedTaskList(i).getRequestId() == rid) {
+                            status.removeFinishedTaskList(i);
+                        }
+                    }
+                }
+            }
+            int cursorRegress = faultConfig.getStatusCursorRegress();
+            if (cursorRegress > 0) {
+                status.setLatestFinishedVersion(
+                        Math.max(0L, status.getLatestFinishedVersion() - cursorRegress));
+            }
+            if (faultConfig.isStatusVersionRegress()) {
+                status.setStatusVersion(statusVersion.addAndGet(-2L));
+            }
+            for (FaultInjectionConfig.StatusFakeTask fake : faultConfig.getStatusFakeTasks()) {
+                if (fake.isFinishedForm()) {
+                    EngineRpcService.TaskInfoPB.Builder finished =
+                            EngineRpcService.TaskInfoPB.newBuilder()
+                                    .setRequestId(fake.requestId())
+                                    .setInputLength(1)
+                                    .setPrefixLength(0)
+                                    .setBatchId(fake.batchId())
+                                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                                    .setEndTimeMs(System.currentTimeMillis())
+                                    .setExecutionTimeMs(0)
+                                    .setIterateCount(1)
+                                    .setDpRank(0);
+                    if (fake.errorCode() != 0) {
+                        finished.setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                .setErrorCode(fake.errorCode())
+                                .setErrorMessage("injected status_fake_task")
+                                .build());
+                    }
+                    status.addFinishedTaskList(finished.build());
+                } else {
+                    status.addRunningTaskInfo(withLegacyTaskState(
+                            EngineRpcService.TaskInfoPB.newBuilder()
+                                    .setRequestId(fake.requestId())
+                                    .setInputLength(1)
+                                    .setPrefixLength(0)
+                                    .setBatchId(fake.batchId())
+                                    .setPhase(parseFakeTaskPhase(fake.phase()))
+                                    .setDpRank(0)
+                                    .build()));
+                }
+            }
+        }
+
+        /** Map a status_fake_task phase string to the TaskPhase enum (default RUNNING). */
+        private static EngineRpcService.TaskPhase parseFakeTaskPhase(String phase) {
+            if (phase == null) {
+                return EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
+            }
+            return switch (phase.toUpperCase()) {
+                case "KV_ALLOCATED" -> EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED;
+                case "RECEIVED" -> EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED;
+                default -> EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
+            };
         }
 
         @Override
@@ -1646,6 +1804,15 @@ public final class JavaMockEngineCluster {
                     long requestId = shape.input().getRequestId();
                     boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                     EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
+                    // status_zombie_running: re-insert the entry right after the
+                    // removal so this request keeps being reported RUNNING
+                    // forever (its completion record is dropped inside
+                    // publishCompletion). Every counter below still releases
+                    // normally — the zombie poisons only the status report,
+                    // not engine capacity.
+                    if (faultConfig.isStatusZombieRunning() && removed != null) {
+                        runningTasks.put(requestId, removed);
+                    }
                     // Only count non-cancelled requests toward pendingRequests
                     // decrement. A cancelled member was re-put to RUNNING by
                     // startPrefillBatch (which loops all shapes), so removed!=null
@@ -2083,6 +2250,14 @@ public final class JavaMockEngineCluster {
             if (removed == null) {
                 return; // cancel won the terminal race; it released everything
             }
+            // status_zombie_running: re-insert the entry after the removal so
+            // this request keeps being reported RUNNING forever (its completion
+            // record is dropped inside publishCompletion); the slot/KV/pending
+            // counters below still release normally so the engine keeps
+            // admitting — the zombie poisons only the status report.
+            if (faultConfig.isStatusZombieRunning()) {
+                runningTasks.put(requestId, removed);
+            }
             stream.owned = true;
             activeDecodeRequests.decrementAndGet();
             activeKvTokens.addAndGet(-stream.shape.inputLen());
@@ -2195,8 +2370,21 @@ public final class JavaMockEngineCluster {
 
         private void publishCompletion(EngineRpcService.TaskInfoPB task) {
             synchronized (completionLock) {
+                // status_zombie_running: drop the completion record entirely —
+                // the request finished internally but is never reported
+                // finished (paired with the runningTasks re-insert at the
+                // completion points).
+                if (faultConfig.isStatusZombieRunning()) {
+                    return;
+                }
                 long version = completionVersion.incrementAndGet();
                 completions.add(new VersionedTask(version, task));
+                // status_duplicate_finished: enqueue the SAME completion twice
+                // under the SAME version — one poll reports the rid twice, and
+                // advancing the cursor past that version consumes both copies.
+                if (faultConfig.isStatusDuplicateFinished()) {
+                    completions.add(new VersionedTask(version, task));
+                }
             }
         }
 
