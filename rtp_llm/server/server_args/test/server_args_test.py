@@ -20,6 +20,14 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_cp_rotate_method_accepts_explicit_disabled_for_tp_prefill(self):
+        from rtp_llm.ops import CPRotateMethod
+        from rtp_llm.server.server_args.util import str2_cp_rotate_method
+
+        self.assertEqual(
+            str2_cp_rotate_method("disabled"), CPRotateMethod.DISABLED
+        )
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

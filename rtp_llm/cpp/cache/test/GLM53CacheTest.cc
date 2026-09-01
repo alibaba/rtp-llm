@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 
 namespace rtp_llm {
 namespace test {
@@ -48,8 +49,8 @@ ModelConfig makeGlm53Config() {
     mc.linear_attention_config.linear_conv_kernel_dim = 4;
     mc.linear_attention_config.linear_key_head_dim    = 64;
     mc.linear_attention_config.linear_value_head_dim  = 64;
-    mc.linear_attention_config.linear_num_key_heads   = 4;
-    mc.linear_attention_config.linear_num_value_heads = 4;
+    mc.linear_attention_config.linear_num_key_heads   = 64;
+    mc.linear_attention_config.linear_num_value_heads = 64;
     mc.linear_attention_config.ssm_state_dtype        = DataType::TYPE_FP32;
     return mc;
 }
@@ -116,13 +117,55 @@ TEST(GLM53CacheConfigTest, KPoolIsAlwaysFp8AndStateIncludesMtpSlack) {
     EXPECT_EQ(indexer_state->entries_per_block, 8u);
 }
 
+TEST(GLM53CacheConfigTest, TpPrefillKeepsHeadShardedComputeAndPageRrStorage) {
+    auto model                                           = makeGlm53Config();
+    model.linear_attention_config.linear_num_key_heads   = 64;
+    model.linear_attention_config.linear_num_value_heads = 64;
+
+    ParallelismConfig pc;
+    pc.tp_size                            = 8;
+    pc.tp_rank                            = 3;
+    pc.prefill_cp_config.method           = CPRotateMethod::DISABLED;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+
+    EXPECT_EQ(pc.get_attn_tp_size(), 8);
+    EXPECT_EQ(pc.get_attn_tp_rank(), 3);
+
+    auto  config = HybridPoolConfigCreator::createConfig(model, pc, makeKvConfig(), false, 0);
+    auto* linear = dynamic_cast<LinearKVCacheSpec*>(config.cache_specs[1].get());
+    ASSERT_NE(linear, nullptr);
+    EXPECT_EQ(linear->local_num_k_heads, 8u);
+    EXPECT_EQ(linear->local_num_v_heads, 8u);
+    EXPECT_EQ(linear->ssm_state_size(), 8u * 64u * 64u);
+
+    DeviceResourceConfig resource_config;
+    const auto           props = buildExecProperties(pc, resource_config);
+    EXPECT_FALSE(props.enable_prefill_cp);
+    EXPECT_TRUE(props.prefill_cp_kv_cache_sharded);
+    EXPECT_EQ(props.tp_size, 8u);
+    EXPECT_EQ(props.tp_rank, 3u);
+}
+
+TEST(GLM53CacheConfigTest, RejectsKdaHeadsNotDivisibleByTp) {
+    auto model                                           = makeGlm53Config();
+    model.linear_attention_config.linear_num_key_heads   = 66;
+    model.linear_attention_config.linear_num_value_heads = 66;
+
+    ParallelismConfig pc;
+    pc.tp_size                            = 8;
+    pc.prefill_cp_config.method           = CPRotateMethod::DISABLED;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+
+    EXPECT_DEATH(HybridPoolConfigCreator::createConfig(model, pc, makeKvConfig(), false, 0), "");
+}
+
 TEST(GLM53CacheConfigTest, AllMlaMtpDoesNotRequireUnusedLinearConfig) {
     ParallelismConfig pc;
-    auto              model = makeGlm53Config();
-    model.num_layers        = 1;
+    auto              model                              = makeGlm53Config();
+    model.num_layers                                     = 1;
     model.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
-    model.attn_config.indexer_layer_ids                   = {0};
-    model.linear_attention_config                         = {};
+    model.attn_config.indexer_layer_ids                  = {0};
+    model.linear_attention_config                        = {};
 
     auto config = HybridPoolConfigCreator::createConfig(model, pc, makeKvConfig(), true, 3);
 
@@ -136,12 +179,12 @@ TEST(GLM53CacheConfigTest, AllMlaMtpDoesNotRequireUnusedLinearConfig) {
 }
 
 TEST(GLM53CacheConfigTest, EagleMtpOwnsIndependentTypedPools) {
-    auto score_model   = makeGlm53Config();
-    auto propose_model = makeGlm53Config();
-    propose_model.num_layers = 1;
+    auto score_model                                             = makeGlm53Config();
+    auto propose_model                                           = makeGlm53Config();
+    propose_model.num_layers                                     = 1;
     propose_model.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
-    propose_model.attn_config.indexer_layer_ids                   = {0};
-    propose_model.linear_attention_config                         = {};
+    propose_model.attn_config.indexer_layer_ids                  = {0};
+    propose_model.linear_attention_config                        = {};
 
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
@@ -152,25 +195,18 @@ TEST(GLM53CacheConfigTest, EagleMtpOwnsIndependentTypedPools) {
     sp_config.type              = SP_TYPE_EAGLE;
     sp_config.gen_num_per_cycle = 3;
 
-    auto config = CacheConfigCreator::createSpConfig(score_model,
-                                                     propose_model,
-                                                     parallelism_config,
-                                                     runtime_config,
-                                                     kv_config,
-                                                     sp_config,
-                                                     std::nullopt,
-                                                     true,
-                                                     true);
+    auto config = CacheConfigCreator::createSpConfig(
+        score_model, propose_model, parallelism_config, runtime_config, kv_config, sp_config, std::nullopt, true, true);
 
     ASSERT_EQ(config.layer_all_num, 7u);
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
-    const int mtp_layer = 6;
+    const int  mtp_layer      = 6;
     const auto default_region = static_cast<size_t>(KVCacheRegionName::DEFAULT);
-    const auto kv_region    = static_cast<size_t>(KVCacheRegionName::INDEXER_KV);
-    const auto state_region = static_cast<size_t>(KVCacheRegionName::INDEXER_STATE);
-    const int default_group = config.layer_region_to_group_id[mtp_layer][default_region];
-    const int kv_group      = config.layer_region_to_group_id[mtp_layer][kv_region];
-    const int state_group   = config.layer_region_to_group_id[mtp_layer][state_region];
+    const auto kv_region      = static_cast<size_t>(KVCacheRegionName::INDEXER_KV);
+    const auto state_region   = static_cast<size_t>(KVCacheRegionName::INDEXER_STATE);
+    const int  default_group  = config.layer_region_to_group_id[mtp_layer][default_region];
+    const int  kv_group       = config.layer_region_to_group_id[mtp_layer][kv_region];
+    const int  state_group    = config.layer_region_to_group_id[mtp_layer][state_region];
 
     EXPECT_GE(default_group, 0);
     EXPECT_GE(kv_group, 0);
@@ -186,7 +222,7 @@ TEST(GLM53CacheConfigTest, EagleMtpOwnsIndependentTypedPools) {
     EXPECT_GT(static_cast<size_t>(state_group), 3u);
     EXPECT_EQ(config.mtp_sub_configs[0]->layer_to_group_id, std::vector<int>({0}));
     EXPECT_EQ(config.mtp_sub_configs[0]->local_to_global_layer_ids, std::vector<int>({mtp_layer}));
-    const auto& mtp_config         = *config.mtp_sub_configs[0];
+    const auto& mtp_config          = *config.mtp_sub_configs[0];
     const int   local_default_group = mtp_config.layer_region_to_group_id[0][default_region];
     const int   local_kv_group      = mtp_config.layer_region_to_group_id[0][kv_region];
     const int   local_state_group   = mtp_config.layer_region_to_group_id[0][state_region];
@@ -223,11 +259,11 @@ TEST(GLM53CacheConfigTest, SplitPhysicalBlocksScaleOnlyPagedKPool) {
 
 TEST(GLM53CacheConfigTest, PhysicalMlaSpecIsNotExpandedTwice) {
     ParallelismConfig pc;
-    auto              model     = makeGlm53Config();
-    auto              kv_config = makeKvConfig();
+    auto              model            = makeGlm53Config();
+    auto              kv_config        = makeKvConfig();
     model.attn_config.tokens_per_block = 1024;
     kv_config.seq_size_per_block       = 1024;
-    auto config = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    auto config                        = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
     EXPECT_EQ(config.group_kv_block_stride_bytes[0], config.cache_specs[0]->block_size_bytes());
     EXPECT_EQ(config.group_kv_block_stride_bytes[2], 8u * 32u * 132u);
 }
@@ -251,34 +287,32 @@ TEST(GLM53CacheConfigTest, RejectsInvalidGeometryAndOwnership) {
     kv_config.seq_size_per_block        = 64;
     kv_config.kernel_seq_size_per_block = 64;
     EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 0), "");
-
 }
 
-TEST(GLM53CacheConfigTest, PrefillCp8AndDecodeDp8UseMatchingKPoolStateRing) {
-    constexpr uint32_t cp_size = 8;
+TEST(GLM53CacheConfigTest, PrefillTp8AndDecodeDp8UseMatchingKPoolStateRing) {
+    constexpr uint32_t tp_size = 8;
 
     ParallelismConfig prefill_pc;
     prefill_pc.role_type                          = RoleType::PREFILL;
-    prefill_pc.tp_size                            = cp_size;
-    prefill_pc.ep_size                            = cp_size;
-    prefill_pc.world_size                         = cp_size;
-    prefill_pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    prefill_pc.tp_size                            = tp_size;
+    prefill_pc.ep_size                            = tp_size;
+    prefill_pc.world_size                         = tp_size;
+    prefill_pc.prefill_cp_config.method           = CPRotateMethod::DISABLED;
     prefill_pc.prefill_cp_config.kv_cache_sharded = true;
 
     ParallelismConfig decode_pc;
     decode_pc.role_type                          = RoleType::DECODE;
     decode_pc.tp_size                            = 1;
-    decode_pc.dp_size                            = cp_size;
-    decode_pc.ep_size                            = cp_size;
-    decode_pc.world_size                         = cp_size;
+    decode_pc.dp_size                            = tp_size;
+    decode_pc.ep_size                            = tp_size;
+    decode_pc.world_size                         = tp_size;
     decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
     decode_pc.prefill_cp_config.kv_cache_sharded = true;
-    decode_pc.prefill_cp_config.prefill_cp_size  = cp_size;
+    decode_pc.prefill_cp_config.prefill_cp_size  = tp_size;
 
     auto prefill_config =
         HybridPoolConfigCreator::createConfig(makeGlm53Config(), prefill_pc, makeKvConfig(), false, 3);
-    auto decode_config =
-        HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 3);
+    auto decode_config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 3);
 
     auto* prefill_kv = dynamic_cast<DSV4KVSpec*>(prefill_config.cache_specs[2].get());
     auto* decode_kv  = dynamic_cast<DSV4KVSpec*>(decode_config.cache_specs[2].get());
@@ -292,9 +326,9 @@ TEST(GLM53CacheConfigTest, PrefillCp8AndDecodeDp8UseMatchingKPoolStateRing) {
     ASSERT_NE(prefill_state, nullptr);
     ASSERT_NE(decode_state, nullptr);
     EXPECT_EQ(prefill_state->entries_per_block, 1u);
-    EXPECT_EQ(decode_state->entries_per_block, cp_size);
-    EXPECT_EQ(decode_state->entries_per_block, prefill_state->entries_per_block * cp_size);
-    EXPECT_EQ(prefill_state->seq_size_per_block, makeKvConfig().seq_size_per_block * cp_size);
+    EXPECT_EQ(decode_state->entries_per_block, tp_size);
+    EXPECT_EQ(decode_state->entries_per_block, prefill_state->entries_per_block * tp_size);
+    EXPECT_EQ(prefill_state->seq_size_per_block, makeKvConfig().seq_size_per_block * tp_size);
     EXPECT_EQ(decode_state->seq_size_per_block, prefill_state->seq_size_per_block);
 }
 
@@ -307,8 +341,7 @@ TEST(GLM53CacheConfigTest, DecodeShardedPrefillCpRequiresExplicitCpSize) {
     decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
     decode_pc.prefill_cp_config.kv_cache_sharded = true;
 
-    EXPECT_DEATH(
-        HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 0), "");
+    EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 0), "");
 }
 
 TEST(GLM53CacheConfigTest, PropagatesLinearReusePolicy) {

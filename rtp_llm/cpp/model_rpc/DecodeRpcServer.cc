@@ -378,11 +378,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_id(0);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
 
-    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-    const bool hybrid_linear_fan_in =
-        cache_config.use_mla && maga_init_params_.parallelism_config.get_attn_tp_size() == 1
-        && load_context.prefill_cp_size <= 1 && peer_addrs.size() > 1
-        && hasSegmentedLinearCacheGroup(cache_config);
+    const auto& cache_config         = engine_->resourceContext().cache_manager->cacheConfig();
+    const bool  hybrid_linear_fan_in = needsSegmentedLinearFanIn(cache_config.use_mla,
+                                                                maga_init_params_.parallelism_config.get_attn_tp_size(),
+                                                                peer_addrs.size(),
+                                                                hasSegmentedLinearCacheGroup(cache_config));
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
         for (const auto& addr : peer_addrs) {
@@ -425,11 +425,11 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     request.set_request_key(load_context.request_key);
     request.set_dp_rank(maga_init_params_.parallelism_config.dp_rank);
     request.set_prefill_cp_size(load_context.prefill_cp_size);
-    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-    const bool hybrid_linear_fan_in =
-        cache_config.use_mla && maga_init_params_.parallelism_config.get_attn_tp_size() == 1
-        && load_context.prefill_cp_size <= 1 && peer_addrs.size() > 1
-        && hasSegmentedLinearCacheGroup(cache_config);
+    const auto& cache_config         = engine_->resourceContext().cache_manager->cacheConfig();
+    const bool  hybrid_linear_fan_in = needsSegmentedLinearFanIn(cache_config.use_mla,
+                                                                maga_init_params_.parallelism_config.get_attn_tp_size(),
+                                                                peer_addrs.size(),
+                                                                hasSegmentedLinearCacheGroup(cache_config));
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
         request.set_partition_count(1);
@@ -788,9 +788,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    const bool hybrid_linear_fan_in =
-        use_mla && maga_init_params_.parallelism_config.get_attn_tp_size() == 1 && !is_page_level_rr && peer_cnt > 1
-        && hasSegmentedLinearCacheGroup(cache_config);
+    const bool hybrid_linear_fan_in = needsSegmentedLinearFanIn(use_mla,
+                                                                maga_init_params_.parallelism_config.get_attn_tp_size(),
+                                                                static_cast<size_t>(peer_cnt),
+                                                                hasSegmentedLinearCacheGroup(cache_config));
     RTP_LLM_CHECK_WITH_INFO(!hybrid_linear_fan_in || load_context.partition_count == 1,
                             "segmented linear fan-in requires unsliced CacheStore requests, got partition_count=%d",
                             load_context.partition_count);
@@ -816,18 +817,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return region_name == KVCacheRegionName::INDEXER_STATE || region_name == KVCacheRegionName::CSA_STATE
                || region_name == KVCacheRegionName::HCA_STATE || region_name == KVCacheRegionName::SWA_KV;
     };
-    auto shouldLoadGroupFromPeer = [&](CacheGroupType group_type, KVCacheRegionName region_name, int peer_idx) {
-        if (!is_page_level_rr) {
-            return true;
-        }
-        if (group_type == CacheGroupType::FULL) {
-            return true;
-        }
-        // These DSV4 fixed/SWA pools are CP-sliced inside one logical block on
-        // prefill, while decode still owns the full block. Pull every peer
-        // slice and place it into the matching destination offset.
-        return isCpSlicedFixedRegion(region_name) || peer_idx == 0;
-    };
+    auto shouldLoadGroupFromPeer =
+        [&](CacheGroupType group_type, KVCacheRegionName region_name, bool segmented_linear_group, int peer_idx) {
+            if (!is_page_level_rr) {
+                return true;
+            }
+            if (hybrid_linear_fan_in && segmented_linear_group) {
+                return true;
+            }
+            if (group_type == CacheGroupType::FULL) {
+                return true;
+            }
+            // These DSV4 fixed/SWA pools are CP-sliced inside one logical block on
+            // prefill, while decode still owns the full block. Pull every peer
+            // slice and place it into the matching destination offset.
+            return isCpSlicedFixedRegion(region_name) || peer_idx == 0;
+        };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
         if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
             return true;
@@ -910,6 +915,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                   /*hybrid_full_from_begin=*/true);
         }
         if (isCompactFixedBlockTable(cfg, region_name, gid)) {
+            if (isStateRegion(region_name)) {
+                return block_num == 0 ? std::vector<size_t>{} : std::vector<size_t>{block_num - 1};
+            }
             return blockPositionsForCacheTransfer(block_num,
                                                   load_context.reuse_block_size,
                                                   cfg_use_hybrid,
@@ -991,10 +999,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                 auto block_pos_list =
                     blockPositionsForLoad(block_num, cache_config, use_hybrid, group_type, region_name, gid);
 
-                if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
+                if (!shouldLoadGroupFromPeer(group_type, region_name, segmented_linear_group, i)) {
                     continue;
                 }
-                if (hybrid_linear_fan_in && !segmented_linear_group && i != 0) {
+                if (hybrid_linear_fan_in && !is_page_level_rr && !segmented_linear_group && i != 0) {
                     // MLA is replicated across prefill TP ranks; KDA is head-sharded.
                     continue;
                 }
@@ -1015,8 +1023,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                cache_key_index)) {
                         continue;
                     }
-                    auto cache_key = makeCacheKey(
-                        model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, region_name);
+                    const auto token_key =
+                        cacheTransferTokenKey(std::to_string(load_context.cache_keys[cache_key_index]),
+                                              load_context.prefill_cp_size,
+                                              region_name);
+                    auto cache_key = makeCacheKey(model_id, token_key, layer_id, region_name);
 
                     const int local_part_cnt = hybrid_linear_fan_in ? (segmented_linear_group ? peer_cnt : 1) :
                                                                       (is_page_level_rr ? 1 : peer_cnt);
@@ -1151,7 +1162,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             auto           block_pos_list = blockPositionsForLoad(
                                 block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
 
-                            if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
+                            if (!shouldLoadGroupFromPeer(
+                                    group_type, region_name, /*segmented_linear_group=*/false, i)) {
                                 continue;
                             }
                             for (size_t block_pos : block_pos_list) {
@@ -1171,10 +1183,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                            cache_key_index)) {
                                     continue;
                                 }
-                                auto       cache_key      = makeCacheKey(model_id,
-                                                              std::to_string(load_context.cache_keys[cache_key_index]),
-                                                              layer_id,
-                                                              region_name);
+                                const auto token_key =
+                                    cacheTransferTokenKey(std::to_string(load_context.cache_keys[cache_key_index]),
+                                                          load_context.prefill_cp_size,
+                                                          region_name);
+                                auto       cache_key      = makeCacheKey(model_id, token_key, layer_id, region_name);
                                 const bool mtp_use_mla    = mtp_cache_cfg.use_mla;
                                 const int  local_part_cnt = is_page_level_rr ? 1 : peer_cnt;
                                 const int  local_part_id  = is_page_level_rr ? 0 : i;
@@ -1366,7 +1379,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                  ErrorCode::MALLOC_FAILED);
+                                                                                   ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

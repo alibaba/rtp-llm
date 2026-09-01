@@ -22,7 +22,9 @@ def str2_cp_rotate_method(value):
     if isinstance(value, CPRotateMethod):
         return value
     value_upper = value.upper()
-    if value_upper == "ALL_GATHER":
+    if value_upper == "DISABLED":
+        return CPRotateMethod.DISABLED
+    elif value_upper == "ALL_GATHER":
         return CPRotateMethod.ALL_GATHER
     elif value_upper == "ALL_GATHER_WITH_OVERLAP":
         return CPRotateMethod.ALL_GATHER_WITH_OVERLAP
@@ -33,5 +35,6 @@ def str2_cp_rotate_method(value):
     else:
         raise ValueError(
             f"Invalid cp_rotate_method: {value}. "
-            f"Must be one of: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL, PREFILL_CP"
+            "Must be one of: DISABLED, ALL_GATHER, "
+            "ALL_GATHER_WITH_OVERLAP, ALLTOALL, PREFILL_CP"
         )

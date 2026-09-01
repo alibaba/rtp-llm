@@ -80,6 +80,59 @@ class TestSparseAttnTileLang(unittest.TestCase):
         ref_mag = out_ref.float().abs().mean().item() + 1e-9
         self.assertLess(diff.mean().item() / ref_mag, 5e-3)
 
+    @unittest.skipUnless(_tl.tilelang_available(), "tilelang not importable")
+    def test_glm53_tp8_no_sink_matches_reference(self):
+        """GLM-5.3-Flash Prefill TP8 owns eight absorbed 512-dim Q heads.
+
+        The model has no attention sink and keeps the checkpoint's
+        ``1/sqrt(256)`` scale after projecting Q into the 512-dim latent space.
+        """
+        from rtp_llm.models_py.modules.dsv4.utils import _sparse_attn
+
+        torch.manual_seed(53)
+        device = "cuda:0"
+        batch, query_len, heads, latent_dim = 1, 8, 8, 512
+        kv_len = 256
+        top_k = 131
+
+        q = (
+            torch.randn(
+                batch,
+                query_len,
+                heads,
+                latent_dim,
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            * 0.1
+        )
+        kv = (
+            torch.randn(
+                batch, kv_len, latent_dim, device=device, dtype=torch.bfloat16
+            )
+            * 0.1
+        )
+        sink = torch.full(
+            (heads,), float("-inf"), device=device, dtype=torch.float32
+        )
+        indices = torch.randint(
+            0,
+            kv_len,
+            (batch, query_len, top_k),
+            device=device,
+            dtype=torch.int32,
+        )
+        indices[:, :, -3:] = -1
+        scale = 256**-0.5
+
+        expected = _sparse_attn(q, kv, sink, indices, scale)
+        actual = _tl.sparse_attn(q, kv, sink, indices, scale)
+
+        self.assertEqual(tuple(actual.shape), (batch, query_len, heads, latent_dim))
+        diff = (expected.float() - actual.float()).abs()
+        ref_mag = expected.float().abs().mean().item() + 1e-9
+        self.assertLess(diff.mean().item() / ref_mag, 5e-3)
+
 
 if __name__ == "__main__":
     unittest.main()

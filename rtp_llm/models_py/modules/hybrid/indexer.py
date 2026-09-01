@@ -1,4 +1,5 @@
 import os
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -42,6 +43,52 @@ def _project_with_optional_fp8(
     ):
         return projection(fp8_input, input_scales=input_scale)
     return projection(bf16_input)
+
+
+def _build_tp_cache_shard_context(
+    attention_inputs: Any,
+    fmha_params: Any,
+    tp_size: int,
+    tp_rank: int,
+) -> SimpleNamespace:
+    """Build page-RR pool geometry without enabling sequence parallelism.
+
+    All TP ranks hold the same query-token rows.  Pool writers still need the
+    page owner rank and pool readers still need all-gather restore metadata,
+    but compressor projections must not be gathered a second time.
+    """
+    input_lengths = attention_inputs.input_lengths.reshape(-1)
+    prefix_lengths = attention_inputs.prefix_lengths.reshape(-1)
+    positions = fmha_params.positions_d.reshape(-1)
+    req_ids = fmha_params.batch_indice_d.reshape(-1)
+    token_count = int(positions.numel())
+    identity = torch.arange(token_count, device=positions.device, dtype=torch.int64)
+    return SimpleNamespace(
+        cp_size=int(tp_size),
+        cp_rank=int(tp_rank),
+        chunk_length=token_count,
+        padded_seq_len=token_count,
+        seq_len_full=token_count,
+        relative_positions=identity,
+        # Multi-request callers always consume prefix_lengths.  Keep the
+        # legacy scalar fields inert to avoid a per-layer GPU-to-CPU sync.
+        prefix_length=0,
+        global_positions=positions.to(torch.int64),
+        local_is_real=torch.ones(
+            token_count, device=positions.device, dtype=torch.bool
+        ),
+        unpad_restore=identity,
+        seq_len_total=0,
+        cp_info=None,
+        req_id_per_token=req_ids.to(torch.int32),
+        prefix_lengths=prefix_lengths,
+        input_lengths_global=input_lengths,
+        cu_seqlens_global=attention_inputs.cu_seqlens,
+        unpad_restore_is_prefix=True,
+        chunk_lengths_per_req=None,
+        kv_cache_sharded=True,
+        sequence_parallel=False,
+    )
 
 
 class Indexer(nn.Module):
@@ -290,6 +337,8 @@ class Indexer(nn.Module):
         )
         cp_ctx = None
         workspace = None
+        sequence_cp = self._prefill_cp_enabled()
+        cache_sharded = self._prefill_cache_sharded()
         try:
             if is_regular_prefill:
                 position_ids = fmha_params.positions_d
@@ -299,7 +348,7 @@ class Indexer(nn.Module):
                 cu_seqlens = attention_inputs.cu_seqlens
                 batch_size = int(input_lengths.numel())
 
-                if self._prefill_cp_enabled():
+                if sequence_cp:
                     if cp_params is None:
                         raise RuntimeError(
                             "GLM-5.3-Flash compressed prefill CP requires cp_params"
@@ -381,6 +430,24 @@ class Indexer(nn.Module):
                         device=hidden_states.device,
                     )
                     cu_seqlens[1:] = torch.cumsum(local_lengths, dim=0)
+                elif cache_sharded:
+                    if cp_params is None:
+                        raise RuntimeError(
+                            "GLM-5.3-Flash TP prefill with page-RR cache "
+                            "requires cache-shard params"
+                        )
+                    cp_size = int(getattr(cp_params, "cp_size", 0))
+                    cp_rank = int(getattr(cp_params, "cp_rank", -1))
+                    if cp_size <= 1 or cp_rank < 0 or cp_rank >= cp_size:
+                        raise RuntimeError(
+                            "invalid GLM-5.3-Flash TP cache-shard geometry: "
+                            f"tp_size={cp_size} tp_rank={cp_rank}"
+                        )
+                    cp_ctx = _build_tp_cache_shard_context(
+                        attention_inputs, fmha_params, cp_size, cp_rank
+                    )
+                    self.compressed_indexer.set_cp_ctx(cp_ctx)
+                    self.compressed_indexer.compressor.set_cp_ctx(cp_ctx)
 
                 meta = self.compressed_indexer.prepare(
                     bsz=1,
@@ -404,7 +471,7 @@ class Indexer(nn.Module):
                     meta,
                     workspace=workspace,
                 )
-                if cp_ctx is not None:
+                if sequence_cp:
                     total_local_ids = getattr(cp_params, "total_local_ids", None)
                     if total_local_ids is None:
                         raise RuntimeError(
@@ -486,6 +553,16 @@ class Indexer(nn.Module):
             return False
         return self.parallelism_config.prefill_cp_config.is_enabled()
 
+    def _prefill_cache_sharded(self) -> bool:
+        parallelism_config = getattr(self, "parallelism_config", None)
+        if parallelism_config is None:
+            return False
+        cp_config = parallelism_config.prefill_cp_config
+        return bool(
+            getattr(cp_config, "kv_cache_sharded", False)
+            and int(getattr(parallelism_config, "tp_size", 1)) > 1
+        )
+
     def _prefill_cp_fused_quant_enabled(self) -> bool:
         return os.environ.get(
             "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
@@ -493,6 +570,11 @@ class Indexer(nn.Module):
 
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
+
+    def _is_sparse_prefill_sharded(self, attention_inputs: Any) -> bool:
+        return bool(attention_inputs.is_prefill) and (
+            self._prefill_cp_enabled() or self._prefill_cache_sharded()
+        )
 
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
@@ -596,7 +678,7 @@ class Indexer(nn.Module):
         k = _project_with_optional_fp8(self.wk, x, x_fp8, x_scale)
         k = self.k_norm(k)
 
-        if self._prefill_cp_enabled():
+        if self._prefill_cp_enabled() or self._prefill_cache_sharded():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
                 q,
@@ -627,7 +709,7 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self._is_sparse_prefill_cp(attention_inputs):
+        if self._is_sparse_prefill_sharded(attention_inputs):
             assert cp_params is not None
             slot_mapping = (
                 cp_params.sharded_slot_mapping
@@ -659,7 +741,7 @@ class Indexer(nn.Module):
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )
-        if self._prefill_cp_enabled():
+        if self._prefill_cp_enabled() or self._prefill_cache_sharded():
             assert cp_params is not None
             return self.indexer_op._get_topk_ragged_cp(
                 q_fp8,
@@ -726,13 +808,15 @@ class Indexer(nn.Module):
             self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
             return None
 
-        if self._is_sparse_prefill_cp(attention_inputs):
-            assert cp_params is not None, "cp_params is required for sparse prefill CP"
+        if self._is_sparse_prefill_sharded(attention_inputs):
+            assert (
+                cp_params is not None
+            ), "cp_params is required for sharded sparse prefill"
 
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
-            self._is_sparse_prefill_cp(attention_inputs)
+            self._is_sparse_prefill_sharded(attention_inputs)
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
         ):

@@ -572,6 +572,62 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedInvalidArgsThrow
                  rtp_llm::RTPException);
 }
 
+TEST_F(MemoryLayoutStrategyTest, ConvertLinearCacheToEightHeadShards) {
+    // GLM-5.3-Flash KDA layout within one physical cache block:
+    //   [SSM heads][history 0: Q heads | K heads | V heads]
+    //              [history 1: Q heads | K heads | V heads]
+    // Prefill TP8 owns one head slice per rank. One Decode DP rank runs TP1
+    // and receives all eight slices directly into their final offsets.
+    auto config                          = createTestConfig(/*layer_num=*/1,
+                                   /*block_num=*/2,
+                                   /*k_block_bytes=*/64,
+                                   /*v_block_bytes=*/192);
+    config.is_mla                        = false;
+    config.use_mla                       = false;
+    config.enable_linear_cache_partition = true;
+    config.linear_num_k_heads            = 8;
+    config.linear_num_v_heads            = 8;
+    config.linear_conv_history           = 2;
+    config.linear_q_bytes_per_history    = 32;
+    config.linear_k_bytes_per_history    = 32;
+    config.linear_v_bytes_per_history    = 32;
+
+    auto ctx = createTestContext(std::move(config), torch::kCPU, BufferInitMode::Arange);
+
+    auto          strategy = std::make_unique<MemoryLayoutStrategy>();
+    torch::Tensor empty_scale;
+    ASSERT_TRUE(strategy->init(ctx.config, ctx.kv_cache_buffer, empty_scale, ctx.cache_ptr));
+
+    const int       layer             = 0;
+    const int       block             = 1;
+    const int       partition_count   = 8;
+    const size_t    ssm_bytes         = 64;
+    const size_t    plane_bytes       = 32;
+    const size_t    history_stride    = 3 * plane_bytes;
+    const size_t    shard_ssm_bytes   = ssm_bytes / partition_count;
+    const size_t    shard_plane_bytes = plane_bytes / partition_count;
+    const uintptr_t block_base        = reinterpret_cast<uintptr_t>(ctx.cache_ptr) + ctx.config.kv_block_stride_bytes;
+
+    for (int partition_id = 0; partition_id < partition_count; ++partition_id) {
+        const auto buffers = strategy->convertIndexToBuffer(layer, block, partition_count, partition_id);
+        ASSERT_EQ(buffers.size(), 1u + ctx.config.linear_conv_history * 3u);
+
+        EXPECT_EQ(buffers[0].size_bytes, shard_ssm_bytes);
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(buffers[0].addr),
+                  block_base + static_cast<size_t>(partition_id) * shard_ssm_bytes);
+
+        for (size_t history = 0; history < ctx.config.linear_conv_history; ++history) {
+            const uintptr_t history_base = block_base + ssm_bytes + history * history_stride;
+            for (size_t plane = 0; plane < 3; ++plane) {
+                const auto& part = buffers[1 + history * 3 + plane];
+                EXPECT_EQ(part.size_bytes, shard_plane_bytes);
+                EXPECT_EQ(reinterpret_cast<uintptr_t>(part.addr),
+                          history_base + plane * plane_bytes + static_cast<size_t>(partition_id) * shard_plane_bytes);
+            }
+        }
+    }
+}
+
 TEST_F(MemoryLayoutStrategyTest, AddressSequentiality) {
     auto ctx = createTestContext();
 

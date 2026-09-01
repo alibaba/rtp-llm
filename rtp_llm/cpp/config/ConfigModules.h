@@ -29,9 +29,10 @@ enum class CPRotateMethod {
 struct PrefillCPConfig {
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
-    // When true + tp_size > 1, KV cache uses page-level round-robin sharding
-    // across the CP (== TP) group. Each rank physically holds only owned blocks
-    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    // When true + tp_size > 1, paged KV cache uses page-level round-robin
+    // sharding across the TP process group. This storage policy is independent
+    // of sequence CP: DISABLED keeps TP head compute while still storing only
+    // owner blocks (block_idx % tp_size == tp_rank). See CPSlotMapper.h.
     bool    kv_cache_sharded = false;
     int64_t prefill_cp_size  = 0;  // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     bool    is_enabled() const {

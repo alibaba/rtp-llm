@@ -190,6 +190,22 @@ py_test(
 )
 
 py_test(
+    name = "glm53_tp8_tilelang_sparse_attn_test",
+    srcs = ["sparse_attn_tilelang_equivalence_test.py"],
+    main = "sparse_attn_tilelang_equivalence_test.py",
+    args = ["TestSparseAttnTileLang.test_glm53_tp8_no_sink_matches_reference"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {
+        "gpu": "L20A_DEV",
+        "gpu_count": "1",
+    },
+)
+
+py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],

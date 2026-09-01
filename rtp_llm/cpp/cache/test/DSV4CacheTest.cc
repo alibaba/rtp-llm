@@ -47,8 +47,7 @@ private:
     bool old_core_dump_on_exception_{false};
 };
 
-[[maybe_unused]] auto* const dsv4_cache_test_env =
-    ::testing::AddGlobalTestEnvironment(new DSV4CacheTestEnvironment());
+[[maybe_unused]] auto* const dsv4_cache_test_env = ::testing::AddGlobalTestEnvironment(new DSV4CacheTestEnvironment());
 
 }  // namespace
 
@@ -368,6 +367,35 @@ TEST(KVCacheTransferPlannerTest, CpCompactSwaKeepsPartialTailRows) {
         EXPECT_EQ(plan[1].key_index, 10);
         EXPECT_EQ(plan[1].offset_index, 5);
     }
+}
+
+TEST(KVCacheTransferPlannerTest, CpCompactStateKeepsOnlyFinalCarryRow) {
+    auto plan = buildCacheStoreBlockPlan(/*total_logical_blocks=*/15,
+                                         /*reuse_block_size=*/0,
+                                         /*use_hybrid=*/true,
+                                         CacheGroupType::SWA,
+                                         /*cp_rank=*/0,
+                                         /*cp_size=*/8,
+                                         KVCacheRegionName::INDEXER_STATE);
+    ASSERT_EQ(plan.size(), 1u);
+    EXPECT_EQ(plan[0].key_index, 14);
+    EXPECT_EQ(plan[0].offset_index, 1);
+}
+
+TEST(KVCacheTransferPlannerTest, CpStateUsesOneRequestScopedKeyOnEveryPeer) {
+    EXPECT_EQ(cacheTransferTokenKey("1234", 8, KVCacheRegionName::INDEXER_STATE), "0");
+    EXPECT_EQ(cacheTransferTokenKey("5678", 8, KVCacheRegionName::INDEXER_STATE), "0");
+    EXPECT_EQ(cacheTransferTokenKey("1234", 1, KVCacheRegionName::INDEXER_STATE), "1234");
+    EXPECT_EQ(cacheTransferTokenKey("1234", 8, KVCacheRegionName::INDEXER_KV), "1234");
+}
+
+TEST(KVCacheTransferPlannerTest, SegmentedLinearFanInAlsoAppliesWithCpPeers) {
+    EXPECT_TRUE(needsSegmentedLinearFanIn(
+        /*use_mla=*/true, /*attn_tp_size=*/1, /*peer_count=*/8, /*has_segmented_linear_group=*/true));
+    EXPECT_FALSE(needsSegmentedLinearFanIn(
+        /*use_mla=*/true, /*attn_tp_size=*/8, /*peer_count=*/8, /*has_segmented_linear_group=*/true));
+    EXPECT_FALSE(needsSegmentedLinearFanIn(
+        /*use_mla=*/true, /*attn_tp_size=*/1, /*peer_count=*/1, /*has_segmented_linear_group=*/true));
 }
 
 // ============================================================

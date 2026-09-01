@@ -124,6 +124,11 @@ class CPContext:
     # straight to the local pool. Plumbed from
     # ``parallelism_config.prefill_cp_config.kv_cache_sharded``.
     kv_cache_sharded: bool = False
+    # True for the legacy sequence-CP layout where every rank receives only a
+    # token chunk.  Pure TP prefill may still bind the cache-shard geometry to
+    # pool readers/writers, but must not all-gather its already replicated
+    # token projections.
+    sequence_parallel: bool = True
 
 
 @dataclass
@@ -1316,10 +1321,16 @@ def cp_actual_owned_kv_lens(
 
 
 def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:
-    """Prefill-only gate: gather runs iff a CPContext is bound.
+    """Prefill-only gate for gathering rank-local sequence-CP token rows.
 
     ``start_pos`` is intentionally ignored: CP continuation prefill also
     receives only the rank-local suffix, so compressor/indexer state must still
-    all-gather the current input before pooling.
+    all-gather the current input before pooling. Pure TP prefill may bind the
+    same context shape solely for page-RR cache ownership; it already has the
+    full token sequence and therefore must not gather those rows again.
     """
-    return cp_ctx is not None and cp_ctx.cp_size > 1
+    return bool(
+        cp_ctx is not None
+        and cp_ctx.cp_size > 1
+        and getattr(cp_ctx, "sequence_parallel", True)
+    )

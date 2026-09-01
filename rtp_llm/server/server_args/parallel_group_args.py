@@ -82,7 +82,7 @@ def init_parallel_group_args(
         bind_to=(prefill_cp_config, "method"),
         type=str2_cp_rotate_method,
         default=CPRotateMethod.DISABLED,
-        help="指定用于上下文并行通信方法。可选值: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL",
+        help="指定上下文并行通信方法。TP 计算使用 DISABLED；可选值: DISABLED, ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL, PREFILL_CP",
     )
     parallel_group.add_argument(
         "--comm_buffer_size",
@@ -98,7 +98,11 @@ def init_parallel_group_args(
         bind_to=(prefill_cp_config, "kv_cache_sharded"),
         type=str2bool,
         default=False,
-        help="开启后 prefill 节点的 paged KV pool（CSA_KV/HCA_KV/INDEXER_KV）按 logical block round-robin 切到各 CP rank，每卡只存 1/cp_size。需 PD 分离 + reuse cache。",
+        help=(
+            "开启后 prefill 节点的 paged KV pool 按 logical block round-robin 分片存储。"
+            "该选项独立于计算并行：DISABLED 时按 TP rank 分片，CP 模式时按 CP rank 分片。"
+            "需 PD 分离 + reuse cache。"
+        ),
     )
     prefill_cp_size_bind_to = (
         (prefill_cp_config, "prefill_cp_size")
@@ -111,7 +115,10 @@ def init_parallel_group_args(
         bind_to=prefill_cp_size_bind_to,
         type=int,
         default=0,
-        help="显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用；decode 开启 PREFILL_CP 且 prefill_cp_kv_cache_sharded 时必须设置。",
+        help=(
+            "显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用；"
+            "decode 开启 PREFILL_CP 且 prefill_cp_kv_cache_sharded 时必须设置。"
+        ),
     )
     parallel_group.add_argument(
         "--use_ub_comm",

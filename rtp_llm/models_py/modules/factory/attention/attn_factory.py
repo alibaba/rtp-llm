@@ -29,6 +29,18 @@ def _requires_prefill_cp_support(
     return bool(attn_inputs.is_prefill and not use_decode_mla)
 
 
+def _prefill_cache_is_sharded(
+    parallelism_config: Optional[ParallelismConfig],
+) -> bool:
+    if parallelism_config is None:
+        return False
+    cp_config = parallelism_config.prefill_cp_config
+    return bool(
+        getattr(cp_config, "kv_cache_sharded", False)
+        and int(getattr(parallelism_config, "tp_size", 1)) > 1
+    )
+
+
 def _sparse_prefill_fast_path_limit(attn_configs: AttentionConfigs) -> int:
     """Return the raw-token width below which dense prefill is exact.
 
@@ -120,6 +132,7 @@ def get_mla_impl(
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
+            and not _prefill_cache_is_sharded(parallelism_config)
         )
 
         if (

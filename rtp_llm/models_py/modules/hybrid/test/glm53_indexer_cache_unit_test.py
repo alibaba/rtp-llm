@@ -12,8 +12,10 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _sparse_prefill_fast_path_limit,
 )
+from rtp_llm.models_py.modules.dsv4.cp import cp_should_gather
 from rtp_llm.models_py.modules.hybrid.indexer import (
     Indexer,
+    _build_tp_cache_shard_context,
     bind_indexer_block_table_group_ids,
 )
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
@@ -355,6 +357,83 @@ class Glm53CompressedIndexerCPTest(unittest.TestCase):
         self.assertEqual(
             compressed.compressor.set_cp_ctx.call_args_list[-1].args, (None,)
         )
+
+    def test_tp_cache_shard_context_keeps_full_tokens_without_projection_gather(
+        self,
+    ) -> None:
+        attention_inputs = SimpleNamespace(
+            input_lengths=torch.tensor([3, 2], dtype=torch.int32),
+            prefix_lengths=torch.tensor([5, 9], dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 3, 5], dtype=torch.int32),
+        )
+        fmha_params = SimpleNamespace(
+            positions_d=torch.tensor([5, 6, 7, 9, 10], dtype=torch.int32),
+            batch_indice_d=torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32),
+        )
+
+        context = _build_tp_cache_shard_context(
+            attention_inputs, fmha_params, tp_size=8, tp_rank=6
+        )
+
+        self.assertEqual((context.cp_size, context.cp_rank), (8, 6))
+        self.assertTrue(context.kv_cache_sharded)
+        self.assertFalse(context.sequence_parallel)
+        self.assertFalse(cp_should_gather(context, start_pos=5))
+        self.assertEqual(context.global_positions.tolist(), [5, 6, 7, 9, 10])
+        self.assertEqual(context.req_id_per_token.tolist(), [0, 0, 0, 1, 1])
+        self.assertEqual(context.input_lengths_global.tolist(), [3, 2])
+
+    def test_tp_cache_sharded_prefill_does_not_drop_or_duplicate_queries(
+        self,
+    ) -> None:
+        indexer = object.__new__(Indexer)
+        indexer.index_head_dim = 128
+        indexer.index_topk = 3
+        indexer._prefill_cp_enabled = Mock(return_value=False)
+        indexer._prefill_cache_sharded = Mock(return_value=True)
+        indexer._bind_compressed_pools = Mock(
+            return_value=(torch.ones((1, 1), dtype=torch.int32), 32)
+        )
+
+        compressed = Mock()
+        compressed.prepare.return_value = object()
+        compressed.return_value = torch.arange(12, dtype=torch.int32).reshape(4, 3)
+        compressed.compressor = Mock()
+        indexer.compressed_indexer = compressed
+
+        attention_inputs = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            is_draft_extend=False,
+            context_parallel_info=None,
+            input_lengths=torch.tensor([4], dtype=torch.int32),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            prefix_lengths_host=torch.tensor([0], dtype=torch.int32),
+            cu_seqlens=torch.tensor([0, 4], dtype=torch.int32),
+        )
+        fmha_params = SimpleNamespace(
+            positions_d=torch.arange(4, dtype=torch.int32),
+            batch_indice_d=torch.zeros(4, dtype=torch.int32),
+        )
+        cache_params = SimpleNamespace(cp_size=8, cp_rank=5)
+
+        actual = Indexer._forward_compressed(
+            indexer,
+            torch.zeros((4, 8), dtype=torch.bfloat16),
+            torch.zeros((4, 4), dtype=torch.bfloat16),
+            fmha_params,
+            attention_inputs,
+            object(),
+            False,
+            cache_params,
+        )
+
+        self.assertEqual(actual.tolist(), torch.arange(12).reshape(4, 3).tolist())
+        bound_context = compressed.set_cp_ctx.call_args_list[0].args[0]
+        self.assertFalse(bound_context.sequence_parallel)
+        self.assertEqual((bound_context.cp_size, bound_context.cp_rank), (8, 5))
+        self.assertIsNone(compressed.call_args.kwargs["workspace"])
+        self.assertEqual(compressed.set_cp_ctx.call_args_list[-1].args, (None,))
 
 
 if __name__ == "__main__":

@@ -46,13 +46,15 @@ struct ExecStatus {
 inline ExecProperties buildExecProperties(const ParallelismConfig&    parallelism_config,
                                           const DeviceResourceConfig& device_resource_config) {
     ExecProperties props;
-    props.tp_rank                     = parallelism_config.tp_rank;
-    props.tp_size                     = parallelism_config.tp_size;
-    props.enable_sp                   = parallelism_config.enable_sp;
-    props.enable_prefill_cp           = parallelism_config.prefill_cp_config.is_enabled();
-    props.prefill_cp_kv_cache_sharded = parallelism_config.prefill_cp_config.is_enabled()
-                                        && parallelism_config.prefill_cp_config.kv_cache_sharded
-                                        && parallelism_config.tp_size > 1;
+    props.tp_rank           = parallelism_config.tp_rank;
+    props.tp_size           = parallelism_config.tp_size;
+    props.enable_sp         = parallelism_config.enable_sp;
+    props.enable_prefill_cp = parallelism_config.prefill_cp_config.is_enabled();
+    // Cache placement and attention compute are independent.  TP prefill keeps
+    // full query tokens on every rank while the paged KV pools are still
+    // round-robin sharded across TP ranks for PD transfer.
+    props.prefill_cp_kv_cache_sharded =
+        parallelism_config.prefill_cp_config.kv_cache_sharded && parallelism_config.tp_size > 1;
     props.ffn_as_service           = parallelism_config.ffn_disaggregate_config.is_ffn_service();
     props.enable_layer_micro_batch = static_cast<MicroBatchType>(device_resource_config.enable_layer_micro_batch);
     props.overlap_comm_type        = device_resource_config.overlap_comm_type;

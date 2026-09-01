@@ -42,11 +42,22 @@ struct CacheStoreBlockPair {
 // ``cp_rank + i*cp_size`` — decode then receives content shifted by
 // ``cp_rank`` slots and produces coherent-but-wrong output (DSV4 PD reuse
 // regression seen 2026-05-12).
-std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_logical_blocks,
-                                                          size_t         reuse_block_size,
-                                                          bool           use_hybrid,
-                                                          CacheGroupType group_type,
-                                                          int            cp_rank,
-                                                          int            cp_size);
+std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t            total_logical_blocks,
+                                                          size_t            reuse_block_size,
+                                                          bool              use_hybrid,
+                                                          CacheGroupType    group_type,
+                                                          int               cp_rank,
+                                                          int               cp_size,
+                                                          KVCacheRegionName region_name = KVCacheRegionName::DEFAULT);
+
+// Linear/KDA cache rows are sharded by attention head on Prefill TP ranks.
+// Decode TP1 therefore needs every peer even when those same peers also form
+// the CP page-RR group used by the FULL attention pools.
+bool needsSegmentedLinearFanIn(bool use_mla, int attn_tp_size, size_t peer_count, bool has_segmented_linear_group);
+
+// CP-sliced recurrent state is request-scoped rather than page-keyed.  Every
+// Prefill rank must publish its slice under the same key because page-RR leaves
+// non-owned cache-key hashes unset on each individual rank.
+std::string cacheTransferTokenKey(const std::string& cache_key, int cp_size, KVCacheRegionName region_name);
 
 }  // namespace rtp_llm

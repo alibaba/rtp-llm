@@ -214,26 +214,22 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
     const auto& param = cache_store_inputs;
 
-    auto check_host_tensor = [](const torch::Tensor& tensor,
-                                const char*          name,
-                                torch::ScalarType    dtype,
-                                int64_t              min_numel) {
-        RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "cache-store %s must be defined", name);
-        RTP_LLM_CHECK_WITH_INFO(tensor.device().is_cpu(),
-                                "cache-store %s must be on CPU, got %s",
-                                name,
-                                tensor.device().str().c_str());
-        RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == dtype,
-                                "cache-store %s has unexpected dtype %s",
-                                name,
-                                c10::toString(tensor.scalar_type()));
-        RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "cache-store %s must be contiguous", name);
-        RTP_LLM_CHECK_WITH_INFO(tensor.numel() >= min_numel,
-                                "cache-store %s is too short: numel=%ld required=%ld",
-                                name,
-                                tensor.numel(),
-                                min_numel);
-    };
+    auto check_host_tensor =
+        [](const torch::Tensor& tensor, const char* name, torch::ScalarType dtype, int64_t min_numel) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "cache-store %s must be defined", name);
+            RTP_LLM_CHECK_WITH_INFO(
+                tensor.device().is_cpu(), "cache-store %s must be on CPU, got %s", name, tensor.device().str().c_str());
+            RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == dtype,
+                                    "cache-store %s has unexpected dtype %s",
+                                    name,
+                                    c10::toString(tensor.scalar_type()));
+            RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "cache-store %s must be contiguous", name);
+            RTP_LLM_CHECK_WITH_INFO(tensor.numel() >= min_numel,
+                                    "cache-store %s is too short: numel=%ld required=%ld",
+                                    name,
+                                    tensor.numel(),
+                                    min_numel);
+        };
 
     check_host_tensor(param.prefix_lengths_host,
                       "prefix_lengths_host",
@@ -243,10 +239,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                       "input_lengths_host",
                       torch::kInt32,
                       static_cast<int64_t>(param.decoder_batch_size + param.context_batch_size));
-    check_host_tensor(param.request_id,
-                      "request_id",
-                      torch::kInt64,
-                      static_cast<int64_t>(param.context_batch_size));
+    check_host_tensor(param.request_id, "request_id", torch::kInt64, static_cast<int64_t>(param.context_batch_size));
     check_host_tensor(param.request_pd_separation,
                       "request_pd_separation",
                       torch::kBool,
@@ -379,10 +372,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                     offset_index);
                 return;
             }
-            std::string cache_key = makeCacheKey(param.model_id,
-                                                 param.cache_keys[batch_id * cache_keys_per_batch + key_index],
-                                                 param.layer_id,
-                                                 param.region_name);
+            const auto token_key = cacheTransferTokenKey(
+                param.cache_keys[batch_id * cache_keys_per_batch + key_index], param.cp_size, param.region_name);
+            std::string cache_key = makeCacheKey(param.model_id, token_key, param.layer_id, param.region_name);
 
             void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
@@ -485,7 +477,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             use_group_cache_transfer_policy,
             group_type,
             param.cp_rank,
-            param.cp_size);
+            param.cp_size,
+            param.region_name);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }

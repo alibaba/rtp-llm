@@ -74,13 +74,25 @@ class MlaImplBase(object):
         if parallelism_config is None:
             return True
 
-        if not parallelism_config.prefill_cp_config.is_enabled():
-            return True
+        prefill_cp_config = parallelism_config.prefill_cp_config
+        if prefill_cp_config.is_enabled():
+            return cls.support_prefill_cp()
 
-        return cls.support_prefill_cp()
+        if (
+            bool(getattr(prefill_cp_config, "kv_cache_sharded", False))
+            and int(getattr(parallelism_config, "tp_size", 1)) > 1
+        ):
+            return cls.support_prefill_cache_sharding()
+
+        return True
 
     @classmethod
     def support_prefill_cp(cls) -> bool:
+        return False
+
+    @classmethod
+    def support_prefill_cache_sharding(cls) -> bool:
+        """Whether TP compute can consume a page-RR sharded prefill cache."""
         return False
 
     def forward(
