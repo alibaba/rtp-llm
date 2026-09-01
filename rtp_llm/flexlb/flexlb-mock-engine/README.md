@@ -49,7 +49,7 @@ bash run_online_eval.sh
 | /metrics | GET | Prometheus-format metrics |
 | /inject | POST | Inject fault (type, delay_ms, n, etc.) |
 | /clear_inject | POST | Clear all fault injections |
-| /set_perf | POST | Override prefill_ms, decode_step_ms, jitter |
+| /set_perf | POST | Override prefill_fixed_ms, decode_scale, max_prefill_concurrency |
 | /set_kv_pressure | POST | Set KV pressure (`active_kv_tokens` absolute / `tokens` additive) |
 | /set_queue_depth | POST | Set queue depth limit (real enqueue rejection) |
 | /stop_engine | POST | Stop engine (simulate crash) |
@@ -117,7 +117,8 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 
 **Python compat notes**:
 
-- `/snapshot` returns the legacy shape `{"engines": [...], "cluster_counters": {...}}`.
+- `/snapshot` returns the shape `{"engines": [...]}` (plus a top-level `ts_epoch_ms`
+  sampling timestamp).
 - `/inject` accepts both the Java format (`{"type": ..., "enabled": ...}`) and the
   legacy Python format (`{"config": {"enqueue_error": bool, ...}}`).
 - `/set_kv_pressure`: `active_kv_tokens` sets the absolute active-KV-token count

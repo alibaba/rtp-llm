@@ -404,10 +404,6 @@ final class MockPerformanceModel {
         return reportQueuedAsKvAllocated;
     }
 
-    void setJitterPct(double pct) {
-        this.jitterPct = pct;
-    }
-
     /**
      * Total decode duration for {@code outputLen} tokens at the given running
      * batch size (external semantics unchanged: "time to produce outputLen

@@ -34,12 +34,11 @@ import java.util.concurrent.TimeUnit;
  * (e.g. "prefill-0") or {@code {"port": N}} resolved by gRPC port, matching
  * the legacy Python mock control plane which addresses engines by name.
  * Response schemas follow Python: /snapshot wraps engines in
- * {@code {"engines": [...], "cluster_counters": {...}}}, /requests is keyed
- * by engine name, /health returns {@code {"status": "ok"}}, and /metrics
- * emits the Python metric names with matching labels (aggregated by role by
- * default, per-engine with {@code ?per_engine=true}). The pre-existing Java
- * request formats and legacy metric series are retained for backward
- * compatibility.
+ * {@code {"engines": [...]}}, /requests is keyed by engine name, /health
+ * returns {@code {"status": "ok"}}, and /metrics emits the Python metric
+ * names with matching labels (aggregated by role by default, per-engine with
+ * {@code ?per_engine=true}). The pre-existing Java request formats are
+ * retained for backward compatibility.
  *
  * <p>Uses JDK built-in {@link HttpServer} — no additional Maven dependencies.
  */
@@ -210,7 +209,7 @@ final class MockControlServer {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
             return;
         }
-        // Python cluster.snapshot() shape: {"engines": [...], "cluster_counters": {...}}
+        // Python cluster.snapshot() shape: {"engines": [...]}
         List<Map<String, Object>> engines = new ArrayList<>();
         for (JavaMockEngineCluster.FastRpcService service : orderedServices()) {
             engines.add(service.getSnapshot());
@@ -220,13 +219,6 @@ final class MockControlServer {
         // fields and the java_mock_stats ts_epoch_ms field (additive, top-level).
         response.put("ts_epoch_ms", System.currentTimeMillis());
         response.put("engines", engines);
-        // The Java cluster runs engines in-process (no remote decode forwarding),
-        // so the gRPC forwarding counters are always zero — kept for schema parity.
-        Map<String, Object> clusterCounters = new LinkedHashMap<>();
-        clusterCounters.put("grpc_error_count", 0);
-        clusterCounters.put("grpc_retry_count", 0);
-        clusterCounters.put("grpc_cancel_forward_count", 0);
-        response.put("cluster_counters", clusterCounters);
         sendJson(exchange, 200, response);
     }
 
@@ -321,16 +313,6 @@ final class MockControlServer {
             }
             if (body.has("max_prefill_concurrency")) {
                 service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
-            }
-            // Original Java fields retained:
-            if (body.has("prefill_ms")) {
-                perf.setOverrideFixedPrefillMs(body.get("prefill_ms").asDouble());
-            }
-            if (body.has("decode_step_ms")) {
-                perf.setOverrideDecodeStepMs(body.get("decode_step_ms").asDouble());
-            }
-            if (body.has("jitter_pct")) {
-                perf.setJitterPct(body.get("jitter_pct").asDouble());
             }
             return successResponse(service);
         });
@@ -581,7 +563,7 @@ final class MockControlServer {
         String query = exchange.getRequestURI().getQuery();
         boolean perEngine = query != null && query.contains("per_engine=true");
 
-        // Take one snapshot per engine; reused for both Python-style and legacy series.
+        // Take one snapshot per engine; reused by both emission modes.
         List<Map<String, Object>> snaps = new ArrayList<>();
         List<JavaMockEngineCluster.FastRpcService> engineServices = orderedServices();
         for (JavaMockEngineCluster.FastRpcService service : engineServices) {
@@ -596,12 +578,6 @@ final class MockControlServer {
         } else {
             appendAggregatedMetrics(sb, snaps);
         }
-        appendLegacyMetrics(sb, engineServices);
-
-        // Cluster-level counters (Java in-process model: always 0, schema-compatible).
-        sb.append("flexlb_mock_grpc_error_count 0\n");
-        sb.append("flexlb_mock_grpc_retry_count 0\n");
-        sb.append("flexlb_mock_grpc_cancel_forward_count 0\n");
 
         sendText(exchange, 200, sb.toString());
     }
@@ -616,8 +592,7 @@ final class MockControlServer {
     // ────────────────── Metrics builders ──────────────────
 
     /**
-     * HELP/TYPE lines for the union of the Python metric set (legacy
-     * ~L825-877 / ~L1344-1396) and the retained legacy Java series.
+     * HELP/TYPE lines for the Python metric set (legacy ~L825-877 / ~L1344-1396).
      */
     private static void appendMetricsMeta(StringBuilder sb) {
         String[][] meta = {
@@ -638,14 +613,6 @@ final class MockControlServer {
                 {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_count", "number of decode samples", "gauge"},
-                {"flexlb_mock_grpc_error_count", "Total gRPC errors in remote decode", "counter"},
-                {"flexlb_mock_grpc_retry_count", "Total gRPC retries in remote decode", "counter"},
-                {"flexlb_mock_grpc_cancel_forward_count", "Total cancel forwarded to remote engines", "counter"},
-                // Legacy Java-only series (retained, not part of the Python set).
-                {"mock_engine_running_tasks", "Current running tasks", "gauge"},
-                {"mock_engine_inflight_count", "Current inflight count", "gauge"},
-                {"mock_engine_kv_tokens_used", "KV cache tokens in use", "gauge"},
-                {"mock_engine_heap_used_bytes", "JVM heap used in bytes", "gauge"},
         };
         for (String[] m : meta) {
             sb.append("# HELP ").append(m[0]).append(' ').append(m[1]).append('\n');
@@ -768,25 +735,6 @@ final class MockControlServer {
         sb.append(String.format("mock_engine_%s_ms_avg{%s} %.1f%n", kind, label, avg));
         sb.append(String.format("mock_engine_%s_ms_p99{%s} %.1f%n", kind, label, p99));
         sb.append(String.format("mock_engine_%s_ms_count{%s} %d%n", kind, label, totalCount));
-    }
-
-    /** Retained legacy Java series with port/role labels (pre-Phase-2 format). */
-    private static void appendLegacyMetrics(StringBuilder sb,
-                                            List<JavaMockEngineCluster.FastRpcService> engineServices) {
-        Runtime runtime = Runtime.getRuntime();
-        long heapUsed = runtime.totalMemory() - runtime.freeMemory();
-        for (JavaMockEngineCluster.FastRpcService service : engineServices) {
-            // Lowercase role keeps the legacy series label-consistent with the
-            // Python-compat aggregated series (role="prefill"/"decode").
-            String labels = String.format("port=\"%d\",role=\"%s\"",
-                    service.getGrpcPort(), service.getRoleName().toLowerCase());
-            sb.append(String.format("mock_engine_running_tasks{%s} %d%n", labels, service.getRunningCount()));
-            sb.append(String.format("mock_engine_accepted_total{%s} %d%n", labels, service.getAcceptedCount()));
-            sb.append(String.format("mock_engine_completed_total{%s} %d%n", labels, service.getCompletedCount()));
-            sb.append(String.format("mock_engine_inflight_count{%s} %d%n", labels, service.getInflightCount()));
-            sb.append(String.format("mock_engine_kv_tokens_used{%s} %d%n", labels, service.getActiveKvTokens()));
-            sb.append(String.format("mock_engine_heap_used_bytes{%s} %d%n", labels, heapUsed));
-        }
     }
 
     private static long sumLong(List<Map<String, Object>> group, String key) {
