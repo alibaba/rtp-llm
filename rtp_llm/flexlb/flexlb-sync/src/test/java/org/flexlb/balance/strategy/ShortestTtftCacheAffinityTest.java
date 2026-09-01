@@ -158,6 +158,24 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
+    void newSessionWithoutPlacementStaysStatelessWhileAffinityIsDisabled() {
+        FlexlbConfig config = new FlexlbConfig();
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        BalanceContext context = buildContext(1024, 14L, config);
+        Request request = context.getRequest();
+        request.setModel("kimi-k3");
+        request.setSessionSchemaVersion(1);
+        request.setInferenceSessionId("session-1");
+        request.setInferenceSessionState(Request.SessionState.NEW);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals(-1L, request.getSessionPlacementEpoch());
+    }
+
+    @Test
     void establishedSessionDoesNotAllocateStateWhileAffinityIsDisabled() {
         FlexlbConfig config = new FlexlbConfig();
         useFixedCandidatePool(config, 1);
