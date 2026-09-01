@@ -50,4 +50,18 @@ class SessionPlacementStoreTest {
 
         assertTrue(store.find("model", "session-1", 1_000L).isEmpty());
     }
+
+    @Test
+    void rejectsCompletionPredatingSessionReset() {
+        SessionPlacementStore store = new SessionPlacementStore();
+        long oldEpoch = store.currentEpoch("model", "session-1");
+        long newEpoch = store.reset("model", "session-1");
+
+        store.record("model", "session-1", "10.0.0.1:9000", 101L, oldEpoch);
+        assertTrue(store.find("model", "session-1", 1_000L).isEmpty());
+
+        store.record("model", "session-1", "10.0.0.2:9000", 102L, newEpoch);
+        assertEquals("10.0.0.2:9000",
+                store.find("model", "session-1", 1_000L).orElseThrow().ipPort());
+    }
 }

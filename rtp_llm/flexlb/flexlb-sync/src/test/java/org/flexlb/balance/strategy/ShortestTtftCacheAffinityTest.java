@@ -137,6 +137,27 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
+    void newSessionResetsPlacementWhileAffinityIsDisabled() {
+        FlexlbConfig config = new FlexlbConfig();
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        BalanceContext context = buildContext(1000, 104L, config);
+        Request request = context.getRequest();
+        request.setModel("kimi-k3");
+        request.setSessionSchemaVersion(1);
+        request.setInferenceSessionId("session-1");
+        request.setInferenceSessionState(Request.SessionState.NEW);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        assertTrue(sessionPlacementStore.find("kimi-k3", "session-1", 1_000).isEmpty());
+    }
+
+    @Test
     void selectsGlobalCacheLeaderWithinExtraTtftBound() {
         FlexlbConfig config = cacheAffinityConfig(150, 5);
         useFixedCandidatePool(config, 1);
