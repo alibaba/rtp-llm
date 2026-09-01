@@ -32,8 +32,13 @@ from rtp_llm.models_py.utils.arch import is_sm120
 
 class Sm120SparseMlaHardwareTest(unittest.TestCase):
     def setUp(self) -> None:
-        if not torch.cuda.is_available() or not is_sm120():
-            self.skipTest("requires an SM120 CUDA device")
+        if not torch.cuda.is_available():
+            self.fail("SM120 hardware gate was scheduled without a CUDA device")
+        if not is_sm120():
+            self.fail(
+                "SM120 hardware gate was scheduled on "
+                f"compute capability {torch.cuda.get_device_capability()}"
+            )
         self.device = torch.device("cuda", torch.cuda.current_device())
         torch.manual_seed(7)
 
@@ -313,6 +318,95 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
                 replay_output = graph_output.clone()
                 eager_after_update = linear(activation)
                 torch.testing.assert_close(replay_output, eager_after_update)
+
+    def test_output_projection_eager_and_cuda_graph_against_dequantized_reference(
+        self,
+    ) -> None:
+        groups, rank, width = 2, 128, 512
+        layer = AttentionFP8.__new__(AttentionFP8)
+        torch.nn.Module.__init__(layer)
+        layer.o_lora_rank = rank
+
+        weight = (torch.randn(groups, rank, width, device=self.device) * 0.2).to(
+            torch.float8_e4m3fn
+        )
+        weight_exponents = (
+            torch.arange(
+                groups * (rank // 128) * (width // 128),
+                dtype=torch.float32,
+                device=self.device,
+            ).view(groups, rank // 128, width // 128)
+            % 4
+            - 2
+        )
+        weight_scale = torch.exp2(weight_exponents).to(torch.float8_e8m0fnu)
+        layer._wo_a_stk_w = weight
+        layer.wo_a_s = weight_scale.view(groups * (rank // 128), width // 128)
+
+        dequantized_weight = weight.float() * weight_scale.float().repeat_interleave(
+            128, dim=1
+        ).repeat_interleave(128, dim=2)
+
+        def make_input(rows: int, offset: int):
+            fp8 = (torch.randn(rows, groups, width, device=self.device) * 0.25).to(
+                torch.float8_e4m3fn
+            )
+            exponents = (
+                torch.arange(
+                    rows * groups * (width // 128),
+                    dtype=torch.float32,
+                    device=self.device,
+                ).view(rows, groups, width // 128)
+                + offset
+            ) % 5 - 2
+            scale = torch.exp2(exponents).to(torch.float8_e8m0fnu)
+            # Production fused_inv_rope_fp8_quant packs four UE8M0 bytes into
+            # each int32 along K. Preserve that exact ABI here.
+            packed_scale = scale.contiguous().view(torch.int32)
+            return fp8, scale, packed_scale
+
+        def reference(fp8: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+            dequantized_input = fp8.float() * scale.float().repeat_interleave(
+                128, dim=-1
+            )
+            return (
+                torch.einsum("mgk,grk->mgr", dequantized_input, dequantized_weight)
+                .to(torch.bfloat16)
+                .view(1, fp8.shape[0], groups, rank)
+            )
+
+        # M=1 covers the decode boundary; 3 and 5 exercise both sides of the
+        # internal four-row padding boundary. G=2 verifies grouped projection.
+        for rows in (1, 3, 5):
+            with self.subTest(rows=rows):
+                fp8, scale, packed_scale = make_input(rows, 0)
+                eager = layer._wo_a_einsum_from_fp8(fp8, packed_scale, 1, rows)
+                torch.testing.assert_close(
+                    eager.float(),
+                    reference(fp8, scale).float(),
+                    rtol=3e-2,
+                    atol=2e-1,
+                )
+
+                static_fp8 = fp8.clone()
+                static_scale = packed_scale.clone()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    graph_output = layer._wo_a_einsum_from_fp8(
+                        static_fp8, static_scale, 1, rows
+                    )
+
+                replay_fp8, replay_scale, replay_packed_scale = make_input(rows, 1)
+                static_fp8.copy_(replay_fp8)
+                static_scale.copy_(replay_packed_scale)
+                graph.replay()
+                torch.cuda.synchronize(self.device)
+                torch.testing.assert_close(
+                    graph_output.float(),
+                    reference(replay_fp8, replay_scale).float(),
+                    rtol=3e-2,
+                    atol=2e-1,
+                )
 
     def test_hca_8192_eager_and_cuda_graph_replay(self) -> None:
         swa_source = torch.randn((12, 512), dtype=torch.bfloat16, device=self.device)

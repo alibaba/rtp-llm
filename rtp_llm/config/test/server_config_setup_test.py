@@ -4,7 +4,7 @@ import os
 import sys
 import unittest
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
@@ -75,7 +75,7 @@ class ServerConfigPortLayoutTest(TestCase):
 class AutoDeepEpArchitectureTest(TestCase):
     @patch(
         "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
-        side_effect=[(12, 0), (12, 1)],
+        side_effect=[(12, 0), (12, 0)],
     )
     @patch(
         "rtp_llm.config.server_config_setup.torch.cuda.device_count",
@@ -86,7 +86,7 @@ class AutoDeepEpArchitectureTest(TestCase):
         return_value=True,
     )
     def test_exact_sm120_disables_auto_deepep(self, *_mocks):
-        self.assertFalse(_auto_deepep_supported_on_visible_devices())
+        self.assertFalse(_auto_deepep_supported_on_visible_devices(2))
 
     @patch(
         "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
@@ -100,8 +100,29 @@ class AutoDeepEpArchitectureTest(TestCase):
         "rtp_llm.config.server_config_setup.torch.cuda.is_available",
         return_value=True,
     )
-    def test_other_sm12x_keeps_normal_auto_selection(self, *_mocks):
-        self.assertTrue(_auto_deepep_supported_on_visible_devices())
+    def test_other_sm12x_fails_with_explicit_capability_error(self, *_mocks):
+        with self.assertRaisesRegex(RuntimeError, "SM121.*exact SM120 only"):
+            _auto_deepep_supported_on_visible_devices(2)
+
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
+        side_effect=[(9, 0), (9, 0), (12, 0), (12, 0)],
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.device_count",
+        return_value=4,
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+        return_value=True,
+    )
+    def test_nonparticipating_sm120_devices_do_not_change_selection(
+        self, _is_available, _device_count, get_device_capability
+    ):
+        self.assertTrue(_auto_deepep_supported_on_visible_devices(2))
+        self.assertEqual(
+            [call.args[0] for call in get_device_capability.call_args_list], [0, 1]
+        )
 
 
 class NcclP2pSetupTest(TestCase):

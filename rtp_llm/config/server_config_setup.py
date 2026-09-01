@@ -18,23 +18,43 @@ from rtp_llm.ops import (
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
-def _auto_deepep_supported_on_visible_devices() -> bool:
-    """Whether automatic DeepEP selection is valid for this CUDA runtime.
+def _auto_deepep_supported_on_visible_devices(local_world_size: int = 0) -> bool:
+    """Whether automatic DeepEP selection is valid for participating devices.
 
     Consumer Blackwell SM120 uses the generic SM120 collective strategy;
-    DeepEP does not ship compatible kernels there.  Other SM12x revisions do
-    not have that exact strategy and must retain the normal backend selection.
-    A user who explicitly
-    requests DeepEP still reaches the normal fail-fast validation path.
+    DeepEP does not ship compatible kernels there. Other SM12x revisions have
+    neither a compatible DeepEP wheel nor the exact-SM120 fallback and are
+    rejected explicitly. Devices visible to the process but outside the local
+    world do not participate and must not affect backend selection.
     """
     if not torch.cuda.is_available():
         # Preserve CPU-only config parsing and unit-test behavior.  Runtime
         # hardware validation occurs later when CUDA is initialized.
         return True
-    return all(
-        torch.cuda.get_device_capability(device_index) != (12, 0)
-        for device_index in range(torch.cuda.device_count())
+    device_count = torch.cuda.device_count()
+    participating_device_count = min(
+        device_count,
+        local_world_size if local_world_size > 0 else device_count,
     )
+    capabilities = [
+        torch.cuda.get_device_capability(device_index)
+        for device_index in range(participating_device_count)
+    ]
+    unsupported_sm12x = [
+        capability
+        for capability in capabilities
+        if capability[0] == 12 and capability != (12, 0)
+    ]
+    if unsupported_sm12x:
+        revisions = ", ".join(
+            sorted({f"SM{major}{minor}" for major, minor in unsupported_sm12x})
+        )
+        raise RuntimeError(
+            "Automatic MoE backend selection does not support "
+            f"{revisions}: DeepEP is unavailable on SM12x and the generic "
+            "collective fallback currently supports exact SM120 only"
+        )
+    return all(capability != (12, 0) for capability in capabilities)
 
 
 def auto_configure_deepep(
@@ -144,7 +164,9 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        if _auto_deepep_supported_on_visible_devices():
+        if _auto_deepep_supported_on_visible_devices(
+            parallelism_config.local_world_size
+        ):
             _apply_auto_deepep_config(
                 moe_config=moe_config,
                 world_size=parallelism_config.world_size,
@@ -156,8 +178,8 @@ def auto_configure_deepep(
             moe_config.use_deepep_low_latency = False
             moe_config.use_deepep_internode = False
             logging.info(
-                "Automatic DeepEP selection is disabled on SM120; using the "
-                "generic SM120 collective strategy"
+                "Automatic DeepEP selection is disabled on participating "
+                "SM120 devices; using the generic SM120 collective strategy"
             )
     else:
         # User has set at least one value, copy them to moe_config

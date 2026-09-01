@@ -13,13 +13,13 @@ softmax merging across both pools (mirrors vLLM
 pools -> BF16 cat -> TileLang sparse_attn" path which was
 bandwidth-bound on the dequant kernels.
 
-FlashMLA wheel is required (CUDA >= 12.9). The op asserts wheel
-availability at forward — there is no slow Python reference fallback
-because all dev/CI/prod boxes carry flash_mla.
+FlashMLA wheel is required for the non-SM120 path (CUDA >= 12.9). It is
+loaded lazily at forward — there is no slow Python reference fallback.
 """
 
 from __future__ import annotations
 
+import importlib
 import logging
 from typing import Any, Optional
 
@@ -28,18 +28,37 @@ import torch
 from rtp_llm.models_py.utils.arch import is_sm120
 
 _FLASH_MLA_AVAILABLE = False
-try:
-    if torch.version.cuda:
-        major, minor = map(int, torch.version.cuda.split(".")[:2])
-        if (major, minor) >= (12, 9):
-            from flash_mla import (
-                flash_mla_with_kvcache,  # type: ignore[import-not-found]
-            )
-            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+_flash_mla_load_attempted = False
 
-            _FLASH_MLA_AVAILABLE = True
-except (ImportError, AttributeError, ValueError) as e:
-    logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
+
+def _load_flash_mla() -> bool:
+    """Validate the optional FlashMLA wheel on first non-SM120 use.
+
+    Importing the DSv4 model package is shared by CUDA variants that do not use
+    FlashMLA.  Keep wheel loading out of module initialization so a missing or
+    ABI-incompatible optional wheel cannot break those startup paths.
+    """
+    global _FLASH_MLA_AVAILABLE, _flash_mla_load_attempted
+    if _FLASH_MLA_AVAILABLE:
+        return True
+    if _flash_mla_load_attempted:
+        return False
+    _flash_mla_load_attempted = True
+    try:
+        if not torch.version.cuda:
+            return False
+        major, minor = map(int, torch.version.cuda.split(".")[:2])
+        if (major, minor) < (12, 9):
+            return False
+        flash_mla = importlib.import_module("flash_mla")
+        getattr(flash_mla, "flash_mla_with_kvcache")
+        getattr(flash_mla, "get_mla_metadata")
+    except (ImportError, AttributeError, OSError, RuntimeError, ValueError) as error:
+        logging.info("[dsv4-fp8] FlashMLA unavailable (%s)", error)
+        return False
+    _FLASH_MLA_AVAILABLE = True
+    return True
+
 
 _sm120_sparse_mla = None
 _sm120_sparse_mla_load_attempted = False
@@ -169,10 +188,11 @@ class SparseAttnV4DecodeFp8Op:
                 extra_topk_idxs,
                 extra_topk_length,
             )
-        assert _FLASH_MLA_AVAILABLE, (
-            "flash_mla wheel is required for FP8 sparse decode "
-            "(install rtp_llm with cuda12_9 / cuda13 config)"
-        )
+        if not _load_flash_mla():
+            raise RuntimeError(
+                "FlashMLA is required for non-SM120 FP8 sparse decode; "
+                "install the cuda12_9/cuda13 RTP-LLM dependency set"
+            )
         return self._forward_flash_mla(
             q,
             kv_cache,

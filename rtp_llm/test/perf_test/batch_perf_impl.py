@@ -231,6 +231,14 @@ class BatchPerfImpl(object):
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
 
+        aggregate_results = analyze_results(all_measure_responses)
+        if aggregate_results.success_requests == 0:
+            raise RuntimeError(
+                "performance measurement failed: no requests succeeded "
+                f"({aggregate_results.fail_requests}/"
+                f"{aggregate_results.total_requests} failed)"
+            )
+
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that
             # all TP/DP ranks profile the upcoming request.  Requires the

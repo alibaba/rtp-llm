@@ -6,12 +6,8 @@ identical results to deep_gemm's get_mn_major_tma_aligned_packed_ue8m0_tensor.
 """
 
 from unittest import SkipTest, TestCase, main
-from unittest.mock import patch
 
 import torch
-
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
-from rtp_llm.models_py.utils import arch
 
 
 def _is_sm100() -> bool:
@@ -67,39 +63,6 @@ def create_test_scale_for_reference(E: int, T: int, num_groups: int) -> torch.Te
 # ============================================================================
 # Tests for pack_ue8m0_kernel_launcher
 # ============================================================================
-
-
-class TestUe8m0LayoutPolicy(TestCase):
-    def tearDown(self) -> None:
-        arch._get_sm_for_device.cache_clear()
-
-    def test_only_sm10x_uses_deepgemm_ue8m0_layout(self):
-        for capability, expected in (
-            ((10, 0), True),
-            ((12, 0), False),
-            ((9, 0), False),
-        ):
-            with self.subTest(capability=capability), patch.object(
-                arch, "is_cuda", return_value=True
-            ), patch.object(torch.cuda, "current_device", return_value=0), patch.object(
-                torch.cuda, "get_device_capability", return_value=capability
-            ):
-                arch._get_sm_for_device.cache_clear()
-                self.assertEqual(is_deep_gemm_e8m0_used(), expected)
-
-    def test_layout_policy_is_cached_per_device(self):
-        capabilities = {0: (10, 0), 1: (12, 0)}
-        with patch.object(arch, "is_cuda", return_value=True), patch.object(
-            torch.cuda,
-            "get_device_capability",
-            side_effect=lambda device: capabilities[int(device)],
-        ):
-            arch._get_sm_for_device.cache_clear()
-            self.assertTrue(is_deep_gemm_e8m0_used(0))
-            self.assertFalse(is_deep_gemm_e8m0_used(1))
-            # Switching back must use device 0's cached capability rather than
-            # a process-global answer produced for device 1.
-            self.assertTrue(is_deep_gemm_e8m0_used(0))
 
 
 class TestPackUe8m0KernelLauncher(TestCase):

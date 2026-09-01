@@ -27,8 +27,13 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 class Sm120IndexerHardwareTest(unittest.TestCase):
     def setUp(self) -> None:
-        if not torch.cuda.is_available() or not is_sm120():
-            self.skipTest("requires an SM120 CUDA device")
+        if not torch.cuda.is_available():
+            self.fail("SM120 hardware gate was scheduled without a CUDA device")
+        if not is_sm120():
+            self.fail(
+                "SM120 hardware gate was scheduled on "
+                f"compute capability {torch.cuda.get_device_capability()}"
+            )
         self.device = torch.device("cuda", torch.cuda.current_device())
         torch.manual_seed(23)
 

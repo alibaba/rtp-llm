@@ -102,6 +102,14 @@ def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
     return [int(x) for x in args.batch_size.split(",")]
 
 
+def _engine_tp_size(
+    engine_args: List[str], environ: Mapping[str, str] = os.environ
+) -> int:
+    """Resolve the TP topology used by the engine for result metadata."""
+    value = extract_arg(engine_args, "tp_size") or environ.get("TP_SIZE", "1")
+    return int(value)
+
+
 # ---------------------------------------------------------------------------
 #  Phase 3: Run — prefill / decode dispatch
 # ---------------------------------------------------------------------------
@@ -113,6 +121,7 @@ def _run_prefill(
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
     batch_size_list: Optional[List[int]] = None,
+    tp_size: int = 1,
     **kwargs: Any,
 ) -> None:
     """Prefill grid run.
@@ -131,6 +140,7 @@ def _run_prefill(
         config.input_len_list,
         input_query_dict,
         is_decode=False,
+        tp_size=tp_size,
         **kwargs,
     ).run()
 
@@ -142,6 +152,7 @@ def _run_decode(
     config: PerfTestConfig,
     input_query_dict: Dict[int, str],
     engine_status: Dict[str, Any],
+    tp_size: int = 1,
     **kwargs: Any,
 ) -> None:
     max_kv = (
@@ -196,6 +207,7 @@ def _run_decode(
                     [input_len],
                     input_query_dict,
                     is_decode=True,
+                    tp_size=tp_size,
                     **kwargs,
                 ).run()
 
@@ -250,6 +262,7 @@ def main() -> str:
             decode_test_length=args.decode_test_length,
             generate_config=generate_config,
             num_measures=args.num_measures,
+            tp_size=_engine_tp_size(remaining),
         )
 
         if args.partial == 2:
@@ -273,10 +286,8 @@ def main() -> str:
                 **runner_kwargs,
             )
 
-        # Cleanup
+        # Persist runtime artifacts only after the measured work completed.
         collect_timeline_files(args.result_dir)
-        server.stop()
-        write_test_info(args, remaining)
 
         if args.partial != 2:
             from rtp_llm.test.perf_test.visualization import plot_decode_results
@@ -286,7 +297,12 @@ def main() -> str:
             except Exception as e:
                 logging.warning(f"plot_decode_results failed: {e}")
     finally:
-        summarize_and_cleanup_coredumps(args.result_dir)
+        try:
+            server.stop()
+        finally:
+            summarize_and_cleanup_coredumps(args.result_dir)
+
+    write_test_info(args, remaining)
 
     return args.result_dir
 
