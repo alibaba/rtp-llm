@@ -109,14 +109,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
@@ -125,6 +125,20 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+TEST_F(ModelDataTest, testComboPositionIdsDeviceIsEncodedInTpShapeHints) {
+    GptModelInputs inputs;
+    inputs.combo_position_ids = torch::arange(6, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto shape_hints = getModelInputShapeHints(inputs);
+    auto device_bits = static_cast<uint32_t>(shape_hints[GptModelInputIndex::tensorDeviceMap]);
+    EXPECT_NE(device_bits & GptModelInputDeviceBit::kDeviceBitComboPositionIds, 0u);
+
+    inputs.combo_position_ids = inputs.combo_position_ids.cpu();
+    shape_hints               = getModelInputShapeHints(inputs);
+    device_bits               = static_cast<uint32_t>(shape_hints[GptModelInputIndex::tensorDeviceMap]);
+    EXPECT_EQ(device_bits & GptModelInputDeviceBit::kDeviceBitComboPositionIds, 0u);
 }
 
 }  // namespace rtp_llm

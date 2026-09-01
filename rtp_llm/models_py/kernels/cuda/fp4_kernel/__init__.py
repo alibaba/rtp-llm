@@ -29,10 +29,25 @@ if is_cuda():
         )
     except (ImportError, AttributeError, OSError, RuntimeError) as error:
         logger.info("FlashInfer CuTeDSL FP4 backend unavailable: %s", error)
+
+
+def is_flashinfer_cutedsl_fp4_available() -> bool:
+    """Whether every wrapper required by the CuTeDSL FP4 backend loaded."""
+    return all(
+        wrapper is not None
+        for wrapper in (
+            flashinfer_cutedsl_moe_masked,
+            scaled_fp4_grouped_quant,
+            silu_and_mul_scaled_fp4_grouped_quant,
+        )
+    )
+
+
 __all__ = [
     "cutlass_scaled_fp4_mm_wrapper",
     "scaled_fp4_quant_wrapper",
     "scaled_fp4_grouped_quant",
     "silu_and_mul_scaled_fp4_grouped_quant",
     "flashinfer_cutedsl_moe_masked",
+    "is_flashinfer_cutedsl_fp4_available",
 ]
