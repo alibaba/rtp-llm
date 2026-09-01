@@ -262,6 +262,22 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
     }
 
 #if CUDART_VERSION >= 12080
+    constexpr int min_batch_driver_version = CUDART_VERSION >= 13000 ? 13000 : 12080;
+    const int     driver_version           = getCudaVersion();
+    if (driver_version < min_batch_driver_version) {
+        static std::once_flag driver_warning_once;
+        std::call_once(driver_warning_once, [driver_version, min_batch_driver_version] {
+            RTP_LLM_LOG_WARNING(
+                "execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d requires driver API version "
+                ">=%d for its cudaMemcpyBatchAsync ABI, installed driver API version=%d; falling back to generic "
+                "copy",
+                CUDART_VERSION,
+                min_batch_driver_version,
+                driver_version);
+        });
+        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
+    }
+
     int        runtime_version       = 0;
     const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
     if (runtime_version_error != cudaSuccess) {
