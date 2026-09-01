@@ -9,6 +9,8 @@ cc_library(
     hdrs = ["pipeline/PPTypes.h"],
     copts = copts(),
     deps = [
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/models_py/bindings/core:op_data",
     ] + torch_deps(),
     visibility = ["//visibility:public"],
@@ -20,6 +22,7 @@ cc_library(
         "*.h",
         "speculative/*.h",
     ]) + [
+        "pipeline/PPBatchStreamProcessor.h",
         "pipeline/PPExecutor.h",
         "pipeline/PPSerialization.h",
         "pipeline/PPTransport.h",
@@ -28,6 +31,7 @@ cc_library(
         "*.cc",
         "speculative/*.cc",
     ]) + [
+        "pipeline/PPBatchStreamProcessor.cc",
         "pipeline/PPExecutor.cc",
         "pipeline/PPSerialization.cc",
         "pipeline/PPTransport.cc",

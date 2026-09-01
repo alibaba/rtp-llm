@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <list>
+#include <vector>
 
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOSchedulerBase.h"
 
@@ -18,7 +20,7 @@ public:
 
     ~PPScheduler() override;
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    absl::StatusOr<ScheduleOutput> schedule() override;
 
 private:
     /** Per-round scheduling and admission accounting. */
@@ -39,6 +41,8 @@ private:
                                const GenerateStreamPtr&            new_stream) override;
 
     bool waitPredicate() override;
+
+    void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) override;
 
     std::list<GenerateStreamPtr> evaluateRunningStreams();
 
@@ -61,7 +65,8 @@ private:
 
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
 
-    const size_t max_batch_tokens_without_cache_ = 0;
+    const size_t         max_batch_tokens_without_cache_ = 0;
+    std::vector<int64_t> finished_request_ids_;
 };
 
 }  // namespace rtp_llm

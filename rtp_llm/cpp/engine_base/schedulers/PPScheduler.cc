@@ -34,6 +34,13 @@ PPScheduler::~PPScheduler() {
     RTP_LLM_LOG_INFO("destroy PPScheduler");
 }
 
+void PPScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
+    if (new_state == StreamState::FINISHED) {
+        finished_request_ids_.push_back(stream->streamId());
+    }
+    FIFOSchedulerBase::addStreamToNewState(stream, new_state);
+}
+
 list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
     list<GenerateStreamPtr> scheduled_streams;
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
@@ -226,7 +233,7 @@ bool PPScheduler::waitPredicate() {
            || !running_streams_.empty();
 }
 
-absl::StatusOr<list<GenerateStreamPtr>> PPScheduler::schedule() {
+absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     RTP_LLM_PROFILE_FUNCTION();
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
@@ -236,6 +243,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PPScheduler::schedule() {
     }
 
     schedule_trigger_ = false;
+    finished_request_ids_.clear();
 
     /** 1. Handle all running streams, skip the in-flight streams. */
     auto scheduled_streams = evaluateRunningStreams();
@@ -274,7 +282,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PPScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return scheduled_streams;
+    return ScheduleOutput{std::move(scheduled_streams), std::move(finished_request_ids_)};
 }
 
 }  // namespace rtp_llm

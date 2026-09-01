@@ -254,7 +254,7 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.dspark_call_phase         = static_cast<DSparkCallPhase>(r.val<int32_t>());
 }
 
-void writeSamplingData(ByteWriter& w, const PPSamplingData& s) {
+void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {
     w.val<uint64_t>(s.random_seeds.size());
     for (const auto& seed : s.random_seeds) {
         w.flag(seed.has_value());
@@ -279,7 +279,6 @@ void writeSamplingData(ByteWriter& w, const PPSamplingData& s) {
             w.val<int32_t>(id);
         }
     }
-    w.flag(s.need_cum_log_probs);
     w.tensor(s.request_ids);
     w.tensor(s.token_ids);
     w.tensor(s.input_lengths);
@@ -295,7 +294,7 @@ void writeSamplingData(ByteWriter& w, const PPSamplingData& s) {
     w.tensor(s.finished_mask);
 }
 
-void readSamplingData(ByteReader& r, PPSamplingData& s) {
+void readSamplingPlan(ByteReader& r, PPSamplingPlan& s) {
     const auto seed_num = r.val<uint64_t>();
     s.random_seeds.resize(seed_num);
     for (uint64_t i = 0; i < seed_num; ++i) {
@@ -325,7 +324,6 @@ void readSamplingData(ByteReader& r, PPSamplingData& s) {
             cfg.end_think_token_ids[k] = r.val<int32_t>();
         }
     }
-    s.need_cum_log_probs   = r.flag();
     s.request_ids          = r.tensor();
     s.token_ids            = r.tensor();
     s.input_lengths        = r.tensor();
@@ -341,6 +339,27 @@ void readSamplingData(ByteReader& r, PPSamplingData& s) {
     s.finished_mask        = r.tensor();
 }
 
+void writeOutputConfig(ByteWriter& w, const PPOutputConfig& output_config) {
+    w.flag(output_config.return_logits);
+    w.flag(output_config.return_softmax_probs);
+    w.flag(output_config.return_cum_log_probs);
+    w.flag(output_config.calculate_loss);
+    w.flag(output_config.return_hidden_states);
+    w.flag(output_config.return_all_hidden_states);
+    w.val<int32_t>(static_cast<int32_t>(output_config.return_all_probs));
+}
+
+void readOutputConfig(ByteReader& r, PPOutputConfig& output_config) {
+    output_config.return_logits            = r.flag();
+    output_config.return_softmax_probs     = r.flag();
+    output_config.return_cum_log_probs     = r.flag();
+    output_config.calculate_loss           = r.flag();
+    output_config.return_hidden_states     = r.flag();
+    output_config.return_all_hidden_states = r.flag();
+    const auto return_all_probs            = r.val<int32_t>();
+    output_config.return_all_probs         = static_cast<ReturnAllProbsMode>(return_all_probs);
+}
+
 }  // namespace
 
 torch::Tensor serializePlan(const PPExecutionPlan& plan, bool empty_plan) {
@@ -349,7 +368,12 @@ torch::Tensor serializePlan(const PPExecutionPlan& plan, bool empty_plan) {
     w.flag(empty_plan);
     if (!empty_plan) {
         writeModelInput(w, plan.model_input);
-        writeSamplingData(w, plan.sampling);
+        writeSamplingPlan(w, plan.sampling_plan);
+        writeOutputConfig(w, plan.output_config);
+        w.val<uint64_t>(plan.finished_request_ids.size());
+        for (const auto request_id : plan.finished_request_ids) {
+            w.val<int64_t>(request_id);
+        }
     }
     return w.finish();
 }
@@ -362,43 +386,66 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
         return plan;  // empty plan marker
     }
     readModelInput(r, plan.model_input);
-    readSamplingData(r, plan.sampling);
+    readSamplingPlan(r, plan.sampling_plan);
+    readOutputConfig(r, plan.output_config);
+    const auto finished_request_num = r.val<uint64_t>();
+    plan.finished_request_ids.resize(finished_request_num);
+    for (uint64_t index = 0; index < finished_request_num; ++index) {
+        plan.finished_request_ids[index] = r.val<int64_t>();
+    }
     r.expectEnd();
     return plan;
 }
 
-torch::Tensor serializeSampleResult(const PPSampleResult& result) {
+torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
     ByteWriter w;
     w.val<uint32_t>(kVersion);
     w.tensor(result.request_ids);
     w.tensor(result.new_token_ids);
     w.tensor(result.sample_success);
+    w.tensor(result.hidden_states);
+    w.tensor(result.logits);
+    w.tensor(result.softmax_probs);
     w.tensor(result.cum_log_probs);
-    w.val<uint64_t>(result.errors.size());
-    for (const auto& err : result.errors) {
-        w.val<int64_t>(err.request_id);
-        w.val<int32_t>(err.error_code);
-        w.str(err.message);
+    w.tensor(result.all_probs);
+    w.tensor(result.loss);
+    w.tensor(result.all_hidden_states);
+    w.val<uint64_t>(result.processor_errors.size());
+    for (const auto& error : result.processor_errors) {
+        w.flag(error.has_value());
+        if (!error.has_value()) {
+            continue;
+        }
+        w.val<int32_t>(static_cast<int32_t>(error->code()));
+        w.str(error->ToString());
     }
     return w.finish();
 }
 
-PPSampleResult deserializeSampleResult(const torch::Tensor& buffer) {
+PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
     ByteReader r(buffer);
-    RTP_LLM_CHECK_WITH_INFO(r.val<uint32_t>() == kVersion, "PP sample-result payload version mismatch");
-    PPSampleResult result;
-    result.request_ids    = r.tensor();
-    result.new_token_ids  = r.tensor();
-    result.sample_success = r.tensor();
-    result.cum_log_probs  = r.tensor();
-    const auto error_num  = r.val<uint64_t>();
-    result.errors.reserve(error_num);
-    for (uint64_t i = 0; i < error_num; ++i) {
-        PPSampleError err;
-        err.request_id = r.val<int64_t>();
-        err.error_code = r.val<int32_t>();
-        err.message    = r.str();
-        result.errors.push_back(std::move(err));
+    RTP_LLM_CHECK_WITH_INFO(r.val<uint32_t>() == kVersion, "PP execution-result payload version mismatch");
+
+    PPExecutionResult result;
+    result.request_ids       = r.tensor();
+    result.new_token_ids     = r.tensor();
+    result.sample_success    = r.tensor();
+    result.hidden_states     = r.tensor();
+    result.logits            = r.tensor();
+    result.softmax_probs     = r.tensor();
+    result.cum_log_probs     = r.tensor();
+    result.all_probs         = r.tensor();
+    result.loss              = r.tensor();
+    result.all_hidden_states = r.tensor();
+
+    const auto processor_error_num = r.val<uint64_t>();
+    result.processor_errors.resize(processor_error_num);
+    for (uint64_t index = 0; index < processor_error_num; ++index) {
+        if (!r.flag()) {
+            continue;
+        }
+        const auto error_code          = static_cast<ErrorCode>(r.val<int32_t>());
+        result.processor_errors[index] = ErrorInfo(error_code, r.str());
     }
     r.expectEnd();
     return result;

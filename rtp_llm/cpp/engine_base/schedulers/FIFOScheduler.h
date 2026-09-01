@@ -31,7 +31,7 @@ public:
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
-    absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    absl::StatusOr<ScheduleOutput> schedule() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -71,7 +71,7 @@ private:
                                const GenerateStreamPtr&            new_stream) override;
     // Counter-based admission check used by admitWaitingStreams(). evaluateRunningMemory()
     // is the list-based FIFOSchedulerBase entry point and delegates here.
-    bool   evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     // Overload for group-queue admission: the admitted streams are tracked as a list
     // because ScheduleRuntime is not built in the group-queue path.
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
