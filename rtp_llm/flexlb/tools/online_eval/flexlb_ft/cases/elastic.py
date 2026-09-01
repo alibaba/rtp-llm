@@ -997,3 +997,318 @@ def elastic_remove_pending_drain(ctx: CaseContext):
             AssertUtils.inflight_clean(_master_http(ops), 30.0)
         except Exception:
             pass
+
+
+# ===========================================================================
+# Scale-out traffic-preference shape (user-named coverage gap, 2026-09):
+# does traffic favour the freshly added, queue-empty engine?
+# ===========================================================================
+#
+# Routing scores prefill candidates by projected TTFT, which folds in the
+# queue/ledger depth: a freshly added engine starts with an empty queue and
+# an empty ledger, so it scores LOWEST and is necessarily preferred at
+# first — the cost-aware-routing design intent (the newcomer absorbs the
+# excess and helps rebalance).  The CORRECT shape is: transient burst
+# allowed, sustained exclusivity NOT allowed, old engines never starved,
+# self-converging — the newcomer's queue fills, its projected TTFT rises,
+# routing falls back into the RANDOM_WITHIN_TOLERANCE parity window and
+# the distribution returns to uniform.  elastic_rebalance pins only the
+# post-scale-out steady share (<60%); elastic_add_preference pins the
+# add_flow SHAPE around it: transient burst + steady re-flattening +
+# oscillation probe, with the same accepted-counter delta caliber.
+
+# Measurement windows, in seconds, timed from the instant the master view
+# converges (discovered==alive==3): every window below is an
+# accepted-counter DELTA between snapshot samples taken at/after that
+# instant, so discovery-convergence counts cannot pollute any window.
+ADD_PREF_BASELINE_S = 15.0  # pre-add steady split on the 2 old prefills (obs)
+ADD_PREF_TOTAL_S = 45.0  # post-add measurement window
+ADD_PREF_TRANSIENT_S = 10.0  # leading transient sub-window
+ADD_PREF_TRANSIENT_PEAK_S = 5.0  # transient sub-slices for the peak capture
+# The steady window is the remaining 35s split into 5 equal 7s sub-windows
+# for the oscillation observation (sample offsets 10, 17, 24, 31, 38, 45).
+ADD_PREF_STEADY_SUBWINDOWS = 5
+# CONTRACT bands for the steady-window newcomer share (P1, case override —
+# the same override mechanism as balance_overload_avoid_decode's P5 delta
+# caliber): normal/loose = 60%, the elastic_rebalance parity band, so
+# sustained exclusivity (>60% of the steady traffic on the newcomer)
+# breaks the contract at EVERY grade; strict = 50%, a quality bar for
+# near-uniform convergence.  CALIBRATION PLAN (task #61 discipline):
+# first runs record the observed steady share; if it lands far below 60%,
+# tighten the normal/loose tiers accordingly.
+ADD_PREF_SHARE_BANDS = {"strict": 0.50, "normal": 0.60, "loose": 0.60}
+# Old-engine starvation floor (P2 hard invariant): each of the two
+# pre-existing prefills keeps >= 10% of the steady-window traffic.
+ADD_PREF_OLD_FLOOR = 0.10
+
+
+def _accepted_timeline(ops, engine_names, offsets_s):
+    """Sample per-engine accepted counters at *offsets_s* seconds from NOW.
+
+    While waiting for the next offset the master's HTTP health is probed
+    at most once per second (any non-200 flips the returned flag).  Every
+    downstream window is a DELTA between samples, so counts that piled up
+    before the caller starts the timeline cannot leak into a window.
+    Returns (samples, master_200) with samples aligned to *offsets_s*
+    (the first offset should be 0.0 so the baseline sample is immediate).
+    """
+    samples = []
+    master_200 = True
+    last_probe = 0.0
+    t0 = time.monotonic()
+    idx = 0
+    while idx < len(offsets_s):
+        if time.monotonic() - t0 >= offsets_s[idx]:
+            snap = ops.snapshot_by_name()
+            samples.append(
+                (
+                    offsets_s[idx],
+                    {n: int(snap.get(n, {}).get("accepted", 0)) for n in engine_names},
+                )
+            )
+            idx += 1
+            continue
+        if time.monotonic() - last_probe >= 1.0:
+            code = http_get_status(
+                f"{_master_http(ops)}/rtp_llm/inflight_status", timeout=5
+            )
+            if code != 200:
+                master_200 = False
+            last_probe = time.monotonic()
+        time.sleep(min(1.0, max(0.05, offsets_s[idx] - (time.monotonic() - t0))))
+    return samples, master_200
+
+
+@case(
+    "elastic_add_preference",
+    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    source=(
+        "user-named gap: post-scale-out traffic preference shape "
+        "(queue-empty newcomer)"
+    ),
+)
+def elastic_add_preference(ctx: CaseContext):
+    """Post-scale-out traffic-preference SHAPE (user-named coverage gap:
+    "流量会不会偏好没排队的新引擎" — does traffic favour the freshly added,
+    queue-empty engine?).
+
+    Scenario: the SHARED elastic env (2P+4D, dynamic file discovery —
+    reusing elastic_spec keeps the fingerprint compatible, so no extra
+    environment rebuild; the prefill axis 2→3 is the measured dimension).
+    A steady background flow of UNIQUE-KEY requests (block key derived
+    from a fresh rid every time — the aff family's free-unique-key
+    construction) runs to prefill so no prefix affinity can pin traffic:
+    the measurement sees the pure queue/ledger routing dimension.  After
+    the master view converges (discovered==alive==2) a ~15s baseline
+    records the pre-add split; add_engine brings a 3rd prefill; after
+    discovered==alive==3 a 45s measurement window runs — leading 10s
+    transient, remaining 35s steady (5 x 7s sub-windows) — then the
+    dynamic engine is removed in the finally hygiene.
+
+    Behaviour: routing scores prefill candidates by projected TTFT
+    (queue/ledger depth included).  The newcomer starts empty-queue and
+    empty-ledger, so it scores LOWEST and is necessarily preferred at
+    first — by design: cost-aware routing lets the newcomer absorb the
+    excess and helps rebalance.  As its queue fills, its projected TTFT
+    rises and routing falls back into the RANDOM_WITHIN_TOLERANCE parity
+    window: the distribution self-converges to near-uniform.
+
+    Expected (CONTRACT — the behaviour the system SHOULD have, not
+    necessarily what it has today):
+      1. The scale-out takes effect: the newcomer receives traffic
+         (post-add window delta > 0).
+      2. (observation, no hard band) transient burst ALLOWED: the first
+         10s newcomer share may sit well above the uniform 1/3 — the
+         recorded 5s-slice peak calibrates a future band.
+      3. (invariant, P1 override) steady share bounded: over the last
+         35s the newcomer's share stays under the 60% elastic_rebalance
+         parity band (sustained exclusivity breaks the contract at every
+         grade; strict tier 50%).  CALIBRATION PLAN: first runs record
+         the observed value — if it lands far below 60%, tighten.
+      4. (invariant, P2) old engines not starved: each of the two
+         pre-existing prefills keeps >= 10% of the steady-window traffic.
+      5. (observation, first round) no oscillation: the newcomer's share
+         across the five 7s steady sub-windows is recorded; a repeated
+         boom-bust pattern is a finding candidate, not yet a hard band.
+      6. Master HTTP 200 across both measurement windows; background
+         flow success >= 90%; topology converges (discovery file entry +
+         master discovered==alive==3) before the window opens.
+
+    Prediction (current master, from the mechanism): the empty-ledger
+    newcomer necessarily scores lowest at first, so the transient share
+    will sit clearly above the uniform 1/3; as its ledger fills the
+    score flattens and the steady share should return into the [1/3,
+    60%) band well within the 35s window.  A steady share above 60%
+    (sustained exclusivity) or an old engine below the 10% floor is a
+    finding.
+    """
+    env, ops = _elastic_env(ctx)
+    base = rid_base(ctx, "elastic")
+    report = GradeReport(run_grade=ctx.grade)
+    flow: Optional[_BackgroundFlow] = None
+    new_name = ""
+    new_port = 0
+    try:
+        # Shared-env hygiene + initial-topology convergence: routable-but-
+        # dead leftovers from earlier cases would poison the baseline (see
+        # elastic_rebalance's baseline comment for the eviction timing).
+        _cleanup_dynamic(ops, env)
+        converged2 = _wait_master_topology(
+            ops, "PREFILL", env.spec.n_prefill, MASTER_EVICT_S
+        )
+        if not converged2:
+            info = ops.master_info() or {}
+            entry = (info.get("worker_summary", {}) or {}).get("PREFILL") or {}
+            return False, (
+                f"initial prefill topology did not converge: "
+                f"discovered={entry.get('discovered', '?')} "
+                f"alive={entry.get('alive', '?')} "
+                f"(need discovered==alive=={env.spec.n_prefill})"
+            )
+
+        flow = _BackgroundFlow(ops, base, interval_s=0.2)
+        flow.start()
+        time.sleep(1.0)  # ramp up before the baseline window
+
+        olds = [f"prefill-{i}" for i in range(env.spec.n_prefill)]
+        base_samples, base_m200 = _accepted_timeline(
+            ops, olds, [0.0, ADD_PREF_BASELINE_S]
+        )
+        base_split = {
+            n: base_samples[1][1].get(n, 0) - base_samples[0][1].get(n, 0) for n in olds
+        }
+        base_total = sum(base_split.values())
+        base_share = {
+            n: (v / base_total if base_total else 0.0) for n, v in base_split.items()
+        }
+
+        # -- THE SCALE-OUT EVENT: a 3rd prefill via the production chain
+        #    (/add_engine -> discovery-file rewrite -> master sync).
+        status, body = ops.add_engine("prefill")
+        if status != 200:
+            return False, f"add_engine failed: {status} {body}"
+        new_name = body["engine"]
+        new_port = body["port"]
+        in_file = wait_for(
+            lambda: _discovery_has_http_port(env, new_port - 1),
+            ADD_CONVERGENCE_S,
+            0.1,
+        )
+        topo3 = _wait_master_topology(ops, "PREFILL", 3, MASTER_EVICT_S)
+        if not (in_file and topo3):
+            return False, (
+                f"{new_name} never converged: file={in_file}, "
+                f"alive={ops.master_alive_count('PREFILL')} "
+                f"(need discovered==alive==3)"
+            )
+
+        # -- post-add measurement window, offset from the CONVERGENCE
+        #    instant (the discovery convergence period cannot pollute it).
+        names = olds + [new_name]
+        steady_len = ADD_PREF_TOTAL_S - ADD_PREF_TRANSIENT_S
+        step = steady_len / ADD_PREF_STEADY_SUBWINDOWS
+        offsets = [0.0, ADD_PREF_TRANSIENT_PEAK_S, ADD_PREF_TRANSIENT_S]
+        offsets += [
+            ADD_PREF_TRANSIENT_S + step * (k + 1)
+            for k in range(ADD_PREF_STEADY_SUBWINDOWS)
+        ]
+        samples, m200 = _accepted_timeline(ops, names, offsets)
+
+        total, ok = flow.stop()
+        rate = ok / total if total else 0.0
+
+        def delta(i_lo: int, i_hi: int, name: str) -> int:
+            return samples[i_hi][1].get(name, 0) - samples[i_lo][1].get(name, 0)
+
+        def window(i_lo: int, i_hi: int) -> dict:
+            return {n: delta(i_lo, i_hi, n) for n in names}
+
+        def share_of(counts: dict, name: str) -> float:
+            tot = sum(counts.values())
+            return (counts[name] / tot) if tot else 0.0
+
+        last = len(samples) - 1
+        transient = window(0, 2)  # [0, 10) after convergence
+        steady = window(2, last)  # [10, 45)
+        steady_subs = [window(2 + k, 3 + k) for k in range(ADD_PREF_STEADY_SUBWINDOWS)]
+        steady_total = sum(steady.values())
+        if steady_total <= 0:
+            return False, (
+                f"measurement void: no traffic landed in the steady window "
+                f"(flow={ok}/{total})"
+            )
+
+        trans_new_share = share_of(transient, new_name)
+        trans_peak = max(
+            share_of(window(0, 1), new_name), share_of(window(1, 2), new_name)
+        )
+        steady_new_share = share_of(steady, new_name)
+        old_shares = {n: share_of(steady, n) for n in olds}
+        sub_shares = [share_of(s, new_name) for s in steady_subs]
+        swing = (max(sub_shares) - min(sub_shares)) if sub_shares else 0.0
+
+        # -- CONTRACT ASSERTIONS -------------------------------------------
+        # #1 the scale-out took effect: the newcomer received traffic.
+        new_got_traffic = (transient[new_name] + steady[new_name]) > 0
+        # #3 steady share bounded (P1 override; ADD_PREF_SHARE_BANDS holds
+        #    the calibration plan).
+        report.check(
+            "P1",
+            steady_new_share,
+            bands=ADD_PREF_SHARE_BANDS,
+            context="new_engine_steady_share",
+            detail=(
+                f"{new_name} took {steady[new_name]}/{steady_total} "
+                f"in steady window"
+            ),
+        )
+        # #4 old engines not starved (P2 hard invariant).
+        report.invariant(
+            "P2",
+            all(v >= ADD_PREF_OLD_FLOOR for v in old_shares.values()),
+            context="old_engine_steady_floor",
+            detail=(
+                f"{olds[0]}={old_shares[olds[0]]:.1%}, "
+                f"{olds[1]}={old_shares[olds[1]]:.1%}, "
+                f"floor={ADD_PREF_OLD_FLOOR:.0%}"
+            ),
+        )
+        # #2/#5 stay observation-only (transient peak, sub-window swing);
+        # #6 availability folds into the case verdict below.
+
+        base_share_str = "/".join(f"{base_share[n]:.0%}" for n in olds)
+        sub_str = ",".join(f"{v:.0%}" for v in sub_shares)
+        ok_verdict, detail, _rep = report.finish(
+            f"new_engine={new_name}(grpc={new_port}), "
+            f"baseline[0-{ADD_PREF_BASELINE_S:.0f}s]={base_split[olds[0]]}"
+            f"+{base_split[olds[1]]}({base_share_str}, obs), "
+            f"transient[0-{ADD_PREF_TRANSIENT_S:.0f}s]=+{transient[olds[0]]}"
+            f"+{transient[olds[1]]}+{transient[new_name]}, "
+            f"new_share={trans_new_share:.0%}"
+            f"(peak5s={trans_peak:.0%}, obs-only), "
+            f"steady[{ADD_PREF_TRANSIENT_S:.0f}-{ADD_PREF_TOTAL_S:.0f}s]="
+            f"+{steady[olds[0]]}+{steady[olds[1]]}+{steady[new_name]}, "
+            f"new_share={steady_new_share:.0%}(cap 60%), "
+            f"old_floor=(p0 {old_shares[olds[0]]:.0%}, "
+            f"p1 {old_shares[olds[1]]:.0%}, floor 10%), "
+            f"sub_shares=[{sub_str}](swing={swing:.0%}, obs-only), "
+            f"new_got_traffic={new_got_traffic}, "
+            f"flow={ok}/{total}({rate:.1%}, >=90% required), "
+            f"master_200=(baseline={base_m200}, window={m200}), "
+            f"topology=(file={in_file}, discovered==alive==3={topo3}), "
+            f"grades: {report.summary()}"
+        )
+        return (
+            ok_verdict and new_got_traffic and rate >= 0.90 and m200 and base_m200,
+            detail,
+            _rep,
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if flow is not None:
+            flow.stop()
+        try:
+            _cleanup_dynamic(ops, env)
+        except Exception:
+            pass
