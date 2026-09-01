@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -76,6 +77,17 @@ class RequestLifecycleCoordinatorTest {
                 duplicate.join().getCode());
         assertSame(canonical, lifecycle.requestSlot(101L).future());
         assertEquals(1, lifecycle.liveRequestCount());
+    }
+
+    @Test
+    void slotLockContractIsEnforcedWithoutJvmAssertions() {
+        lifecycle.register(context(102L), 8);
+        RequestSlot slot = lifecycle.requestSlot(102L);
+
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class, slot::activeItem);
+
+        assertTrue(failure.getMessage().contains("requires slot lock"));
     }
 
     @Test

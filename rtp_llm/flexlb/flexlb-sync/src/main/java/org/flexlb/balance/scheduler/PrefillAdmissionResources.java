@@ -110,7 +110,7 @@ final class PrefillAdmissionResources {
         SelectedRole replacement = selection.endpoint();
         WorkerEndpoint.GenerationPin pin = null;
         DecodeEndpoint candidate = null;
-        DecodeEndpoint.QueuedEngineDispatchPermitAcquisition acquisition = null;
+        DecodeEndpoint.EngineDispatchPermitAcquisition acquisition = null;
         try (replacement) {
             pin = replacement.takeGenerationPin();
             if (!(pin.endpoint() instanceof DecodeEndpoint exactCandidate)) {
@@ -208,7 +208,7 @@ final class PrefillAdmissionResources {
 
     private static Throwable rollbackReplacement(
             DecodeEndpoint endpoint,
-            DecodeEndpoint.QueuedEngineDispatchPermitAcquisition acquisition,
+            DecodeEndpoint.EngineDispatchPermitAcquisition acquisition,
             Throwable priorFailure) {
         Throwable failure = rollbackPermit(
                 acquisition == null ? null : acquisition.permit(),
@@ -345,8 +345,10 @@ final class PrefillAdmissionResources {
             while (values.size() > originalSize) {
                 values.remove(values.size() - 1);
             }
-            assert values.size() == originalSize
-                    : "prepared admission list shrank below its append boundary";
+            if (values.size() != originalSize) {
+                throw new IllegalStateException(
+                        "prepared admission list shrank below its append boundary");
+            }
         } catch (Throwable failure) {
             return combine(priorFailure, failure);
         }
@@ -445,8 +447,10 @@ final class PrefillAdmissionResources {
         private CommittedAdmissionOwner(
                 List<Member> exactMembers,
                 int committedHandoffCount) {
-            assert !exactMembers.isEmpty() && committedHandoffCount > 0
-                    : "committed admission requires members and handoffs";
+            if (exactMembers.isEmpty() || committedHandoffCount <= 0) {
+                throw new IllegalArgumentException(
+                        "committed admission requires members and handoffs");
+            }
             membersByIdentity = new IdentityHashMap<>(exactMembers.size());
             members = exactMembers.toArray(Member[]::new);
             permits = new DecodeEndpoint.EngineDispatchPermit[members.length];
@@ -454,8 +458,10 @@ final class PrefillAdmissionResources {
                     committedHandoffCount];
             for (int index = 0; index < members.length; index++) {
                 Member member = members[index];
-                assert member.ownership == MemberOwnership.ADMISSION_OWNED
-                        : "committed admission member is not admission-owned";
+                if (member.ownership != MemberOwnership.ADMISSION_OWNED) {
+                    throw new IllegalStateException(
+                            "committed admission member is not admission-owned");
+                }
                 membersByIdentity.put(member.item, member);
                 permits[index] = member.permit;
             }

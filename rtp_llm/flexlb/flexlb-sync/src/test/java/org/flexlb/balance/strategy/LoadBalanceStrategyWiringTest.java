@@ -19,32 +19,26 @@ class LoadBalanceStrategyWiringTest {
             .withBean(CacheAwareService.class, () -> mock(CacheAwareService.class))
             .withBean(PrefillResourceMeasure.class, () -> mock(PrefillResourceMeasure.class))
             .withBean(EngineHealthReporter.class, () -> mock(EngineHealthReporter.class))
-            .withBean("shortestTtftStrategy", ShortestTTFTStrategy.class)
             .withBean("costBasedPrefillStrategy", CostBasedPrefillStrategy.class)
             .withBean(ConfiguredLoadBalanceSelector.class);
 
     @Test
-    void createsBothAffinityCapableBaselineStrategies() {
+    void onePrefillStrategySupportsBothCandidateChoices() {
         runner.run(context -> {
             assertThat(context).hasNotFailed();
-            assertThat(context).hasBean("shortestTtftStrategy");
             assertThat(context).hasBean("costBasedPrefillStrategy");
             assertThat(context).hasSingleBean(ConfiguredLoadBalanceSelector.class);
 
-            ShortestTTFTStrategy shortest = context.getBean(
-                    "shortestTtftStrategy", ShortestTTFTStrategy.class);
             CostBasedPrefillStrategy costBased = context.getBean(
                     "costBasedPrefillStrategy", CostBasedPrefillStrategy.class);
             RoutingConfig.EstimatedTtftSelectorConfig selector =
                     new RoutingConfig.EstimatedTtftSelectorConfig();
 
             assertThat(costBased.supports(RoleType.PREFILL, selector)).isTrue();
-            assertThat(shortest.supports(RoleType.PREFILL, selector)).isFalse();
 
             selector.setCandidateChoice(
                     new RoutingConfig.LeastRecentlyUsedInPoolConfig());
-            assertThat(shortest.supports(RoleType.PREFILL, selector)).isTrue();
-            assertThat(costBased.supports(RoleType.PREFILL, selector)).isFalse();
+            assertThat(costBased.supports(RoleType.PREFILL, selector)).isTrue();
         });
     }
 }

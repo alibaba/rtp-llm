@@ -230,8 +230,10 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             this.prepared = prepared;
             this.blockedItem = blockedItem;
             this.blockedResult = blockedResult;
-            assert items.isEmpty() == (prepared == null)
-                    : "route transaction owns preparation exactly when active";
+            if (items.isEmpty() != (prepared == null)) {
+                throw new IllegalArgumentException(
+                        "route transaction owns preparation exactly when active");
+            }
         }
 
         @Override

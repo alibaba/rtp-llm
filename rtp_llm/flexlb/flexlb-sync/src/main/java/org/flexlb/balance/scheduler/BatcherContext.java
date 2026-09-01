@@ -217,8 +217,10 @@ class BatcherContext {
      * claiming exact queue identities. Caller holds {@code queueLock}.
      */
     void stopAcceptingUnderLock() {
-        assert queueLock.isHeldByCurrentThread()
-                : "queue mutation requires queueLock";
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "queue mutation requires queueLock");
+        }
         stopped = true;
     }
 
@@ -499,8 +501,10 @@ class BatcherContext {
             DeliveryStrategy.Transaction transaction,
             String decisionReason) {
         List<ScheduledRequest> items = batchItems(transaction.items());
-        assert !items.isEmpty()
-                : "prepared selection commit requires a non-empty selection";
+        if (items.isEmpty()) {
+            throw new IllegalStateException(
+                    "prepared selection commit requires a non-empty selection");
+        }
         BatcherCycleResult admittedResult = null;
         RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         Throwable postCommitFailure = null;

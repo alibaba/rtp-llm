@@ -352,7 +352,8 @@ public class EvictionPlacement {
             PrefillEvictionStatus status,
             List<ScheduledRequest> removed) {
         public PrefillEvictionCommit {
-            assert status != null : "missing Prefill eviction status";
+            java.util.Objects.requireNonNull(
+                    status, "missing Prefill eviction status");
             removed = List.copyOf(removed);
             if (status != PrefillEvictionStatus.COMMITTED
                     && !removed.isEmpty()) {

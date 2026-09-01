@@ -335,7 +335,7 @@ class RequestAdmissionResourceLeakTest {
         new EndpointEventProjector(lifecycle).onStatusReduced(
                 new DecodeEndpoint.StatusReduction(
                 registered.item().decodeEp(),
-                List.of(new DecodeEndpoint.AcceptedWorkerStatusFact(
+                List.of(DecodeEndpoint.WorkerStatusFact.accepted(
                         registered.item().decodeReservation()))));
     }
 

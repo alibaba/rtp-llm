@@ -3,9 +3,9 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.eviction.DecodePreemptionCoordinator.PreemptionUpdate;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionClaim;
-import org.flexlb.balance.eviction.DecodePreemptionCoordinator.PreemptionUpdate;
 import org.flexlb.balance.scheduler.ExpirationTimer.AcceptanceDeadline;
 import org.flexlb.balance.scheduler.ExpirationTimer.RequestDeadline;
 import org.flexlb.dao.loadbalance.Response;
@@ -17,7 +17,9 @@ import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -32,10 +34,11 @@ final class RequestSlot extends RequestState {
 
     private static final int OUTSTANDING_ADMISSION_CLOSED = -1;
 
-    private final RequestRegistry owner;
     private final RequestCompletionPublisher completionPublisher;
     private final long requestId;
     private final RequestFuture future;
+    /** Cleared exactly when the directory removes this request generation. */
+    private boolean currentGeneration = true;
 
     private ScheduledRequest item;
     private boolean priorityAdmission;
@@ -64,11 +67,9 @@ final class RequestSlot extends RequestState {
     private EngineFenceRegistration engineFence;
 
     RequestSlot(
-            RequestRegistry owner,
             RequestCompletionPublisher completionPublisher,
             long requestId) {
         super(requestId);
-        this.owner = Objects.requireNonNull(owner, "owner");
         this.completionPublisher = Objects.requireNonNull(
                 completionPublisher, "completionPublisher");
         this.requestId = requestId;
@@ -347,7 +348,9 @@ final class RequestSlot extends RequestState {
 
     // ==================== Admission mutation ====================
 
-    AdmissionMutation tryBeginAdmissionMutation() {
+    AdmissionMutation tryBeginAdmissionMutation(
+            BiConsumer<AdmissionMutation, Response> termination,
+            Consumer<AdmissionMutation> completion) {
         requireSlotLock("admission mutation claim");
         if (!ownsActiveGeneration()
                 || !isOpen()
@@ -358,9 +361,7 @@ final class RequestSlot extends RequestState {
             return null;
         }
         AdmissionMutation exact = new AdmissionMutation(
-                (mutation, failure) -> owner.terminateAdmissionMutation(
-                        this, mutation, failure),
-                mutation -> owner.completeAdmissionMutation(this, mutation));
+                termination, completion);
         admissionMutation = exact;
         assertInvariant();
         return exact;
@@ -696,7 +697,10 @@ final class RequestSlot extends RequestState {
 
     CancelReason requireCancellationFirstCause() {
         requireSlotLock("cancellation first-cause claim");
-        assert cancellationReason != null : "missing cancellation first cause";
+        if (cancellationReason == null) {
+            throw new IllegalStateException(
+                    "missing cancellation first cause for request " + requestId);
+        }
         return cancellationReason;
     }
 
@@ -751,11 +755,11 @@ final class RequestSlot extends RequestState {
             PreemptionUpdate update) {
         requireSlotLock("preemption update reduction");
         if (claim == null || update == null) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         PreemptionRegistration exact = exactPreemption(claim);
         if (exact == null) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         return switch (update) {
             case PreemptionUpdate.Tombstoned tombstoned ->
@@ -779,8 +783,8 @@ final class RequestSlot extends RequestState {
                 && exact.beginCancel();
         assertInvariant();
         return accepted
-                ? PreemptionReduction.None.INSTANCE
-                : PreemptionReduction.Stale.INSTANCE;
+                ? PreemptionReduction.NONE
+                : PreemptionReduction.STALE;
     }
 
     private PreemptionReduction applyPreemptionCancelAccepted(
@@ -788,11 +792,11 @@ final class RequestSlot extends RequestState {
         if (!ownsActiveGeneration()
                 || preemption != exact
                 || !exact.acceptCancel()) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         requestCancel(exact.detail());
         assertInvariant();
-        return PreemptionReduction.None.INSTANCE;
+        return PreemptionReduction.NONE;
     }
 
     private PreemptionReduction applyPreemptionCancelNotFound(
@@ -800,7 +804,7 @@ final class RequestSlot extends RequestState {
         if (!ownsActiveGeneration()
                 || preemption != exact
                 || !exact.markNotFound()) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         assertInvariant();
         EngineFenceRegistration started = null;
@@ -820,7 +824,7 @@ final class RequestSlot extends RequestState {
         }
         return started == null
                 ? materializePendingReplay(exact, false, exact)
-                : new PreemptionReduction.StartFence(
+                : PreemptionReduction.startFence(
                         started, cancelTarget(item));
     }
 
@@ -829,7 +833,7 @@ final class RequestSlot extends RequestState {
         if (!ownsActiveGeneration()
                 || preemption != exact
                 || !exact.markUnknown()) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         assertInvariant();
         return materializePendingReplay(exact, true, exact);
@@ -840,7 +844,7 @@ final class RequestSlot extends RequestState {
         if (!ownsActiveGeneration()
                 || preemption != exact
                 || !exact.isReleasable()) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         boolean discardable = cancellationReason == null
                 && engineOwnership == EngineOwnership.DECODE_OWNED;
@@ -862,8 +866,8 @@ final class RequestSlot extends RequestState {
                         true,
                         false);
         return started == null
-                ? PreemptionReduction.Stale.INSTANCE
-                : new PreemptionReduction.StartFence(
+                ? PreemptionReduction.STALE
+                : PreemptionReduction.startFence(
                         started, cancelTarget(item));
     }
 
@@ -874,288 +878,266 @@ final class RequestSlot extends RequestState {
                 || preemptionOwner() != exact
                 || !exact.canSettleTombstone()
                 || !exact.settle()) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
-        DeferredTerminal terminal = new DeferredTerminal.Priority(detail);
+        DeferredTerminal terminal = DeferredTerminal.priority(detail);
         exact.retainTerminal(terminal);
         // DecodePreemptionCoordinator has already consumed the exact endpoint
         // claim before publishing TOMBSTONED. Reconciliation is therefore
         // neither required nor legal on this authoritative path.
         detachPreemptionOwner(exact);
         assertInvariant();
-        return new PreemptionReduction.Replay(
+        return PreemptionReduction.replay(
                 new ReplayPayload.Terminal(terminal),
                 exact,
                 null);
     }
 
     /**
-     * Reduce one exact transport/endpoint fact without exposing the mutable
-     * preemption registration. The caller holds {@code synchronized (slot)}
-     * and only executes the returned, already-selected effect.
+     * Reduce one exact transport/endpoint fact without exposing the mutable preemption
+     * registration. The caller holds {@code synchronized (slot)} and only executes the returned,
+     * already-selected effect.
      */
-    PreemptionReduction applyPreemptionFact(PreemptionFact fact) {
-        requireSlotLock("preemption fact reduction");
-        if (fact instanceof PreemptionFact.PrefillActive active) {
-            PreemptionRegistration exact = preemption;
-            if (!ownsPrefillFact(active.source(), active.expected())
-                    || exact == null
-                    || !exact.isNotFound()) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            EngineFenceRegistration started = null;
-            if (exact.postDeliveryFenceDetail() != null) {
-                try {
-                    started = installEngineFence(
-                            cancellationReason == null
-                                    ? EngineFenceCause.DELIVERY_UNCERTAIN
-                                    : EngineFenceCause.CANCELLATION,
-                            exact.postDeliveryFenceDetail(),
-                            exact,
-                            cancellationReason != null,
-                            true);
-                } catch (NotFoundFenceTransferLost legalRace) {
-                    started = null;
-                }
-            }
-            if (started != null) {
-                return new PreemptionReduction.StartFence(
-                        started, cancelTarget(item));
-            }
-            DecodeEndpoint decode = active.expected().decodeEp();
-            if (decode == null
-                    || decode.reconcilePriorityVictimActive(
-                            exact.attemptToken(),
-                            active.expected().decodeReservation())) {
-                detachPreemptionOwner(exact);
-            }
-            return PreemptionReduction.None.INSTANCE;
+    PreemptionReduction reducePrefillActive(PrefillEndpoint source, ScheduledRequest expected) {
+        requireSlotLock("Prefill activity reduction");
+        PreemptionRegistration exact = preemption;
+        if (!ownsPrefillFact(source, expected) || exact == null || !exact.isNotFound()) {
+            return PreemptionReduction.STALE;
         }
-        if (fact instanceof PreemptionFact.WorkerTerminal worker) {
-            if (!ownsActiveItem(worker.expected())) {
-                return PreemptionReduction.Stale.INSTANCE;
+        EngineFenceRegistration started = null;
+        if (exact.postDeliveryFenceDetail() != null) {
+            try {
+                started =
+                        installEngineFence(
+                                cancellationReason == null
+                                        ? EngineFenceCause.DELIVERY_UNCERTAIN
+                                        : EngineFenceCause.CANCELLATION,
+                                exact.postDeliveryFenceDetail(),
+                                exact,
+                                cancellationReason != null,
+                                true);
+            } catch (NotFoundFenceTransferLost legalRace) {
+                started = null;
             }
-            if (admissionMutation != null) {
-                retainAdmissionTerminal(worker.terminal());
-                assertInvariant();
-                return PreemptionReduction.None.INSTANCE;
-            }
-            PreemptionRegistration exact = preemptionOwner();
-            if (exact == null) {
-                return new PreemptionReduction.Replay(
-                        new ReplayPayload.Terminal(worker.terminal()),
-                        null,
-                        null);
-            }
-            if (exact.isSettled()) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            exact.retainTerminal(worker.terminal());
-            if (!ownsActiveGeneration()
-                    || preemptionOwner() != exact
-                    || !exact.settle()) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            assertInvariant();
-            return materializePendingReplay(exact, false, exact);
         }
-        if (fact instanceof PreemptionFact.DispatchRejected rejected) {
-            if (!ownsActiveItem(rejected.expected())
-                    || !ownsDecodeFact(
-                            rejected.source(), rejected.reservation())) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            DeferredTerminal terminal = rejected.terminal();
-            if (admissionMutation != null) {
-                retainAdmissionTerminal(terminal);
-                assertInvariant();
-                return PreemptionReduction.None.INSTANCE;
-            }
-            PreemptionRegistration exact = preemptionOwner();
-            PreemptionRegistration signal = null;
-            if (exact != null) {
-                exact.retainTerminal(terminal);
-                if (exact.settle()) {
-                    signal = exact;
-                }
-                detachPreemptionOwner(exact);
-            }
-            assertInvariant();
-            return new PreemptionReduction.Replay(
-                    new ReplayPayload.Terminal(terminal),
-                    signal,
-                    null);
+        if (started != null) {
+            return PreemptionReduction.startFence(started, cancelTarget(item));
         }
-        if (fact instanceof PreemptionFact.OrdinaryTerminal ordinary) {
-            if (!ownsActiveItem(ordinary.expected())) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            DeferredTerminal terminal = ordinary.terminal();
-            if (terminal.authoritativeWorker()) {
-                throw new IllegalArgumentException(
-                        "authoritative worker fact requires WorkerTerminal");
-            }
-            if (engineFence != null) {
-                return PreemptionReduction.None.INSTANCE;
-            }
-            if (admissionMutation != null) {
-                retainAdmissionTerminal(terminal);
-                assertInvariant();
-                return PreemptionReduction.None.INSTANCE;
-            }
-
-            PreemptionRegistration exact = preemptionOwner();
-            if (engineOwnership == EngineOwnership.DECODE_OWNED
-                    && terminal.deliveryFailure()) {
-                RequestState.Snapshot lifecycle = snapshot();
-                DeliveryClaimKind deliveryKind = lifecycle.deliveryClaimKind();
-                long batchId = lifecycle.batchId();
-                if (exact == null) {
-                    DeliveryConfirmation confirmation =
-                            confirmDeliveryForPublication(
-                                    ordinary.expected(),
-                                    deliveryKind,
-                                    batchId);
-                    return confirmation == null
-                            ? PreemptionReduction.Stale.INSTANCE
-                            : new PreemptionReduction.Replay(
-                                    new ReplayPayload.Delivery(
-                                            confirmation,
-                                            ordinary.expected(),
-                                            deliveryKind,
-                                            batchId),
-                                    null,
-                                    null);
-                }
-                if (exact.isSettled()) {
-                    return PreemptionReduction.Stale.INSTANCE;
-                }
-                exact.recordDeliveryConfirmation(batchId);
-                assertInvariant();
-                return materializePendingReplay(exact, false, null);
-            }
-
-            if (exact == null) {
-                    return new PreemptionReduction.Replay(
-                            new ReplayPayload.Terminal(terminal),
-                            null,
-                            null);
-            }
-            if (exact.isSettled()) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            exact.retainTerminal(terminal);
-            assertInvariant();
-            if (!exact.isNotFound() && !exact.isUnknown()) {
-                return PreemptionReduction.None.INSTANCE;
-            }
-            return materializePendingReplay(
-                    exact, exact.isUnknown(), exact);
-        }
-        if (fact instanceof PreemptionFact.PriorityCanceled canceled) {
-            PreemptionRegistration exact =
-                    ownsPrefillFact(canceled.source(), canceled.expected())
-                            ? preemptionOwner() : null;
-            DecodeEndpoint decode = canceled.expected().decodeEp();
-            if (exact == null
-                    || exact.isSettled()
-                    || decode == null
-                    || canceled.expected().decodeReservation() == null
-                    || !decode.settlePriorityCanceled(
-                            exact.attemptToken(),
-                            canceled.expected().decodeReservation())
-                    || !ownsActiveGeneration()
-                    || preemptionOwner() != exact
-                    || !exact.settle()) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            DeferredTerminal terminal = new DeferredTerminal.Priority(
-                    "priority victim canceled by worker");
-            exact.retainTerminal(terminal);
+        DecodeEndpoint decode = expected.decodeEp();
+        if (decode == null
+                || decode.reconcilePriorityVictimActive(
+                        exact.attemptToken(), expected.decodeReservation())) {
             detachPreemptionOwner(exact);
-            assertInvariant();
-            return new PreemptionReduction.Replay(
-                    new ReplayPayload.Terminal(terminal),
-                    exact,
-                    null);
         }
-        if (fact instanceof PreemptionFact.DecodeGenerationRetired retired) {
-            if (!ownsDecodeFact(retired.source(), retired.reservation())) {
-                return PreemptionReduction.Stale.INSTANCE;
-            }
-            DeferredTerminal terminal =
-                    new DeferredTerminal.DecodeGenerationRetired(
-                            retired.detail());
-            if (admissionMutation != null) {
-                retainAdmissionTerminal(terminal);
-                assertInvariant();
-                return PreemptionReduction.None.INSTANCE;
-            }
+        return PreemptionReduction.NONE;
+    }
 
-            PreemptionRegistration exact = preemptionOwner();
-            PreemptionRegistration signal = null;
-            if (exact != null) {
-                exact.retainTerminal(terminal);
-                exact.settle();
+    PreemptionReduction reduceWorkerTerminal(ScheduledRequest expected, DeferredTerminal terminal) {
+        requireSlotLock("worker terminal reduction");
+        if (!terminal.authoritativeWorker()) {
+            throw new IllegalArgumentException(
+                    "worker terminal requires authoritative observation");
+        }
+        if (!ownsActiveItem(expected)) {
+            return PreemptionReduction.STALE;
+        }
+        if (admissionMutation != null) {
+            retainAdmissionTerminal(terminal);
+            assertInvariant();
+            return PreemptionReduction.NONE;
+        }
+        PreemptionRegistration exact = preemptionOwner();
+        if (exact == null) {
+            return PreemptionReduction.replay(new ReplayPayload.Terminal(terminal), null, null);
+        }
+        if (exact.isSettled()) {
+            return PreemptionReduction.STALE;
+        }
+        exact.retainTerminal(terminal);
+        if (!ownsActiveGeneration() || preemptionOwner() != exact || !exact.settle()) {
+            return PreemptionReduction.STALE;
+        }
+        assertInvariant();
+        return materializePendingReplay(exact, false, exact);
+    }
+
+    PreemptionReduction reduceDispatchRejected(
+            DecodeEndpoint source,
+            DecodeEndpoint.ReservationHandle reservation,
+            ScheduledRequest expected,
+            DeferredTerminal terminal) {
+        requireSlotLock("dispatch rejection reduction");
+        if (terminal.kind() != DeferredTerminal.Kind.DELIVERY_REJECTED) {
+            throw new IllegalArgumentException(
+                    "dispatch rejection requires delivery-rejected terminal");
+        }
+        if (!ownsActiveItem(expected) || !ownsDecodeFact(source, reservation)) {
+            return PreemptionReduction.STALE;
+        }
+        if (admissionMutation != null) {
+            retainAdmissionTerminal(terminal);
+            assertInvariant();
+            return PreemptionReduction.NONE;
+        }
+        PreemptionRegistration exact = preemptionOwner();
+        PreemptionRegistration signal = null;
+        if (exact != null) {
+            exact.retainTerminal(terminal);
+            if (exact.settle()) {
                 signal = exact;
             }
             detachPreemptionOwner(exact);
-
-            PrefillOnlyCleanup prefillCleanup = null;
-            EngineFenceRegistration retiredFence = engineFence;
-            if (retiredFence != null) {
-                retiredFence.close();
-                engineFence = null;
-                prefillCleanup = retiredFence.resources
-                        .detachAfterDecodeGenerationRetired();
-            }
-            assertInvariant();
-            return new PreemptionReduction.Replay(
-                    new ReplayPayload.Terminal(terminal),
-                    signal,
-                    prefillCleanup);
         }
-        PreemptionFact.DeliveryConfirmed delivered =
-                (PreemptionFact.DeliveryConfirmed) fact;
+        assertInvariant();
+        return PreemptionReduction.replay(new ReplayPayload.Terminal(terminal), signal, null);
+    }
+
+    PreemptionReduction reduceOrdinaryTerminal(
+            ScheduledRequest expected, DeferredTerminal terminal) {
+        requireSlotLock("ordinary terminal reduction");
+        if (!ownsActiveItem(expected)) {
+            return PreemptionReduction.STALE;
+        }
+        if (terminal.authoritativeWorker()) {
+            throw new IllegalArgumentException("authoritative worker fact requires WorkerTerminal");
+        }
+        if (engineFence != null) {
+            return PreemptionReduction.NONE;
+        }
+        if (admissionMutation != null) {
+            retainAdmissionTerminal(terminal);
+            assertInvariant();
+            return PreemptionReduction.NONE;
+        }
+
+        PreemptionRegistration exact = preemptionOwner();
+        if (engineOwnership == EngineOwnership.DECODE_OWNED && terminal.deliveryFailure()) {
+            RequestState.Snapshot lifecycle = snapshot();
+            DeliveryClaimKind deliveryKind = lifecycle.deliveryClaimKind();
+            long batchId = lifecycle.batchId();
+            if (exact == null) {
+                DeliveryConfirmation confirmation =
+                        confirmDeliveryForPublication(expected, deliveryKind, batchId);
+                return confirmation == null
+                        ? PreemptionReduction.STALE
+                        : PreemptionReduction.replay(
+                                new ReplayPayload.Delivery(
+                                        confirmation, expected, deliveryKind, batchId),
+                                null,
+                                null);
+            }
+            if (exact.isSettled()) {
+                return PreemptionReduction.STALE;
+            }
+            exact.recordDeliveryConfirmation(batchId);
+            assertInvariant();
+            return materializePendingReplay(exact, false, null);
+        }
+
+        if (exact == null) {
+            return PreemptionReduction.replay(new ReplayPayload.Terminal(terminal), null, null);
+        }
+        if (exact.isSettled()) {
+            return PreemptionReduction.STALE;
+        }
+        exact.retainTerminal(terminal);
+        assertInvariant();
+        if (!exact.isNotFound() && !exact.isUnknown()) {
+            return PreemptionReduction.NONE;
+        }
+        return materializePendingReplay(exact, exact.isUnknown(), exact);
+    }
+
+    PreemptionReduction reducePriorityCanceled(PrefillEndpoint source, ScheduledRequest expected) {
+        requireSlotLock("priority cancellation reduction");
+        PreemptionRegistration exact = ownsPrefillFact(source, expected) ? preemptionOwner() : null;
+        DecodeEndpoint decode = expected.decodeEp();
+        if (exact == null
+                || exact.isSettled()
+                || decode == null
+                || expected.decodeReservation() == null
+                || !decode.settlePriorityCanceled(
+                        exact.attemptToken(), expected.decodeReservation())
+                || !ownsActiveGeneration()
+                || preemptionOwner() != exact
+                || !exact.settle()) {
+            return PreemptionReduction.STALE;
+        }
+        DeferredTerminal terminal = DeferredTerminal.priority("priority victim canceled by worker");
+        exact.retainTerminal(terminal);
+        detachPreemptionOwner(exact);
+        assertInvariant();
+        return PreemptionReduction.replay(new ReplayPayload.Terminal(terminal), exact, null);
+    }
+
+    PreemptionReduction reduceDecodeGenerationRetired(
+            DecodeEndpoint source, DecodeEndpoint.ReservationHandle reservation, String detail) {
+        requireSlotLock("Decode generation retirement reduction");
+        Objects.requireNonNull(detail, "detail");
+        if (!ownsDecodeFact(source, reservation)) {
+            return PreemptionReduction.STALE;
+        }
+        DeferredTerminal terminal = DeferredTerminal.decodeGenerationRetired(detail);
+        if (admissionMutation != null) {
+            retainAdmissionTerminal(terminal);
+            assertInvariant();
+            return PreemptionReduction.NONE;
+        }
+
+        PreemptionRegistration exact = preemptionOwner();
+        PreemptionRegistration signal = null;
+        if (exact != null) {
+            exact.retainTerminal(terminal);
+            exact.settle();
+            signal = exact;
+        }
+        detachPreemptionOwner(exact);
+
+        PrefillOnlyCleanup prefillCleanup = null;
+        EngineFenceRegistration retiredFence = engineFence;
+        if (retiredFence != null) {
+            retiredFence.close();
+            engineFence = null;
+            prefillCleanup = retiredFence.resources.detachAfterDecodeGenerationRetired();
+        }
+        assertInvariant();
+        return PreemptionReduction.replay(
+                new ReplayPayload.Terminal(terminal), signal, prefillCleanup);
+    }
+
+    PreemptionReduction reduceDeliveryConfirmed(long batchId) {
+        requireSlotLock("delivery confirmation reduction");
         ScheduledRequest active = activeItem();
         RequestState.Snapshot lifecycle = snapshot();
         DeliveryClaimKind deliveryKind = lifecycle.deliveryClaimKind();
-        if (active == null
-                || !ownsDeliveryClaim(
-                        active, deliveryKind, delivered.batchId())) {
-            return PreemptionReduction.Stale.INSTANCE;
+        if (active == null || !ownsDeliveryClaim(active, deliveryKind, batchId)) {
+            return PreemptionReduction.STALE;
         }
         if (engineFence != null) {
-            return PreemptionReduction.None.INSTANCE;
+            return PreemptionReduction.NONE;
         }
         PreemptionRegistration exact = preemptionOwner();
         if (exact == null) {
             DeliveryConfirmation confirmation =
-                    confirmDeliveryForPublication(
-                            active, deliveryKind, delivered.batchId());
+                    confirmDeliveryForPublication(active, deliveryKind, batchId);
             return confirmation == null
-                    ? PreemptionReduction.Stale.INSTANCE
-                    : new PreemptionReduction.Replay(
-                            new ReplayPayload.Delivery(
-                                    confirmation,
-                                    active,
-                                    deliveryKind,
-                                    delivered.batchId()),
+                    ? PreemptionReduction.STALE
+                    : PreemptionReduction.replay(
+                            new ReplayPayload.Delivery(confirmation, active, deliveryKind, batchId),
                             null,
                             null);
         }
         if (exact.isSettled()) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
-        exact.recordDeliveryConfirmation(delivered.batchId());
+        exact.recordDeliveryConfirmation(batchId);
         assertInvariant();
         return materializePendingReplay(exact, false, null);
     }
 
     /** Install or join the canonical delivery-uncertainty fence. */
     FenceReduction requestDeliveryFence(String detail) {
-        return requestFence(
-                EngineFenceCause.DELIVERY_UNCERTAIN, detail, false);
+        return requestFence(EngineFenceCause.DELIVERY_UNCERTAIN, detail, false);
     }
 
     /** Install or join the canonical cancellation fence. */
@@ -1164,67 +1146,53 @@ final class RequestSlot extends RequestState {
     }
 
     private FenceReduction requestFence(
-            EngineFenceCause cause,
-            String detail,
-            boolean allowDecodeOwned) {
+            EngineFenceCause cause, String detail, boolean allowDecodeOwned) {
         requireSlotLock("Engine fence request");
         if (preemption != null) {
             PreemptionRegistration exact = preemption;
             exact.requirePostDeliveryFence(detail);
             if (!exact.isNotFound()) {
                 assertInvariant();
-                return FenceReduction.None.INSTANCE;
+                return FenceReduction.NONE;
             }
             EngineFenceRegistration transferred;
             try {
-                transferred = installEngineFence(
-                        cause,
-                        detail,
-                        exact,
-                        allowDecodeOwned,
-                        true);
+                transferred = installEngineFence(cause, detail, exact, allowDecodeOwned, true);
             } catch (NotFoundFenceTransferLost legalRace) {
-                return FenceReduction.Stale.INSTANCE;
+                return FenceReduction.STALE;
             }
             return transferred == null
-                    ? FenceReduction.Stale.INSTANCE
-                    : new FenceReduction.Start(
-                            transferred, cancelTarget(item));
+                    ? FenceReduction.STALE
+                    : FenceReduction.start(transferred, cancelTarget(item));
         }
-        EngineFenceRegistration installed = installEngineFence(
-                cause,
-                detail,
-                null,
-                allowDecodeOwned,
-                false);
+        EngineFenceRegistration installed =
+                installEngineFence(cause, detail, null, allowDecodeOwned, false);
         return installed == null
-                ? FenceReduction.Stale.INSTANCE
-                : new FenceReduction.Start(installed, cancelTarget(item));
+                ? FenceReduction.STALE
+                : FenceReduction.start(installed, cancelTarget(item));
     }
 
     /** Reduce one event against the exact Engine-fence owner. */
-    FenceReduction applyFenceUpdate(
-            FenceHandle handle,
-            FenceUpdate update) {
+    FenceReduction applyFenceUpdate(FenceHandle handle, FenceUpdate update) {
         requireSlotLock("Engine fence update reduction");
         EngineFenceRegistration exact = exactFence(handle);
         if (!ownsActiveGeneration() || exact == null || update == null) {
-            return FenceReduction.Stale.INSTANCE;
+            return FenceReduction.STALE;
         }
         return switch (update) {
             case CANCEL_STARTED -> {
                 if (!exact.beginCancel()) {
-                    yield FenceReduction.Stale.INSTANCE;
+                    yield FenceReduction.STALE;
                 }
                 assertInvariant();
-                yield FenceReduction.None.INSTANCE;
+                yield FenceReduction.NONE;
             }
             case AWAIT_TERMINAL -> {
                 if (!exact.awaitTerminal()) {
-                    yield FenceReduction.Stale.INSTANCE;
+                    yield FenceReduction.STALE;
                 }
                 assertInvariant();
-                yield FenceReduction.None.INSTANCE;
+                yield FenceReduction.NONE;
             }
             case TOMBSTONED -> applyFenceTombstoned(exact);
         };
@@ -1233,13 +1201,13 @@ final class RequestSlot extends RequestState {
     private FenceReduction applyFenceTombstoned(
             EngineFenceRegistration exact) {
         if (!exact.recordTombstoned() && !exact.isClosed()) {
-            return FenceReduction.Stale.INSTANCE;
+            return FenceReduction.STALE;
         }
         assertInvariant();
         if (admissionMutation != null) {
-            return FenceReduction.Deferred.INSTANCE;
+            return FenceReduction.DEFERRED;
         }
-        return new FenceReduction.TerminalProof(
+        return FenceReduction.terminalProof(
                 new FenceTerminalProof(
                         exact.detail,
                         exact.transferredPreemption,
@@ -1262,16 +1230,16 @@ final class RequestSlot extends RequestState {
                     exact.attemptToken(),
                     active == null ? null : active.decodeReservation());
             if (!ordinaryWon) {
-                return PreemptionReduction.None.INSTANCE;
+                return PreemptionReduction.NONE;
             }
             detachPreemptionOwner(exact);
-            return new PreemptionReduction.Replay(
+            return PreemptionReduction.replay(
                     new ReplayPayload.Terminal(terminal),
                     signal,
                     null);
         }
         if (transportUnknown || !exact.hasPendingDeliveryConfirmation()) {
-            return PreemptionReduction.None.INSTANCE;
+            return PreemptionReduction.NONE;
         }
 
         ScheduledRequest active = activeItem();
@@ -1281,11 +1249,11 @@ final class RequestSlot extends RequestState {
                         exact.attemptToken(),
                         active.decodeReservation());
         if (!activeWon) {
-            return PreemptionReduction.None.INSTANCE;
+            return PreemptionReduction.NONE;
         }
         detachPreemptionOwner(exact);
         if (active == null) {
-            return PreemptionReduction.Stale.INSTANCE;
+            return PreemptionReduction.STALE;
         }
         RequestState.Snapshot lifecycle = snapshot();
         DeliveryConfirmation confirmation = confirmDeliveryForPublication(
@@ -1293,8 +1261,8 @@ final class RequestSlot extends RequestState {
                 lifecycle.deliveryClaimKind(),
                 exact.pendingConfirmationBatchId());
         return confirmation == null
-                ? PreemptionReduction.Stale.INSTANCE
-                : new PreemptionReduction.Replay(
+                ? PreemptionReduction.STALE
+                : PreemptionReduction.replay(
                         new ReplayPayload.Delivery(
                                 confirmation,
                                 active,
@@ -1421,7 +1389,10 @@ final class RequestSlot extends RequestState {
     private EngineFenceResources acquireFenceResources() {
         requireSlotLock("Engine fence resource acquisition");
         ScheduledRequest active = activeItem();
-        assert active != null : "Engine fence requires active item";
+        if (active == null) {
+            throw new IllegalStateException(
+                    "Engine fence requires active item for request " + requestId);
+        }
         RequestState.Snapshot lifecycle = snapshot();
         PrefillEndpoint prefill = active.prefillEp();
         PrefillState.Protection protection = null;
@@ -1624,7 +1595,10 @@ final class RequestSlot extends RequestState {
             Response response,
             boolean requestPublication) {
         requireSlotLock("terminal claim");
-        assert transition != null : "terminal transition is required";
+        if (transition == null) {
+            throw new IllegalStateException(
+                    "terminal transition is required for request " + requestId);
+        }
         if (!ownsActiveGeneration() || admissionMutation != null) {
             return null;
         }
@@ -1748,7 +1722,16 @@ final class RequestSlot extends RequestState {
     }
 
     private boolean isCurrentGeneration() {
-        return owner.isCurrentSlot(this);
+        return currentGeneration;
+    }
+
+    void detachGeneration() {
+        requireSlotLock("request generation detach");
+        if (!currentGeneration) {
+            throw new IllegalStateException(
+                    "request generation already detached: " + requestId);
+        }
+        currentGeneration = false;
     }
 
     @Override
@@ -1757,12 +1740,12 @@ final class RequestSlot extends RequestState {
     }
 
     private void assertInvariant() {
-        assert invariantHolds();
+        requireSlotLock("request slot invariant");
+        invariantHolds();
     }
 
-    /** Expensive aggregate verification used by tests and debug JVMs only. */
-    private boolean invariantHolds() {
-        assert Thread.holdsLock(this) : "request slot invariant requires slot lock";
+    /** Verify the aggregate at every mutation boundary. */
+    private void invariantHolds() {
         if (preemption != null && engineFence != null) {
             throw new IllegalStateException(
                     "preemption and Engine fence cannot directly own request "
@@ -1795,7 +1778,7 @@ final class RequestSlot extends RequestState {
                             + requestId);
         }
         if (slotPhase != SlotPhase.TOMBSTONE) {
-            return true;
+            return;
         }
         RequestState.Snapshot lifecycle = snapshot();
         if (admissionOpen
@@ -1816,11 +1799,13 @@ final class RequestSlot extends RequestState {
             throw new IllegalStateException(
                     "tombstone lifecycle is not terminal for " + requestId);
         }
-        return true;
     }
 
     private void requireSlotLock(String operation) {
-        assert Thread.holdsLock(this) : operation + " requires slot lock";
+        if (!Thread.holdsLock(this)) {
+            throw new IllegalStateException(
+                    operation + " requires slot lock for request " + requestId);
+        }
     }
 
     private static Throwable appendFailure(
@@ -1877,69 +1862,6 @@ final class RequestSlot extends RequestState {
         void release();
     }
 
-    /** External facts which advance the exact preemption owner. */
-    sealed interface PreemptionFact {
-        record PrefillActive(PrefillEndpoint source, ScheduledRequest expected)
-                implements PreemptionFact {
-        }
-
-        record WorkerTerminal(
-                ScheduledRequest expected,
-                DeferredTerminal terminal)
-                implements PreemptionFact {
-            public WorkerTerminal {
-                if (!terminal.authoritativeWorker()) {
-                    throw new IllegalArgumentException(
-                            "WorkerTerminal requires an authoritative worker fact");
-                }
-            }
-        }
-
-        record OrdinaryTerminal(
-                ScheduledRequest expected,
-                DeferredTerminal terminal)
-                implements PreemptionFact {
-            public OrdinaryTerminal {
-                if (terminal.authoritativeWorker()) {
-                    throw new IllegalArgumentException(
-                            "authoritative worker fact requires WorkerTerminal");
-                }
-            }
-        }
-
-        record DispatchRejected(
-                DecodeEndpoint source,
-                DecodeEndpoint.ReservationHandle reservation,
-                ScheduledRequest expected,
-                DeferredTerminal terminal)
-                implements PreemptionFact {
-            public DispatchRejected {
-                if (!(terminal instanceof DeferredTerminal.DeliveryRejected)) {
-                    throw new IllegalArgumentException(
-                            "DispatchRejected requires a delivery rejection terminal");
-                }
-            }
-        }
-
-        record PriorityCanceled(
-                PrefillEndpoint source,
-                ScheduledRequest expected,
-                DeferredTerminal terminal)
-                implements PreemptionFact {
-        }
-
-        record DeliveryConfirmed(long batchId)
-                implements PreemptionFact {
-        }
-
-        record DecodeGenerationRetired(
-                DecodeEndpoint source,
-                DecodeEndpoint.ReservationHandle reservation,
-                String detail)
-                implements PreemptionFact {
-        }
-    }
-
     /** Immutable replay already selected under the exact slot lock. */
     sealed interface ReplayPayload {
         record Terminal(DeferredTerminal exact) implements ReplayPayload {
@@ -1954,25 +1876,55 @@ final class RequestSlot extends RequestState {
         }
     }
 
-    /** The only effects exposed after a preemption ownership reduction. */
-    sealed interface PreemptionReduction {
-        enum Stale implements PreemptionReduction {
-            INSTANCE
+    /** The only effect exposed after a preemption ownership reduction. */
+    record PreemptionReduction(
+            Status status,
+            FenceHandle fence,
+            CancelTarget target,
+            ReplayPayload payload,
+            PreemptionRegistration signal,
+            PrefillOnlyCleanup prefillOnlyCleanup) {
+
+        static final PreemptionReduction STALE = simple(Status.STALE);
+        static final PreemptionReduction NONE = simple(Status.NONE);
+
+        PreemptionReduction {
+            Objects.requireNonNull(status, "status");
+            boolean startsFence = status == Status.START_FENCE;
+            boolean replays = status == Status.REPLAY;
+            if (startsFence != (fence != null && target != null)
+                    || replays != (payload != null)
+                    || (!replays && (signal != null
+                        || prefillOnlyCleanup != null))) {
+                throw new IllegalArgumentException(
+                        "preemption reduction status requires its exact payload");
+            }
         }
 
-        enum None implements PreemptionReduction {
-            INSTANCE
+        static PreemptionReduction startFence(
+                FenceHandle fence, CancelTarget target) {
+            return new PreemptionReduction(Status.START_FENCE, fence, target,
+                    null, null, null);
         }
 
-        record StartFence(FenceHandle exact, CancelTarget target)
-                implements PreemptionReduction {
-        }
-
-        record Replay(
+        static PreemptionReduction replay(
                 ReplayPayload payload,
                 PreemptionRegistration signal,
-                PrefillOnlyCleanup prefillOnlyCleanup)
-                implements PreemptionReduction {
+                PrefillOnlyCleanup prefillOnlyCleanup) {
+            return new PreemptionReduction(Status.REPLAY, null, null,
+                    payload, signal, prefillOnlyCleanup);
+        }
+
+        private static PreemptionReduction simple(Status status) {
+            return new PreemptionReduction(
+                    status, null, null, null, null, null);
+        }
+
+        enum Status {
+            STALE,
+            NONE,
+            START_FENCE,
+            REPLAY
         }
     }
 
@@ -1984,28 +1936,49 @@ final class RequestSlot extends RequestState {
             FenceCleanup cleanup) {
     }
 
-    /** The only effects exposed after an Engine-fence reduction. */
-    sealed interface FenceReduction {
-        enum Stale implements FenceReduction {
-            INSTANCE
+    /** The only effect exposed after an Engine-fence reduction. */
+    record FenceReduction(
+            Status status,
+            FenceHandle fence,
+            CancelTarget target,
+            FenceTerminalProof proof) {
+
+        static final FenceReduction STALE = simple(Status.STALE);
+        static final FenceReduction DEFERRED = simple(Status.DEFERRED);
+        static final FenceReduction NONE = simple(Status.NONE);
+
+        FenceReduction {
+            Objects.requireNonNull(status, "status");
+            boolean starts = status == Status.START;
+            boolean terminal = status == Status.TERMINAL_PROOF;
+            if (starts != (fence != null && target != null)
+                    || terminal != (proof != null)) {
+                throw new IllegalArgumentException(
+                        "fence reduction status requires its exact payload");
+            }
         }
 
-        enum Deferred implements FenceReduction {
-            INSTANCE
+        static FenceReduction start(FenceHandle fence, CancelTarget target) {
+            return new FenceReduction(
+                    Status.START, fence, target, null);
         }
 
-        enum None implements FenceReduction {
-            INSTANCE
+        static FenceReduction terminalProof(FenceTerminalProof proof) {
+            return new FenceReduction(
+                    Status.TERMINAL_PROOF, null, null, proof);
         }
 
-        record Start(FenceHandle exact, CancelTarget target)
-                implements FenceReduction {
+        private static FenceReduction simple(Status status) {
+            return new FenceReduction(status, null, null, null);
         }
 
-        record TerminalProof(FenceTerminalProof proof)
-                implements FenceReduction {
+        enum Status {
+            STALE,
+            DEFERRED,
+            NONE,
+            START,
+            TERMINAL_PROOF
         }
-
     }
 
     enum RequestDeadlineExpiry {
@@ -2530,66 +2503,87 @@ record WorkerTerminalObservation(
 }
 
 /** First ordinary terminal observed while priority Cancel owns the slot. */
-sealed interface DeferredTerminal
-        permits DeferredTerminal.Failure,
-                DeferredTerminal.Timeout,
-                DeferredTerminal.DeliveryFailure,
-                DeferredTerminal.DeliveryRejected,
-                DeferredTerminal.Worker,
-                DeferredTerminal.Priority,
-                DeferredTerminal.DecodeGenerationRetired {
+record DeferredTerminal(
+        Kind kind,
+        StrategyErrorType errorType,
+        String detail,
+        WorkerTerminalObservation observation) {
 
-    record Failure(StrategyErrorType errorType, String detail)
-            implements DeferredTerminal {
-        public Failure {
-            Objects.requireNonNull(errorType, "errorType");
+    enum Kind {
+        FAILURE,
+        TIMEOUT,
+        DELIVERY_FAILURE,
+        DELIVERY_REJECTED,
+        WORKER,
+        PRIORITY,
+        DECODE_GENERATION_RETIRED
+    }
+
+    DeferredTerminal {
+        Objects.requireNonNull(kind, "kind");
+        boolean valid = switch (kind) {
+            case FAILURE, DELIVERY_FAILURE ->
+                    errorType != null && observation == null;
+            case WORKER -> errorType == null && observation != null;
+            case TIMEOUT, DELIVERY_REJECTED, PRIORITY,
+                    DECODE_GENERATION_RETIRED ->
+                    errorType == null && observation == null;
+        };
+        if (!valid) {
+            throw new IllegalArgumentException(
+                    "deferred terminal kind requires its exact payload");
         }
     }
 
-    record Timeout(String detail) implements DeferredTerminal {
+    static DeferredTerminal failure(
+            StrategyErrorType errorType, String detail) {
+        return new DeferredTerminal(Kind.FAILURE, errorType, detail, null);
     }
 
-    record DeliveryFailure(StrategyErrorType errorType, String detail)
-            implements DeferredTerminal {
-        public DeliveryFailure {
-            Objects.requireNonNull(errorType, "errorType");
-        }
+    static DeferredTerminal timeout(String detail) {
+        return new DeferredTerminal(Kind.TIMEOUT, null, detail, null);
     }
 
-    record DeliveryRejected(String detail) implements DeferredTerminal {
+    static DeferredTerminal deliveryFailure(
+            StrategyErrorType errorType, String detail) {
+        return new DeferredTerminal(
+                Kind.DELIVERY_FAILURE, errorType, detail, null);
     }
 
-    record Worker(WorkerTerminalObservation observation)
-            implements DeferredTerminal {
-        public Worker {
-            Objects.requireNonNull(observation, "observation");
-        }
+    static DeferredTerminal deliveryRejected(String detail) {
+        return new DeferredTerminal(
+                Kind.DELIVERY_REJECTED, null, detail, null);
     }
 
-    record Priority(String detail) implements DeferredTerminal {
+    static DeferredTerminal worker(WorkerTerminalObservation observation) {
+        return new DeferredTerminal(Kind.WORKER, null, null, observation);
     }
 
-    record DecodeGenerationRetired(String detail)
-            implements DeferredTerminal {
+    static DeferredTerminal priority(String detail) {
+        return new DeferredTerminal(Kind.PRIORITY, null, detail, null);
     }
 
-    default boolean authoritativeWorker() {
-        return this instanceof Worker
-                || this instanceof DecodeGenerationRetired;
+    static DeferredTerminal decodeGenerationRetired(String detail) {
+        return new DeferredTerminal(
+                Kind.DECODE_GENERATION_RETIRED, null, detail, null);
     }
 
-    default boolean endpointAlreadyRetired() {
-        return this instanceof DecodeGenerationRetired;
+    boolean authoritativeWorker() {
+        return kind == Kind.WORKER
+                || kind == Kind.DECODE_GENERATION_RETIRED;
     }
 
-    default boolean decodeSettlementCommitted() {
-        return this instanceof Worker worker
-                && worker.observation().source()
-                    .decodeSettlementCommitted();
+    boolean endpointAlreadyRetired() {
+        return kind == Kind.DECODE_GENERATION_RETIRED;
     }
 
-    default boolean deliveryFailure() {
-        return this instanceof DeliveryFailure;
+    boolean decodeSettlementCommitted() {
+        return kind == Kind.WORKER
+                && observation.source().decodeSettlementCommitted();
+    }
+
+    boolean deliveryFailure() {
+        return kind == Kind.DELIVERY_FAILURE;
     }
 }
 

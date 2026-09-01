@@ -109,31 +109,37 @@ public final class PrefillState {
         }
     }
 
-    public sealed interface WorkerStatusFact
-            permits ActiveWorkerStatusFact, TerminalWorkerStatusFact {
-        ScheduledRequest item();
-    }
-
-    public record ActiveWorkerStatusFact(ScheduledRequest item)
-            implements WorkerStatusFact {
-        public ActiveWorkerStatusFact {
-            Objects.requireNonNull(item, "item");
-        }
-    }
-
-    public enum TerminalFactKind {
-        COMPLETED,
-        FAILED,
-        PRIORITY_CANCELED
-    }
-
-    public record TerminalWorkerStatusFact(
+    public record WorkerStatusFact(
             ScheduledRequest item,
-            TerminalFactKind kind,
-            long errorCode) implements WorkerStatusFact {
-        public TerminalWorkerStatusFact {
+            Kind kind,
+            long errorCode) {
+        public WorkerStatusFact {
             Objects.requireNonNull(item, "item");
             Objects.requireNonNull(kind, "kind");
+            if (kind == Kind.ACTIVE && errorCode != 0L) {
+                throw new IllegalArgumentException(
+                        "an active Prefill fact cannot carry an error code");
+            }
+        }
+
+        public static WorkerStatusFact active(ScheduledRequest item) {
+            return new WorkerStatusFact(item, Kind.ACTIVE, 0L);
+        }
+
+        public static WorkerStatusFact terminal(
+                ScheduledRequest item, Kind kind, long errorCode) {
+            if (kind == Kind.ACTIVE) {
+                throw new IllegalArgumentException(
+                        "terminal Prefill fact requires a terminal kind");
+            }
+            return new WorkerStatusFact(item, kind, errorCode);
+        }
+
+        public enum Kind {
+            ACTIVE,
+            COMPLETED,
+            FAILED,
+            PRIORITY_CANCELED
         }
     }
 
@@ -457,8 +463,8 @@ public final class PrefillState {
 
         private void add(RequestEntry entry) {
             boolean added = members.add(entry);
-            assert added
-                    : "duplicate batch reduction request_id=" + entry.requestId;
+            requireState(added,
+                    "duplicate batch reduction request_id=" + entry.requestId);
         }
 
         private List<ScheduledRequest> liveItems() {
@@ -722,7 +728,8 @@ public final class PrefillState {
                            long pendingRequestCount) {
         public Snapshot {
             activeItems = List.copyOf(activeItems);
-            assert committedWork != null : "missing committed work snapshot";
+            Objects.requireNonNull(
+                    committedWork, "missing committed work snapshot");
         }
     }
 
@@ -833,8 +840,8 @@ public final class PrefillState {
             ScheduledRequest incoming) {
         requireLock();
         List<ScheduledRequest> victims = exactVictims;
-        assert !victims.isEmpty()
-                : "ACTIVE replacement requires exact victims";
+        requireState(!victims.isEmpty(),
+                "ACTIVE replacement requires exact victims");
 
         Set<Long> victimIds = new HashSet<>();
         List<RequestEntry> victimEntries = new ArrayList<>(victims.size());
@@ -847,12 +854,12 @@ public final class PrefillState {
                 return ActiveReplaceStatus.CONFLICT;
             }
             CapacityLease lease = entry.reservation;
-            assert lease == null || lease.state == LeaseState.OPEN
-                    : "ACTIVE victim owns a non-OPEN Prefill lease request_id="
-                    + victim.requestId();
-            assert activeIndex.contains(victim)
-                    : "canonical ACTIVE victim has no queue index request_id="
-                    + victim.requestId();
+            requireState(lease == null || lease.state == LeaseState.OPEN,
+                    "ACTIVE victim owns a non-OPEN Prefill lease request_id="
+                            + victim.requestId());
+            requireState(activeIndex.contains(victim),
+                    "canonical ACTIVE victim has no queue index request_id="
+                            + victim.requestId());
             victimEntries.add(entry);
         }
         if (victimIds.contains(incoming.requestId())
@@ -875,15 +882,15 @@ public final class PrefillState {
             ScheduledRequest victim = victims.get(index);
             RequestEntry entry = victimEntries.get(index);
             boolean removed = nextRequests.remove(victim.requestId(), entry);
-            assert removed
-                    : "validated ACTIVE victim missing from replacement plan request_id="
-                    + victim.requestId();
+            requireState(removed,
+                    "validated ACTIVE victim missing from replacement plan request_id="
+                            + victim.requestId());
         }
         RequestEntry previous = nextRequests.put(
                 incoming.requestId(), incomingEntry);
-        assert previous == null
-                : "validated incoming request exists in replacement plan request_id="
-                + incoming.requestId();
+        requireState(previous == null,
+                "validated incoming request exists in replacement plan request_id="
+                        + incoming.requestId());
 
         // Exercise the exact post-swap heap off to the side. This completes
         // allocation and comparator execution before the first canonical
@@ -898,23 +905,23 @@ public final class PrefillState {
         plannedIndex.addAll(activeIndex);
         for (ScheduledRequest victim : victims) {
             boolean removed = plannedIndex.remove(victim);
-            assert removed
-                    : "validated ACTIVE victim missing from index plan request_id="
-                    + victim.requestId();
+            requireState(removed,
+                    "validated ACTIVE victim missing from index plan request_id="
+                            + victim.requestId());
         }
         boolean planned = plannedIndex.add(incoming);
-        assert planned
-                : "validated incoming identity cannot enter index plan request_id="
-                + incoming.requestId();
+        requireState(planned,
+                "validated incoming identity cannot enter index plan request_id="
+                        + incoming.requestId());
 
         // Deterministic commit: exact identities and heap comparisons were
         // already proven above; no result construction or fallible branch
         // remains after the first canonical mutation.
         for (ScheduledRequest victim : victims) {
             boolean removed = activeIndex.remove(victim);
-            assert removed
-                    : "validated ACTIVE victim disappeared before commit request_id="
-                    + victim.requestId();
+            requireState(removed,
+                    "validated ACTIVE victim disappeared before commit request_id="
+                            + victim.requestId());
         }
         activeIndex.add(incoming);
         requests = nextRequests;
@@ -928,13 +935,13 @@ public final class PrefillState {
             return false;
         }
         CapacityLease lease = entry.reservation;
-        assert lease == null || lease.state == LeaseState.OPEN
-                : "ACTIVE request owns a non-OPEN Prefill lease request_id="
-                + item.requestId();
+        requireState(lease == null || lease.state == LeaseState.OPEN,
+                "ACTIVE request owns a non-OPEN Prefill lease request_id="
+                        + item.requestId());
         boolean removed = activeIndex.remove(item);
-        assert removed
-                : "canonical ACTIVE request has no queue index request_id="
-                + item.requestId();
+        requireState(removed,
+                "canonical ACTIVE request has no queue index request_id="
+                        + item.requestId());
         // The synchronous admission still owns any OPEN lease and releases it
         // after this queue transaction. ACTIVE removal owns only request/index.
         requests.remove(item.requestId(), entry);
@@ -954,17 +961,17 @@ public final class PrefillState {
             return null;
         }
         RequestEntry entry = requests.get(item.requestId());
-        assert entry != null && entry.activeIdentity(item)
-                : "stopped queue head has no canonical ACTIVE owner request_id="
-                + item.requestId();
+        requireState(entry != null && entry.activeIdentity(item),
+                "stopped queue head has no canonical ACTIVE owner request_id="
+                        + item.requestId());
         CapacityLease lease = entry.reservation;
-        assert lease == null || lease.state == LeaseState.OPEN
-                : "stopped ACTIVE request owns a non-OPEN Prefill lease request_id="
-                + item.requestId();
+        requireState(lease == null || lease.state == LeaseState.OPEN,
+                "stopped ACTIVE request owns a non-OPEN Prefill lease request_id="
+                        + item.requestId());
         boolean removed = activeIndex.remove(item);
-        assert removed
-                : "stopped canonical ACTIVE request has no queue index request_id="
-                + item.requestId();
+        requireState(removed,
+                "stopped canonical ACTIVE request has no queue index request_id="
+                        + item.requestId());
         // The queue-index removal is the PNR. Every fallible validation is
         // complete; the sole remaining commit is this private field store.
         entry.stopTerminalPending = true;
@@ -1209,24 +1216,24 @@ public final class PrefillState {
     }
 
     private List<ScheduledRequest> validateActiveGroup(List<ScheduledRequest> items) {
-        assert !items.isEmpty() : "committed group requires members";
+        requireState(!items.isEmpty(), "committed group requires members");
         for (ScheduledRequest item : items) {
             RequestEntry entry = requests.get(item.requestId());
-            assert entry != null && entry.activeIdentity(item)
-                    : "group member is not canonical ACTIVE request_id="
-                    + item.requestId();
-            assert activeIndex.contains(item)
-                    : "canonical ACTIVE request has no queue index request_id="
-                    + item.requestId();
+            requireState(entry != null && entry.activeIdentity(item),
+                    "group member is not canonical ACTIVE request_id="
+                            + item.requestId());
+            requireState(activeIndex.contains(item),
+                    "canonical ACTIVE request has no queue index request_id="
+                            + item.requestId());
         }
         return items;
     }
 
     private void removeValidatedActiveIndex(ScheduledRequest item) {
         boolean removed = activeIndex.remove(item);
-        assert removed
-                : "validated ACTIVE queue index disappeared request_id="
-                + item.requestId();
+        requireState(removed,
+                "validated ACTIVE queue index disappeared request_id="
+                        + item.requestId());
     }
 
     public DirectRegistration tryRegisterDirect(
@@ -1487,7 +1494,7 @@ public final class PrefillState {
                 || isPriorityCancelOverlayOnly(task)) {
             return null;
         }
-        return new ActiveWorkerStatusFact(entry.committedItem);
+        return WorkerStatusFact.active(entry.committedItem);
     }
 
     private List<BatchPredictionUpdate> prepareBatchPredictionsUnderLock(
@@ -2244,14 +2251,14 @@ public final class PrefillState {
             // deliberately left live for Decode.
             return null;
         }
-        TerminalFactKind kind = terminal.errorCode == 0L
-                ? TerminalFactKind.COMPLETED
+        WorkerStatusFact.Kind kind = terminal.errorCode == 0L
+                ? WorkerStatusFact.Kind.COMPLETED
                 : terminal.preemptionProgress
                         == PriorityPreemptionProgress.CANCELED
                     && terminal.errorCode == PRIORITY_PREEMPTED_ERROR_CODE
-                ? TerminalFactKind.PRIORITY_CANCELED
-                : TerminalFactKind.FAILED;
-        return new TerminalWorkerStatusFact(
+                ? WorkerStatusFact.Kind.PRIORITY_CANCELED
+                : WorkerStatusFact.Kind.FAILED;
+        return WorkerStatusFact.terminal(
                 entry.committedItem, kind, terminal.errorCode);
     }
 
@@ -2516,8 +2523,14 @@ public final class PrefillState {
     }
 
     private void requireLock() {
-        assert lock.isHeldByCurrentThread()
-                : "Prefill ownership requires queueLock";
+        requireState(lock.isHeldByCurrentThread(),
+                "Prefill ownership requires queueLock");
+    }
+
+    private static void requireState(boolean condition, String message) {
+        if (!condition) {
+            throw new IllegalStateException(message);
+        }
     }
 
     private static long individualRemaining(RequestEntry entry, long nowMs) {

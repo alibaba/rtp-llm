@@ -30,20 +30,35 @@ import org.flexlb.enums.DecodeTaskPhase;
  *                         test/snapshot values that were not admitted by an
  *                         endpoint
  */
-public record RequestInflight(
-        long kvTokens,
-        long expectedKvTokens,
-        long createdAtMs,
-        int priority,
-        DecodeTaskPhase phase,
-        long reservationToken
-) implements TtlEvictor.TtlTracked {
+public final class RequestInflight implements TtlEvictor.TtlTracked {
+    private final long kvTokens;
+    private final long expectedKvTokens;
+    private final long createdAtMs;
+    private final int priority;
+    private final DecodeTaskPhase phase;
+    private final long reservationToken;
+    /** Guarded by the owning DecodeEndpoint admission lock. */
+    private volatile boolean queued;
+    /** Exact pre-delivery slot owner; guarded by the Decode admission lock. */
+    private volatile DecodeEndpoint.EngineDispatchPermit dispatchPermit;
 
-    public RequestInflight {
+    public RequestInflight(
+            long kvTokens,
+            long expectedKvTokens,
+            long createdAtMs,
+            int priority,
+            DecodeTaskPhase phase,
+            long reservationToken) {
         if (reservationToken < 0L) {
             throw new IllegalArgumentException(
                     "reservationToken must be non-negative");
         }
+        this.kvTokens = kvTokens;
+        this.expectedKvTokens = expectedKvTokens;
+        this.createdAtMs = createdAtMs;
+        this.priority = priority;
+        this.phase = phase;
+        this.reservationToken = reservationToken;
     }
 
     /**
@@ -61,6 +76,69 @@ public record RequestInflight(
         this(kvTokens, expectedKvTokens, System.currentTimeMillis(),
                 priority, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
                 reservationToken);
+    }
+
+    public long kvTokens() {
+        return kvTokens;
+    }
+
+    public long expectedKvTokens() {
+        return expectedKvTokens;
+    }
+
+    @Override
+    public long createdAtMs() {
+        return createdAtMs;
+    }
+
+    public int priority() {
+        return priority;
+    }
+
+    public DecodeTaskPhase phase() {
+        return phase;
+    }
+
+    public long reservationToken() {
+        return reservationToken;
+    }
+
+    boolean queued() {
+        return queued;
+    }
+
+    boolean markQueued() {
+        if (queued) {
+            return false;
+        }
+        queued = true;
+        return true;
+    }
+
+    boolean clearQueued() {
+        if (!queued) {
+            return false;
+        }
+        queued = false;
+        return true;
+    }
+
+    DecodeEndpoint.EngineDispatchPermit dispatchPermit() {
+        return dispatchPermit;
+    }
+
+    void installDispatchPermit(DecodeEndpoint.EngineDispatchPermit permit) {
+        if (dispatchPermit != null) {
+            throw new IllegalStateException(
+                    "Decode reservation already owns a dispatch permit");
+        }
+        dispatchPermit = java.util.Objects.requireNonNull(permit, "permit");
+    }
+
+    DecodeEndpoint.EngineDispatchPermit clearDispatchPermit() {
+        DecodeEndpoint.EngineDispatchPermit current = dispatchPermit;
+        dispatchPermit = null;
+        return current;
     }
 
     /**

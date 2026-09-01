@@ -22,11 +22,13 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
@@ -52,9 +54,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             RoutingConfig.EndpointSelectorConfig configured) {
         return (role == RoleType.PREFILL || role == RoleType.PDFUSION)
                 && configured
-                instanceof RoutingConfig.EstimatedTtftSelectorConfig estimated
-                && !(estimated.getCandidateChoice()
-                instanceof RoutingConfig.LeastRecentlyUsedInPoolConfig);
+                instanceof RoutingConfig.EstimatedTtftSelectorConfig;
     }
 
     @Override
@@ -76,8 +76,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
     }
 
-    /** Subclasses clear request-scoped ThreadLocal references here. */
-    protected void releasePerSelectionState() {
+    private void releasePerSelectionState() {
     }
 
     private EndpointSelection doSelect(
@@ -266,11 +265,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return selectedIndex;
     }
 
-    /**
-     * Select from candidates that already passed CostBasedPrefill's hard filters.
-     * Subclasses may add a bounded preference and delegate here for exact baseline fallback.
-     */
-    protected int selectBestCandidate(CandidateSet survivors,
+    /** Select from candidates that already passed the common hard filters. */
+    private int selectBestCandidate(CandidateSet survivors,
                                       long minProjectedTtftMs,
                                       BalanceContext balanceContext,
                                       RoleType roleType,
@@ -281,37 +277,28 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return -1;
         }
 
-        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
-                .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineCandidate(survivors, minProjectedTtftMs, config);
-        }
+        RoutingConfig.PrefillSelectorConfig selector = config.getRouter()
+                .getRoles().getPrefill().getSelector();
+        RoutingConfig.CandidateChoiceConfig choice =
+                ((RoutingConfig.EstimatedTtftSelectorConfig) selector)
+                        .getCandidateChoice();
+        CacheAffinityPolicy.Decision affinity = evaluateCacheAffinity(
+                survivors, minProjectedTtftMs, seqLen, config);
 
-        long referenceHitTokens = 0L;
-        for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.projectedTtftMs(i) == minProjectedTtftMs) {
-                referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
-            }
+        if (choice instanceof RoutingConfig.LeastRecentlyUsedInPoolConfig) {
+            return selectLeastRecentlyUsed(
+                    survivors, affinity, roleType, group, config);
         }
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                survivors.size(),
-                survivors::projectedTtftMs,
-                survivors::cacheHit,
-                minProjectedTtftMs,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
 
         int selectedIndex;
-        if (affinity.hasPreference()) {
+        if (affinity != null && affinity.hasPreference()) {
             selectedIndex = selectCacheLeader(survivors, affinity);
         } else {
             selectedIndex = selectBaselineCandidate(
                     survivors, minProjectedTtftMs, config);
         }
 
-        if (selectedIndex >= 0) {
+        if (selectedIndex >= 0 && affinity != null) {
             String reason = affinity.reason().name();
             reportCacheAffinityDecision(
                     roleType, survivors.endpoint(selectedIndex).getIp(), reason);
@@ -332,6 +319,74 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
         }
         return selectedIndex;
+    }
+
+    private static CacheAffinityPolicy.Decision evaluateCacheAffinity(
+            CandidateSet candidates,
+            long minProjectedTtftMs,
+            long seqLen,
+            FlexlbConfig config) {
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter()
+                .getRoles().getPrefill().getCacheAffinity();
+        if (cacheAffinity == null) {
+            return null;
+        }
+        long referenceHitTokens = 0L;
+        for (int i = 0; i < candidates.size(); i++) {
+            if (candidates.projectedTtftMs(i) == minProjectedTtftMs) {
+                referenceHitTokens = Math.max(
+                        referenceHitTokens, candidates.cacheHit(i));
+            }
+        }
+        return CacheAffinityPolicy.evaluate(
+                candidates.size(),
+                candidates::projectedTtftMs,
+                candidates::cacheHit,
+                minProjectedTtftMs,
+                referenceHitTokens,
+                seqLen,
+                cacheAffinity.getMaxExtraTtftMs(),
+                cacheAffinity.getMinPrefixHitPercent());
+    }
+
+    private int selectLeastRecentlyUsed(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity,
+            RoleType roleType,
+            String group,
+            FlexlbConfig config) {
+        List<Integer> baselinePool = shortestCandidateIndexes(
+                candidates,
+                config.shortestTtftCandidateCount(candidates.size()));
+        ClaimResult result = claimCandidate(
+                candidates, affinity, baselinePool);
+        if (result == null) {
+            return -1;
+        }
+        if (affinity != null) {
+            String reason = result.preferred()
+                    ? CacheAffinityPolicy.Reason.CACHE_LEADER.name()
+                    : affinity.hasPreference()
+                            ? "CACHE_AFFINITY_FALLBACK"
+                            : affinity.reason().name();
+            reportCacheAffinityDecision(
+                    roleType, candidates.endpoint(result.index()).getIp(), reason);
+            if (Logger.isDebugEnabled()) {
+                Logger.debug(
+                        "Prefill LRU cache-affinity decision - role: {}, group: {}, "
+                                + "selected: {}, minTtftMs: {}, selectedTtftMs: {}, "
+                                + "ttftCutoffMs: {}, hitTokens: {}, reason: {}",
+                        roleType,
+                        group,
+                        candidates.endpointAddress(result.index()),
+                        affinity.minProjectedTtftMs(),
+                        candidates.projectedTtftMs(result.index()),
+                        affinity.projectedTtftCutoffMs(),
+                        candidates.cacheHit(result.index()),
+                        reason);
+            }
+        }
+        return result.index();
     }
 
     /** Preserve CostBasedPrefill's original tie-window selection when affinity is disabled or gated off. */
@@ -384,6 +439,121 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
         }
         return selectedIndex;
+    }
+
+    private static List<Integer> shortestCandidateIndexes(
+            CandidateSet candidates, int configuredCount) {
+        int count = Math.min(Math.max(1, configuredCount), candidates.size());
+        List<Integer> indexes = new ArrayList<>(candidates.size());
+        for (int i = 0; i < candidates.size(); i++) {
+            indexes.add(i);
+        }
+        indexes.sort(Comparator
+                .comparingLong((Integer index) ->
+                        candidates.projectedTtftMs(index))
+                .thenComparingInt(Integer::intValue));
+        return indexes.subList(0, count);
+    }
+
+    private static ClaimResult claimCandidate(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity,
+            List<Integer> baselinePool) {
+        LiveCandidate target = findTarget(candidates, affinity, baselinePool);
+        if (target == null) {
+            return null;
+        }
+        if (claim(target.clock(), target.expected())) {
+            return new ClaimResult(target.index(), target.preferred());
+        }
+        target = findTarget(candidates, affinity, baselinePool);
+        if (target == null) {
+            return null;
+        }
+        publishMonotonically(target.clock());
+        return new ClaimResult(target.index(), target.preferred());
+    }
+
+    private static LiveCandidate findTarget(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity,
+            List<Integer> baselinePool) {
+        LiveCandidate target = affinity != null && affinity.hasPreference()
+                ? findLiveLru(candidates, affinity)
+                : null;
+        return target != null
+                ? target.asPreferred()
+                : findLiveLru(candidates, baselinePool);
+    }
+
+    private static LiveCandidate findLiveLru(
+            CandidateSet candidates,
+            CacheAffinityPolicy.Decision affinity) {
+        LiveCandidate selected = null;
+        for (int i = 0; i < affinity.preferredCount(); i++) {
+            selected = chooseLiveLru(
+                    candidates, affinity.preferredIndex(i), selected);
+        }
+        return selected;
+    }
+
+    private static LiveCandidate findLiveLru(
+            CandidateSet candidates, List<Integer> indexes) {
+        LiveCandidate selected = null;
+        for (int index : indexes) {
+            selected = chooseLiveLru(candidates, index, selected);
+        }
+        return selected;
+    }
+
+    private static LiveCandidate chooseLiveLru(
+            CandidateSet candidates, int index, LiveCandidate selected) {
+        AtomicLong clock = candidates.endpoint(index).getLastSelectedTime();
+        long live = clock.get();
+        if (live == Long.MAX_VALUE) {
+            return selected;
+        }
+        if (selected == null
+                || live < selected.expected()
+                || live == selected.expected()
+                        && (candidates.projectedTtftMs(index)
+                                < candidates.projectedTtftMs(selected.index())
+                        || candidates.projectedTtftMs(index)
+                                == candidates.projectedTtftMs(selected.index())
+                                && index < selected.index())) {
+            return new LiveCandidate(index, clock, live);
+        }
+        return selected;
+    }
+
+    private static boolean claim(AtomicLong clock, long expected) {
+        long nowMicros = System.nanoTime() / 1_000L;
+        return clock.compareAndSet(
+                expected, Math.max(nowMicros, expected + 1L));
+    }
+
+    private static void publishMonotonically(AtomicLong clock) {
+        long nowMicros = System.nanoTime() / 1_000L;
+        clock.updateAndGet(current -> current == Long.MAX_VALUE
+                ? Long.MAX_VALUE
+                : Math.max(nowMicros, current + 1L));
+    }
+
+    private record LiveCandidate(
+            int index,
+            AtomicLong clock,
+            long expected,
+            boolean preferred) {
+        private LiveCandidate(int index, AtomicLong clock, long expected) {
+            this(index, clock, expected, false);
+        }
+
+        private LiveCandidate asPreferred() {
+            return new LiveCandidate(index, clock, expected, true);
+        }
+    }
+
+    private record ClaimResult(int index, boolean preferred) {
     }
 
     private static final class EndpointDiscovery implements AutoCloseable {

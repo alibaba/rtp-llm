@@ -205,10 +205,11 @@ public final class RoutePrefillAdmission implements PrefillAdmissionPort {
                 throw new IllegalArgumentException(
                         "route commit does not match prepared identities");
             }
-            assert !reservations.isEmpty()
-                    : "route admission has no head reservation";
-            assert reservations.size() == members.size()
-                    : "route admission reservation/member count diverged";
+            if (reservations.isEmpty()
+                    || reservations.size() != members.size()) {
+                throw new IllegalStateException(
+                        "route admission reservation/member ownership diverged");
+            }
             PrefillState.RouteReservation headReservation =
                     reservations.get(0);
             PrefillAdmissionResources.CommittedAdmissionOwner committedOwner =

@@ -427,7 +427,7 @@ class DecodeEndpointAdmissionTest {
     void queuedDispatchTransactionPublishesReservationAndPermitTogether() {
         updateStatus(Map.of(), Map.of(), 10_000L);
 
-        DecodeEndpoint.QueuedEngineDispatchPermitAcquisition acquisition;
+        DecodeEndpoint.EngineDispatchPermitAcquisition acquisition;
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             acquisition = endpoint.tryAcquireQueuedEngineDispatchPermitPinned(
@@ -454,7 +454,7 @@ class DecodeEndpointAdmissionTest {
         reserve(90L, 100L, 110L, 50);
         assertEquals(1, endpoint.getEngineLoad());
 
-        DecodeEndpoint.QueuedEngineDispatchPermitAcquisition acquisition;
+        DecodeEndpoint.EngineDispatchPermitAcquisition acquisition;
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertNotNull(pin);
             acquisition = endpoint.tryAcquireQueuedEngineDispatchPermitPinned(
@@ -822,9 +822,8 @@ class DecodeEndpointAdmissionTest {
                         EndpointTestSupport.applyStatus(endpoint, response);
 
         assertEquals(1, reduction.facts().size());
-        DecodeEndpoint.ActiveWorkerStatusFact active =
-                (DecodeEndpoint.ActiveWorkerStatusFact)
-                        reduction.facts().getFirst();
+        DecodeEndpoint.WorkerStatusFact active = reduction.facts().getFirst();
+        assertEquals(DecodeEndpoint.WorkerStatusFact.Kind.ACTIVE, active.kind());
         assertEquals(reservation, active.reservation());
         assertEquals(reservation, endpoint.reservationHandle(1L));
     }

@@ -18,7 +18,7 @@ class RequestSlotTerminalSettlementTest {
     @Test
     void decodeTerminalIsAProofOfAlreadyCommittedEndpointSettlement() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        DeferredTerminal terminal = new DeferredTerminal.Worker(
+        DeferredTerminal terminal = DeferredTerminal.worker(
                 new WorkerTerminalObservation(
                         WorkerTerminalSource.DECODE_ENDPOINT_SETTLED,
                         true,
@@ -32,7 +32,7 @@ class RequestSlotTerminalSettlementTest {
     @Test
     void prefillBackedTerminalDelegatesToTheExactDecodeClaimTransaction() {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        DeferredTerminal terminal = new DeferredTerminal.Worker(
+        DeferredTerminal terminal = DeferredTerminal.worker(
                 new WorkerTerminalObservation(
                         WorkerTerminalSource.PREFILL_BACKED,
                         false,

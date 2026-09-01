@@ -4,7 +4,8 @@ import org.flexlb.dao.loadbalance.Response;
 
 import java.util.ArrayDeque;
 import java.util.Objects;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -50,11 +51,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
                 policy.workerCount(),
                 0L,
                 TimeUnit.MILLISECONDS,
-                // One exact current RequestSlot can own at most one lease, so
-                // the global outstanding-request bound is the real queue
-                // bound. A non-blocking ingress avoids scheduler/transport
-                // deadlock under user-continuation backpressure.
-                new LinkedBlockingQueue<>(),
+                new ArrayBlockingQueue<>(policy.queueCapacity()),
                 runnable -> {
                     Thread thread = new Thread(
                             runnable,
@@ -63,7 +60,17 @@ final class RequestCompletionPublisher implements AutoCloseable {
                     thread.setDaemon(true);
                     return thread;
                 },
-                new ThreadPoolExecutor.AbortPolicy());
+                (publication, saturated) -> {
+                    if (saturated.isShutdown()) {
+                        throw new RejectedExecutionException(
+                                "completion publisher is closed");
+                    }
+                    // Every asynchronous submit is required to happen outside
+                    // the RequestSlot lock. On saturation, execute the exact
+                    // completion synchronously instead of retaining unbounded
+                    // responses or silently dropping a terminal publication.
+                    publication.run();
+                });
         executor.prestartAllCoreThreads();
     }
 
@@ -198,16 +205,6 @@ final class RequestCompletionPublisher implements AutoCloseable {
         }
     }
 
-    Snapshot snapshot() {
-        int queueSize = executor.getQueue().size();
-        return new Snapshot(
-                executor.getMaximumPoolSize(),
-                queueSize,
-                executor.getLargestPoolSize(),
-                executor.getCompletedTaskCount(),
-                phaseSnapshot() != PublisherPhase.OPEN);
-    }
-
     boolean awaitTermination(long timeout, TimeUnit unit)
             throws InterruptedException {
         return executor.awaitTermination(timeout, unit);
@@ -322,7 +319,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
         Runnable drainTask = () -> drainPublications(publication);
         try {
             executor.execute(drainTask);
-        } catch (java.util.concurrent.RejectedExecutionException closed) {
+        } catch (RejectedExecutionException closed) {
             throw new IllegalStateException(
                     "accepted completion publication was rejected", closed);
         }
@@ -361,12 +358,6 @@ final class RequestCompletionPublisher implements AutoCloseable {
             if (inFlightPublications == 0) {
                 lifecycleMonitor.notifyAll();
             }
-        }
-    }
-
-    private PublisherPhase phaseSnapshot() {
-        synchronized (lifecycleMonitor) {
-            return phase;
         }
     }
 
@@ -489,26 +480,23 @@ final class RequestCompletionPublisher implements AutoCloseable {
         CLOSED
     }
 
-    record Policy(int workerCount) {
+    record Policy(int workerCount, int queueCapacity) {
 
         Policy {
             if (workerCount < 1) {
                 throw new IllegalArgumentException(
                         "completion publisher worker count must be positive");
             }
+            if (queueCapacity < 1) {
+                throw new IllegalArgumentException(
+                        "completion publisher queue capacity must be positive");
+            }
         }
 
         static Policy productionDefaults() {
-            return new Policy(Math.max(2, Math.min(
-                    8, Runtime.getRuntime().availableProcessors())));
+            int workers = Math.max(2, Math.min(
+                    8, Runtime.getRuntime().availableProcessors()));
+            return new Policy(workers, workers * 1024);
         }
-    }
-
-    record Snapshot(
-            int workerLimit,
-            int queueSize,
-            int largestPoolSize,
-            long completedTaskCount,
-            boolean shutdown) {
     }
 }

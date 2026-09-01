@@ -152,9 +152,13 @@ public class RequestRegistry implements SlotDeliveryPort {
     public boolean removeExactTombstone(
             RequestSlot exactSlot, long updatedBeforeMs) {
         synchronized (exactSlot) {
-            return exactSlot.isRemovableTombstone(updatedBeforeMs)
-                    && requestSlots.remove(
-                            exactSlot.requestId(), exactSlot);
+            if (!exactSlot.isRemovableTombstone(updatedBeforeMs)
+                    || !requestSlots.remove(
+                            exactSlot.requestId(), exactSlot)) {
+                return false;
+            }
+            exactSlot.detachGeneration();
+            return true;
         }
     }
 
@@ -197,7 +201,6 @@ public class RequestRegistry implements SlotDeliveryPort {
         }
 
         RequestSlot slot = new RequestSlot(
-                this,
                 completionPublisher,
                 context.getRequestId());
         RequestFuture future = slot.future();
@@ -454,7 +457,11 @@ public class RequestRegistry implements SlotDeliveryPort {
             AdmissionMutation mutation;
             synchronized (slot) {
                 mutation = isCurrentSlot(slot)
-                        ? slot.tryBeginAdmissionMutation() : null;
+                        ? slot.tryBeginAdmissionMutation(
+                                (exact, failure) -> terminateAdmissionMutation(
+                                        slot, exact, failure),
+                                exact -> completeAdmissionMutation(slot, exact))
+                        : null;
             }
             transferred = mutation != null;
             return mutation;
@@ -774,7 +781,7 @@ public class RequestRegistry implements SlotDeliveryPort {
             PreemptionWork work;
             synchronized (entry) {
                 work = reduceDeferredTerminalFactLocked(entry,
-                        new DeferredTerminal.Failure(errorType, detail));
+                        DeferredTerminal.failure(errorType, detail));
             }
             consumePreemptionWork(entry, work);
         }
@@ -817,16 +824,14 @@ public class RequestRegistry implements SlotDeliveryPort {
         return work.accepted();
     }
 
-    PreemptionWork reducePreemptionFactLocked(
+    PreemptionWork materializePreemptionWorkLocked(
             RequestSlot entry,
-            RequestSlot.PreemptionFact fact,
+            RequestSlot.PreemptionReduction reduction,
             Runnable priorityCounterpartCleanup) {
         if (!Thread.holdsLock(entry)) {
             throw new IllegalStateException(
                     "preemption reduction requires slot lock");
         }
-        RequestSlot.PreemptionReduction reduction =
-                entry.applyPreemptionFact(fact);
         return materializePreemptionReductionLocked(
                 entry, reduction, priorityCounterpartCleanup);
     }
@@ -835,20 +840,22 @@ public class RequestRegistry implements SlotDeliveryPort {
             RequestSlot entry,
             RequestSlot.PreemptionReduction reduction,
             Runnable priorityCounterpartCleanup) {
-        if (reduction instanceof RequestSlot.PreemptionReduction.Stale) {
+        if (reduction.status()
+                == RequestSlot.PreemptionReduction.Status.STALE) {
             return PreemptionWork.STALE;
         }
-        if (reduction instanceof RequestSlot.PreemptionReduction.None) {
+        if (reduction.status()
+                == RequestSlot.PreemptionReduction.Status.NONE) {
             return PreemptionWork.ACCEPTED;
         }
-        if (reduction instanceof RequestSlot.PreemptionReduction.StartFence start) {
+        if (reduction.status()
+                == RequestSlot.PreemptionReduction.Status.START_FENCE) {
             return new PreemptionWork(
-                    true, null, start.exact(), start.target(), null, null);
+                    true, null, reduction.fence(), reduction.target(),
+                    null, null);
         }
-        RequestSlot.PreemptionReduction.Replay replay =
-                (RequestSlot.PreemptionReduction.Replay) reduction;
         PublicationWork publication = materializeReplayLocked(
-                entry, replay.payload(), priorityCounterpartCleanup);
+                entry, reduction.payload(), priorityCounterpartCleanup);
         if (publication == null) {
             throw new IllegalStateException(
                     "accepted preemption replay produced no publication for request "
@@ -859,8 +866,8 @@ public class RequestRegistry implements SlotDeliveryPort {
                 publication,
                 null,
                 null,
-                replay.signal(),
-                replay.prefillOnlyCleanup());
+                reduction.signal(),
+                reduction.prefillOnlyCleanup());
     }
 
     private PublicationWork materializeReplayLocked(
@@ -869,11 +876,11 @@ public class RequestRegistry implements SlotDeliveryPort {
             Runnable priorityCounterpartCleanup) {
         if (payload instanceof RequestSlot.ReplayPayload.Terminal terminal) {
             DeferredTerminal exact = terminal.exact();
-            if (exact instanceof DeferredTerminal.Priority priority) {
+            if (exact.kind() == DeferredTerminal.Kind.PRIORITY) {
                 return PublicationWork.terminal(
                         beginSettledPriorityTerminalLocked(
                                 entry,
-                                priority.detail(),
+                                exact.detail(),
                                 priorityCounterpartCleanup));
             }
             return applyOrdinaryTerminalLocked(entry, exact);
@@ -1093,9 +1100,10 @@ public class RequestRegistry implements SlotDeliveryPort {
             synchronized (entry) {
                 RequestSlot.FenceReduction reduction = entry.applyFenceUpdate(
                         fence, RequestSlot.FenceUpdate.AWAIT_TERMINAL);
-                if (!(reduction instanceof RequestSlot.FenceReduction.None)
-                        && !(reduction
-                            instanceof RequestSlot.FenceReduction.Stale)) {
+                if (reduction.status()
+                            != RequestSlot.FenceReduction.Status.NONE
+                        && reduction.status()
+                            != RequestSlot.FenceReduction.Status.STALE) {
                     throw new IllegalStateException(
                             "await-terminal produced an invalid fence effect: "
                                     + reduction.getClass().getSimpleName());
@@ -1114,14 +1122,17 @@ public class RequestRegistry implements SlotDeliveryPort {
         if (reduction == null) {
             return;
         }
-        if (reduction instanceof RequestSlot.FenceReduction.Start start) {
-            startFence(entry, start.exact(), start.target());
+        if (reduction.status()
+                == RequestSlot.FenceReduction.Status.START) {
+            startFence(entry, reduction.fence(), reduction.target());
             return;
         }
-        if (reduction instanceof RequestSlot.FenceReduction.None) {
+        if (reduction.status()
+                == RequestSlot.FenceReduction.Status.NONE) {
             return;
         }
-        if (reduction instanceof RequestSlot.FenceReduction.Stale
+        if (reduction.status()
+                    == RequestSlot.FenceReduction.Status.STALE
                 && !requireOwnedEffect) {
             return;
         }
@@ -1270,20 +1281,20 @@ public class RequestRegistry implements SlotDeliveryPort {
         if (item == null) {
             return PreemptionWork.STALE;
         }
-        RequestSlot.PreemptionFact fact;
-        if (terminal instanceof DeferredTerminal.DeliveryRejected
+        RequestSlot.PreemptionReduction reduction;
+        if (terminal.kind() == DeferredTerminal.Kind.DELIVERY_REJECTED
                 && item.decodeEp() != null
                 && item.decodeReservation() != null) {
-            fact = new RequestSlot.PreemptionFact.DispatchRejected(
+            reduction = entry.reduceDispatchRejected(
                     item.decodeEp(), item.decodeReservation(), item, terminal);
         } else {
-            fact = terminal.authoritativeWorker()
-                    ? new RequestSlot.PreemptionFact.WorkerTerminal(
+            reduction = terminal.authoritativeWorker()
+                    ? entry.reduceWorkerTerminal(
                             item, terminal)
-                    : new RequestSlot.PreemptionFact.OrdinaryTerminal(
+                    : entry.reduceOrdinaryTerminal(
                             item, terminal);
         }
-        return reducePreemptionFactLocked(entry, fact, null);
+        return materializePreemptionWorkLocked(entry, reduction, null);
     }
 
     /** Apply an already-owned ordinary outcome. Called with {@code entry} locked. */
@@ -1293,21 +1304,19 @@ public class RequestRegistry implements SlotDeliveryPort {
         if (terminal.endpointAlreadyRetired()) {
             return applyDecodeSettledTerminalLocked(entry, terminal);
         }
-        return switch (terminal) {
-            case DeferredTerminal.Failure failure ->
-                    applyFailureTerminalLocked(entry, failure);
-            case DeferredTerminal.Timeout timeout ->
-                    applyTimeoutTerminalLocked(entry, timeout);
-            case DeferredTerminal.DeliveryFailure failure ->
-                    applyFailureTerminalLocked(entry, failure);
-            case DeferredTerminal.DeliveryRejected rejected ->
-                    applyDecodeSettledTerminalLocked(entry, rejected);
-            case DeferredTerminal.Worker worker ->
-                    applyWorkerTerminalLocked(entry, worker.observation());
-            case DeferredTerminal.Priority ignored ->
+        return switch (terminal.kind()) {
+            case FAILURE -> applyFailureTerminalLocked(entry, terminal, false);
+            case TIMEOUT -> applyTimeoutTerminalLocked(entry, terminal);
+            case DELIVERY_FAILURE ->
+                    applyFailureTerminalLocked(entry, terminal, true);
+            case DELIVERY_REJECTED ->
+                    applyDecodeSettledTerminalLocked(entry, terminal);
+            case WORKER ->
+                    applyWorkerTerminalLocked(entry, terminal.observation());
+            case PRIORITY ->
                     throw new IllegalStateException(
                             "priority terminal requires its typed reducer");
-            case DeferredTerminal.DecodeGenerationRetired ignored ->
+            case DECODE_GENERATION_RETIRED ->
                     throw new IllegalStateException(
                             "retired Decode generation was not marked retired");
         };
@@ -1315,7 +1324,7 @@ public class RequestRegistry implements SlotDeliveryPort {
 
     private PublicationWork applyTimeoutTerminalLocked(
             RequestSlot entry,
-            DeferredTerminal.Timeout timeout) {
+            DeferredTerminal timeout) {
         return PublicationWork.terminal(beginTerminalLocked(
                 entry,
                 true,
@@ -1327,18 +1336,10 @@ public class RequestRegistry implements SlotDeliveryPort {
 
     private PublicationWork applyFailureTerminalLocked(
             RequestSlot entry,
-            DeferredTerminal.Failure failure) {
+            DeferredTerminal failure,
+            boolean releaseDecode) {
         return PublicationWork.terminal(beginTerminalLocked(
-                entry, true, false,
-                owner -> owner.fail(failure.detail()),
-                buildErrorResponse(failure.errorType(), failure.detail())));
-    }
-
-    private PublicationWork applyFailureTerminalLocked(
-            RequestSlot entry,
-            DeferredTerminal.DeliveryFailure failure) {
-        return PublicationWork.terminal(beginTerminalLocked(
-                entry, true, true,
+                entry, true, releaseDecode,
                 owner -> owner.fail(failure.detail()),
                 buildErrorResponse(failure.errorType(), failure.detail())));
     }
@@ -1347,10 +1348,10 @@ public class RequestRegistry implements SlotDeliveryPort {
             RequestSlot entry,
             DeferredTerminal terminal) {
         String terminalDetail;
-        if (terminal instanceof DeferredTerminal.DeliveryRejected rejected) {
-            terminalDetail = rejected.detail();
-        } else if (terminal instanceof DeferredTerminal.DecodeGenerationRetired retired) {
-            terminalDetail = retired.detail();
+        if (terminal.kind() == DeferredTerminal.Kind.DELIVERY_REJECTED
+                || terminal.kind()
+                    == DeferredTerminal.Kind.DECODE_GENERATION_RETIRED) {
+            terminalDetail = terminal.detail();
         } else {
             throw new IllegalArgumentException(
                     "Decode-settled reducer requires a Decode terminal");
@@ -1499,7 +1500,7 @@ public class RequestRegistry implements SlotDeliveryPort {
                                 exactSlot.timeoutErrorType(), detail));
             } else {
                 work = reduceDeferredTerminalFactLocked(
-                        exactSlot, new DeferredTerminal.Timeout(detail));
+                        exactSlot, DeferredTerminal.timeout(detail));
             }
         }
         submitTerminal(direct);
@@ -1533,7 +1534,7 @@ public class RequestRegistry implements SlotDeliveryPort {
             PreemptionWork work;
             synchronized (entry) {
                 work = reduceDeferredTerminalFactLocked(entry,
-                        new DeferredTerminal.Failure(
+                        DeferredTerminal.failure(
                                 StrategyErrorType.BATCH_DISPATCH_FAILED,
                                 "Worker scheduling queue rejected request: "
                                         + failureDetail));
@@ -1714,9 +1715,9 @@ public class RequestRegistry implements SlotDeliveryPort {
                 item, DeliveryClaimKind.ROUTE_DECISION, 0L)) {
             return PreemptionWork.STALE;
         }
-        return reducePreemptionFactLocked(
+        return materializePreemptionWorkLocked(
                 entry,
-                new RequestSlot.PreemptionFact.DeliveryConfirmed(0L),
+                entry.reduceDeliveryConfirmed(0L),
                 null);
     }
 
@@ -1751,9 +1752,9 @@ public class RequestRegistry implements SlotDeliveryPort {
                 String detail = "Delivery failed: "
                         + detailOf(completion.cause());
                 if (exact.slot.decodeOwnsRequest()) {
-                    work = reducePreemptionFactLocked(
+                    work = materializePreemptionWorkLocked(
                             exact.slot,
-                            new RequestSlot.PreemptionFact.DeliveryConfirmed(
+                            exact.slot.reduceDeliveryConfirmed(
                                     claimCorrelationId(exact.identity)),
                             null);
                 } else {
@@ -1768,10 +1769,10 @@ public class RequestRegistry implements SlotDeliveryPort {
                     switch (settlement) {
                         case RELEASED -> work = reduceDeferredTerminalFactLocked(
                                 exact.slot,
-                                new DeferredTerminal.DeliveryRejected(detail));
-                        case ENGINE_ACCEPTED -> work = reducePreemptionFactLocked(
+                                DeferredTerminal.deliveryRejected(detail));
+                        case ENGINE_ACCEPTED -> work = materializePreemptionWorkLocked(
                                 exact.slot,
-                                new RequestSlot.PreemptionFact.DeliveryConfirmed(
+                                exact.slot.reduceDeliveryConfirmed(
                                         claimCorrelationId(exact.identity)),
                                 null);
                         case CONFLICT -> fenceReduction =
@@ -1780,9 +1781,9 @@ public class RequestRegistry implements SlotDeliveryPort {
                     }
                 }
             } else if (exact.slot.decodeOwnsRequest()) {
-                work = reducePreemptionFactLocked(
+                work = materializePreemptionWorkLocked(
                         exact.slot,
-                        new RequestSlot.PreemptionFact.DeliveryConfirmed(
+                        exact.slot.reduceDeliveryConfirmed(
                                 claimCorrelationId(exact.identity)),
                         null);
             } else {
@@ -1819,9 +1820,9 @@ public class RequestRegistry implements SlotDeliveryPort {
                     item.requestId());
             return PreemptionWork.STALE;
         }
-        return reducePreemptionFactLocked(
+        return materializePreemptionWorkLocked(
                 entry,
-                new RequestSlot.PreemptionFact.DeliveryConfirmed(batchId),
+                entry.reduceDeliveryConfirmed(batchId),
                 null);
     }
 
@@ -2091,7 +2092,7 @@ public class RequestRegistry implements SlotDeliveryPort {
                 }
                 work = reduceDeferredTerminalFactLocked(
                         entry,
-                        new DeferredTerminal.DeliveryFailure(
+                        DeferredTerminal.deliveryFailure(
                                 StrategyErrorType.BATCH_DISPATCH_FAILED,
                                 "Delivery preparation failed: "
                                         + detailOf(cause)));

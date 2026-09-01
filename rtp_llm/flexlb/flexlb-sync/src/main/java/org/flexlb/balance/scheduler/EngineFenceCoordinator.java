@@ -47,7 +47,8 @@ final class EngineFenceCoordinator {
         synchronized (slot) {
             RequestSlot.FenceReduction reduction = slot.applyFenceUpdate(
                     exactFence, RequestSlot.FenceUpdate.CANCEL_STARTED);
-            if (reduction instanceof RequestSlot.FenceReduction.Stale) {
+            if (reduction.status()
+                    == RequestSlot.FenceReduction.Status.STALE) {
                 return false;
             }
             requireNoFenceEffect(reduction, "Cancel start");
@@ -110,13 +111,16 @@ final class EngineFenceCoordinator {
             reduction = slot.applyFenceUpdate(
                     exactFence, RequestSlot.FenceUpdate.TOMBSTONED);
         }
-        if (reduction instanceof RequestSlot.FenceReduction.Deferred) {
+        if (reduction.status()
+                == RequestSlot.FenceReduction.Status.DEFERRED) {
             return TerminalDisposition.DEFERRED;
         }
-        if (reduction instanceof RequestSlot.FenceReduction.Stale) {
+        if (reduction.status()
+                == RequestSlot.FenceReduction.Status.STALE) {
             return TerminalDisposition.STALE;
         }
-        if (!(reduction instanceof RequestSlot.FenceReduction.TerminalProof ready)) {
+        if (reduction.status()
+                != RequestSlot.FenceReduction.Status.TERMINAL_PROOF) {
             throw new IllegalStateException(
                     "Engine fence TOMBSTONED produced an invalid effect: "
                             + reduction.getClass().getSimpleName());
@@ -126,8 +130,10 @@ final class EngineFenceCoordinator {
         // The sink owns a total reduction: leaf cleanup failures are isolated
         // there and cannot veto the RequestSlot terminal edge.
         TerminalDisposition disposition =
-                terminalSink.apply(slot, ready.proof());
-        assert disposition != null : "missing Engine fence disposition";
+                terminalSink.apply(slot, reduction.proof());
+        if (disposition == null) {
+            throw new IllegalStateException("missing Engine fence disposition");
+        }
         validateDisposition(slot, exactFence, disposition);
         return disposition;
     }
@@ -141,10 +147,10 @@ final class EngineFenceCoordinator {
                     exactFence, RequestSlot.FenceUpdate.TOMBSTONED);
             boolean valid = switch (disposition) {
                 case TERMINALIZED -> slot.isTombstone();
-                case DEFERRED -> actual
-                        instanceof RequestSlot.FenceReduction.Deferred;
-                case STALE -> actual
-                        instanceof RequestSlot.FenceReduction.Stale;
+                case DEFERRED -> actual.status()
+                        == RequestSlot.FenceReduction.Status.DEFERRED;
+                case STALE -> actual.status()
+                        == RequestSlot.FenceReduction.Status.STALE;
             };
             if (!valid) {
                 throw new IllegalStateException(
@@ -163,7 +169,8 @@ final class EngineFenceCoordinator {
         synchronized (slot) {
             RequestSlot.FenceReduction reduction = slot.applyFenceUpdate(
                     exactFence, RequestSlot.FenceUpdate.AWAIT_TERMINAL);
-            if (!(reduction instanceof RequestSlot.FenceReduction.Stale)) {
+            if (reduction.status()
+                    != RequestSlot.FenceReduction.Status.STALE) {
                 requireNoFenceEffect(reduction, "await terminal");
             }
         }
@@ -172,7 +179,8 @@ final class EngineFenceCoordinator {
     private static void requireNoFenceEffect(
             RequestSlot.FenceReduction reduction,
             String operation) {
-        if (!(reduction instanceof RequestSlot.FenceReduction.None)) {
+        if (reduction.status()
+                != RequestSlot.FenceReduction.Status.NONE) {
             throw new IllegalStateException(
                     operation + " produced an invalid Engine fence effect: "
                             + reduction.getClass().getSimpleName());

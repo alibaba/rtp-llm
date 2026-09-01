@@ -132,13 +132,8 @@ class CostBasedPrefillSelectionMetricTest {
         when(cache.findMatchingEngines(any(), any(), any()))
                 .thenReturn(Map.of());
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
-        CostBasedPrefillStrategy strategy = shortestTtft
-                ? new ShortestTTFTStrategy(
-                        new WorkerDirectory(registry), cache,
-                        measure, reporter)
-                : new CostBasedPrefillStrategy(
-                        new WorkerDirectory(registry), cache,
-                        measure, reporter);
+        CostBasedPrefillStrategy strategy = new CostBasedPrefillStrategy(
+                new WorkerDirectory(registry), cache, measure, reporter);
 
         Request request = new Request();
         request.setRequestId(10_001L);

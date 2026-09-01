@@ -98,12 +98,11 @@ final class EndpointEventProjector implements EndpointEventSink {
             long observedAtMs) {
         for (PrefillState.WorkerStatusFact fact : reduction.facts()) {
             try {
-                switch (fact) {
-                    case PrefillState.ActiveWorkerStatusFact active ->
-                            projectPrefillActive(
-                                    reduction.source(), active, observedAtMs);
-                    case PrefillState.TerminalWorkerStatusFact terminal ->
-                            projectPrefillTerminal(reduction, terminal);
+                switch (fact.kind()) {
+                    case ACTIVE -> projectPrefillActive(
+                            reduction.source(), fact, observedAtMs);
+                    case COMPLETED, FAILED, PRIORITY_CANCELED ->
+                            projectPrefillTerminal(reduction, fact);
                 }
             } catch (Throwable failure) {
                 logErrorNoFail(
@@ -116,7 +115,7 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectPrefillActive(
             PrefillEndpoint source,
-            PrefillState.ActiveWorkerStatusFact fact,
+            PrefillState.WorkerStatusFact fact,
             long observedAtMs) {
         ScheduledRequest item = fact.item();
         RequestSlot slot = scheduler.requestSlot(item.requestId());
@@ -130,10 +129,9 @@ final class EndpointEventProjector implements EndpointEventSink {
                 return;
             }
             slot.observeWorkerStatus(observedAtMs);
-            work = scheduler.reducePreemptionFactLocked(
+            work = scheduler.materializePreemptionWorkLocked(
                     slot,
-                    new RequestSlot.PreemptionFact.PrefillActive(
-                            source, item),
+                    slot.reducePrefillActive(source, item),
                     null);
         }
         scheduler.consumePreemptionWork(slot, work);
@@ -141,8 +139,8 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectPrefillTerminal(
             PrefillEndpoint.StatusReduction reduction,
-            PrefillState.TerminalWorkerStatusFact fact) {
-        if (fact.kind() == PrefillState.TerminalFactKind.COMPLETED
+            PrefillState.WorkerStatusFact fact) {
+        if (fact.kind() == PrefillState.WorkerStatusFact.Kind.COMPLETED
                 && reduction.semantics()
                     != PrefillEndpoint.StatusSemantics.FUSION_TERMINAL) {
             logWarnNoFail(
@@ -166,21 +164,20 @@ final class EndpointEventProjector implements EndpointEventSink {
                     new WorkerTerminalObservation(
                             WorkerTerminalSource.PREFILL_BACKED,
                             fact.kind()
-                                == PrefillState.TerminalFactKind.COMPLETED,
+                                == PrefillState.WorkerStatusFact.Kind.COMPLETED,
                             fact.errorCode());
-            DeferredTerminal terminal = new DeferredTerminal.Worker(observation);
+            DeferredTerminal terminal = DeferredTerminal.worker(observation);
             if (fact.kind()
-                    == PrefillState.TerminalFactKind.PRIORITY_CANCELED) {
-                work = scheduler.reducePreemptionFactLocked(
+                    == PrefillState.WorkerStatusFact.Kind.PRIORITY_CANCELED) {
+                work = scheduler.materializePreemptionWorkLocked(
                         slot,
-                        new RequestSlot.PreemptionFact.PriorityCanceled(
-                                reduction.source(), item, terminal),
+                        slot.reducePriorityCanceled(
+                                reduction.source(), item),
                         null);
             } else {
-                work = scheduler.reducePreemptionFactLocked(
+                work = scheduler.materializePreemptionWorkLocked(
                         slot,
-                        new RequestSlot.PreemptionFact.WorkerTerminal(
-                                item, terminal),
+                        slot.reduceWorkerTerminal(item, terminal),
                         null);
             }
         }
@@ -192,15 +189,13 @@ final class EndpointEventProjector implements EndpointEventSink {
             long observedAtMs) {
         for (DecodeEndpoint.WorkerStatusFact fact : reduction.facts()) {
             try {
-                switch (fact) {
-                    case DecodeEndpoint.ActiveWorkerStatusFact active ->
-                            projectDecodeActive(
-                                    reduction.source(), active, observedAtMs);
-                    case DecodeEndpoint.AcceptedWorkerStatusFact accepted ->
-                            projectDecodeAccepted(
-                                    reduction.source(), accepted, observedAtMs);
-                    case DecodeEndpoint.TerminalWorkerStatusFact terminal ->
-                            projectDecodeTerminal(reduction.source(), terminal);
+                switch (fact.kind()) {
+                    case ACTIVE -> projectDecodeActive(
+                            reduction.source(), fact, observedAtMs);
+                    case ACCEPTED -> projectDecodeAccepted(
+                            reduction.source(), fact, observedAtMs);
+                    case TERMINAL -> projectDecodeTerminal(
+                            reduction.source(), fact);
                 }
             } catch (Throwable failure) {
                 logErrorNoFail(
@@ -213,7 +208,7 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectDecodeActive(
             DecodeEndpoint source,
-            DecodeEndpoint.ActiveWorkerStatusFact fact,
+            DecodeEndpoint.WorkerStatusFact fact,
             long observedAtMs) {
         RequestSlot slot = scheduler.requestSlot(fact.reservation().requestId());
         if (slot == null) {
@@ -229,7 +224,7 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectDecodeAccepted(
             DecodeEndpoint source,
-            DecodeEndpoint.AcceptedWorkerStatusFact fact,
+            DecodeEndpoint.WorkerStatusFact fact,
             long observedAtMs) {
         RequestSlot slot = scheduler.requestSlot(fact.reservation().requestId());
         if (slot == null) {
@@ -246,9 +241,9 @@ final class EndpointEventProjector implements EndpointEventSink {
             acceptance = slot.markDecodeAccepted();
             if (acceptance.acceptedBeforeCancel()
                     && acceptance.releasableFence() != null) {
-                work = scheduler.reducePreemptionFactLocked(
+                work = scheduler.materializePreemptionWorkLocked(
                         slot,
-                        new RequestSlot.PreemptionFact.DeliveryConfirmed(
+                        slot.reduceDeliveryConfirmed(
                                 slot.snapshot().batchId()),
                         null);
             }
@@ -283,7 +278,7 @@ final class EndpointEventProjector implements EndpointEventSink {
 
     private void projectDecodeTerminal(
             DecodeEndpoint source,
-            DecodeEndpoint.TerminalWorkerStatusFact fact) {
+            DecodeEndpoint.WorkerStatusFact fact) {
         RequestSlot slot = scheduler.requestSlot(fact.reservation().requestId());
         if (slot == null) {
             return;
@@ -300,11 +295,10 @@ final class EndpointEventProjector implements EndpointEventSink {
                             WorkerTerminalSource.DECODE_ENDPOINT_SETTLED,
                             fact.errorCode() == 0L,
                             fact.errorCode());
-            DeferredTerminal terminal = new DeferredTerminal.Worker(observation);
-            work = scheduler.reducePreemptionFactLocked(
+            DeferredTerminal terminal = DeferredTerminal.worker(observation);
+            work = scheduler.materializePreemptionWorkLocked(
                     slot,
-                    new RequestSlot.PreemptionFact.WorkerTerminal(
-                            slot.activeItem(), terminal),
+                    slot.reduceWorkerTerminal(slot.activeItem(), terminal),
                     null);
         }
         scheduler.consumePreemptionWork(slot, work);
@@ -393,9 +387,9 @@ final class EndpointEventProjector implements EndpointEventSink {
             if (!scheduler.isCurrentSlot(slot)) {
                 return;
             }
-            work = scheduler.reducePreemptionFactLocked(
+            work = scheduler.materializePreemptionWorkLocked(
                     slot,
-                    new RequestSlot.PreemptionFact.DecodeGenerationRetired(
+                    slot.reduceDecodeGenerationRetired(
                             retiredEndpoint, reservation, detail),
                     null);
         }

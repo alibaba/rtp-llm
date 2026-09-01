@@ -215,8 +215,7 @@ public final class WorkerBatcher {
 
     public boolean offer(ScheduledRequest exactItem) {
         ScheduledRequest item = exactItem;
-        assert item.prefillEp() == prefillEndpoint
-                : "incoming item belongs to another Prefill generation";
+        requireExactEndpoint(item, "incoming item");
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return false;
         }
@@ -225,8 +224,7 @@ public final class WorkerBatcher {
 
     public boolean offerForPlacement(ScheduledRequest exactItem) {
         ScheduledRequest item = exactItem;
-        assert item.prefillEp() == prefillEndpoint
-                : "incoming item belongs to another Prefill generation";
+        requireExactEndpoint(item, "incoming item");
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return false;
         }
@@ -323,8 +321,10 @@ public final class WorkerBatcher {
      * <p>Caller holds {@link #queueLock}.
      */
     private AdmissionBlock admissionBlockUnderLock() {
-        assert queueLock.isHeldByCurrentThread()
-                : "capacity block snapshot requires queueLock";
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "capacity block snapshot requires queueLock");
+        }
         BatcherCycleResult blocked = capacityBlockedHead;
         if (blocked == null
                 || ctx.peek() != blocked.item()
@@ -567,8 +567,7 @@ public final class WorkerBatcher {
             ScheduledRequest exactItem,
             String reason) {
         ScheduledRequest item = exactItem;
-        assert item.prefillEp() == prefillEndpoint
-                : "queued item belongs to another Prefill generation";
+        requireExactEndpoint(item, "queued item");
         boolean removed;
         queueLock.lock();
         try {
@@ -592,6 +591,14 @@ public final class WorkerBatcher {
             }
         }
         return removed;
+    }
+
+    private void requireExactEndpoint(
+            ScheduledRequest item, String operation) {
+        if (item.prefillEp() != prefillEndpoint) {
+            throw new IllegalArgumentException(
+                    operation + " belongs to another Prefill generation");
+        }
     }
 
     public QueueReplacement replaceQueued(

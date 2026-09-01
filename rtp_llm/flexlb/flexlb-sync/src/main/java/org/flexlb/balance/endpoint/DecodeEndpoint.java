@@ -133,10 +133,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * alongside {@code inflightRequests}. DIRECT paths never mark, so their
      * accounting is unchanged.
      */
-    private final java.util.Set<Long> queuedPhase = ConcurrentHashMap.newKeySet();
-
     /**
-     * O(1) mirror of {@code |queuedPhase ∩ inflightRequests|} (PR-C):
+     * O(1) mirror of queued reservations in {@link #inflightRequests} (PR-C):
      * incremented when a reservation is marked queued and decremented when
      * it is dispatched / released / calibrated out, so {@link #getEngineLoad}
      * avoids the per-call O(n) scan of the former full-scan formula. Read lock-free;
@@ -153,7 +151,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Decode slots reserved before a queued request is irreversibly exposed to
      * its Prefill/Decode delivery path. The request remains in
-     * {@link #queuedPhase}, so {@link #getEngineLoad()} continues to describe
+     * Their reservation owner is marked queued, so {@link #getEngineLoad()}
+     * continues to describe
      * only engine-facing work. Capacity acquisition instead uses
      * {@code getEngineLoad() + activeEngineDispatchPermitCount} under
      * {@link #admissionLock}.
@@ -163,8 +162,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * reserved. A successful commit removes the lease permanently: committed
      * Decode ownership is never rolled back by a delivery token.
      */
-    private final Map<Long, EngineDispatchPermit> engineDispatchPermits =
-            new ConcurrentHashMap<>();
     /** Hard prompt KV already committed to acquired pre-delivery permits. */
     private final AtomicLong engineDispatchPermitHardKvReservedTotal = new AtomicLong();
     /** Expected KV already committed to acquired pre-delivery permits. */
@@ -227,6 +224,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 placementAvailability, "placementAvailability");
         this.requestEvictor = TtlEvictor.withKeyCallback(
                 inflightRequests, (requestId, req) -> {
+                    removeEngineDispatchPermitLocked(req);
                     engineLifecycleReservationTokens.remove(
                             req.reservationToken());
                     removeQueuedPhaseLocked(requestId, req);
@@ -291,26 +289,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** One exact fact interpreted by canonical Decode accounting. */
-    public sealed interface WorkerStatusFact
-            permits ActiveWorkerStatusFact,
-                    AcceptedWorkerStatusFact,
-                    TerminalWorkerStatusFact {
-        ReservationHandle reservation();
-    }
-
-    /** Activity-only fact; it never advances Decode acceptance state. */
-    public record ActiveWorkerStatusFact(ReservationHandle reservation)
-            implements WorkerStatusFact {
-    }
-
-    public record AcceptedWorkerStatusFact(ReservationHandle reservation)
-            implements WorkerStatusFact {
-    }
-
-    public record TerminalWorkerStatusFact(
+    public record WorkerStatusFact(
+            Kind kind,
             ReservationHandle reservation,
-            long errorCode)
-            implements WorkerStatusFact {
+            long errorCode) {
+        public WorkerStatusFact {
+            java.util.Objects.requireNonNull(kind, "kind");
+            java.util.Objects.requireNonNull(reservation, "reservation");
+            if (kind != Kind.TERMINAL && errorCode != 0L) {
+                throw new IllegalArgumentException(
+                        "only a terminal Decode fact may carry an error code");
+            }
+        }
+
+        public static WorkerStatusFact active(ReservationHandle reservation) {
+            return new WorkerStatusFact(Kind.ACTIVE, reservation, 0L);
+        }
+
+        public static WorkerStatusFact accepted(ReservationHandle reservation) {
+            return new WorkerStatusFact(Kind.ACCEPTED, reservation, 0L);
+        }
+
+        public static WorkerStatusFact terminal(
+                ReservationHandle reservation, long errorCode) {
+            return new WorkerStatusFact(Kind.TERMINAL, reservation, errorCode);
+        }
+
+        public enum Kind {
+            ACTIVE,
+            ACCEPTED,
+            TERMINAL
+        }
     }
 
     /** Exact RequestSlot facts emitted after the Decode lock is released. */
@@ -398,8 +407,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             Set<Long> plannedRetiredPermitTokens = new HashSet<>(
                     retiredEngineDispatchPermitTokens);
-            for (EngineDispatchPermit permit : engineDispatchPermits.values()) {
-                plannedRetiredPermitTokens.add(permit.token);
+            for (RequestInflight reservation : inflightRequests.values()) {
+                EngineDispatchPermit permit = reservation.dispatchPermit();
+                if (permit != null) {
+                    plannedRetiredPermitTokens.add(permit.token);
+                }
             }
             retiredReservations = retireGenerationOwnershipLocked(
                     plannedRetiredPermitTokens);
@@ -429,10 +441,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 addRetiredOwner(
                         owners, generationId, requestId,
                         confirmed.reservationToken()));
-        engineDispatchPermits.forEach((requestId, permit) ->
-                addRetiredOwner(
-                        owners, generationId, requestId,
-                        permit.reservation.reservationToken()));
         engineFenceProtections.forEach((requestId, protection) ->
                 addRetiredOwner(
                         owners, generationId, requestId,
@@ -478,7 +486,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Canonical retirement commit. The immutable owner list and every
         // exact ReservationHandle have been validated above this line.
         retiredEngineDispatchPermitTokens = plannedRetiredPermitTokens;
-        engineDispatchPermits.clear();
+        inflightRequests.values().forEach(RequestInflight::clearDispatchPermit);
         activeEngineDispatchPermitCount = 0;
         engineDispatchPermitHardKvReservedTotal.set(0L);
         engineDispatchPermitExpectedKvReservedTotal.set(0L);
@@ -491,7 +499,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         trackedConfirmed.clear();
         confirmedEngineOwnedCount = 0;
 
-        queuedPhase.clear();
         queuedPhaseCount.set(0);
         queuedHardKvReservedTotal.set(0L);
         queuedExpectedKvReservedTotal.set(0L);
@@ -729,8 +736,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ConfirmedTask confirmed = trackedConfirmed.get(requestId);
             EngineFenceProtection protection = engineFenceProtections.get(requestId);
             PreemptionClaim claim = preemptionClaims.get(requestId);
-            EngineDispatchPermit dispatchPermit =
-                    engineDispatchPermits.get(requestId);
+            EngineDispatchPermit dispatchPermit = current == null
+                    ? null : current.dispatchPermit();
 
             boolean exactConfirmed = confirmed != null
                     && confirmed.reservationToken()
@@ -825,8 +832,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     || hasExactIncomingAttemptLocked(reservation)) {
                 return false;
             }
-            EngineDispatchPermit dispatchPermit =
-                    engineDispatchPermits.get(requestId);
+            EngineDispatchPermit dispatchPermit = shadow.dispatchPermit();
             if (dispatchPermit != null
                     && !isExactReservation(
                             dispatchPermit.reservation, reservation)) {
@@ -1110,8 +1116,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 }
 
                 RequestInflight shadow = inflightRequests.get(requestId);
-                EngineDispatchPermit dispatchPermit =
-                        engineDispatchPermits.get(requestId);
+                EngineDispatchPermit dispatchPermit = shadow == null
+                        ? null : shadow.dispatchPermit();
                 boolean exactShadow = isExactReservation(shadow, reservation);
                 boolean exactDispatchPermit = dispatchPermit != null
                         && isExactReservation(
@@ -1185,8 +1191,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             changed = true;
         }
 
-        EngineDispatchPermit dispatchPermit =
-                engineDispatchPermits.get(requestId);
+        RequestInflight permitOwner = inflightRequests.get(requestId);
+        EngineDispatchPermit dispatchPermit = permitOwner == null
+                ? null : permitOwner.dispatchPermit();
         if (dispatchPermit != null
                 && isExactReservation(
                         dispatchPermit.reservation, reservation)) {
@@ -1289,10 +1296,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private boolean hasAnyRequestOwnerLocked(long requestId) {
         return inflightRequests.containsKey(requestId)
                 || trackedConfirmed.containsKey(requestId)
-                || engineDispatchPermits.containsKey(requestId)
                 || engineFenceProtections.containsKey(requestId)
-                || preemptionClaims.containsKey(requestId)
-                || queuedPhase.contains(requestId);
+                || preemptionClaims.containsKey(requestId);
     }
 
     /**
@@ -1319,8 +1324,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long token = reservation.reservationToken();
         RequestInflight shadow = inflightRequests.get(requestId);
         ConfirmedTask confirmed = trackedConfirmed.get(requestId);
-        EngineDispatchPermit dispatchPermit =
-                engineDispatchPermits.get(requestId);
+        EngineDispatchPermit dispatchPermit = shadow == null
+                ? null : shadow.dispatchPermit();
         EngineFenceProtection protection =
                 engineFenceProtections.get(requestId);
         PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -1407,10 +1412,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     return LocalEvictionResult.CONFLICT;
                 }
                 RequestInflight held = inflightRequests.get(victim.requestId());
-                EngineDispatchPermit permit =
-                        engineDispatchPermits.get(victim.requestId());
+                EngineDispatchPermit permit = held == null
+                        ? null : held.dispatchPermit();
                 if (!isExactReservation(held, victim)
-                        || !queuedPhase.contains(victim.requestId())
+                        || !held.queued()
                         || hasEngineLifecycleReservationExactLocked(victim)
                         || preemptionClaims.containsKey(victim.requestId())
                         || engineFenceProtections.containsKey(victim.requestId())
@@ -1480,11 +1485,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             return new LayeredAdmissionView(routingViewLocked(),
                     Map.copyOf(inflightRequests), List.copyOf(confirmed),
-                    java.util.Set.copyOf(queuedPhase),
+                    queuedRequestIdsLocked(),
                     claimed, activeEngineDispatchPermitCount);
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    private Set<Long> queuedRequestIdsLocked() {
+        Set<Long> queued = new HashSet<>();
+        inflightRequests.forEach((requestId, reservation) -> {
+            if (reservation.queued()) {
+                queued.add(requestId);
+            }
+        });
+        return Set.copyOf(queued);
     }
 
     /** Atomic reserved/confirmed/queued ownership tuple. */
@@ -1762,12 +1777,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (exactShadow && exactConfirmed) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
-                EngineDispatchPermit dispatchPermit =
-                        engineDispatchPermits.get(victimId);
+                EngineDispatchPermit dispatchPermit = shadow == null
+                        ? null : shadow.dispatchPermit();
                 if (dispatchPermit != null) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
-                if (exactShadow && !queuedPhase.contains(victimId)) {
+                if (exactShadow && !shadow.queued()) {
                     if (shadow.priority() <= 0 || shadow.priority() >= incomingPriority) {
                         return PreemptionBeginResult.INVALID_PRIORITY;
                     }
@@ -2049,8 +2064,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         RequestInflight shadow = inflightRequests.get(requestId);
         ConfirmedTask confirmed = trackedConfirmed.get(requestId);
-        EngineDispatchPermit dispatchPermit =
-                engineDispatchPermits.get(requestId);
+        EngineDispatchPermit dispatchPermit = shadow == null
+                ? null : shadow.dispatchPermit();
         EngineFenceProtection protection =
                 engineFenceProtections.get(requestId);
         if ((shadow != null && !isExactReservation(shadow, reservation))
@@ -2390,7 +2405,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 ReservationHandle active = workerStatusHandleLocked(
                         task.requestId());
                 if (active != null) {
-                    facts.add(new ActiveWorkerStatusFact(active));
+                    facts.add(WorkerStatusFact.active(active));
                 }
             }
         } finally {
@@ -2428,8 +2443,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 actualConfirmed++;
                 RequestInflight removed = inflightRequests.remove(requestId);
                 removeEngineLifecycleReservationLocked(removed);
-                removeEngineDispatchPermitLocked(requestId);
                 if (removed != null) {
+                    removeEngineDispatchPermitLocked(removed);
                     removeQueuedPhaseLocked(requestId, removed);
                     inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                     inflightExpectedKvReservedTotal.addAndGet(
@@ -2453,12 +2468,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 observeEngineFenceConfirmedLocked(requestId, removed);
                 ReservationHandle accepted = workerStatusHandleLocked(requestId);
                 if (accepted != null) {
-                    facts.add(new AcceptedWorkerStatusFact(accepted));
+                    facts.add(WorkerStatusFact.accepted(accepted));
                 }
             } else {
                 ReservationHandle active = workerStatusHandleLocked(requestId);
                 if (active != null) {
-                    facts.add(new ActiveWorkerStatusFact(active));
+                    facts.add(WorkerStatusFact.active(active));
                 }
             }
         }
@@ -2479,9 +2494,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (terminal != null
                         && settlePriorityClaimTerminalLocked(
                                 claim.attemptToken, terminal, claim)) {
-                    facts.add(new TerminalWorkerStatusFact(
-                            terminal,
-                            task.errorCode()));
+                    facts.add(WorkerStatusFact.terminal(
+                            terminal, task.errorCode()));
                 } else {
                     logger.error(
                             "Decode terminal did not match its exact priority claim: "
@@ -2491,9 +2505,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 continue;
             }
             if (terminal != null) {
-                facts.add(new TerminalWorkerStatusFact(
-                        terminal,
-                        task.errorCode()));
+                facts.add(WorkerStatusFact.terminal(
+                        terminal, task.errorCode()));
             }
             AuthoritativeTerminalProof proof = terminal == null
                     ? workerStatusTerminalProofLocked(requestId)
@@ -2954,17 +2967,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     ttlMs, requestId -> !schedulerOwnsRequest.test(requestId)
                             && !preemptionClaims.containsKey(requestId)
                             && !engineFenceProtections.containsKey(requestId));
-            int permitsRemoved = 0;
-            // TtlEvictor owns only the reservation map/counters. Reconcile
-            // its token-fenced pre-delivery owners under the same admission lock.
-            for (Long requestId : List.copyOf(engineDispatchPermits.keySet())) {
-                EngineDispatchPermit permit = engineDispatchPermits.get(requestId);
-                if (permit != null
-                        && inflightRequests.get(requestId) != permit.reservation
-                        && removeEngineDispatchPermitLocked(requestId)) {
-                    permitsRemoved++;
-                }
-            }
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
             java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedEvictIt =
@@ -2985,12 +2987,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             boolean settledTombstonesPurged = settledTombstones.entrySet()
                     .removeIf(entry -> entry.getValue() < cutoff);
-            if (evicted > 0 || permitsRemoved > 0
-                    || trackedPurged > 0 || settledTombstonesPurged) {
+            if (evicted > 0 || trackedPurged > 0 || settledTombstonesPurged) {
                 admissionVersion.incrementAndGet();
             }
-            capacityChanged = evicted > 0 || permitsRemoved > 0
-                    || trackedPurged > 0 || settledTombstonesPurged;
+            capacityChanged = evicted > 0 || trackedPurged > 0
+                    || settledTombstonesPurged;
         } finally {
             admissionLock.unlock();
         }
@@ -3065,7 +3066,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (!isExactReservation(current, reservation)) {
                 return MarkQueuedResult.NOT_OWNED;
             }
-            if (queuedPhase.contains(requestId)) {
+            if (current.queued()) {
                 return MarkQueuedResult.ALREADY_QUEUED;
             }
             addQueuedPhaseLocked(requestId, current);
@@ -3085,7 +3086,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private boolean addQueuedPhaseLocked(long requestId, RequestInflight reservation) {
-        if (reservation == null || !queuedPhase.add(requestId)) {
+        if (reservation == null || !reservation.markQueued()) {
             return false;
         }
         queuedPhaseCount.incrementAndGet();
@@ -3095,14 +3096,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private boolean removeQueuedPhaseLocked(long requestId, RequestInflight reservation) {
-        if (!queuedPhase.remove(requestId)) {
-            return false;
-        }
-        queuedPhaseCount.decrementAndGet();
         if (reservation == null) {
             throw new IllegalStateException(
                     "queued Decode reservation missing for request " + requestId);
         }
+        if (!reservation.clearQueued()) {
+            return false;
+        }
+        queuedPhaseCount.decrementAndGet();
         queuedHardKvReservedTotal.addAndGet(-reservation.kvTokens());
         queuedExpectedKvReservedTotal.addAndGet(-reservation.expectedKvTokens());
         return true;
@@ -3134,6 +3135,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Explicit result of {@link #acquireEngineDispatchPermit(long, long)}. */
     public record EngineDispatchPermitAcquisition(
             EngineDispatchPermitAcquireStatus status,
+            ReservationHandle reservation,
             EngineDispatchPermit permit) {
 
         public EngineDispatchPermitAcquisition {
@@ -3144,33 +3146,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 throw new IllegalArgumentException(
                         "only an ACQUIRED result may carry an engine dispatch permit");
             }
-        }
-    }
-
-    /**
-     * One cross-phase admission created while the endpoint lock is held.
-     * The queued reservation and its Engine dispatch permit are either both
-     * published or neither is published.
-     */
-    public record QueuedEngineDispatchPermitAcquisition(
-            EngineDispatchPermitAcquireStatus status,
-            ReservationHandle reservation,
-            EngineDispatchPermit permit) {
-
-        public QueuedEngineDispatchPermitAcquisition {
-            if (status == null) {
+            if (status != EngineDispatchPermitAcquireStatus.ACQUIRED
+                    && reservation != null) {
                 throw new IllegalArgumentException(
-                        "permit acquisition status is required");
-            }
-            boolean acquired = status
-                    == EngineDispatchPermitAcquireStatus.ACQUIRED;
-            if (acquired != (reservation != null && permit != null)) {
-                throw new IllegalArgumentException(
-                        "only an ACQUIRED result may carry queued ownership");
-            }
-            if (!acquired && (reservation != null || permit != null)) {
-                throw new IllegalArgumentException(
-                        "a rejected result cannot carry queued ownership");
+                        "a rejected result cannot carry a reservation");
             }
         }
     }
@@ -3295,7 +3274,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Prefill queue head moves away from a binding that became full after the
      * request was enqueued.
      */
-    public QueuedEngineDispatchPermitAcquisition
+    public EngineDispatchPermitAcquisition
             tryAcquireQueuedEngineDispatchPermitPinned(
             GenerationPin pin,
             long requestId,
@@ -3308,7 +3287,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             requirePinnedGeneration(pin);
             if (!requestIdAvailableForReservationLocked(requestId)) {
-                return rejectedQueuedEngineDispatchPermit(
+                return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.NOT_OWNED);
             }
             RequestInflight projected = new RequestInflight(
@@ -3318,7 +3297,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     0L);
             if (isEngineDispatchCapacityFullLocked(
                     projected, concurrencyLimit, maxKvUsagePercent)) {
-                return rejectedQueuedEngineDispatchPermit(
+                return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.CAPACITY_FULL);
             }
 
@@ -3333,7 +3312,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 addQueuedPhaseLocked(requestId, exact);
                 EngineDispatchPermit permit = installEngineDispatchPermitLocked(
                         requestId, exact);
-                return new QueuedEngineDispatchPermitAcquisition(
+                return new EngineDispatchPermitAcquisition(
                         EngineDispatchPermitAcquireStatus.ACQUIRED,
                         reservation,
                         permit);
@@ -3365,11 +3344,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.NOT_OWNED);
             }
-            if (!queuedPhase.contains(requestId)) {
+            if (!reservation.queued()) {
                 return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.NOT_QUEUED);
             }
-            if (engineDispatchPermits.containsKey(requestId)) {
+            if (reservation.dispatchPermit() != null) {
                 return rejectedEngineDispatchPermit(
                         EngineDispatchPermitAcquireStatus.ALREADY_ACQUIRED);
             }
@@ -3382,7 +3361,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             EngineDispatchPermit permit = installEngineDispatchPermitLocked(
                     requestId, reservation);
             return new EngineDispatchPermitAcquisition(
-                    EngineDispatchPermitAcquireStatus.ACQUIRED, permit);
+                    EngineDispatchPermitAcquireStatus.ACQUIRED, null, permit);
         } finally {
             admissionLock.unlock();
         }
@@ -3390,14 +3369,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private static EngineDispatchPermitAcquisition rejectedEngineDispatchPermit(
             EngineDispatchPermitAcquireStatus status) {
-        return new EngineDispatchPermitAcquisition(status, null);
-    }
-
-    private static QueuedEngineDispatchPermitAcquisition
-            rejectedQueuedEngineDispatchPermit(
-            EngineDispatchPermitAcquireStatus status) {
-        return new QueuedEngineDispatchPermitAcquisition(
-                status, null, null);
+        return new EngineDispatchPermitAcquisition(status, null, null);
     }
 
     /** Caller holds admissionLock and has validated exact queued ownership. */
@@ -3407,7 +3379,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         long token = nextEngineDispatchPermitTokenLocked();
         EngineDispatchPermit permit = new EngineDispatchPermit(
                 this, requestId, token, reservation);
-        engineDispatchPermits.put(requestId, permit);
+        reservation.installDispatchPermit(permit);
         activeEngineDispatchPermitCount++;
         engineDispatchPermitHardKvReservedTotal.addAndGet(
                 reservation.kvTokens());
@@ -3443,7 +3415,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return EngineDispatchPermitTransferStatus.OWNERSHIP_LOST;
             }
             if (inflightRequests.get(permit.requestId) != permit.reservation
-                    || !queuedPhase.contains(permit.requestId)
+                    || !permit.reservation.queued()
                     || preemptionClaims.containsKey(permit.requestId)) {
                 removeEngineDispatchPermitLocked(permit.requestId);
                 admissionVersion.incrementAndGet();
@@ -3494,11 +3466,19 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private boolean isCurrentEngineDispatchPermitLocked(EngineDispatchPermit permit) {
-        return engineDispatchPermits.get(permit.requestId) == permit;
+        return permit.reservation.dispatchPermit() == permit
+                && inflightRequests.get(permit.requestId) == permit.reservation;
     }
 
     private boolean removeEngineDispatchPermitLocked(long requestId) {
-        EngineDispatchPermit removed = engineDispatchPermits.remove(requestId);
+        RequestInflight reservation = inflightRequests.get(requestId);
+        return reservation != null
+                && removeEngineDispatchPermitLocked(reservation);
+    }
+
+    private boolean removeEngineDispatchPermitLocked(
+            RequestInflight reservation) {
+        EngineDispatchPermit removed = reservation.clearDispatchPermit();
         if (removed == null) {
             return false;
         }
@@ -3751,8 +3731,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         RequestInflight candidate = inflightRequests.get(requestId);
         if (candidate == null
-                || !queuedPhase.contains(requestId)
-                || engineDispatchPermits.containsKey(requestId)) {
+                || !candidate.queued()
+                || candidate.dispatchPermit() != null) {
             return true;
         }
         WorkerStatus.CommittedWorkerStatus committed =
