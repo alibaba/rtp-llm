@@ -43,10 +43,10 @@ void syncPinnedCpuCopies(bool need_sync) {
 
 }  // namespace
 
-std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
-                                                   const torch::Tensor& success_cpu,
-                                                   int                  batch_idx_in,
-                                                   int                  cur_batch_size) {
+std::optional<ErrorInfo> collectStreamSamplerError(const std::vector<std::optional<ErrorInfo>>& processor_errors,
+                                                   const torch::Tensor&                         success_cpu,
+                                                   int                                          batch_idx_in,
+                                                   int                                          cur_batch_size) {
     std::optional<ErrorInfo> error_info;
     const auto               set_first_error = [&error_info](const ErrorInfo& error) {
         if (!error_info.has_value()) {
@@ -58,9 +58,8 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
     // output coordinates can diverge when beam search changes the batch size.
     for (int i = 0; i < cur_batch_size; ++i) {
         const size_t error_idx = static_cast<size_t>(batch_idx_in + i);
-        if (error_idx < sampler_output.processor_errors.size()
-            && sampler_output.processor_errors[error_idx].has_value()) {
-            set_first_error(sampler_output.processor_errors[error_idx].value());
+        if (error_idx < processor_errors.size() && processor_errors[error_idx].has_value()) {
+            set_first_error(processor_errors[error_idx].value());
         }
     }
 
@@ -379,7 +378,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         }
     }
 
-    auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+    auto error_info =
+        collectStreamSamplerError(sampler_output.processor_errors, success_cpu, batch_idx_in, cur_batch_size);
     if (asyncDebugEnabled() && success_cpu.defined()) {
         for (int i = 0; i < cur_batch_size; ++i) {
             if (!(success_cpu.data_ptr<bool>()[batch_idx_in + i])) {

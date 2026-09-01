@@ -46,7 +46,7 @@ public:
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
@@ -114,9 +114,8 @@ protected:
     // last_hidden_states hand-off. hidden_rows == 0 means "use the tensor's own
     // row count"; target verify passes the explicit combo row count because a
     // graph replay does not advance the Python-side row counter.
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output,
-                                              ModelBase&       source,
-                                              int64_t          hidden_rows = 0);
+    void
+    maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source, int64_t hidden_rows = 0);
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
@@ -208,34 +207,34 @@ protected:
                                    const MergedOutput&                          draft_prefill_output);
 
     void releaseAllModelBuffers();
+
 private:
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
-    std::unique_ptr<ModelBase>               model_;
-    std::unique_ptr<Sampler>                 sampler_;
-    std::unique_ptr<MtpBatchStreamProcessor> batch_stream_processor_;
-    std::shared_ptr<KVCacheManager>          cache_manager_;
-    std::shared_ptr<ModelInputsLogger>       model_inputs_logger_;
-    bool                                     enable_ffn_disaggregate_ = false;
-    bool                                     enable_detail_log_       = false;
-    int                                      tp_rank_                 = 0;
-    ParallelismConfig                        parallelism_config_;
-    kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
+    std::unique_ptr<ModelBase>                                               model_;
+    std::unique_ptr<Sampler>                                                 sampler_;
+    std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
+    std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
+    bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     enable_detail_log_       = false;
+    int                                                                      tp_rank_                 = 0;
+    ParallelismConfig                                                        parallelism_config_;
+    kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
-    size_t                                                                   vocab_size_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                                            expert_balancer_;
+    size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool                                             is_dspark_ = false;
-    size_t                                           draft_vocab_size_;
-    std::shared_ptr<ModelBase>                       draft_model_;
+    bool                       is_dspark_ = false;
+    size_t                     draft_vocab_size_;
+    std::shared_ptr<ModelBase> draft_model_;
     // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
     // proposal and gamma+1 verified rows for commit. They must not share one
     // capture-width/phase identity.
@@ -268,8 +267,8 @@ private:
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
-    AsyncRunner                             target_verify_prepare_runner_;
-    AsyncRunner                             draft_prefill_prepare_runner_;
+    AsyncRunner target_verify_prepare_runner_;
+    AsyncRunner draft_prefill_prepare_runner_;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/engine_base/stream/SamplingState.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
@@ -145,6 +146,7 @@ public:
 
     virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
     void         update(const StreamUpdateInfo& update_info);
+    void         updateFromPP(const StreamUpdateInfo& update_info);
     void         specUpdate(const StreamSpecUpdateInfo& update_info);
     bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -369,11 +371,11 @@ public:
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 
     void setReturnAllProbs(ReturnAllProbsMode return_all_probs) {
-        return_all_probs_ = return_all_probs;
+        sampling_state_.return_all_probs = return_all_probs;
     }
 
     ReturnAllProbsMode getReturnAllProbs() const {
-        return return_all_probs_;
+        return sampling_state_.return_all_probs;
     }
 
     torch::Tensor generateContextPositionIds();
@@ -534,11 +536,11 @@ public:
     }
 
     const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
-        return logits_processor_list_;
+        return sampling_state_.logits_processors;
     }
 
     at::Generator getGenerator() {
-        return generator_;
+        return sampling_state_.generator;
     }
 
     void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {
@@ -818,7 +820,7 @@ protected:
     bool released_              = false;
     bool need_release_resource_ = true;
 
-    ReturnAllProbsMode return_all_probs_ = ReturnAllProbsMode::NONE;
+    SamplingState sampling_state_;
 
     bool last_block_aligned_ = false;
 
@@ -835,9 +837,6 @@ protected:
     // shared_ptr; neither resource nor state machine points back here, so no
     // ownership cycle is created.
 
-    torch::Tensor                            cum_log_probs_;
-    torch::Tensor                            all_probs_;
-    torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
     int                                      loss_index_ = 0;
@@ -891,9 +890,6 @@ protected:
 
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
-
-    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
-    at::Generator                       generator_;
 
     // just for bool test
     bool perf_test_ = false;

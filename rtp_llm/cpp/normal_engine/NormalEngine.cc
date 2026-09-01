@@ -320,8 +320,8 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
-    std::list<GenerateStreamPtr> streams{stream};
-    THROW_IF_STATUS_ERROR(executor_->process(streams));
+    ScheduleOutput schedule_output{{stream}};
+    THROW_IF_STATUS_ERROR(executor_->process(schedule_output));
 #if USING_CUDA
     if (mode == preRunMode::build_system_prompt) {
         // Keep the stream and its execution buffers alive until the resident KV writes finish.
@@ -690,12 +690,13 @@ absl::Status NormalEngine::step() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    list<GenerateStreamPtr> streams;
+    int64_t        tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    ScheduleOutput schedule_output;
+    auto&          streams = schedule_output.streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
-            CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+            CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
@@ -736,7 +737,7 @@ absl::Status NormalEngine::step() {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         const bool refresh_cache_status_snapshot =
             resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
-        status = executor_->process(streams, tps_schedule_time_us);
+        status = executor_->process(schedule_output, tps_schedule_time_us);
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
@@ -776,13 +777,14 @@ absl::Status NormalEngine::pp_step() {
         }
     }
 
-    int64_t                 schedule_time_us = 0;
-    list<GenerateStreamPtr> streams;
+    int64_t        schedule_time_us = 0;
+    ScheduleOutput schedule_output;
+    auto&          streams = schedule_output.streams;
     if (is_first_stage_scheduler) {
         schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.pp_schedule(reserve_step=%d)", reserve_step_);
-            CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+            CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
         }
 
         if (parallelism_config.dp_size > 1) {
@@ -816,7 +818,7 @@ absl::Status NormalEngine::pp_step() {
         const bool refresh_cache_status_snapshot =
             is_first_stage_scheduler && resource_context_.cache_manager
             && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
-        status = executor_->process(streams, schedule_time_us);
+        status = executor_->process(schedule_output, schedule_time_us);
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();

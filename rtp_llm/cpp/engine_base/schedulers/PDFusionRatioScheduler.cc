@@ -188,8 +188,7 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, static_cast<size_t>(stream->contextLength()));
     }
-    return max_token_size * (streams.size() + 1) < max_batch_tokens_size_
-           && tryAdmitKVForPrefill(new_stream);
+    return max_token_size * (streams.size() + 1) < max_batch_tokens_size_ && tryAdmitKVForPrefill(new_stream);
 }
 
 bool PDFusionRatioScheduler::waitPredicate() {
@@ -197,7 +196,7 @@ bool PDFusionRatioScheduler::waitPredicate() {
            || !running_streams_.empty() || !pending_decode_streams_.empty();
 }
 
-absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
+absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
@@ -233,7 +232,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
             }
             reportMetrics();
             last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-            return prefill_batch;
+            return ScheduleOutput{std::move(prefill_batch)};
         }
     }
 
@@ -255,7 +254,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-    return running_streams_;
+    return ScheduleOutput{running_streams_};
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
@@ -308,10 +307,10 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
     auto&     state              = *admission_peak_state_;
     const int remaining_kv_steps = remainingKVAllocationSteps(new_stream);
     // Preserve the idle fast path, where the allocator reports an impossible standalone request.
-    const bool    enforce_capacity = !state.streams.empty();
+    const bool enforce_capacity = !state.streams.empty();
     // Device KV-cache matching happens later in the allocator. At scheduler admission time the actual prefix hit is
     // unknown, so use the conservative no-hit estimate here.
-    const int64_t initial_delta    = estimateInitialNeedBlocks(new_stream);
+    const int64_t initial_delta = estimateInitialNeedBlocks(new_stream);
 
     if (enforce_capacity
         && (state.initial_need_blocks + initial_delta > initial_capacity
@@ -319,7 +318,7 @@ bool PDFusionRatioScheduler::tryAddToAdmissionPeakState(const GenerateStreamPtr&
         return false;
     }
 
-    const auto insert_it = std::lower_bound(state.streams.begin(),
+    const auto insert_it      = std::lower_bound(state.streams.begin(),
                                             state.streams.end(),
                                             AdmissionStreamInfo{new_stream, remaining_kv_steps},
                                             longerLifetimeFirst);

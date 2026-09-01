@@ -326,7 +326,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLo
     NormalExecutor executor(params, nullptr, true);
 
     EXPECT_TRUE(executor.gatherCanUseDeviceState(stream_groups));
-    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
     stream->incPendingAsyncBookkeeping();
     EXPECT_FALSE(executor.gatherCanUseDeviceState(stream_groups));
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
@@ -355,7 +355,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathAllowsAsyncLogitsP
         .last_real_seq_len     = 3,
         .next_real_seq_len     = 4,
     });
-    stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<TestStatefulLogitsProcessor>(true));
 
     std::list<GenerateStreamPtr> streams{stream};
     StreamGroups                 stream_groups(streams);
@@ -692,13 +692,14 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabPassesCompactEosOnlyToMult
     auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 
     ASSERT_FALSE(stream->hasError());
-    ASSERT_EQ(stream->logits_processor_list_.size(), 1);
-    ASSERT_NE(std::dynamic_pointer_cast<MultiSeqLogitsProcessor>(stream->logits_processor_list_[0]), nullptr);
+    auto& logits_processor_list_ = stream->sampling_state_.logits_processors;
+    ASSERT_EQ(logits_processor_list_.size(), 1);
+    ASSERT_NE(std::dynamic_pointer_cast<MultiSeqLogitsProcessor>(logits_processor_list_[0]), nullptr);
 
     SamplerInputs inputs;
     inputs.logits        = torch::zeros({2, 5}, torch::kFloat32).to(torch::kCUDA);
     inputs.finished_mask = torch::tensor({false, true}, torch::kBool);
-    stream->logits_processor_list_[0]->process(inputs, 0, 2);
+    logits_processor_list_[0]->process(inputs, 0, 2);
 
     auto processed_logits = inputs.logits.cpu();
     for (int token_id = 0; token_id < 5; ++token_id) {

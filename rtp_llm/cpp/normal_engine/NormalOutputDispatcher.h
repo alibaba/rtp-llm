@@ -11,10 +11,10 @@
 
 namespace rtp_llm {
 
-std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
-                                                   const torch::Tensor& success_cpu,
-                                                   int                  batch_idx_in,
-                                                   int                  cur_batch_size);
+std::optional<ErrorInfo> collectStreamSamplerError(const std::vector<std::optional<ErrorInfo>>& processor_errors,
+                                                   const torch::Tensor&                         success_cpu,
+                                                   int                                          batch_idx_in,
+                                                   int                                          cur_batch_size);
 
 class NormalOutputDispatcher {
 public:

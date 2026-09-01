@@ -173,7 +173,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    const auto&   streams               = schedule_output.streams;
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
@@ -338,7 +339,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -360,7 +361,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }

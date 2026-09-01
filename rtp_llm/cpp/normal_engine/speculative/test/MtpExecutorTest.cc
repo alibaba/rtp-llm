@@ -672,7 +672,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1});
+    auto status = components.executor->process(ScheduleOutput{{stream1}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -751,7 +751,7 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1, stream2});
+    auto status = components.executor->process(ScheduleOutput{{stream1, stream2}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -917,7 +917,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1});
+    auto status = components.executor->process(ScheduleOutput{{stream1}});
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step);
     if (components.executor->useAsyncPrepare()) {
@@ -937,18 +937,18 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
+    stream->sampling_state_.logits_processors.push_back(
         std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
 
-    auto draft_input_1  = GptModelInputs{};
-    auto draft_output_1 = GptModelOutputs{};
+    auto draft_input_1               = GptModelInputs{};
+    auto draft_output_1              = GptModelOutputs{};
     draft_input_1.combo_tokens       = torch::tensor({3}, torch::kInt32);
     draft_input_1.input_lengths      = torch::tensor({2}, torch::kInt32);
     draft_input_1.sequence_lengths   = torch::tensor({3}, torch::kInt32);
@@ -963,10 +963,9 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     target_input.input_lengths     = torch::tensor({3}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1, 2}, torch::kInt32);
-    target_output.logits =
-        torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.2f, 0.1f, 0.8f, 0.4f, 0.7f, 0.2f, 0.1f, 0.0f})
-            .reshape({3, 4})
-            .to(torch::kCUDA);
+    target_output.logits = torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.2f, 0.1f, 0.8f, 0.4f, 0.7f, 0.2f, 0.1f, 0.0f})
+                               .reshape({3, 4})
+                               .to(torch::kCUDA);
     target_output.all_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f}).reshape({3, 2});
 
     auto next_draft_input               = GptModelInputs{};
@@ -984,31 +983,27 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
-    auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{
-        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
-        torch::tensor({0}, torch::kInt32).reshape({1, 1})};
+    auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
+                                                              torch::tensor({0}, torch::kInt32).reshape({1, 1})};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
-        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}),
-        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
     components.fake_fast_topk_sampler->setInputs({draft_output_1.logits, next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
 
-    auto sampler_input = SamplerInputs{target_output.logits.clone()};
+    auto sampler_input         = SamplerInputs{target_output.logits.clone()};
     sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
-    auto target_sampler_output  = SamplerOutput{torch::tensor({1, 2, 2}, torch::kInt32).reshape({3, 1})};
-    target_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f,
-                                                     0.0f, 0.0f, 1.0f, 0.0f,
-                                                     0.0f, 0.0f, 1.0f, 0.0f})
-                                          .reshape({3, 4});
+    auto target_sampler_output = SamplerOutput{torch::tensor({1, 2, 2}, torch::kInt32).reshape({3, 1})};
+    target_sampler_output.all_probs =
+        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({3, 4});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({target_sampler_output});
 
-    auto forced_accept_tokens                           = torch::tensor({{3, 0, 0}}, torch::kInt32);
-    auto speculative_sampler_output                     = spec::SpeculativeSamplerOutput();
-    speculative_sampler_output.accept_tokens_cpu        = forced_accept_tokens;
-    speculative_sampler_output.accept_tokens            = forced_accept_tokens.to(torch::kCUDA);
-    speculative_sampler_output.accept_len_cpu           = torch::tensor({1}, torch::kInt32);
-    speculative_sampler_output.accept_len               = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    auto forced_accept_tokens                    = torch::tensor({{3, 0, 0}}, torch::kInt32);
+    auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
+    speculative_sampler_output.accept_tokens_cpu = forced_accept_tokens;
+    speculative_sampler_output.accept_tokens     = forced_accept_tokens.to(torch::kCUDA);
+    speculative_sampler_output.accept_len_cpu    = torch::tensor({1}, torch::kInt32);
+    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
     setupFakeModels(components.executor.get(),
@@ -1018,7 +1013,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
@@ -1033,14 +1028,14 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
+    stream->sampling_state_.logits_processors.push_back(
         std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
 
     auto target_input              = GptModelInputs{};
@@ -1049,9 +1044,8 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1}, torch::kInt32);
-    target_output.logits           = torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.7f, 0.2f, 0.1f, 0.0f})
-                               .reshape({2, 4})
-                               .to(torch::kCUDA);
+    target_output.logits =
+        torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.7f, 0.2f, 0.1f, 0.0f}).reshape({2, 4}).to(torch::kCUDA);
     target_output.all_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f}).reshape({2, 2});
 
     auto next_draft_input               = GptModelInputs{};
@@ -1070,16 +1064,14 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     components.fake_draft_model->setOutputs({next_draft_output});
 
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
-        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}),
-        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
     components.fake_fast_topk_sampler->setInputs({next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({next_draft_sampler_output});
 
-    auto sampler_input = SamplerInputs{target_output.logits.clone()};
-    sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
-    auto target_sampler_output = SamplerOutput{torch::tensor({1, 2}, torch::kInt32).reshape({2, 1})};
-    target_sampler_output.all_probs =
-        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({2, 4});
+    auto sampler_input              = SamplerInputs{target_output.logits.clone()};
+    sampler_input.logits[0][3]      = BaseLogitsProcessor::neg_inf;
+    auto target_sampler_output      = SamplerOutput{torch::tensor({1, 2}, torch::kInt32).reshape({2, 1})};
+    target_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({2, 4});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({target_sampler_output});
 
@@ -1098,7 +1090,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
@@ -1277,7 +1269,7 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1, stream2});
+    auto status = components.executor->process(ScheduleOutput{{stream1, stream2}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -1377,7 +1369,8 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     std::vector<torch::Tensor> draft_probs_list;
     torch::Tensor              draft_token_ids_t;
     int64_t                    model_forward_us = 0;
-    components.executor->draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+    components.executor->draftModelDecode(
+        model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
@@ -1412,18 +1405,16 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     // Verify next_seq_len = prev_seq_len + accept_len
     auto expected_next = (prev_seq_len + accept_len).cpu();
     auto actual_next   = next_seq_len.cpu();
-    EXPECT_TRUE(torch::equal(actual_next, expected_next))
-        << "next_seq_len mismatch:\n"
-        << actual_next << "\nvs expected:\n"
-        << expected_next;
+    EXPECT_TRUE(torch::equal(actual_next, expected_next)) << "next_seq_len mismatch:\n"
+                                                          << actual_next << "\nvs expected:\n"
+                                                          << expected_next;
 
     // Verify hidden_idx = accept_len - 1
     auto expected_idx = (accept_len.to(torch::kInt64) - 1).cpu();
     auto actual_idx   = hidden_idx.cpu();
-    EXPECT_TRUE(torch::equal(actual_idx, expected_idx))
-        << "hidden_idx mismatch:\n"
-        << actual_idx << "\nvs expected:\n"
-        << expected_idx;
+    EXPECT_TRUE(torch::equal(actual_idx, expected_idx)) << "hidden_idx mismatch:\n"
+                                                        << actual_idx << "\nvs expected:\n"
+                                                        << expected_idx;
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
@@ -1458,8 +1449,8 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
 #endif
     }
     cudaDeviceSynchronize();
-    auto end_batched  = std::chrono::high_resolution_clock::now();
-    auto us_batched   = std::chrono::duration_cast<std::chrono::microseconds>(end_batched - start_batched).count();
+    auto end_batched = std::chrono::high_resolution_clock::now();
+    auto us_batched  = std::chrono::duration_cast<std::chrono::microseconds>(end_batched - start_batched).count();
 
     // Benchmark per-stream scalar approach (old way)
     auto start_scalar = std::chrono::high_resolution_clock::now();
@@ -1474,15 +1465,14 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
         }
     }
     cudaDeviceSynchronize();
-    auto end_scalar  = std::chrono::high_resolution_clock::now();
-    auto us_scalar   = std::chrono::duration_cast<std::chrono::microseconds>(end_scalar - start_scalar).count();
+    auto end_scalar = std::chrono::high_resolution_clock::now();
+    auto us_scalar  = std::chrono::duration_cast<std::chrono::microseconds>(end_scalar - start_scalar).count();
 
     double speedup = static_cast<double>(us_scalar) / static_cast<double>(us_batched);
     RTP_LLM_LOG_INFO("[dispatch-bench] batch_size=%ld iterations=%d", batch_size, iterations);
-    RTP_LLM_LOG_INFO("[dispatch-bench] batched: %ld us total, %.2f us/iter",
-                     us_batched, (double)us_batched / iterations);
-    RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter",
-                     us_scalar, (double)us_scalar / iterations);
+    RTP_LLM_LOG_INFO(
+        "[dispatch-bench] batched: %ld us total, %.2f us/iter", us_batched, (double)us_batched / iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
 
@@ -1516,14 +1506,14 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(std::make_shared<IncompatibleMtpProcessor>());
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<IncompatibleMtpProcessor>());
     stream->reportError(ErrorCode::INVALID_PARAMS, "grammar accept_token error: parser rejected token");
 
     auto target_input              = GptModelInputs{};
@@ -1576,7 +1566,7 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
 }
@@ -1610,7 +1600,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
-    stream->logits_processor_list_.push_back(processor);
+    stream->sampling_state_.logits_processors.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
     GptModelInputs target_input;
@@ -1622,8 +1612,8 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     GptModelOutputs target_output;
     target_output.logits =
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.2f, 0.6f, 0.1f, 0.1f, 0.7f, 0.1f, 0.1f, 0.1f})
-                               .reshape({gamma + 1, vocab_size})
-                               .to(torch::kCUDA);
+            .reshape({gamma + 1, vocab_size})
+            .to(torch::kCUDA);
     auto target_aux_features =
         torch::arange(0, 2 * (gamma + 1), torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
             .reshape({gamma + 1, 2});
@@ -1651,9 +1641,9 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     // no feature input.
     GptModelInputs draft_input;
     draft_input.combo_tokens      = torch::tensor({2, 0, 0}, torch::kInt32);
-    draft_input.input_lengths      = torch::tensor({gamma}, torch::kInt32);
+    draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
     draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
-    draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
+    draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
 
     // Commit call: dense verify rows at the old prefix (accept-independent).
     GptModelInputs commit_input;
@@ -1678,7 +1668,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process(ScheduleOutput{{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
