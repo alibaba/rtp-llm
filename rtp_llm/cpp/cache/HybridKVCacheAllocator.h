@@ -11,6 +11,7 @@
 namespace rtp_llm {
 
 class LoadAsyncContext;
+struct BlockTreeMatchPolicy;
 
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
@@ -41,12 +42,12 @@ public:
 
 protected:
     struct PreparedKVCache {
-        size_t                            matched_device_blocks = 0;
-        size_t                            total_logical_blocks  = 0;
-        std::vector<RequiredPositions>    required_positions;
-        std::vector<BlockIndicesType>     referenced_blocks;
-        std::vector<size_t>               original_sizes;
-        MallocStatus                      materialize_status = MallocStatus::NONE;
+        size_t                         matched_device_blocks = 0;
+        size_t                         total_logical_blocks  = 0;
+        std::vector<RequiredPositions> required_positions;
+        std::vector<BlockIndicesType>  referenced_blocks;
+        std::vector<size_t>            original_sizes;
+        MallocStatus                   materialize_status = MallocStatus::NONE;
     };
 
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
@@ -67,9 +68,10 @@ protected:
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource) override;
 
     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
-                        BatchKVCacheResource&                kv_resource,
-                        const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                        PreparedKVCache&                     prepared);
+                                                     BatchKVCacheResource&                kv_resource,
+                                                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                                                     const BlockTreeMatchPolicy&          match_policy,
+                                                     PreparedKVCache&                     prepared);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -79,26 +81,26 @@ protected:
                                                            LoadAsyncContext& context,
                                                            size_t            matched_blocks);
 
-    virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&       malloc_info,
-                                                      size_t                  reserve_blocks,
+    virtual MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
+                                                      size_t                 reserve_blocks,
                                                       const PreparedKVCache& prepared,
                                                       bool                   has_load_context) const;
-    virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
-    virtual void logMallocFailure(const MallocInfo& malloc_info,
-                                  const char*       phase,
-                                  int               failed_batch,
-                                  int               failed_group,
-                                  bool              incremental,
-                                  int               failed_need_blocks) const;
-    size_t       loadTargetPosition(size_t                               path_index,
-                                    size_t                               group_id,
-                                    const std::shared_ptr<CPSlotMapper>& mapper,
-                                    int                                  cp_scale) const;
-    bool         cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
-    void         rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
-    void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
-                                    const std::vector<BlockIndicesType>& referenced_blocks,
-                                    const std::vector<size_t>&           original_sizes);
+    virtual bool         hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
+    virtual void         logMallocFailure(const MallocInfo& malloc_info,
+                                          const char*       phase,
+                                          int               failed_batch,
+                                          int               failed_group,
+                                          bool              incremental,
+                                          int               failed_need_blocks) const;
+    size_t               loadTargetPosition(size_t                               path_index,
+                                            size_t                               group_id,
+                                            const std::shared_ptr<CPSlotMapper>& mapper,
+                                            int                                  cp_scale) const;
+    bool                 cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    void                 rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
+    void                 rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
+                                            const std::vector<BlockIndicesType>& referenced_blocks,
+                                            const std::vector<size_t>&           original_sizes);
     virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
     virtual MemoryType memoryTypeForGroup(int group_id) const;
 

@@ -1,3 +1,4 @@
+import signal
 import unittest
 from unittest.mock import patch
 
@@ -8,6 +9,36 @@ from rtp_llm.utils.process_manager import ProcessManager
 
 
 class StartServerFailureTest(unittest.TestCase):
+    def test_vit_sigterm_is_expected_only_during_manager_owned_shutdown(self):
+        py_env_configs = PyEnvConfigs()
+        py_env_configs.role_config.role_type = RoleType.VIT
+        vit_process = object()
+
+        with (
+            patch(
+                "rtp_llm.start_server.start_vit_server_impl",
+                return_value=[vit_process],
+            ),
+            patch.object(
+                ProcessManager, "add_processes", autospec=True
+            ) as add_processes,
+            patch.object(ProcessManager, "run_health_checks", return_value=True),
+            patch.object(
+                ProcessManager, "monitor_and_release_processes", return_value=True
+            ),
+            patch("rtp_llm.start_server._maybe_run_startup_real_warmup"),
+            patch("rtp_llm.start_server._mark_startup_warmup_health_gate_ready"),
+        ):
+            start_server(py_env_configs)
+
+        add_processes.assert_called_once()
+        _, processes = add_processes.call_args.args
+        self.assertEqual(processes, [vit_process])
+        self.assertEqual(
+            add_processes.call_args.kwargs["expected_shutdown_exit_codes"],
+            {-signal.SIGTERM},
+        )
+
     def test_health_check_failure_requests_failure_shutdown_and_raises(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT

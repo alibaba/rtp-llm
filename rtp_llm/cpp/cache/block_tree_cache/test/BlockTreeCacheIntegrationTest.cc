@@ -59,9 +59,8 @@ size_t transferBatchCount(const std::vector<TransferDescriptor>& descriptors, co
     std::vector<std::pair<std::tuple<Tier, Tier, size_t>, size_t>> groups;
     for (const auto& descriptor : descriptors) {
         const auto key = std::make_tuple(descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id);
-        const auto group = std::find_if(groups.begin(), groups.end(), [&key](const auto& item) {
-            return item.first == key;
-        });
+        const auto group =
+            std::find_if(groups.begin(), groups.end(), [&key](const auto& item) { return item.first == key; });
         if (group == groups.end()) {
             groups.emplace_back(key, 1);
         } else {
@@ -76,7 +75,7 @@ size_t transferBatchCount(const std::vector<TransferDescriptor>& descriptors, co
         const bool device_host_direction =
             (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
         const size_t batch_limit = device_host_direction ? config.max_descriptors_per_transfer_batch :
-                                                            config.max_descriptors_per_non_device_host_transfer_batch;
+                                                           config.max_descriptors_per_non_device_host_transfer_batch;
         batch_count += (descriptor_count + batch_limit - 1) / batch_limit;
     }
     return batch_count;
@@ -1222,6 +1221,97 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         EXPECT_EQ(after.matched_device_blocks, 1u);
         EXPECT_EQ(after.async_context, nullptr);
         block_tree_cache_test::releaseRequestRefsForTest(*environment->cache, after.matched_device_resources);
+
+        context.reset();
+        joined_context.reset();
+        environment->releaseMatch(second);
+        for (const auto& [pool, block] : request_targets) {
+            releaseDeviceBlocks(*environment->cache, pool, {block});
+        }
+        environment->reclaimAll();
+        environment->expectFullyReclaimed();
+    }
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, MixedRequestTierJoinAlwaysPromotesWhenAnyParticipantEnablesDevice) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    for (const bool device_enabled_leader : {false, true}) {
+        SCOPED_TRACE(device_enabled_leader ? "device-enabled leader" : "device-disabled leader");
+        FullSWAEnvironmentOptions options;
+        options.path_length = 1;
+        options.enable_disk = false;
+        auto environment    = FullSWAEnvironment::create(options);
+        ASSERT_NE(environment, nullptr);
+        auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
+            environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
+        PausableTransferReleaseGuard release_guard(pausable_copy);
+        BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
+        environment->insertRequestPath();
+        environment->releaseRequestRefs();
+        demoteTo(*environment, Tier::HOST);
+
+        const BlockTreeMatchPolicy  device_enabled_policy{/*enable_device=*/true,
+                                                         /*enable_host=*/true,
+                                                         /*enable_disk=*/false,
+                                                         /*enable_remote=*/false};
+        const BlockTreeMatchPolicy  host_only_policy{/*enable_device=*/false,
+                                                    /*enable_host=*/true,
+                                                    /*enable_disk=*/false,
+                                                    /*enable_remote=*/false};
+        const BlockTreeMatchPolicy& leader_policy = device_enabled_leader ? device_enabled_policy : host_only_policy;
+        const BlockTreeMatchPolicy& joiner_policy = device_enabled_leader ? host_only_policy : device_enabled_policy;
+
+        BlockTreeMatchResult              first   = environment->cache->match(environment->keys, leader_policy);
+        std::shared_ptr<LoadAsyncContext> context = takeLoadContext(first);
+        ASSERT_NE(context, nullptr);
+        std::vector<std::pair<IBlockPool*, BlockIdxType>>        host_sources;
+        std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
+        for (size_t desc_index = 0; desc_index < context->load_descs_.size(); ++desc_index) {
+            TransferDescriptor& desc = context->load_descs_[desc_index];
+            EXPECT_EQ(desc.source_tier, Tier::HOST);
+            EXPECT_EQ(desc.install_target_in_cache, device_enabled_leader);
+            ASSERT_EQ(desc.source_blocks.size(), 1u);
+            host_sources.emplace_back(environment->host_pools[desc.group_set_id].get(), desc.source_blocks.front());
+            desc.target_blocks.clear();
+            for (const DeviceBlockPoolPtr& pool : environment->groups[desc.group_set_id]->devicePools()) {
+                const BlockIdList blocks = pool->malloc(1).value();
+                ASSERT_EQ(blocks.size(), 1u);
+                pool->incRef(blocks);
+                desc.target_blocks.push_back(blocks.front());
+                request_targets.emplace_back(pool, blocks.front());
+            }
+        }
+
+        pausable_copy->enablePause();
+        ASSERT_TRUE(context->commit());
+        ASSERT_TRUE(pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout));
+
+        BlockTreeMatchResult              second         = environment->cache->match(environment->keys, joiner_policy);
+        std::shared_ptr<LoadAsyncContext> joined_context = takeLoadContext(second);
+        ASSERT_NE(joined_context, nullptr);
+        ASSERT_EQ(joined_context->loadDescs().size(), joined_context->joinedLoads().size());
+        for (size_t desc_index = 0; desc_index < joined_context->loadDescs().size(); ++desc_index) {
+            EXPECT_TRUE(joined_context->joinedLoads()[desc_index]);
+            EXPECT_EQ(joined_context->loadDescs()[desc_index].install_target_in_cache, !device_enabled_leader);
+        }
+        ASSERT_TRUE(joined_context->commit());
+
+        pausable_copy->release();
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+        ASSERT_TRUE(context->done());
+        ASSERT_TRUE(context->success());
+        ASSERT_TRUE(joined_context->done());
+        ASSERT_TRUE(joined_context->success());
+        EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+        for (const auto& [pool, block] : host_sources) {
+            EXPECT_FALSE(pool->isAllocated(block));
+        }
+        for (const auto& [pool, block] : request_targets) {
+            EXPECT_EQ(pool->refCount(block), 3u);  // tree + leader request + joined request
+        }
 
         context.reset();
         joined_context.reset();

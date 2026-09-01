@@ -65,6 +65,13 @@ struct MallocInfo {
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_cache_lookup = true;
+    // Per-request tier policy, already intersected with deployment-level
+    // availability by StreamCacheResource. A lookup must never attribute a hit
+    // to, or read data from, a tier disabled by the request.
+    bool enable_device_cache = true;
+    bool enable_host_cache   = true;
+    bool enable_disk_cache   = true;
+    bool enable_remote_cache = true;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.

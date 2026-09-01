@@ -104,14 +104,15 @@ public:
         return stream_;
     }
 
-    bool reuseCache() const;
-    bool enableHostCache() const;
-    bool enableDeviceCache() const;
-    bool enableDiskCache() const;
-    bool enableRemoteCache() const;
-    bool enableCacheLookup() const;
-    Tier storeTarget() const;
-    void reportCacheReuseMetrics();
+    bool              reuseCache() const;
+    bool              enableHostCache() const;
+    bool              enableDeviceCache() const;
+    bool              enableDiskCache() const;
+    bool              enableRemoteCache() const;
+    bool              enableCacheLookup() const;
+    Tier              storeTarget() const;
+    std::vector<Tier> storeTargets() const;
+    void              reportCacheReuseMetrics();
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();

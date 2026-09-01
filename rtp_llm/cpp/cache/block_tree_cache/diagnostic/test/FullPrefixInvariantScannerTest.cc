@@ -226,22 +226,16 @@ TEST(FullPrefixDetectorTest, NonFullGroupSetsAreNotReported) {
 // 3. Invalid resource: locatable reason, no derived path violation
 // ---------------------------------------------------------------------------
 
-TEST(FullPrefixDetectorTest, InvalidResourceReportsReasonInsteadOfPathViolation) {
-    // A resource living in two serving tiers at once. Its top tier is HOST, which would
-    // otherwise make the DEVICE child look like lower_to_device; the resource itself is
-    // inconsistent, so only that is reported.
+TEST(FullPrefixDetectorTest, IndependentTierCopiesRemainValidForPathChecks) {
     GroupSetResource multi_tier;
-    multi_tier.host_block = 2;
-    multi_tier.disk_block  = 3;
+    multi_tier.device_blocks = {2};
+    multi_tier.host_block    = 2;
 
     SyntheticTree tree(makeFullGroupSet());
-    const auto    nodes   = tree.addSingleGroupPath({deviceRes(), multi_tier, deviceRes()});
-    const auto    details = tree.detectAll();
+    tree.addSingleGroupPath({deviceRes(), multi_tier, deviceRes()});
+    const auto details = tree.detectAll();
 
-    ASSERT_EQ(details.size(), 1u);
-    EXPECT_EQ(details[0].type, FullViolationType::INVALID_RESOURCE);
-    EXPECT_EQ(details[0].reason, InvalidResourceReason::MULTI_TIER);
-    EXPECT_EQ(details[0].current.cache_key, nodes[1]->cache_key);
+    EXPECT_TRUE(details.empty());
 }
 
 // ---------------------------------------------------------------------------

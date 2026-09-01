@@ -158,6 +158,10 @@ struct TransferDescriptor {
     Tier                      target_tier{Tier::NONE};
     std::vector<BlockIdxType> source_blocks;
     std::vector<BlockIdxType> target_blocks;
+    // Loads always materialize request-owned DEVICE blocks. This flag controls
+    // whether that target also replaces the lower-tier cache copy. Requests
+    // that disable DEVICE cache keep the real lower-tier source resident.
+    bool install_target_in_cache{true};
 
 private:
     static bool endpointResolved(Tier tier, const std::vector<BlockIdxType>& blocks) {

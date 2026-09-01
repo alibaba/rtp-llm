@@ -695,7 +695,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
             vit_processes = start_vit_server_impl(py_env_configs, process_manager)
-            process_manager.add_processes(vit_processes)
+            process_manager.add_processes(
+                vit_processes,
+                expected_shutdown_exit_codes={-signal.SIGTERM},
+            )
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND

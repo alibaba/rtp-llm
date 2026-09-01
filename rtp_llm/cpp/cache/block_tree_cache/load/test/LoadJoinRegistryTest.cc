@@ -32,14 +32,18 @@ protected:
         coordinator_->shutdown();
     }
 
-    std::shared_ptr<LoadAsyncContext>
-    makeContext(size_t transfer_count, TreeNode* node = nullptr, size_t group_set_id = 0, bool joined = false) {
+    std::shared_ptr<LoadAsyncContext> makeContext(size_t    transfer_count,
+                                                  TreeNode* node                    = nullptr,
+                                                  size_t    group_set_id            = 0,
+                                                  bool      joined                  = false,
+                                                  bool      install_target_in_cache = true) {
         std::vector<TransferDescriptor> load_descs(transfer_count);
         for (TransferDescriptor& desc : load_descs) {
-            desc.node         = node;
-            desc.group_set_id = group_set_id;
-            desc.source_tier  = Tier::HOST;
-            desc.target_tier  = Tier::DEVICE;
+            desc.node                    = node;
+            desc.group_set_id            = group_set_id;
+            desc.source_tier             = Tier::HOST;
+            desc.target_tier             = Tier::DEVICE;
+            desc.install_target_in_cache = install_target_in_cache;
         }
         auto context = coordinator_->create(load_descs, std::vector<bool>(load_descs.size(), joined), 1);
         EXPECT_NE(context, nullptr);
@@ -124,6 +128,23 @@ TEST_F(LoadJoinRegistryTest, EraseForContextPreservesOtherContexts) {
     EXPECT_TRUE(registry.finish(&node, 0, true));
     EXPECT_TRUE(first_context->success());
     EXPECT_FALSE(second_context->done());
+}
+
+TEST_F(LoadJoinRegistryTest, InstallDecisionAggregatesActiveContexts) {
+    LoadJoinRegistry                        registry(tree_.get());
+    TreeNode                                node;
+    const std::shared_ptr<LoadAsyncContext> host_only_leader =
+        makeContext(1, nullptr, 0, /*joined=*/false, /*install_target_in_cache=*/false);
+    const std::shared_ptr<LoadAsyncContext> device_joiner =
+        makeContext(1, &node, 0, /*joined=*/true, /*install_target_in_cache=*/true);
+
+    ASSERT_TRUE(registry.start(&node, 0, {target_blocks_[6]}, host_only_leader, /*install_target_in_cache=*/false));
+    EXPECT_FALSE(registry.installTargetInCache(&node, 0));
+    ASSERT_TRUE(registry.join(device_joiner));
+    EXPECT_TRUE(registry.installTargetInCache(&node, 0));
+    EXPECT_TRUE(registry.eraseForContext(&node, 0, device_joiner->contextId()));
+    EXPECT_FALSE(registry.installTargetInCache(&node, 0));
+    EXPECT_TRUE(registry.finish(&node, 0, true));
 }
 
 TEST_F(LoadJoinRegistryTest, ExpiredJoinedContextIsNotKeptAlive) {
