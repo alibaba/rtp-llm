@@ -1132,14 +1132,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     metrics_collector.not_skip = true;
 
-    // The draft prefill re-runs tpSyncModelInputs after rank 0 has shifted the
-    // speculative input.  request_id/request_pd_separation/cache_keys are not
-    // part of that shift: they identify the original PD request and must stay
-    // identical to the metadata used by the target cache-store write.  Keep an
-    // owning snapshot here.  In particular, non-root ranks must not publish the
-    // draft KV block with the zero-initialized request metadata from a freshly
-    // allocated second-sync buffer (which makes decode wait forever for the
-    // real key).
+    // Preserve the original PD request metadata across the second TP sync.
     torch::Tensor pd_request_id;
     torch::Tensor pd_request_separation;
     torch::Tensor pd_cache_keys;
@@ -1290,15 +1283,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         if (!final_chunk_input.force_disable_sp_run) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-            // Every rank already owns the target chunk auxiliary buffer.
-            // The second tpSync broadcasts the round-selected per-request
-            // metadata (including PD keys), so no full-batch restore is
-            // needed. Never sync [C, H].
+            // Sync draft cache metadata before the final draft forward.
             final_chunk_input.last_hidden_states = torch::Tensor();
-            tpSyncModelInputs(final_chunk_input, parallelism_config_);
-
-            // Non-final draft KV was published incrementally by the hook;
-            // this final pass publishes the last round's draft keys.
             final_chunk_input.kv_block_stride_bytes        = draft_cache_cfg.kv_block_stride_bytes;
             final_chunk_input.kv_scale_stride_bytes        = draft_cache_cfg.kv_scale_stride_bytes;
             final_chunk_input.seq_size_per_block           = draft_cache_cfg.seq_size_per_block;
@@ -1307,6 +1293,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             final_chunk_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
             final_chunk_input.kv_cache_group_types         = draft_kv_cache_group_types;
             final_chunk_input.kv_cache_group_types_host    = draft_kv_cache_group_types;
+            tpSyncModelInputs(final_chunk_input, parallelism_config_);
             maybeOverrideLastHiddenWithMtpBuffer(final_chunk_input, *model_);
 
             maybePrintModelInput(final_chunk_input, "prefill final round draft model");
@@ -1385,14 +1372,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             if (cp_enabled) {
                 model_input.last_hidden_states = torch::Tensor();
             }
-            tpSyncModelInputs(model_input, parallelism_config_);
-            if (model_input.pd_separation) {
-                model_input.request_id            = pd_request_id;
-                model_input.request_pd_separation = pd_request_separation;
-                model_input.cache_keys            = pd_cache_keys;
-            }
-            maybePrintModelInput(model_input, "prefill post draft model");
-            int64_t     start_time_us                = autil::TimeUtility::currentTimeInMicroSeconds();
             const auto& mtp_cache_cfg                = cache_manager_->getMTPModuleCacheConfig(0);
             model_input.kv_block_stride_bytes        = mtp_cache_cfg.kv_block_stride_bytes;
             model_input.kv_scale_stride_bytes        = mtp_cache_cfg.kv_scale_stride_bytes;
@@ -1400,6 +1379,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             model_input.kv_cache_layer_to_group_host = draft_kv_cache_layer_to_group;
             model_input.kv_cache_group_types         = draft_kv_cache_group_types;
             model_input.kv_cache_group_types_host    = draft_kv_cache_group_types;
+            if (model_input.pd_separation) {
+                model_input.request_id            = pd_request_id;
+                model_input.request_pd_separation = pd_request_separation;
+                model_input.cache_keys            = pd_cache_keys;
+            }
+            tpSyncModelInputs(model_input, parallelism_config_);
+            maybePrintModelInput(model_input, "prefill post draft model");
+            int64_t     start_time_us                = autil::TimeUtility::currentTimeInMicroSeconds();
             maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
             draft_model_output = std::move(draft_model_->forward(model_input));
             model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
