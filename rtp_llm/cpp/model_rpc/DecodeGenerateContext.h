@@ -70,12 +70,6 @@ public:
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests     = 0;
     int32_t                  prefill_cp_size            = 1;  // CP size used by prefill; >1 means sharded KV cache
-    int32_t                  prefill_seq_size_per_block = 0;
-    int32_t                  prefill_kernel_seq_size_per_block = 0;
-    int32_t                  prefill_attention_tp_size         = 0;
-    int32_t                  prefill_cache_dtype               = 0;
-    int32_t                  prefill_ssm_state_dtype           = 0;
-    int32_t                  prefill_conv_state_dtype          = 0;
 
     // for debug, will delete in future
     TimeInfo time_info;

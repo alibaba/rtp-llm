@@ -1,6 +1,9 @@
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 
+#include <future>
+#include <mutex>
+
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -39,6 +42,10 @@ namespace {
 constexpr int kDsv4PoolNum        = 7;
 constexpr int kDsv4TokensPerBlock = 256;
 
+std::string testPeerIp(size_t rank) {
+    return "192.0.2." + std::to_string(rank + 1);
+}
+
 class DummyMemoryUtil: public MemoryUtil {
 public:
     bool regUserMr(void*, uint64_t, bool, uint64_t = 0) override {
@@ -60,6 +67,11 @@ public:
 
 class MemoryBackedCacheStore: public NormalCacheStore {
 public:
+    struct LoadBufferCall {
+        std::string                                      peer_ip;
+        std::vector<std::shared_ptr<RequestBlockBuffer>> requests;
+    };
+
     MemoryBackedCacheStore() {
         memory_util_                = std::make_shared<DummyMemoryUtil>();
         request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(memory_util_);
@@ -83,7 +95,7 @@ public:
 
     void load(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
               CacheStoreLoadDoneCallback                 callback,
-              const std::string&,
+              const std::string&                         peer_ip,
               uint32_t,
               uint32_t,
               uint32_t = 1000,
@@ -91,13 +103,35 @@ public:
               int      = 0) override {
         bool ok = true;
         for (const auto& [key, block] : request_block_buffer->getBlocks()) {
-            auto it = stored_blocks_.find(key);
-            if (it == stored_blocks_.end() || it->second.size() != block->len) {
+            if (load_failure_predicate_ && load_failure_predicate_(peer_ip, key)) {
                 ok = false;
                 continue;
             }
-            auto host = torch::from_blob(const_cast<uint8_t*>(it->second.data()),
-                                         {(int64_t)it->second.size()},
+            std::vector<uint8_t>        synthesized_bytes;
+            const auto                  peer_it      = load_patterns_.find(peer_ip);
+            const std::vector<uint8_t>* source_bytes = nullptr;
+            if (load_byte_pattern_) {
+                synthesized_bytes.assign(block->len, load_byte_pattern_(peer_ip, key));
+                source_bytes = &synthesized_bytes;
+            } else if (peer_it != load_patterns_.end()) {
+                const auto pattern_it = peer_it->second.find(key);
+                if (pattern_it != peer_it->second.end()) {
+                    synthesized_bytes.assign(block->len, pattern_it->second);
+                    source_bytes = &synthesized_bytes;
+                }
+            }
+            if (source_bytes == nullptr) {
+                auto it = stored_blocks_.find(key);
+                if (it != stored_blocks_.end()) {
+                    source_bytes = &it->second;
+                }
+            }
+            if (source_bytes == nullptr || source_bytes->size() != block->len) {
+                ok = false;
+                continue;
+            }
+            auto host = torch::from_blob(const_cast<uint8_t*>(source_bytes->data()),
+                                         {(int64_t)source_bytes->size()},
                                          torch::TensorOptions(torch::kUInt8).device(torch::kCPU))
                             .clone();
             auto dst_options = torch::TensorOptions(torch::kUInt8).device(block->gpu_mem ? torch::kCUDA : torch::kCPU);
@@ -106,7 +140,11 @@ public:
         }
         runtimeSyncAndCheck();
         load_request_keys_.push_back(request_block_buffer->getRequestKey());
-        callback(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
+        if (defer_load_callback_) {
+            defer_load_callback_(std::move(callback), ok, peer_ip);
+        } else {
+            callback(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
+        }
     }
 
     std::shared_ptr<LoadContext>
@@ -118,6 +156,7 @@ public:
                 LoadContext::CheckCancelFunc                            check_cancel_func,
                 int                                                     partition_count,
                 int                                                     partition_id) override {
+        load_buffer_calls_.push_back({ip, request_block_buffers});
         load_buffer_requests_.insert(
             load_buffer_requests_.end(), request_block_buffers.begin(), request_block_buffers.end());
         auto context = std::make_shared<LoadContext>(shared_from_this(), false);
@@ -126,13 +165,17 @@ public:
         return context;
     }
 
-    std::unordered_map<std::string, std::vector<uint8_t>> stored_blocks_;
-    std::vector<std::string>                              store_request_keys_;
-    std::vector<std::string>                              load_request_keys_;
-    std::vector<std::shared_ptr<RequestBlockBuffer>>      store_buffer_requests_;
-    std::vector<std::shared_ptr<RequestBlockBuffer>>      load_buffer_requests_;
+    std::unordered_map<std::string, std::vector<uint8_t>>                              stored_blocks_;
+    std::unordered_map<std::string, std::unordered_map<std::string, uint8_t>>          load_patterns_;
+    std::vector<std::string>                                                           store_request_keys_;
+    std::vector<std::string>                                                           load_request_keys_;
+    std::vector<std::shared_ptr<RequestBlockBuffer>>                                   store_buffer_requests_;
+    std::vector<std::shared_ptr<RequestBlockBuffer>>                                   load_buffer_requests_;
+    std::vector<LoadBufferCall>                                                        load_buffer_calls_;
+    std::function<bool(const std::string&, const std::string&)>                        load_failure_predicate_;
+    std::function<uint8_t(const std::string&, const std::string&)>                     load_byte_pattern_;
+    std::function<void(CacheStoreLoadDoneCallback, bool, const std::string&)> defer_load_callback_;
 };
-
 class MinimalEngine: public EngineBase {
 public:
     MinimalEngine(const EngineInitParams&        params,
@@ -161,6 +204,72 @@ public:
 
 private:
     bool is_mtp_eagle_;
+};
+
+// Own the server's raw propose-params pointer and the cache allocations until
+// every synchronous load context in a test has finished.
+struct K3TransferFixture {
+    std::shared_ptr<KVCacheManager>               manager;
+    std::shared_ptr<GenerateInput>                input;
+    CompleteTokenIdsPtr                           tokens;
+    BatchKVCacheResourcePtr                       resource = std::make_shared<BatchKVCacheResource>();
+    std::unique_ptr<ProposeModelEngineInitParams> propose_params;
+    std::shared_ptr<MemoryBackedCacheStore>       cache_store = std::make_shared<MemoryBackedCacheStore>();
+    DecodeRpcServer                               server;  // Destroy before the parameters and buffers it uses.
+
+    bool init(const CacheConfig&       config,
+              const ParallelismConfig& parallelism,
+              int                      page_count,
+              int64_t                  request_id,
+              size_t                   model_id,
+              size_t                   draft_model_id,
+              bool                     keep_skipped_blocks) {
+        manager = std::make_shared<KVCacheManager>(config, true, nullptr, KVCacheConfig{}, parallelism);
+        manager->config_.block_num = config.block_num;
+        if (!manager->init()) {
+            return false;
+        }
+        resource->resetBatchSize(1);
+        resource->initGroups(config.groupNums(),
+                             static_cast<int>(config.layer_all_num),
+                             config.layer_to_group_id,
+                             config.kernelBlocksPerKvBlock(),
+                             config.group_types,
+                             config.layer_region_to_group_id);
+        input                  = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(page_count * static_cast<int>(config.seq_size_per_block), torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens                 = std::make_shared<CompleteTokenIds>(
+            1, 1, (page_count + 1) * static_cast<int>(config.seq_size_per_block), config.seq_size_per_block);
+        tokens->init(input);
+        tokens->setSeqLength(page_count * static_cast<int>(config.seq_size_per_block));
+        MallocInfo malloc_info{resource,
+                               tokens,
+                               request_id,
+                               /*verbose=*/true,
+                               /*reuse_cache=*/false,
+                               /*enable_device_cache=*/false};
+        malloc_info.enable_remove_skipped_blocks = !keep_skipped_blocks;
+        if (!manager->malloc(malloc_info).success) {
+            return false;
+        }
+
+        EngineInitParams params;
+        params.model_id                 = model_id;
+        params.model_config_.num_layers = 2;
+        params.parallelism_config       = parallelism;
+        auto draft                      = std::make_unique<EngineInitParams>();
+        draft->model_id                 = draft_model_id;
+        draft->model_config_.num_layers = 1;
+        auto mtp_params                 = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+        mtp_params->push_back(std::move(draft));
+        propose_params = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_EAGLE3, 3, std::move(mtp_params));
+        server.engine_ = std::make_shared<MinimalEngine>(params, manager, true);
+        server.maga_init_params_         = params;
+        server.propose_maga_init_params_ = propose_params.get();
+        server.resource_.cache_store     = cache_store;
+        return true;
+    }
 };
 
 void fillDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
@@ -196,6 +305,40 @@ void expectDsv4RegionBytes(const std::shared_ptr<KVCacheManager>& manager,
 
 uint8_t dsv4PdPattern(int layer_id, int gid, size_t block_pos) {
     return static_cast<uint8_t>(17 + layer_id * 19 + gid * 11 + block_pos);
+}
+
+void fillK3BlockBytes(const std::shared_ptr<KVCacheManager>& manager,
+                      int                                    block_id,
+                      int                                    global_layer_id,
+                      uint8_t                                value) {
+    for (const auto& part : manager->convertIndexToBuffer(block_id, global_layer_id)) {
+        auto device = torch::from_blob(
+            part.addr, {(int64_t)part.size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        device.fill_(value);
+    }
+}
+
+void expectK3BlockBytes(const std::shared_ptr<KVCacheManager>& manager,
+                        int                                    block_id,
+                        int                                    global_layer_id,
+                        uint8_t                                value) {
+    const auto parts = manager->convertIndexToBuffer(block_id, global_layer_id);
+    ASSERT_FALSE(parts.empty());
+    for (size_t part_id = 0; part_id < parts.size(); ++part_id) {
+        const auto& part   = parts[part_id];
+        auto        device = torch::from_blob(
+            part.addr, {(int64_t)part.size_bytes}, torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        auto        host = device.cpu().contiguous();
+        const auto* ptr  = host.data_ptr<uint8_t>();
+        for (size_t byte = 0; byte < part.size_bytes; ++byte) {
+            ASSERT_EQ(ptr[byte], value) << "byte=" << byte << " part=" << part_id << " layer=" << global_layer_id
+                                        << " block=" << block_id;
+        }
+    }
+}
+
+uint8_t k3PdPattern(size_t model_slot, size_t layer_id, size_t global_page) {
+    return static_cast<uint8_t>(23 + model_slot * 67 + layer_id * 29 + global_page);
 }
 
 torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, int gid) {
@@ -349,6 +492,59 @@ protected:
 
         return CacheConfigCreator::createSpConfig(score_model_config,
                                                   propose_model_config,
+                                                  parallelism_config,
+                                                  runtime_config,
+                                                  kv_cache_config,
+                                                  sp_config,
+                                                  /*warm_up_result=*/std::nullopt,
+                                                  /*is_mtp=*/true,
+                                                  /*is_eagle=*/true);
+    }
+
+    ModelConfig makeTinyK3ModelConfig(const std::vector<HybridAttentionType>& attention_types) {
+        ModelConfig config;
+        config.num_layers                                                = static_cast<int64_t>(attention_types.size());
+        config.max_seq_len                                               = 4096;
+        config.hidden_size                                               = 128;
+        config.vocab_size                                                = 1024;
+        config.data_type                                                 = rtp_llm::DataType::TYPE_BF16;
+        config.attn_config.head_num                                      = 8;
+        config.attn_config.kv_head_num                                   = 1;
+        config.attn_config.size_per_head                                 = 16;
+        config.attn_config.tokens_per_block                              = 128;
+        config.attn_config.use_mla                                       = true;
+        config.attn_config.kv_lora_rank                                  = 16;
+        config.attn_config.rope_head_dim                                 = 4;
+        config.attn_config.kv_cache_dtype                                = KvCacheDataType::BASE;
+        config.hybrid_attention_config.enable_hybrid_attention           = true;
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+        config.hybrid_attention_config.hybrid_attention_types            = attention_types;
+        config.linear_attention_config.linear_conv_kernel_dim            = 4;
+        config.linear_attention_config.linear_key_head_dim               = 4;
+        config.linear_attention_config.linear_value_head_dim             = 4;
+        config.linear_attention_config.linear_num_key_heads              = 8;
+        config.linear_attention_config.linear_num_value_heads            = 8;
+        return config;
+    }
+
+    CacheConfig makeTinyK3PageRREagleConfig(const ParallelismConfig&                parallelism_config,
+                                            const std::vector<HybridAttentionType>& draft_attention_types = {
+                                                HybridAttentionType::NONE}) {
+        auto score_config = makeTinyK3ModelConfig({HybridAttentionType::LINEAR, HybridAttentionType::NONE});
+        auto draft_config = makeTinyK3ModelConfig(draft_attention_types);
+        if (std::find(draft_attention_types.begin(), draft_attention_types.end(), HybridAttentionType::SLIDING_WINDOW)
+            != draft_attention_types.end()) {
+            draft_config.attn_config.sliding_window = 256;
+        }
+        RuntimeConfig runtime_config;
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.seq_size_per_block = 128;
+        kv_cache_config.test_block_num     = 64;
+        SpeculativeExecutionConfig sp_config;
+        sp_config.type              = SP_TYPE_EAGLE3;
+        sp_config.gen_num_per_cycle = 3;
+        return CacheConfigCreator::createSpConfig(score_config,
+                                                  draft_config,
                                                   parallelism_config,
                                                   runtime_config,
                                                   kv_cache_config,
@@ -672,7 +868,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << gid;
         } else {
             EXPECT_TRUE(isNullBlockIdx(blocks[0])) << "tail group " << gid << " should keep only tail blocks";
-            EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+            if (config.group_region_names[gid] == KVCacheRegionName::HCA_STATE) {
+                EXPECT_TRUE(isNullBlockIdx(blocks[2])) << "HCA state keeps only the active tail block";
+            } else {
+                EXPECT_FALSE(isNullBlockIdx(blocks[2])) << "tail group " << gid;
+            }
             EXPECT_FALSE(isNullBlockIdx(blocks[3])) << "tail group " << gid;
         }
     }
@@ -824,8 +1024,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
-                ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
-                ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
+                ASSERT_EQ(isNullBlockIdx(prefill_block_id), isNullBlockIdx(decode_block_id))
+                    << "gid=" << gid << " pos=" << block_pos;
+                if (isNullBlockIdx(prefill_block_id)) {
+                    continue;
+                }
                 fillDsv4RegionBytes(
                     prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
                 fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
@@ -893,7 +1096,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
         }
     }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 10u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 26u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(), 25u);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -907,9 +1110,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     server.resource_.cache_store     = cache_store;
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    const std::string                  request_key = "dsv4-cache-store-pd";
     grpc::ServerContext                 server_context;
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-cache-store-pd",
+                                                     request_key,
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
@@ -930,7 +1134,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
                 blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
-                ASSERT_FALSE(isNullBlockIdx(decode_block_id));
+                if (isNullBlockIdx(decode_block_id)) {
+                    continue;
+                }
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
             }
@@ -1060,9 +1266,10 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
     server.resource_.cache_store     = cache_store;
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    const std::string                  request_key = "eagle-independent-draft-pd";
     grpc::ServerContext                 server_context;
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "eagle-independent-draft-pd",
+                                                     request_key,
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
@@ -1091,6 +1298,348 @@ TEST_F(PdSepKVCacheReleaseTest, testEagleDraftLoadUsesIndependentPhysicalGroup) 
         actual_destination_addrs.insert(block->addr.get());
     }
     EXPECT_EQ(actual_destination_addrs, expected_destination_addrs);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testK3PageRRToReplicatedLoadsSingleGroupMtpSwaTailFromRankAffinePeer) {
+    constexpr int     kShardCount   = 8;
+    constexpr int     kPageCount    = 4;
+    constexpr int64_t kRequestId    = 9027;
+    constexpr size_t  kDraftModelId = 95;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size                            = kShardCount;
+    parallelism_config.tp_rank                            = 3;
+    parallelism_config.role_type                          = RoleType::DECODE;
+    parallelism_config.prefill_cp_config.prefill_cp_size  = kShardCount;
+    parallelism_config.prefill_cp_config.kv_cache_sharded = false;
+    auto config = makeTinyK3PageRREagleConfig(parallelism_config, {HybridAttentionType::SLIDING_WINDOW});
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    ASSERT_EQ(config.mtp_sub_configs[0]->group_types, std::vector<CacheGroupType>({CacheGroupType::SWA}));
+
+    K3TransferFixture fixture;
+    ASSERT_TRUE(fixture.init(config, parallelism_config, kPageCount, kRequestId, 94, kDraftModelId,
+                             /*keep_skipped_blocks=*/false));
+    const auto& resource = fixture.resource;
+    auto& server = fixture.server;
+    const auto& cache_store = fixture.cache_store;
+
+    const int mtp_gid = config.layer_to_group_id[2];
+    ASSERT_EQ(config.group_types[static_cast<size_t>(mtp_gid)], CacheGroupType::SWA);
+    const auto& mtp_blocks = resource->blocks(0, mtp_gid);
+    ASSERT_EQ(mtp_blocks.size(), static_cast<size_t>(kPageCount));
+    EXPECT_TRUE(isNullBlockIdx(mtp_blocks[0]));
+    EXPECT_TRUE(isNullBlockIdx(mtp_blocks[1]));
+    EXPECT_FALSE(isNullBlockIdx(mtp_blocks[2]));
+    EXPECT_FALSE(isNullBlockIdx(mtp_blocks[3]));
+
+    std::vector<CacheKeyType> cache_keys;
+    for (int page = 0; page < kPageCount; ++page) {
+        cache_keys.push_back(42000 + page);
+    }
+
+    cache_store->load_byte_pattern_ = [](const std::string&, const std::string&) { return uint8_t{0x5A}; };
+
+    std::vector<std::string> peer_addrs;
+    for (int rank = 0; rank < kShardCount; ++rank) {
+        peer_addrs.push_back(testPeerIp(rank) + ":12345:12346");
+    }
+    const std::string request_key = "k3-mtp-single-swa";
+    grpc::ServerContext                 server_context;
+    DecodeRpcServer::LoadKVCacheContext load_context(kRequestId,
+                                                     request_key,
+                                                     peer_addrs,
+                                                     cache_keys,
+                                                     resource->groupBlocks(),
+                                                     /*reuse_block_size=*/0,
+                                                     /*timeout_ms=*/5000,
+                                                     /*partition_count=*/1,
+                                                     /*partition_id=*/0,
+                                                     &server_context,
+                                                     /*prefill_cp_size=*/kShardCount,
+                                                     /*force_disable_sp_run=*/false);
+    const auto                          status = server.loadCache(load_context);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+
+    std::unordered_set<std::string> mtp_keys;
+    std::unordered_set<std::string> mtp_peer_ips;
+    for (const auto& call : cache_store->load_buffer_calls_) {
+        for (const auto& request : call.requests) {
+            for (const auto& [key, block] : request->getBlocks()) {
+                (void)block;
+                if (key.find("_" + std::to_string(kDraftModelId) + "_") != std::string::npos) {
+                    mtp_keys.insert(key);
+                    mtp_peer_ips.insert(call.peer_ip);
+                }
+            }
+        }
+    }
+    EXPECT_EQ(mtp_peer_ips, std::unordered_set<std::string>({testPeerIp(3)}));
+    ASSERT_EQ(mtp_keys.size(), 2u);
+    for (size_t page : {size_t{2}, size_t{3}}) {
+        EXPECT_EQ(mtp_keys.count("kv_"
+                                 + makeCacheKey(kDraftModelId,
+                                                std::to_string(cache_keys[page]),
+                                                /*layer_id=*/0,
+                                                KVCacheRegionName::DEFAULT)),
+                  1u);
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testK3SupportedLayoutsTransferCanonicalMainAndMtpGroups) {
+    constexpr int     kPageCount = 21;
+    constexpr int64_t kRequestId = 9024;
+    constexpr size_t  kModelId = 92, kDraftModelId = 93;
+    struct LayoutCase {
+        int  tp_size;
+        bool page_rr;
+        bool target_only;
+    };
+    for (const auto row : {LayoutCase{8, false, false},
+                           LayoutCase{2, true, false},
+                           LayoutCase{4, true, false},
+                           LayoutCase{8, true, false},
+                           LayoutCase{8, true, true}}) {
+        SCOPED_TRACE(testing::Message() << "TP=" << row.tp_size << " page_rr=" << row.page_rr
+                                        << " target_only=" << row.target_only);
+        const int         kTpSize = row.tp_size, kDecodeRank = std::min(3, kTpSize - 1);
+        const int         source_shards = row.page_rr ? kTpSize : 1;
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = kTpSize;
+        parallelism.tp_rank                            = kDecodeRank;
+        parallelism.role_type                          = RoleType::DECODE;
+        parallelism.prefill_cp_config.prefill_cp_size  = source_shards;
+        parallelism.prefill_cp_config.kv_cache_sharded = false;
+        const auto config                              = makeTinyK3PageRREagleConfig(
+            parallelism, {row.page_rr ? HybridAttentionType::LINEAR : HybridAttentionType::NONE});
+        K3TransferFixture fixture;
+        ASSERT_TRUE(fixture.init(config, parallelism, kPageCount, kRequestId, kModelId, kDraftModelId,
+                                 /*keep_skipped_blocks=*/true));
+        const auto& manager = fixture.manager;
+        const auto& resource = fixture.resource;
+        const auto& cache_store = fixture.cache_store;
+        auto& server = fixture.server;
+        server.resource_.workers.assign(kTpSize, "decode-worker");
+        server.resource_.grpc_workers.assign(kTpSize, "decode-worker");
+        std::vector<std::string> ordered_peers;
+        for (int rank = 0; rank < kTpSize; ++rank) {
+            ordered_peers.push_back(testPeerIp(rank) + ":12345:12346");
+        }
+        const auto selected_peers = row.page_rr ? ordered_peers : std::vector<std::string>{ordered_peers[kDecodeRank]};
+        CacheKeysType cache_keys;
+        for (int page = 0; page < kPageCount; ++page) {
+            cache_keys.push_back(41000 + page);
+        }
+        GroupBlockIds groups = resource->groupBlocks();
+        if (row.target_only) {
+            groups.resize(2);
+        }
+        const std::string                   request_key = "k3-canonical-transfer";
+        grpc::ServerContext                 rpc_context;
+        // LoadKVCacheContext borrows these named containers and request key.
+        // Each context is consumed synchronously before its inputs leave scope.
+        auto make_load_context = [&](const std::vector<std::string>& peers, int64_t reuse) {
+            return DecodeRpcServer::LoadKVCacheContext(kRequestId, request_key, peers, cache_keys, groups,
+                                                       reuse, 5000, 1, 0, &rpc_context, source_shards,
+                                                       row.target_only);
+        };
+        auto route_context = make_load_context(ordered_peers, 16);
+        auto request = server.constructRemoteLoadRequestForMla(route_context, kDecodeRank, ordered_peers);
+        ASSERT_EQ(request.peer_addrs_size(), selected_peers.size());
+        EXPECT_EQ(std::vector<std::string>(request.peer_addrs().begin(), request.peer_addrs().end()), selected_peers);
+        EXPECT_EQ(request.partition_count(), 1);
+        EXPECT_EQ(request.partition_id(), 0);
+        EXPECT_EQ(request.prefill_cp_size(), source_shards);
+        EXPECT_EQ(request.group_block_ids_size(), row.target_only ? 2 : 3);
+
+        std::unordered_map<std::string, std::unordered_map<std::string, void*>> expected;
+        struct BlockCheck {
+            int     block;
+            int     layer;
+            uint8_t pattern;
+        };
+        std::vector<BlockCheck> block_checks;
+        for (int gid = 0; gid < 3; ++gid) {
+            const bool   linear       = gid == 1 || (gid == 2 && row.page_rr);
+            const int    global_layer = gid == 0 ? 1 : gid == 1 ? 0 : 2;
+            const size_t model_id     = gid == 2 ? kDraftModelId : kModelId;
+            const size_t wire_layer   = gid == 0 ? 1 : 0;
+            const auto&  blocks       = resource->blocks(0, gid);
+            const size_t terminal     = linear ? (kPageCount - 1) / source_shards : kPageCount - 1;
+            ASSERT_GT(blocks.size(), terminal);
+            for (size_t page = linear ? kPageCount - 1 : 0; page < kPageCount; ++page) {
+                const auto block   = blocks[linear ? terminal : page];
+                const auto pattern = k3PdPattern(gid == 2 ? 1 : 0, wire_layer, page);
+                fillK3BlockBytes(manager, block, global_layer, 0xEE);
+                block_checks.push_back({block, global_layer, row.target_only && gid == 2 ? uint8_t{0xEE} : pattern});
+                if (row.target_only && gid == 2) {
+                    continue;
+                }
+                const auto peer = testPeerIp(row.page_rr && !linear ? page % kTpSize : kDecodeRank);
+                const auto base_key =
+                    makeCacheKey(model_id, std::to_string(cache_keys[page]), wire_layer, KVCacheRegionName::DEFAULT);
+                const auto parts =
+                    manager->convertIndexToBuffer(block, global_layer, /*partition_count=*/1, /*partition_id=*/0);
+                ASSERT_FALSE(parts.empty());
+                for (size_t segment = 0; segment < parts.size(); ++segment) {
+                    const auto key      = linear ? makeLinearCacheSegmentKey(segment, base_key) : "kv_" + base_key;
+                    expected[peer][key] = parts[segment].addr;
+                    cache_store->load_patterns_[peer][key] = pattern;
+                }
+            }
+        }
+        runtimeSyncAndCheck();
+        if (row.target_only) {
+            // A target-only RemoteLoad omits the draft group from the wire request.
+            BroadcastLoadResponsePB response;
+            ASSERT_TRUE(server.RemoteLoad(&rpc_context, &request, &response).ok());
+            EXPECT_EQ(response.error_info().error_code(), ErrorCodePB::NONE_ERROR);
+        } else {
+            auto load_context = make_load_context(selected_peers, 16);
+            const auto                          status = server.loadCache(load_context);
+            ASSERT_TRUE(status.ok()) << status.ToString();
+        }
+        ASSERT_EQ(cache_store->load_buffer_calls_.size(), selected_peers.size());
+        for (size_t peer = 0; peer < selected_peers.size(); ++peer) {
+            const auto& call = cache_store->load_buffer_calls_[peer];
+            EXPECT_EQ(call.peer_ip, testPeerIp(row.page_rr ? peer : kDecodeRank));
+            std::unordered_map<std::string, void*> actual;
+            for (const auto& buffer : call.requests) {
+                for (const auto& [key, block] : buffer->getBlocks()) {
+                    EXPECT_TRUE(actual.emplace(key, block->addr.get()).second) << key;
+                }
+            }
+            EXPECT_EQ(actual, expected.at(call.peer_ip));
+        }
+        for (const auto& check : block_checks) {
+            expectK3BlockBytes(manager, check.block, check.layer, check.pattern);
+        }
+        if (!row.page_rr || row.target_only || kTpSize != 8) {
+            continue;
+        }
+
+        // Reject an RPC-carried null destination before any transfer starts.
+        const auto saved_block = groups[0]->blocks()[0];
+        groups[0]->setAt(0, NULL_BLOCK_IDX);
+        cache_store->load_buffer_calls_.clear();
+        auto invalid_destination = make_load_context(selected_peers, 0);
+        EXPECT_FALSE(server.loadCache(invalid_destination).ok());
+        EXPECT_TRUE(cache_store->load_buffer_calls_.empty());
+        groups[0]->setAt(0, saved_block);
+
+        for (int fault = 0; fault < 4; ++fault) {
+            SCOPED_TRACE(fault);  // FULL, main LINEAR, MTP LINEAR, malformed final peer.
+            const auto failure_key =
+                fault == 0 ? "kv_" + makeCacheKey(kModelId, std::to_string(cache_keys[5]), 1, KVCacheRegionName::DEFAULT) :
+                             makeLinearCacheSegmentKey(0,
+                                                       makeCacheKey(fault == 1 ? kModelId : kDraftModelId,
+                                                                    std::to_string(cache_keys.back()),
+                                                                    0,
+                                                                    KVCacheRegionName::DEFAULT));
+            const auto failed_peer = testPeerIp(fault == 0 ? 5 : kDecodeRank);
+            size_t     matches = 0;
+            cache_store->load_failure_predicate_ = [&](const std::string& peer, const std::string& key) {
+                const bool match = fault != 3 && peer == failed_peer && key == failure_key;
+                matches += match;
+                return match;
+            };
+            cache_store->load_buffer_calls_.clear();
+            auto failure_peers = selected_peers;
+            if (fault == 3) {
+                failure_peers.back() = "malformed-peer";
+            }
+            auto failure_context = make_load_context(failure_peers, 0);
+            EXPECT_FALSE(server.loadCache(failure_context).ok());
+            EXPECT_EQ(matches, fault == 3 ? 0u : 1u);
+            EXPECT_EQ(cache_store->load_buffer_calls_.size(), fault == 3 ? 7u : 8u);
+            cache_store->load_failure_predicate_ = nullptr;
+        }
+
+        // A later FULL owner or affine MTP peer must not bypass the wait for
+        // earlier transfers whose completion callbacks have not run yet.
+        for (const int invalid_gid : {0, 2}) {
+            SCOPED_TRACE(testing::Message() << "delayed callback, invalid gid=" << invalid_gid);
+            const size_t invalid_slot = invalid_gid == 0 ? 5 : (kPageCount - 1) / kTpSize;
+            const int invalid_peer = invalid_gid == 0 ? 5 : kDecodeRank;
+            const auto saved = groups[invalid_gid]->blocks()[invalid_slot];
+            groups[invalid_gid]->setAt(invalid_slot, NULL_BLOCK_IDX);
+            std::mutex callback_mutex;
+            std::vector<std::function<void()>> pending_callbacks;
+            std::promise<void> preceding_peer_dispatched;
+            auto dispatched = preceding_peer_dispatched.get_future();
+            bool signaled = false, release_callbacks = false;
+            cache_store->defer_load_callback_ = [&](CacheStoreLoadDoneCallback callback, bool ok,
+                                                    const std::string& peer) {
+                auto complete = [callback = std::move(callback), ok]() {
+                    callback(ok, ok ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadErrorUnknown);
+                };
+                std::unique_lock<std::mutex> lock(callback_mutex);
+                if (release_callbacks) {
+                    lock.unlock();
+                    complete();
+                } else {
+                    pending_callbacks.push_back(std::move(complete));
+                    if (!signaled && peer == testPeerIp(invalid_peer - 1)) {
+                        signaled = true;
+                        preceding_peer_dispatched.set_value();
+                    }
+                }
+            };
+            auto delayed_context = make_load_context(selected_peers, 0);
+            auto load = std::async(std::launch::async, [&]() { return server.loadCache(delayed_context); });
+            EXPECT_EQ(dispatched.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+            EXPECT_EQ(load.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout)
+                << "loadCache returned before preceding transfer callbacks completed";
+            // Complete callbacks before fixture teardown even if the wait
+            // assertion fails.
+            std::vector<std::function<void()>> completions;
+            {
+                std::lock_guard<std::mutex> lock(callback_mutex);
+                release_callbacks = true;
+                completions.swap(pending_callbacks);
+            }
+            for (auto& complete : completions) {
+                complete();
+            }
+            EXPECT_EQ(load.get().code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+            cache_store->defer_load_callback_ = nullptr;
+            groups[invalid_gid]->setAt(invalid_slot, saved);
+        }
+    }
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testK3RemoteWorkerRejectsInvalidTopologyBeforeCallback) {
+    struct Topology {
+        bool decode_page_rr;
+        int  upstream_shards;
+        int  request_shards;
+        int  peers;
+    };
+    for (const auto row : {Topology{true, 8, 8, 8}, Topology{false, 8, 8, 7}, Topology{false, 4, 8, 8}}) {
+        SCOPED_TRACE(testing::Message() << row.decode_page_rr << "/" << row.upstream_shards << "/" << row.peers);
+        ParallelismConfig parallelism;
+        parallelism.tp_size                            = 8;
+        parallelism.role_type                          = RoleType::DECODE;
+        parallelism.prefill_cp_config.prefill_cp_size  = row.upstream_shards;
+        parallelism.prefill_cp_config.kv_cache_sharded = row.decode_page_rr;
+        auto manager = std::make_shared<KVCacheManager>(makeTinyK3PageRREagleConfig(parallelism), false, nullptr);
+        EngineInitParams params;
+        params.model_config_.num_layers = 2;
+        params.parallelism_config       = parallelism;
+        auto            cache_store     = std::make_shared<MemoryBackedCacheStore>();
+        DecodeRpcServer server;
+        server.engine_               = std::make_shared<MinimalEngine>(params, manager, false);
+        server.maga_init_params_     = params;
+        server.resource_.cache_store = cache_store;
+        BroadcastLoadRequestPB request;
+        request.set_prefill_cp_size(row.request_shards);
+        for (int rank = 0; rank < row.peers; ++rank) {
+            request.add_peer_addrs(testPeerIp(rank) + ":12345:12346");
+        }
+        grpc::ServerContext     rpc_context;
+        BroadcastLoadResponsePB response;
+        EXPECT_THROW(server.RemoteLoad(&rpc_context, &request, &response), std::exception);
+        EXPECT_TRUE(cache_store->load_buffer_calls_.empty());
+    }
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBlocks) {
@@ -1152,8 +1701,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
-                ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
-                ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
+                ASSERT_EQ(isNullBlockIdx(prefill_block_id), isNullBlockIdx(decode_block_id))
+                    << "gid=" << gid << " pos=" << block_pos;
+                if (isNullBlockIdx(prefill_block_id)) {
+                    continue;
+                }
                 fillDsv4RegionBytes(
                     prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
                 fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
@@ -1215,7 +1767,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             inputs.cache_store                    = cache_store;
 
             torch_ext::LayerKVCache layer_cache;
-            layer_cache.kv_cache_base      = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
+            layer_cache.kv_cache_base = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
+            layer_cache.cache_store_tensor_is_kernel_block_view =
+                config.group_types[gid] == CacheGroupType::FULL && config.kernelBlocksPerKvBlock() > 1;
             layer_cache.seq_size_per_block = config.group_types[gid] == CacheGroupType::FULL ? kernel_spb : spb;
             layer_cache.layer_id           = layer_id;
             layer_cache.group_id           = gid;
@@ -1247,9 +1801,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     server.resource_.cache_store     = cache_store;
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    const std::string                  request_key = "dsv4-decoupled-cache-store-pd";
     grpc::ServerContext                 server_context;
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-decoupled-cache-store-pd",
+                                                     request_key,
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
@@ -1268,7 +1823,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
                 blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
-                ASSERT_FALSE(isNullBlockIdx(decode_block_id));
+                if (isNullBlockIdx(decode_block_id)) {
+                    continue;
+                }
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
             }
@@ -1335,8 +1892,11 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
             for (auto block_pos : positions) {
                 auto prefill_block_id = prefill_resource->blocks(0, gid)[block_pos];
                 auto decode_block_id  = decode_resource->blocks(0, gid)[block_pos];
-                ASSERT_FALSE(isNullBlockIdx(prefill_block_id)) << "prefill gid=" << gid << " pos=" << block_pos;
-                ASSERT_FALSE(isNullBlockIdx(decode_block_id)) << "decode gid=" << gid << " pos=" << block_pos;
+                ASSERT_EQ(isNullBlockIdx(prefill_block_id), isNullBlockIdx(decode_block_id))
+                    << "gid=" << gid << " pos=" << block_pos;
+                if (isNullBlockIdx(prefill_block_id)) {
+                    continue;
+                }
                 fillDsv4RegionBytes(
                     prefill_manager, prefill_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
                 fillDsv4RegionBytes(decode_manager, decode_block_id, layer_id, region_name, 0xEE);
@@ -1404,7 +1964,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
         }
     }
     ASSERT_EQ(cache_store->store_request_keys_.size(), 10u);
-    ASSERT_EQ(cache_store->stored_blocks_.size(), 26u);
+    ASSERT_EQ(cache_store->stored_blocks_.size(), 25u);
 
     EngineInitParams params;
     params.model_id                 = model_id;
@@ -1418,9 +1978,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     server.resource_.cache_store     = cache_store;
 
     std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
+    const std::string                  request_key = "dsv4-cache-store-pd-prefix-reuse";
     grpc::ServerContext                 server_context;
     DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-cache-store-pd-prefix-reuse",
+                                                     request_key,
                                                      peer_addrs,
                                                      cache_keys,
                                                      decode_resource->groupBlocks(),
@@ -1441,7 +2002,9 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
                 blockPositionsForCacheTransfer(block_num, /*first_full_block=*/0, true, config.group_types[gid]);
             for (auto block_pos : positions) {
                 auto decode_block_id = decode_resource->blocks(0, gid)[block_pos];
-                ASSERT_FALSE(isNullBlockIdx(decode_block_id));
+                if (isNullBlockIdx(decode_block_id)) {
+                    continue;
+                }
                 expectDsv4RegionBytes(
                     decode_manager, decode_block_id, layer_id, region_name, dsv4PdPattern(layer_id, gid, block_pos));
             }

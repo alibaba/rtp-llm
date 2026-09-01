@@ -325,23 +325,34 @@ def update_worker_addrs(
     worker_addrs = []
     worker_grpc_addrs = []
     local_rank = parallelism_config.local_rank
-    for member in world_info.members:
-        if (
-            int(
-                (member.world_rank / parallelism_config.tp_size)
-                % parallelism_config.dp_size
-            )
-            == parallelism_config.dp_rank
-        ):
-            worker_addrs.append(
-                f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
-            )
-            worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
-            logging.info(
-                f"append member for pd sep "
-                f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
-                f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
-            )
+    tp_size = int(parallelism_config.tp_size)
+    selected_members = [
+        member
+        for member in world_info.members
+        if (int(member.world_rank) // tp_size) % int(parallelism_config.dp_size)
+        == int(parallelism_config.dp_rank)
+    ]
+    # RuntimeConfig worker vectors are rank-indexed wire data. Canonicalize
+    # from each member's real world rank instead of trusting discovery order.
+    selected_members.sort(key=lambda member: int(member.world_rank) % tp_size)
+    tp_ranks = [int(member.world_rank) % tp_size for member in selected_members]
+    expected_tp_ranks = list(range(tp_size))
+    if len(selected_members) == tp_size and tp_ranks != expected_tp_ranks:
+        raise RuntimeError(
+            "PD worker TP ranks must contain exactly "
+            f"{expected_tp_ranks}; got {tp_ranks}"
+        )
+
+    for member in selected_members:
+        worker_addrs.append(
+            f"{member.ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"
+        )
+        worker_grpc_addrs.append(f"{member.ip}:{member.rpc_server_port}")
+        logging.info(
+            f"append member for pd sep "
+            f"{member.ip}:{member.rpc_server_port}, {member.cache_store_listen_port}, "
+            f"{member.cache_store_rdma_listen_port} to local rank {local_rank}, world rank {member.world_rank}"
+        )
     runtime_config.worker_grpc_addrs = worker_grpc_addrs
     runtime_config.worker_addrs = worker_addrs
 
