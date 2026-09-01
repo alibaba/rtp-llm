@@ -77,6 +77,12 @@ final class SchedulerRuntime {
         try {
             reporter.reportSchedulerInflightSize(
                     requests.liveRequestCount());
+            // Age of the oldest scheduler-ledger inflight entry: with a
+            // healthy TTL the size gauge alone cannot distinguish "busy"
+            // from "leaking"; a max age creeping toward the TTL window is
+            // the leak signature.
+            reporter.reportSchedulerInflightMaxAgeMs(
+                    requests.oldestLiveSlotAgeMs());
         } catch (RuntimeException failure) {
             warnIsolated(
                     "Failed to report scheduler inflight metrics", failure);

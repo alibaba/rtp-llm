@@ -321,7 +321,13 @@ final class ExpirationTimer implements AutoCloseable {
         MaintenanceResult result = new MaintenanceResult(
                 exactSlots.size(), staleReduced, tombstonesRemoved);
         if (staleReduced > 0) {
-            reporter.reportInflightTtlExpired(staleReduced);
+            // Scheduler-ledger eviction: report through the split-by-ledger
+            // series (role=SCHEDULER + engineIp="scheduler" + reason) so it
+            // is no longer mislabelled as a PREFILL endpoint series. This
+            // architecture has a single stale-inflight exit, so the reason
+            // bucket is always "ttl".
+            reporter.reportSchedulerInflightTtlExpired(
+                    "ttl", staleReduced);
             Logger.info(
                     "event=scheduler_inflight_ttl_eviction evicted={} scanned={}",
                     staleReduced, exactSlots.size());
