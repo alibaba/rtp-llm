@@ -470,9 +470,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     for (int index = 0; index < 4 * block_size; ++index) {
         input_data[index] = index;
     }
-    auto generate_input             = std::make_shared<GenerateInput>();
-    generate_input->input_ids       = std::move(input_ids);
-    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    auto generate_input                                = std::make_shared<GenerateInput>();
+    generate_input->input_ids                          = std::move(input_ids);
+    generate_input->generate_config                    = std::make_shared<GenerateConfig>();
     generate_input->generate_config->reuse_cache       = true;
     generate_input->generate_config->enable_host_cache = true;
 
@@ -480,6 +480,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     resource_context.cache_manager     = manager_;
     resource_context.reuse_cache       = true;
     resource_context.enable_host_cache = true;
+    resource_context.enable_disk_cache = true;
     resource_context.role_type         = RoleType::PREFILL;
 
     ModelConfig model_config;
@@ -493,14 +494,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
 
-    auto prefill_stream = std::make_shared<NormalGenerateStream>(
-        generate_input, model_config, runtime_config, resource_context, nullptr);
-    auto scheduler = std::make_shared<FIFOScheduler>(runtime_config,
-                                                     model_config,
-                                                     pd_sep_config,
-                                                     parallelism_config,
-                                                     model_specific_config,
-                                                     manager_);
+    auto prefill_stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+    auto scheduler = std::make_shared<FIFOScheduler>(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, manager_);
     ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
     auto first_schedule = scheduler->schedule();
     ASSERT_TRUE(first_schedule.ok());
@@ -509,8 +506,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     EXPECT_EQ(prefill_stream->reuseLength(), block_size);
     EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
 
-    const bool failure_entered = engine->waitUntilEnteredFor(
-        std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
+    const bool failure_entered =
+        engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
     if (!failure_entered) {
         engine->release();
     }
@@ -533,7 +530,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
 
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
-        const auto& group_set   = cache->groupSets()[group_set_id];
+        const auto&  group_set   = cache->groupSets()[group_set_id];
         const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
         const size_t reuse_begin = 3 - reuse_count;
         for (const size_t raw_group_id : group_set->groupIds()) {
