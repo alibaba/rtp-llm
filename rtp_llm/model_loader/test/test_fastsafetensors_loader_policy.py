@@ -97,9 +97,9 @@ class TestFastsafetensorsLoaderPolicy(unittest.TestCase):
         )
         loader._is_online_ptpc = MagicMock(return_value=False)
 
-        loader._load_from_fastsafetensor(
-            "cuda:0", FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT
-        )
+        # Preserve the pre-existing one-argument private-call contract. The
+        # transitional default is the bounded per-expert delivery path.
+        loader._load_from_fastsafetensor("cuda:0")
 
         self.assertEqual(observed_filter, [True, False, False])
         self.assertEqual(observed_modes, [FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT])

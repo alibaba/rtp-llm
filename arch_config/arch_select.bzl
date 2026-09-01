@@ -87,6 +87,15 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        "@rtp_llm//:using_cuda12_9_x86": [
+            # Keep wheel metadata synchronized with the CUDA 12.9 requirements
+            # and lock files. Hashes are copied from the generated lock file so
+            # installing the RTP-LLM wheel cannot silently select another ABI.
+            "torch@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torch-2.8.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=54d240b5d3b1f9075d4ee6179675a22c1974f7bef1885d134c582678d5180cd3",
+            "torchvision@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/torchvision-0.23.0%2Bcu129-cp310-cp310-manylinux_2_28_x86_64.whl#sha256=5690810877f2d7d1a2b432e31d68d4a9ccbb695a9a8fa0e27bbad44c6a90a181",
+            "fast-safetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl#sha256=dd760931feb6dd585cc0b14b1bacf39c1e31a39bb9f8e12a8c62720caf1ccc1f",
+            "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_x86_64.whl#sha256=bb084a01e6b3d97a8790e583cb5c0fcadcef1960e64b069bb2a97fff0079fe40",
+        ],
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",

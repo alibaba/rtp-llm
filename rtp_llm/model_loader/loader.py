@@ -684,7 +684,11 @@ class ModelLoader:
             return False
         return isinstance(weight.kernel, MoeAtomicWeight) and weight.scale is not None
 
-    def _load_from_fastsafetensor(self, device: str, stacked_moe_mode: str):
+    def _load_from_fastsafetensor(
+        self,
+        device: str,
+        stacked_moe_mode: str = FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
+    ):
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()

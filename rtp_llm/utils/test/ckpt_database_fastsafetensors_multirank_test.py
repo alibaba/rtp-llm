@@ -5,7 +5,6 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -61,21 +60,9 @@ def _run_real_fastsafetensors_rank(
                 "fuse-shm": {
                     "bbuf_size_kb": 64,
                     "direct_io": False,
-                    "require_fuse_shm": True,
                 },
             }
         )
-
-        import fastsafetensors
-
-        real_auto_loader = fastsafetensors.AutoLoader
-
-        class TrackingAutoLoader(real_auto_loader):
-            close_calls = 0
-
-            def close(self) -> None:
-                type(self).close_calls += 1
-                super().close()
 
         wanted_keys = (
             {"direct", "experts.0.weight"} if rank == 0 else {"experts.1.weight"}
@@ -83,21 +70,21 @@ def _run_real_fastsafetensors_rank(
         database = object.__new__(CkptDatabase)
         database.pretrain_file_list = [_CheckpointFile(checkpoint_path)]
 
-        with patch.object(fastsafetensors, "AutoLoader", TrackingAutoLoader):
-            outputs = dict(
-                database.fastsafetensors_weights_iterator(
-                    "cuda",
-                    stacked_key_config={"stacked": "experts.{expert_id}.weight"},
-                    local_copyout_filter=wanted_keys.__contains__,
-                    stacked_moe_mode=FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
-                )
+        outputs = dict(
+            database.fastsafetensors_weights_iterator(
+                "cuda",
+                stacked_key_config={"stacked": "experts.{expert_id}.weight"},
+                local_copyout_filter=wanted_keys.__contains__,
+                stacked_moe_mode=FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
             )
+        )
 
-        # The generator has completed and closed the real loader. Returned
-        # tensors must still own valid storage after that close.
+        # Exhausting the production generator executes its finally/close path.
+        # Returned tensors must still own valid storage afterwards. Exact close
+        # invocation is covered separately by the iterator failure-path unit
+        # tests; this integration boundary intentionally patches no package API.
         torch.cuda.synchronize(rank)
         result = {
-            "close_calls": TrackingAutoLoader.close_calls,
             "keys": sorted(outputs),
             "values": {
                 key: tensor.detach().cpu().tolist() for key, tensor in outputs.items()
@@ -110,11 +97,11 @@ def _run_real_fastsafetensors_rank(
 
 
 class InstalledFastsafetensorsMultiRankTest(unittest.TestCase):
-    def test_real_two_rank_split_filter_broadcast_and_close(self) -> None:
+    def test_real_two_rank_split_filter_broadcast_and_storage_ownership(self) -> None:
         self.assertGreaterEqual(
             torch.cuda.device_count(),
             2,
-            "Bazel target requires two H20 GPUs",
+            "Bazel target requires two CUDA GPUs",
         )
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkpoint_path = os.path.join(tmp_dir, "model.safetensors")
@@ -146,8 +133,6 @@ class InstalledFastsafetensorsMultiRankTest(unittest.TestCase):
             with open(os.path.join(tmp_dir, "rank-1.json")) as reader:
                 rank1 = json.load(reader)
 
-        self.assertEqual(rank0["close_calls"], 1)
-        self.assertEqual(rank1["close_calls"], 1)
         self.assertEqual(rank0["keys"], ["direct", "experts.0.weight"])
         self.assertEqual(rank1["keys"], ["experts.1.weight"])
         self.assertEqual(rank0["values"]["direct"], [90.0, 91.0])

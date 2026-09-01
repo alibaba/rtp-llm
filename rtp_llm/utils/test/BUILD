@@ -149,6 +149,42 @@ py_test(
 )
 
 py_test(
+    name = "ckpt_database_fastsafetensors_multirank_arm_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["ckpt_database_fastsafetensors_multirank_test.py"],
+    main = "ckpt_database_fastsafetensors_multirank_test.py",
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:fast-safetensors",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:lora",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "2"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "rtp_llm_cuda12_9_wheel_metadata_test",
+    srcs = ["rtp_llm_wheel_metadata_test.py"],
+    main = "rtp_llm_wheel_metadata_test.py",
+    args = ["$(location //rtp_llm:rtp_llm_whl)"],
+    data = ["//rtp_llm:rtp_llm_whl"],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     # Verifies load_tensor_slice / copy-out on a real ROCm build (hip asserted).
     name = "ckpt_database_test_rocm",
     srcs = ["ckpt_database_test.py"],
