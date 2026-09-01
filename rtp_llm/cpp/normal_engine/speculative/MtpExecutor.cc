@@ -662,10 +662,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         // extra graph memory (larger commit bsz falls back to eager via canRun).
         static const bool kCommitAsDecode = getenv("DSV4_COMMIT_AS_DECODE") != nullptr;
         if (is_dspark_ && kCommitAsDecode) {
-            // Bisect gate (design doc §9 step 1): DSV4_COMMIT_AS_DECODE_NOCAP
-            // builds the wrapper WITHOUT graph capture — isolates capture-time
-            // poisoning from wrapper-existence side effects.
-            const bool kNoCap = getenv("DSV4_COMMIT_AS_DECODE_NOCAP") != nullptr;
+            // Bisect gates RETIRED (Sep-1): capture + routing are now implied —
+            // the NOCAP/ROUTE env splits served their bisect purpose and the
+            // launcher file proved unreliable for carrying them (external
+            // writer reverts edits).
+            const bool kNoCap = false;
             auto decode_params = model_init_params;
             decode_params.sp_config.type                              = SP_TYPE_NONE;
             decode_params.hw_kernel_config.decode_capture_batch_sizes = {1, 2, 4};
@@ -827,24 +828,21 @@ bool MtpExecutor::useCommitDecodePath(const GptModelInputs& model_input) const {
     if (target_sp_decode_model_ == nullptr || model_input.skip_run) {
         return false;
     }
-    // Bisect gate: wrapper creation vs routing. The wrapper is built when
-    // DSV4_COMMIT_AS_DECODE is set; the route additionally requires
-    // DSV4_COMMIT_AS_DECODE_ROUTE so a wrapper-only boot isolates capture-side
-    // from replay-side failures.
-    static const bool kRouteEnabled = getenv("DSV4_COMMIT_AS_DECODE_ROUTE") != nullptr;
-    if (!kRouteEnabled) {
-        return false;
-    }
+    // Bisect gate RETIRED (Sep-1): routing is implied by wrapper existence —
+    // the separate ROUTE env split served its bisect purpose.
     if (!model_input.input_lengths.defined() || !model_input.combo_tokens.defined()) {
         return false;
     }
     const int64_t bsz = model_input.input_lengths.size(0);
+    // Route ONLY all-fake rounds: the idle fake ctx stream is T=1 permanently
+    // (it is NOT a geometry mirror of real streams), and rounds carrying any
+    // REAL stream keep canonical eager semantics end-to-end (zero
+    // scheduler/static-buffer interaction risk). The win — the idle fake
+    // ctx rounds that cost ~200 ms eager each — is exactly the all-fake case.
     // The prefill gather packs combo_tokens as the concat of per-stream token
-    // runs, so numel == bsz iff every input_lengths[b] == 1 — exactly the
-    // commit-round geometry (real prefill chunks have T > 1 and fall through
-    // to the eager path). Fake/warmup streams mirror real stream geometry, so
-    // the condition is rank-invariant (the slice-1 deadlock lesson).
-    return bsz > 0 && model_input.combo_tokens.numel() == bsz;
+    // runs, so numel == bsz iff every input_lengths[b] == 1 (T=1 per stream;
+    // real prefill chunks have T > 1 and fall through to the eager path).
+    return model_input.is_fake_stream && bsz > 0 && model_input.combo_tokens.numel() == bsz;
 }
 
 void MtpExecutor::convertCommitRoundToDecodeInputs(GptModelInputs&                     model_input,
@@ -877,6 +875,21 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
+
+    // [CADE] probe: prefillStep entry — rank identity + gate inputs (budget
+    // ~40/process, ALL rounds). Answers which world ranks hold tp_rank_==0 and
+    // what the sample/dispatch gates will see.
+    static std::atomic<int> cade_budget{40};
+    if (cade_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        fprintf(stderr,
+                "[CADE] r=%d tp_rank=%d tp0=%d warmup=%d nstreams=%zu\n",
+                (int)parallelism_config_.world_rank,
+                (int)tp_rank_,
+                (int)isTpRank0(),
+                (int)warm_up_,
+                streams.size());
+        fflush(stderr);
+    }
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
@@ -940,7 +953,32 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-        const bool commit_as_decode         = useCommitDecodePath(model_input);
+        bool commit_as_decode                = useCommitDecodePath(model_input);
+        // Rank-invariant ROUND decision (the collective-family invariant): the
+        // fake-mirror ctx rounds run T=1 while a real seed/chunk ctx round on
+        // the owner rank runs T=8192 — if they took DIFFERENT MoE collective
+        // families in the same round (routed fixed_ep decode-graph replays vs
+        // eager all_to_all), the ranks deadlock at the first MoE layer
+        // ([MOE] fwd layer=0, GPUs pinned at 100%). One 1-element
+        // all_reduce(MAX) over the world group decides the round: route ONLY
+        // if every rank's ctx round is a captured-shape candidate (bsz <= 4,
+        // T=1 per stream). A real seed round forces everyone onto the eager
+        // all_to_all path for that round — byte-identical to the healthy flow.
+        {
+            const int64_t cad_bsz =
+                model_input.input_lengths.defined() ? (int64_t)model_input.input_lengths.size(0) : -1;
+            const int32_t local_bad =
+                (commit_as_decode && (cad_bsz == 1 || cad_bsz == 2 || cad_bsz == 4)) ? 0 : 1;
+            torch::Tensor route_flag =
+                torch::tensor({local_bad}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+            execAllReduce({route_flag, ReduceOp::Max, false, ParallelMode::DP_AND_TP});
+            // route_flag lives on DEVICE — read it back via a host copy
+            // (LoadFlags::isReady pattern); data_ptr<int32_t>()[0] here
+            // dereferenced a GPU address on the host (SIGSEGV, exit -11).
+            if (route_flag.cpu().item<int32_t>() != 0) {
+                commit_as_decode = false;
+            }
+        }
         {
             // Geometry probe: every prefillStep target forward, unbuffered —
             // shows whether/when all-T=1 commit rounds actually occur.
@@ -953,14 +991,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                ? (long long)model_input.combo_tokens.numel()
                                                : -1;
                 fprintf(stderr,
-                        "[CADG] bsz=%lld total=%lld route=%d fake=%d\n",
+                        "[CADG] r=%d bsz=%lld total=%lld route=%d fake=%d\n",
+                        (int)parallelism_config_.world_rank,
                         (long long)cadg_bsz,
                         (long long)cadg_total,
                         (int)commit_as_decode,
                         (int)model_input.is_fake_stream);
                 for (const auto& s : streams) {
                     fprintf(stderr,
-                            "[CADG2] prefix=%d seq=%d in=%d\n",
+                            "[CADG2] r=%d prefix=%d seq=%d in=%d\n",
+                            (int)parallelism_config_.world_rank,
                             (int)s->prefixLength(),
                             (int)s->seqLength(),
                             (int)s->inputLength());
@@ -977,7 +1017,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             torch::Tensor orig_prefix = model_input.prefix_lengths;
             convertCommitRoundToDecodeInputs(model_input, streams);
             fprintf(stderr,
-                    "[CAD] routed bsz=%lld seq_size=%lld\n",
+                    "[CAD] r=%d routed bsz=%lld seq_size=%lld\n",
+                    (int)parallelism_config_.world_rank,
                     (long long)model_input.input_lengths.size(0),
                     (long long)model_input.sequence_lengths.size(0));
             fflush(stderr);
@@ -997,7 +1038,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 if (model_output.hidden_states.defined()) {
                     model_output.hidden_states = model_output.hidden_states.clone();
                 }
-                fprintf(stderr, "[CAD] forward OK\n");
+                fprintf(stderr, "[CAD] r=%d forward OK\n", (int)parallelism_config_.world_rank);
                 fflush(stderr);
                 // The decode path just wrote THIS round's aux rows into the
                 // shared MTP hidden buffer (decode/forward.py capture_ids
@@ -1006,7 +1047,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 // eager path.
                 maybeOverrideAllHiddenStatesWithMtpBuffer(
                     model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
-                fprintf(stderr, "[CAD] override OK\n");
+                fprintf(stderr, "[CAD] r=%d override OK\n", (int)parallelism_config_.world_rank);
                 fflush(stderr);
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_ERROR("[commit-as-decode] routed post-forward failed: %s", e.what());
@@ -1017,9 +1058,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             model_input.prefix_lengths   = orig_prefix;
         } else {
             ModelBase& target_ref = *model_;
-            model_output          = target_ref.forward(model_input);
-            maybeOverrideAllHiddenStatesWithMtpBuffer(
-                model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
+            try {
+                model_output = target_ref.forward(model_input);
+                maybeOverrideAllHiddenStatesWithMtpBuffer(
+                    model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
+            } catch (const std::exception& e) {
+                fprintf(stderr,
+                        "[CAD] r=%d EAGER FORWARD THROW: %s\n",
+                        (int)parallelism_config_.world_rank,
+                        e.what());
+                fflush(stderr);
+                throw;
+            }
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1036,10 +1086,31 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (!model_input.is_fake_stream) {
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+            // [CAD] probe: the CHECK_AND_RETURN_REF below returns early on
+            // failure — which would SKIP dispatchPrefill entirely, leaving
+            // is_context_stream_ true forever (the commit-spin signature).
+            // Surface the status instead of swallowing it.
+            auto sampler_input_ref =
+                batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output);
+            if (!sampler_input_ref.ok()) {
+                fprintf(stderr, "[CAD] r=%d sampler_input FAIL: %s\n", (int)parallelism_config_.world_rank,
+                    sampler_input_ref.status().ToString().c_str());
+                fflush(stderr);
+            }
+            CHECK_AND_RETURN_REF(sampler_input, sampler_input_ref);
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            sampler_output = std::move(sampler_->forward(sampler_input));
+            try {
+                sampler_output = std::move(sampler_->forward(sampler_input));
+            } catch (const std::exception& e) {
+                fprintf(stderr,
+                        "[CAD] r=%d SAMPLER THROW: %s\n",
+                        (int)parallelism_config_.world_rank,
+                        e.what());
+                fflush(stderr);
+                throw;
+            }
+            fprintf(stderr, "[CAD] r=%d sample OK\n", (int)parallelism_config_.world_rank);
+            fflush(stderr);
         }
         // Restore the full combo_tokens / input_lengths — under CP both were
         // mutated to rank-local by the target forward's handleInputs. The MTP
@@ -1080,7 +1151,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         if (is_dspark_) {
             batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
-            fprintf(stderr, "[CAD] draft validate OK\n");
+            fprintf(stderr, "[CAD] r=%d draft validate OK\n", (int)parallelism_config_.world_rank);
             fflush(stderr);
             // Seeding = commit only: prompt-suffix feature rows into the
             // draft feature KV (the call keeps the target's own
@@ -1095,7 +1166,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 RTP_LLM_LOG_ERROR("[CAD] draft commit forward failed: %s", e.what());
                 throw;
             }
-            fprintf(stderr, "[CAD] draft forward OK\n");
+            fprintf(stderr, "[CAD] r=%d draft forward OK\n", (int)parallelism_config_.world_rank);
             fflush(stderr);
             draft_model_output = GptModelOutputs();
         } else {
@@ -1105,6 +1176,19 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        // [CAD] probe: WHICH gate skips dispatchPrefill (the stream flip lives
+        // only in dispatchPrefill -> specUpdate). Budget-limited.
+        static std::atomic<int> cad_skip_budget{48};
+        if (cad_skip_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+            fprintf(stderr,
+                    "[CAD] r=%d SKIPDISPATCH tp0=%d warmup=%d nstreams=%zu fake=%d\n",
+                    (int)parallelism_config_.world_rank,
+                    (int)isTpRank0(),
+                    (int)warm_up_,
+                    streams.size(),
+                    (int)model_input.is_fake_stream);
+            fflush(stderr);
+        }
         cudaSyncAndCheck();
         return absl::OkStatus();
     }
@@ -1164,6 +1248,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      {std::move(model_output), std::move(sampler_output)},
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)},
                                                      draft_last_hidden_states);
+        if (!result.ok()) {
+            fprintf(stderr, "[CAD] r=%d dispatchPrefill FAIL: %s\n", (int)parallelism_config_.world_rank,
+                    result.ToString().c_str());
+            fflush(stderr);
+        } else {
+            fprintf(stderr, "[CAD] r=%d dispatch OK\n", (int)parallelism_config_.world_rank);
+            fflush(stderr);
+        }
         RTP_LLM_LOG_DEBUG("dispatch done");
         return result;
     }
@@ -1329,6 +1421,13 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
 absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
                                      MtpMetricsCollector&                metrics_collector) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+
+    // [CADD] probe: decode-round entry per rank (budget-limited).
+    static std::atomic<int> cadd_budget{600};
+    if (cadd_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        fprintf(stderr, "[CADD] r=%d ndecode=%zu\n", (int)parallelism_config_.world_rank, streams.size());
+        fflush(stderr);
+    }
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
@@ -2156,6 +2255,23 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
 
     for (auto& stream : streams) {
         // split streams into prefill and decode
+        // [CADS1] probe: per-stream state at classification time — NON-FAKE
+        // streams only (the idle fake loop would otherwise burn the budget
+        // before the real request arrives).
+        if (!stream->isFakeStream()) {
+            static std::atomic<int> cads1_budget{400};
+            if (cads1_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+                fprintf(stderr,
+                        "[CADS1] r=%d sid=%lld ctx=%d seq=%d ctxlen=%d fin=%d\n",
+                        (int)parallelism_config_.world_rank,
+                        (long long)stream->streamId(),
+                        (int)stream->isContextStream(),
+                        (int)stream->seqLength(),
+                        (int)stream->contextLength(),
+                        (int)stream->isFinished());
+                fflush(stderr);
+            }
+        }
         if (stream->isContextStream()) {
             prefill_streams.push_back(stream);
         } else {
@@ -2180,6 +2296,18 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         // set propose_step
         auto sp_output_buffer          = stream->getSPOutputBuffer();
         sp_output_buffer->propose_step = propose_step_;
+    }
+
+    // [CADS] probe: per-round stream classification per rank (budget-limited).
+    static std::atomic<int> cads_budget{600};
+    if (cads_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
+        fprintf(stderr,
+                "[CADS] r=%d total=%zu prefill=%zu decode=%zu\n",
+                (int)parallelism_config_.world_rank,
+                streams.size(),
+                prefill_streams.size(),
+                decode_streams.size());
+        fflush(stderr);
     }
 }
 

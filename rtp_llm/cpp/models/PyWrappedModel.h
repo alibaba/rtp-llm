@@ -415,7 +415,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         try {
-            py_init_result = py_initialize_method(init_resources);
+            // P0 Variant B: gate the re-run on the same flag as the non-graph
+            // branch above — a second wrapper over an ALREADY-INITIALIZED py
+            // instance must not re-run initialize() here either, or it
+            // re-creates the shared python state that earlier wrappers'
+            // captured graphs reference (the serving poison).
+            if (reinitialize_py_model) {
+                py_init_result = py_initialize_method(init_resources);
+            }
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
@@ -427,7 +434,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         }
     }
 
-    auto py_init_success = py_init_result.cast<bool>();
+    // P0 Variant B: a skipped re-initialize leaves py_init_result as None —
+    // treat that as success instead of failing the cast below.
+    const bool py_init_success = reinitialize_py_model ? py_init_result.cast<bool>() : true;
     if (!py_init_success) {
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
