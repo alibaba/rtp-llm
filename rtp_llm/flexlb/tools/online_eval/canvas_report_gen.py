@@ -1406,7 +1406,8 @@ def main():
         latency_containers.append(
             emit_container(
                 "schedule 延迟 p50 / p95 / p99",
-                "x = 压测时间（s，1s 采样）；y = 延迟（ms）",
+                "x = 压测时间（s，1s 采样）；y = 延迟（ms）"
+                "；出生秒分桶（client 发出时刻，全终态含失败行）",
                 emit_chart(
                     "LineChart",
                     TSEC,
@@ -1509,6 +1510,12 @@ def main():
                 sched_lat_count
             )
         stage_ts_cap += "；master 链路阶段 p95 为幸存者口径（仅计完成该阶段的行）"
+        # 轴标注（20260901）：末尾一句话点明每条线的分桶时刻——schedule
+        # 线按 client 发出（出生秒），master 链路阶段线按完成（完成秒）。
+        stage_ts_cap += (
+            "；schedule = 出生秒（client 发出时刻分桶，全终态）"
+            "；master 链路阶段 = 完成秒（10s 窗口）"
+        )
         latency_containers.append(
             emit_container(
                 "调度延迟：schedule p95 + master 链路阶段 p95",
@@ -1714,6 +1721,12 @@ def main():
                 five_cap += "；prefill exec 每秒样本量见 prefill_exec_n"
             if has_birth_de and any("decode_exec_n" in p for p in per_second):
                 five_cap += "；decode exec 每秒样本量见 decode_exec_n"
+            # 轴标注（20260901）：末尾一句话点明各线分桶时刻——e2e 族按
+            # client 发出（出生秒），route_submit 按成功发布（完成秒）。
+            five_cap += (
+                "；e2e/full_e2e/exec = 出生秒（client 发出时刻分桶）"
+                "；route_submit = 完成秒（成功发布时刻，幸存者口径）"
+            )
             _five_title = (
                 "五延迟：full_e2e / ttft / schedule / prefill exec / decode exec"
                 if has_full_e2e
