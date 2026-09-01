@@ -1,9 +1,8 @@
 package org.flexlb.dispatcher;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.logging.DeferredLogs;
 import org.springframework.mock.env.MockEnvironment;
-
-import java.util.function.Supplier;
 
 import static org.flexlb.dispatcher.DispatchConfigEnvironmentPostProcessor.ENABLE_PROPERTY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -12,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class DispatchConfigEnvironmentPostProcessorTest {
 
     private final DispatchConfigEnvironmentPostProcessor epp =
-            new DispatchConfigEnvironmentPostProcessor(Supplier::get);
+            new DispatchConfigEnvironmentPostProcessor(new DeferredLogs());
 
     @Test
     void jsonOnlyConfigEnablesDispatcher() {
