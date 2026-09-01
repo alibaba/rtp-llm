@@ -15,6 +15,7 @@ assertions effective for the first time.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from .harness import (
     ensure_schedule_proto_modules,
     http_get_json,
     http_post_json,
+    wait_for,
 )
 
 DEFAULT_INPUT_LEN = 2048
@@ -53,7 +55,7 @@ class StreamSnapshot:
     terminated: bool = False
     terminated_s: Optional[float] = None  # monotonic time when stream ended
     # Monotonic time when the FIRST output arrived — the client-observed
-    # TTFT anchor for graded property P7 (see bal_overload_avoid_prefill;
+    # TTFT anchor for graded property P7 (see balance_overload_avoid_prefill;
     # under BATCH dispatch the first FetchResponse message only surfaces
     # after decode completes, so P7 uses the completion-duration口径 there).
     first_received_s: Optional[float] = None
@@ -575,3 +577,118 @@ class EngineOps:
             return addr, None
         except Exception as exc:
             return "", repr(exc)
+
+
+# ===========================================================================
+# Shared control-plane helpers (suite-reorg task #85)
+#
+# Cross-category helpers that used to live in injection_gate_cases.py /
+# status_fault_cases.py (the latter held its own copy while the mock control
+# server learned the status-fault types).  They operate purely on the mock
+# HTTP control plane and engine snapshots, so engine_ops.py is their shared
+# home — every flexlb_ft/cases/ category module imports them from here.
+# ===========================================================================
+
+
+def inject_type(
+    ops: "EngineOps", engine_name: str, fault_type: str, enabled: bool = True, **params
+) -> dict:
+    """POST /inject with the ORIGINAL Java "type" format (MERGE semantics,
+    supports all fault types plus their parameters).
+
+    The EngineOps.inject() method uses the Python "config" format which
+    REPLACES the whole config and only knows the four boolean flags, so it
+    cannot express kv_pressure / queue_depth / crash_after / delays / the
+    status_* family.
+    """
+    payload = {"engine": engine_name, "type": fault_type, "enabled": enabled}
+    payload.update(params)
+    status, body = http_post_json(
+        f"http://127.0.0.1:{ops.mock_http_port}/inject", payload
+    )
+    if status != 200:
+        raise RuntimeError(
+            f"inject_type({engine_name}, {fault_type}, {params}) "
+            f"failed: {status} {body}"
+        )
+    return body or {}
+
+
+def inject_type_all(ops: "EngineOps", names: list, fault_type: str, **params) -> None:
+    for name in names:
+        inject_type(ops, name, fault_type, **params)
+
+
+def clear_type_all(ops: "EngineOps", names: list, fault_type: str) -> None:
+    for name in names:
+        try:
+            inject_type(ops, name, fault_type, enabled=False)
+        except Exception:
+            pass
+
+
+def engine_inflight_clean(
+    ops: "EngineOps", names: list, timeout_s: float = 10.0
+) -> tuple:
+    """Engine-side leak check: every named engine reports inflight == 0 and
+    leak_detected == false in /snapshot."""
+
+    def clean() -> bool:
+        snap = ops.snapshot_by_name()
+        return all(
+            snap.get(n, {}).get("inflight", 0) == 0
+            and not snap.get(n, {}).get("leak_detected", False)
+            for n in names
+        )
+
+    ok = wait_for(clean, timeout_s, 0.5)
+    snap = ops.snapshot_by_name()
+    detail = {
+        n: (
+            snap.get(n, {}).get("inflight", -1),
+            snap.get(n, {}).get("leak_detected", None),
+        )
+        for n in names
+    }
+    return ok, f"{json.dumps(detail, sort_keys=True)}"
+
+
+def _fence_residue_stable(
+    ops: "EngineOps", max_residue: int, settle_s: float = 20.0
+) -> tuple:
+    """Cross-process contract for an empty-ack (uncertain) enqueue batch.
+
+    The master installs a BATCH_ACK_UNCERTAIN engine fence
+    (PriorityScheduler.fenceEntryForUncertainBatchDelivery).  In the
+    cross-process production wiring the cancel channel is
+    UnsupportedEngineCancelChannel, whose UNSUPPORTED ack is NOT a safe
+    release fact (handleEngineFenceOutcome groups it with FAILED /
+    NOT_FOUND), so the entry parks in the 60s quarantined-fence sweep
+    indefinitely; cleanupInflight explicitly skips engineFence entries
+    from the stale TTL.  A bounded, non-growing scheduler-ledger residue
+    is therefore the EXPECTED production behaviour, not a leak: assert
+    residue <= max_residue (the uncertain batches themselves) and that a
+    later sample does not grow (no amplification).
+    """
+    http = f"http://127.0.0.1:{ops.master_http_port}"
+    first = None
+    deadline = time.monotonic() + settle_s
+    while time.monotonic() < deadline:
+        data = http_get_json(f"{http}/rtp_llm/inflight_status", timeout=5)
+        if data is not None:
+            first = data.get("scheduler_inflight", 0)
+            if first <= max_residue:
+                break
+        time.sleep(1.0)
+    if first is None:
+        return False, "no inflight_status response"
+    if first > max_residue:
+        return False, f"residue {first} > bound {max_residue}"
+    time.sleep(8.0)
+    data = http_get_json(f"{http}/rtp_llm/inflight_status", timeout=5)
+    second = -1 if data is None else data.get("scheduler_inflight", 0)
+    if second < 0:
+        return False, "no inflight_status response (second sample)"
+    if second > first:
+        return False, f"residue grew {first} -> {second} (leak amplification)"
+    return True, f"quarantined residue bounded and stable: {first} -> {second}"

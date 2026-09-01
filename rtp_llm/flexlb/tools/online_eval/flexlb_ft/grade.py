@@ -64,7 +64,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # ~= 0.26% (< 1% mandated false-fail floor); 0.75 corresponds to
     # P(X >= 15) ~= 4.1%, 0.65 to P(X >= 13) ~= 26% (strict tier is a
     # quality bar, not a statistical guarantee).
-    # e2e observed (task #61, bal_uniform_serial, 4 profiles x normal):
+    # end-to-end observed (task #61, balance_uniform_serial, 4 profiles x normal):
     # plain 0.50-0.70 (13/20..15/20), speed_hetero 0.50 — tiers separate
     # exactly as the binomial model predicts (strict sometimes, normal
     # sometimes, never near loose).
@@ -76,7 +76,7 @@ GRADE_BANDS: Dict[str, dict] = {
     # offered homogeneous traffic is starved).
     "P2": {"kind": "invariant"},
     # P3 token-weighted max-share (client-side Σ input_len per engine / total).
-    # First e2e calibration (task #62, bal_len_mixed — bimodal 5-wave, per
+    # First end-to-end calibration (task #62, balance_len_mixed — bimodal 5-wave, per
     # wave 2 long @32768..49152 + 6 short @512, all prefills set_perf 3s):
     #   batch-window 0.507, single-nonbatch 0.528, single-batch 0.517,
     #   window-nonbatch 0.502 — all four inside the predicted 0.5 ± 0.02.
@@ -94,11 +94,11 @@ GRADE_BANDS: Dict[str, dict] = {
     },
     # P5 overload-avoidance hot-engine share (fraction of the wave landing
     # on the deliberately overloaded engine; 0 = deterministic avoidance).
-    # e2e observed (task #61, bal_overload_avoid_prefill, 4 profiles): 0.0
+    # end-to-end observed (task #61, balance_overload_avoid_prefill, 4 profiles): 0.0
     # every run — ledger-priced avoidance is deterministic; the nonzero
     # tiers only tolerate an in-flight straggler racing the injection
     # snapshot.  (Decode-KV caliber uses a case override: delta bands
-    # 0/1/2 — see bal_overload_avoid_decode.)
+    # 0/1/2 — see balance_overload_avoid_decode.)
     "P5": {
         "kind": "upper",
         "bands": {"strict": 0.0, "normal": 0.05, "loose": 0.10},
@@ -107,9 +107,9 @@ GRADE_BANDS: Dict[str, dict] = {
     # terminal state — completed, no loss/hang).
     "P6": {"kind": "invariant"},
     # P7 short-request protection: TTFT (or, under BATCH dispatch, completion
-    # duration — see bal_overload_avoid_prefill) as a multiple of the
+    # duration — see balance_overload_avoid_prefill) as a multiple of the
     # unloaded baseline.
-    # e2e observed (task #61, bal_overload_avoid_prefill): 0.97 (batch-window
+    # end-to-end observed (task #61, balance_overload_avoid_prefill): 0.97 (batch-window
     # completion-duration caliber, wave_max 0.152s vs base 0.157s) — with
     # successful avoidance the wave rides the cool engine and the ratio
     # hovers near 1.0; a swallowed request pays the hot engine's ~5s and
@@ -120,7 +120,7 @@ GRADE_BANDS: Dict[str, dict] = {
     },
     # P9 affinity fidelity (fraction of prefix-reuse requests that land on
     # the engine holding the prefix cache).
-    # e2e observed (task #61, aff_prefix_stickiness, 4 profiles): 10/10
+    # end-to-end observed (task #61, kv_prefix_stickiness, 4 profiles): 10/10
     # hits every run — cache-affinity leader selection is deterministic in
     # the serial single-family form; the lower tiers tolerate tie-window
     # overrides observed historically in concurrent forms.
@@ -129,7 +129,7 @@ GRADE_BANDS: Dict[str, dict] = {
         "bands": {"strict": 0.95, "normal": 0.90, "loose": 0.80},
     },
     # M2 concentration cap (upper bound on the hot-family holder's TOTAL
-    # request share).  First e2e calibration: aff_hot_prefix_tension — 70%
+    # request share).  First end-to-end calibration: kv_hot_prefix_tension — 70%
     # family traffic pinned to the holder + 30% uniform free flow.  The
     # holder's share = (29 + k)/41 with k ~ B(12, .5) over the free requests
     # scattered onto it (29 = seed + 28 continuations under perfect P9
@@ -152,7 +152,7 @@ GRADE_BANDS: Dict[str, dict] = {
         "bands": {"strict": 0.88, "normal": 0.93, "loose": 0.96},
     },
     # M3 hit-tier concentration (lower bound on the same-engine share of the
-    # full-hit / half-hit tiers, aff_match_mixed).  Design values (task #62):
+    # full-hit / half-hit tiers, kv_match_mixed).  Design values (task #62):
     # the estimate discount (0.7 * hitTokens ms — ~5.0s full-hit, ~2.9s
     # half-hit) dwarfs the tie window (~0.3s), so a correct affinity router
     # concentrates both tiers deterministically; a value near 0.5 is the

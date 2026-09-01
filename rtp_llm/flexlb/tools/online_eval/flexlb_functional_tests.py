@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
-"""FlexLB unified functional + chaos test runner.
+"""FlexLB mock engine CASE test runner (场景测试).
+
+Terminology (unified 2026-09, suite reorg task #85):
+
+  * mock engine CASE test (场景测试) — THIS runner: flexlb_functional_tests.py
+    plus the flexlb_ft/cases/ category modules.  Each case boots a small
+    mock cluster via EnvManager and pins one behavioural contract per
+    scenario.
+  * mock engine STRESS test (压测) — the online_eval load pipeline
+    (run_online_eval.sh + the eval/analysis scripts): QPS / ramp /
+    duration load profiles and time-series analysis.  A separate
+    lineage; do not mix the terms.
+
+The legacy "e2e test" / "chaos test" suite wording is retired: fault
+injection is a MECHANISM inside case tests (the engine_fault / status /
+direct categories), not a suite name.
+
+Nine scenario categories (flexlb_ft/cases/, one contract theme per
+module — 68 cases total):
+
+    cancel 7 | status 19 | kv 15 | balance 6 | elastic 6
+    engine_fault 7 | master 3 | admission 4 | direct 1
 
 Usage:
-    python3 flexlb_functional_tests.py --suite smoke --profile batch-window
+    python3 flexlb_functional_tests.py --category all --profile batch-window
     python3 flexlb_functional_tests.py --list
-    python3 flexlb_functional_tests.py --filter T1 --profile single-nonbatch
-    python3 flexlb_functional_tests.py --suite all --json results.json
+    python3 flexlb_functional_tests.py --filter cancel_t1 --profile single-nonbatch
+    python3 flexlb_functional_tests.py --category kv --json results.json
 """
 import argparse
 import json
@@ -17,31 +38,61 @@ from pathlib import Path
 # Allow running from online_eval/ directly
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from flexlb_ft.chaos_cases import CHAOS_CASES
+from flexlb_ft.cases import (
+    ADMISSION_CASES,
+    BALANCE_CASES,
+    CANCEL_CASES,
+    DIRECT_CASES,
+    ELASTIC_CASES,
+    ENGINE_FAULT_CASES,
+    KV_CASES,
+    MASTER_CASES,
+    STATUS_CASES,
+)
 from flexlb_ft.context import CaseContext, CaseDef
 from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
 from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
-from flexlb_ft.smoke_cases import SMOKE_CASES
 
-ALL_CASES: list[CaseDef] = SMOKE_CASES + CHAOS_CASES
+# Task #85 (category reorg): the nine cases/ modules register into their
+# own CATEGORY_CASES lists; the runner concatenates them in the canonical
+# category order below.
+ALL_CASES: list[CaseDef] = (
+    CANCEL_CASES
+    + STATUS_CASES
+    + KV_CASES
+    + BALANCE_CASES
+    + ELASTIC_CASES
+    + ENGINE_FAULT_CASES
+    + MASTER_CASES
+    + ADMISSION_CASES
+    + DIRECT_CASES
+)
 
-# Task #51 (append-only registration): cross-process injection coverage
-# (chaos suite) + admission gates (smoke suite). See flexlb_ft/injection_gate_cases.py.
-from flexlb_ft.injection_gate_cases import INJECTION_GATE_CASES  # noqa: E402
-
-ALL_CASES = ALL_CASES + INJECTION_GATE_CASES
-
-# Task #83 (status-report fault family): engine→master status channel
-# faults, 17 cases asserting the correct master contract (chaos suite).
-# See flexlb_ft/status_fault_cases.py.
-from flexlb_ft.status_fault_cases import STATUS_FAULT_CASES  # noqa: E402
-
-ALL_CASES = ALL_CASES + STATUS_FAULT_CASES
+# CLI spelling (kebab-case) -> CaseDef.category (python identifier).
+CATEGORY_ALIASES = {"engine-fault": "engine_fault"}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FlexLB functional test runner")
-    parser.add_argument("--suite", choices=["smoke", "chaos", "all"], default="all")
+    parser = argparse.ArgumentParser(
+        description="FlexLB mock engine case test runner (场景测试)"
+    )
+    parser.add_argument(
+        "--category",
+        choices=[
+            "all",
+            "cancel",
+            "status",
+            "kv",
+            "balance",
+            "elastic",
+            "engine-fault",
+            "master",
+            "admission",
+            "direct",
+        ],
+        default="all",
+        help="scenario category (one of the nine flexlb_ft/cases/ modules)",
+    )
     parser.add_argument(
         "--profile",
         choices=list(PROFILES),
@@ -59,7 +110,7 @@ def main():
             "assertion grade: strict uses tight bounds (达到=优异), normal "
             "standard bounds (达到=良好), loose floor bounds (最宽但仍能判不可用). "
             "Exceeding the running grade's bound fails the case; the achieved "
-            "grade is recorded per case and rolled up into a suite verdict."
+            "grade is recorded per case and rolled up into a run verdict."
         ),
     )
     parser.add_argument(
@@ -67,10 +118,12 @@ def main():
     )
     args = parser.parse_args()
 
+    category = CATEGORY_ALIASES.get(args.category, args.category)
+
     # Filter cases
     cases = ALL_CASES
-    if args.suite != "all":
-        cases = [c for c in cases if c.suite == args.suite]
+    if category != "all":
+        cases = [c for c in cases if c.category == category]
     if args.filter:
         cases = [c for c in cases if args.filter.lower() in c.name.lower()]
     # Profile filter: explicit profile list, then semantic requirements
@@ -84,12 +137,16 @@ def main():
     ]
 
     if args.list:
-        print(f"{'NAME':<40} {'SUITE':<8} {'PROFILES':<20} {'REQUIRES':<24} {'SOURCE'}")
-        print("-" * 110)
+        print(
+            f"{'NAME':<40} {'CATEGORY':<14} {'PROFILES':<20} {'REQUIRES':<24} {'SOURCE'}"
+        )
+        print("-" * 120)
         for c in cases:
             profiles = ",".join(c.profiles) if c.profiles else "all"
             requires = ",".join(c.requires) if c.requires else "-"
-            print(f"{c.name:<40} {c.suite:<8} {profiles:<20} {requires:<24} {c.source}")
+            print(
+                f"{c.name:<40} {c.category:<14} {profiles:<20} {requires:<24} {c.source}"
+            )
         print(f"\nTotal: {len(cases)} cases")
         return 0
 
@@ -115,7 +172,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(
-        f" FlexLB Functional Tests — suite={args.suite} "
+        f" FlexLB Case Tests — category={args.category} "
         f"profile={args.profile} grade={args.grade}"
     )
     print(f" {len(cases)} cases, run_root={run_root}")
@@ -145,7 +202,7 @@ def main():
             graded_achieved.append(report.achieved)
         results.append(
             {
-                "suite": case.suite,
+                "category": case.category,
                 "name": case.name,
                 "profile": args.profile,
                 "status": status,

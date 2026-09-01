@@ -1,4 +1,17 @@
-"""Case registry + execution context shared by all suites."""
+"""Case registry + execution context shared by all case categories.
+
+Terminology (unified 2026-09, suite reorg task #85):
+
+  * mock engine CASE test (场景测试) — this framework: the
+    flexlb_functional_tests.py runner and the flexlb_ft/cases/ category
+    modules (cancel / status / kv / balance / elastic / engine_fault /
+    master / admission / direct).
+  * mock engine STRESS test (压测) — the online_eval load pipeline
+    (run_online_eval.sh + eval scripts), a separate lineage.
+
+The legacy "e2e test" / "chaos test" suite wording is retired; fault
+injection is a MECHANISM inside case tests, not a suite name.
+"""
 
 from __future__ import annotations
 
@@ -15,18 +28,22 @@ SMOKE_LABEL_PERF = default_perf()
 
 @dataclass
 class CaseDef:
-    """One test case: name, suite, callable and optional profile restriction.
+    """One test case: name, category, callable and optional profile
+    restriction.
+
+    ``category`` is one of the nine scenario categories (see
+    flexlb_ft/cases/): cancel, status, kv, balance, elastic,
+    engine_fault, master, admission, direct.
 
     ``profiles`` restricts a case to specific scheduling profiles (None = all
     profiles apply).  ``requires`` declares semantic capabilities the case
     needs (vocabulary: see harness.PROFILE_CAPS, e.g. ``enqueue_batch``,
     ``generate_stream``); a case runs only under profiles whose capability
-    set is a superset.  Phase 1 wires the field and the runner filter —
-    per-case semantic declarations land with task #55.
+    set is a superset.
     """
 
-    name: str  # e.g. smoke_cancel_t1
-    suite: str  # smoke | chaos
+    name: str  # e.g. cancel_t1
+    category: str  # cancel | status | kv | balance | elastic | engine_fault | master | admission | direct
     fn: Callable  # ctx -> (passed, detail)
     profiles: Optional[List[str]] = None  # None = all profiles apply
     requires: Optional[List[str]] = None  # semantic capability requirements
@@ -76,8 +93,9 @@ class CaseContext:
     # -- environments ------------------------------------------------------
 
     def smoke_spec(self) -> EnvSpec:
-        """Shared smoke environment: 2P + 4D, standard perf, master in
-        ctx.profile."""
+        """Shared default environment: 2P + 4D, standard perf, master in
+        ctx.profile (legacy name kept: the runner API predates the
+        category reorg)."""
         return EnvSpec(
             label=f"smoke_{self.profile}",
             n_prefill=2,
@@ -115,13 +133,14 @@ class CaseContext:
         self._ops_cache.clear()
 
 
-# request-id bases per case family × scheduling profile.  All bases live in a
-# single < 1M window (RID_BASES + case_seq * 1M can never collide across
-# (family, profile) pairs because every pairwise base distance is < 1M), so a
-# reused master's dedup table stays collision-free across profiles and reruns.
-# The legacy "elastic" family was split off "chaos" (2026-08 rework); smoke and
-# chaos run in separate processes whose case_seq counters both start at 1, so
-# the families need disjoint base ranges.
+# request-id bases per case category × scheduling profile.  All bases live
+# in a single < 1M window (RID_BASES + case_seq * 1M can never collide
+# across (category, profile) pairs because every pairwise base distance is
+# < 1M), so a reused master's dedup table stays collision-free across
+# profiles and reruns.  The nine categories map 1:1 onto the nine
+# flexlb_ft/cases/ modules (task #85 reorg); the pre-reorg families
+# (scheduling / anomaly / chaos) were dissolved into status, balance,
+# kv, engine_fault, master and direct.
 RID_BASES = {
     "cancel": {
         "batch-window": 100_000,
@@ -129,19 +148,19 @@ RID_BASES = {
         "single-batch": 150_000,
         "window-nonbatch": 175_000,
     },
-    "scheduling": {
+    "status": {
         "batch-window": 200_000,
         "single-nonbatch": 225_000,
         "single-batch": 250_000,
         "window-nonbatch": 275_000,
     },
-    "anomaly": {
+    "balance": {
         "batch-window": 300_000,
         "single-nonbatch": 325_000,
         "single-batch": 350_000,
         "window-nonbatch": 375_000,
     },
-    "chaos": {
+    "direct": {
         "batch-window": 400_000,
         "single-nonbatch": 425_000,
         "single-batch": 450_000,
@@ -153,15 +172,29 @@ RID_BASES = {
         "single-batch": 550_000,
         "window-nonbatch": 575_000,
     },
-    # KV-cache event/storm/capacity-conflict family (kv_cache_cases.py,
-    # task #84).  Fresh 600k window.  A parallel agent may add a "status"
-    # family alongside — on a push rejection fetch+rebase and re-push
-    # (no force-push, T0 discipline).
     "kv": {
         "batch-window": 600_000,
         "single-nonbatch": 625_000,
         "single-batch": 650_000,
         "window-nonbatch": 675_000,
+    },
+    "engine_fault": {
+        "batch-window": 700_000,
+        "single-nonbatch": 725_000,
+        "single-batch": 750_000,
+        "window-nonbatch": 775_000,
+    },
+    "master": {
+        "batch-window": 800_000,
+        "single-nonbatch": 825_000,
+        "single-batch": 850_000,
+        "window-nonbatch": 875_000,
+    },
+    "admission": {
+        "batch-window": 900_000,
+        "single-nonbatch": 925_000,
+        "single-batch": 950_000,
+        "window-nonbatch": 975_000,
     },
 }
 

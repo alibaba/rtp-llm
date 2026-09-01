@@ -1,17 +1,17 @@
-"""Engine→master status-report fault family (17 cases, suite="chaos").
+"""Status-category cases: the engine→master status-report contract.
 
 The engine→master status channel is the authoritative terminal source for
 the master's inflight ledgers: WorkerStatus facts (ACTIVE / TERMINAL) both
 settle request slots and refresh their stale-inflight activity clock
 (RequestSlot.observeWorkerStatus → reduceStaleSlot expires a slot only when
-now - lastWorkerStatusAtMs > staleInflightTimeoutMs).  This family injects
-faults into exactly that channel (mock /inject "status_*" / "enqueue_ack_*"
-types) and pins the CORRECT master contract, NOT the current behaviour:
-assertions state what a correct master MUST do, and cases the current
-implementation cannot satisfy are expected to FAIL — that failure is the
-finding (chaos_status_zombie_fake_running is the declared P2 probe; the
-fence-TTL drain of chaos_status_ack_empty_no_crash is a second structural
-candidate per the verified quarantine semantics).
+now - lastWorkerStatusAtMs > staleInflightTimeoutMs).  This category
+injects faults into exactly that channel (mock /inject "status_*" /
+"enqueue_ack_*" types) and pins the CORRECT master contract, NOT the
+current behaviour: assertions state what a correct master MUST do, and
+cases the current implementation cannot satisfy are expected to FAIL —
+that failure is the finding (status_zombie_fake_running is the declared
+P2 probe; the fence-TTL drain of status_ack_empty_no_crash is a second
+structural candidate per the verified quarantine semantics).
 
 Injection interface (mock side, parallel implementation; field names per
 the agreed spec — do not invent alternatives):
@@ -25,7 +25,7 @@ the agreed spec — do not invent alternatives):
     enqueue_ack_partial_fail(int k) / enqueue_ack_error_code(int code)
     enqueue_ack_drop(bool)
 
-Shared environment (_status_spec): 2P+2D, legacy chaos axes pinned via
+Shared environment (_status_spec): 2P+2D, legacy fault axes pinned via
 FLEXLB_CONFIG (PRIORITY + FIXED_WINDOW + BATCH), staleInflightTimeoutMs=30s
 (TTL observations cap at TTL+margin) and scheduler.queueTimeoutMs=10s —
 zombie keep-alive scenarios (a suppressed-finished request keeps appearing
@@ -40,23 +40,28 @@ hard assertions are the drained ledgers themselves):
 Case index (P0 = release-blocking contract, P1 = robustness, P2 = declared
 contract-level finding probe):
 
-    P0 chaos_status_ack_partial_fail          k-of-batch ack failure isolates
-    P0 chaos_status_ack_multi_error           per-request error-code passthrough
-    P0 chaos_status_ack_empty_no_crash        empty ack → uncertain fence, bounded + clearable
-    P0 chaos_status_prefill_suppress_all      full status silence → TTL eviction
-    P0 chaos_status_prefill_suppress_finished running keep-alive → queueTimeout is the only exit
-    P0 chaos_status_status_no_respond         status RPC silence → generation retirement
-    P0 chaos_status_unknown_rid_finished      unknown-rid terminal ignored
-    P0 chaos_status_version_regress           stale version → generation retirement
-    P1 chaos_status_decode_suppress_finished  decode-side terminal suppression
-    P1 chaos_status_decode_before_prefill     D-side terminal settles the request
-    P1 chaos_status_unknown_rid_running       one-shot ghost running entry
-    P1 chaos_status_unknown_batchid           mismatched batchId must not settle a real rid
-    P1 chaos_status_duplicate_finished        duplicate terminal replay idempotent
-    P1 chaos_status_cursor_regress            completion cursor rewind idempotent
-    P1 chaos_status_finished_then_running     terminal must not be resurrected
-    P1 chaos_status_zombie_completed_running  zombie running vs tombstone
-    P2 chaos_status_zombie_fake_running       permanent-resident inflight probe (expected finding)
+    P0 status_ack_partial_fail          k-of-batch ack failure isolates
+    P0 status_ack_multi_error           per-request error-code passthrough
+    P0 status_ack_empty_no_crash        empty ack → uncertain fence, bounded + clearable
+    P0 status_prefill_suppress_all      full status silence → TTL eviction
+    P0 status_prefill_suppress_finished running keep-alive → queueTimeout is the only exit
+    P0 status_status_no_respond         status RPC silence → generation retirement
+    P0 status_unknown_rid_finished      unknown-rid terminal ignored
+    P0 status_version_regress           stale version → generation retirement
+    P1 status_decode_suppress_finished  decode-side terminal suppression
+    P1 status_decode_before_prefill     D-side terminal settles the request
+    P1 status_unknown_rid_running       one-shot ghost running entry
+    P1 status_unknown_batchid           mismatched batchId must not settle a real rid
+    P1 status_duplicate_finished        duplicate terminal replay idempotent
+    P1 status_cursor_regress            completion cursor rewind idempotent
+    P1 status_finished_then_running     terminal must not be resurrected
+    P1 status_zombie_completed_running  zombie running vs tombstone
+    P2 status_zombie_fake_running       permanent-resident inflight probe (expected finding)
+
+Migrated in from the legacy fault families (task #85 category reorg):
+
+    status_inflight_ttl_cleanup         stuck inflight → TTL cleanup (S1 port)
+    status_fetch_error                  batch FetchResponse fault surfacing
 """
 
 from __future__ import annotations
@@ -65,19 +70,27 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .context import CaseContext, CaseDef, rid_base
-from .harness import (
+from ..context import CaseContext, CaseDef, rid_base
+from ..engine_ops import (
+    _fence_residue_stable,
+    clear_type_all,
+    engine_inflight_clean,
+    inject_type,
+    inject_type_all,
+)
+from ..harness import (
     AssertUtils,
     EnvSpec,
+    _accepted,
+    _fault_spec,
     build_flexlb_config,
     default_perf,
     http_get_status,
-    http_post_json,
+    ttl_spec,
     wait_for,
 )
-from .injection_gate_cases import _fence_residue_stable
 
-STATUS_FAULT_CASES: list[CaseDef] = []
+STATUS_CASES: list[CaseDef] = []
 
 STREAM_TIMEOUT_S = 15.0
 # > staleInflightTimeoutMs (30s): lets a TTL-eviction terminal reach the
@@ -86,7 +99,8 @@ LONG_STREAM_TIMEOUT_S = 45.0
 STALE_INFLIGHT_TTL_S = 30.0
 TTL_MARGIN_S = 30.0
 QUEUE_TIMEOUT_S = 10.0
-# 3-strike health demotion + eviction window (chaos MASTER_EVICT_S precedent).
+# 3-strike health demotion + eviction window (fault-family MASTER_EVICT_S
+# precedent).
 MASTER_EVICT_S = 30.0
 # Fake/ghost rid offset: far above every rid this process will hand out
 # (next_request_ids stay within base + small offsets) so the master has
@@ -95,13 +109,13 @@ GHOST_RID_OFFSET = 900_000
 
 
 def case(name: str, profiles=None, requires=None, source: str = ""):
-    """Register into STATUS_FAULT_CASES (suite is always "chaos")."""
+    """Register into STATUS_CASES (category is always "status")."""
 
     def deco(fn):
-        STATUS_FAULT_CASES.append(
+        STATUS_CASES.append(
             CaseDef(
                 name=name,
-                suite="chaos",
+                category="status",
                 fn=fn,
                 profiles=profiles,
                 requires=requires,
@@ -119,7 +133,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
 
 
 def _status_spec(ctx: CaseContext) -> EnvSpec:
-    """Family env: 2P+2D, legacy chaos axes, TTL=30s, queueTimeout=10s.
+    """Family env: 2P+2D, legacy fault axes, TTL=30s, queueTimeout=10s.
 
     queueTimeoutMs=10s is the zombie keep-alive bottom line: a request
     whose terminal is suppressed but which keeps appearing RUNNING on the
@@ -172,44 +186,10 @@ def _decode_names(ops) -> list[str]:
     return [e["name"] for e in snap.get("engines", []) if e.get("role") == "decode"]
 
 
-def inject_type(
-    ops, engine_name: str, fault_type: str, enabled: bool = True, **params
-) -> dict:
-    """POST /inject with the Java "type" format (MERGE semantics).
-
-    Copied from injection_gate_cases so this file owns its own surface
-    while the mock control server learns the status-fault types (parallel
-    work); injection_gate_cases itself is not modified.
-    """
-    payload = {"engine": engine_name, "type": fault_type, "enabled": enabled}
-    payload.update(params)
-    status, body = http_post_json(
-        f"http://127.0.0.1:{ops.mock_http_port}/inject", payload
-    )
-    if status != 200:
-        raise RuntimeError(
-            f"inject_type({engine_name}, {fault_type}, {params}) "
-            f"failed: {status} {body}"
-        )
-    return body or {}
-
-
-def inject_type_all(ops, names: list[str], fault_type: str, **params) -> None:
-    for name in names:
-        inject_type(ops, name, fault_type, **params)
-
-
-def clear_type_all(ops, names: list[str], fault_type: str) -> None:
-    for name in names:
-        try:
-            inject_type(ops, name, fault_type, enabled=False)
-        except Exception:
-            pass
-
-
 def _timeout_typed(err) -> bool:
-    """Deadline/timeout-class terminal (gate_slo_deadline keyword set plus
-    the run_one_request "stream did not complete" client-timeout form)."""
+    """Deadline/timeout-class terminal (admission_slo_queue_deadline
+    keyword set plus the run_one_request "stream did not complete"
+    client-timeout form)."""
     text = str(err or "").lower()
     return any(
         kw in text
@@ -254,7 +234,7 @@ def _run_requests(
     return errs
 
 
-def _recovery_rate(ops, base: int, n: int = 20) -> tuple[bool, str]:
+def _recovery_rate(ops, base: int, n: int = 20) -> tuple:
     """AssertUtils.recovery_rate's >=95% contract on the direct gRPC path
     (a fresh n-request batch; driving the JavaLoadClient subprocess for
     this is overkill — the semantic is identical)."""
@@ -345,7 +325,7 @@ def _ttl_anchor_deltas(env, before: tuple) -> tuple:
 def _fire_and_forget(ops, base: int, n: int, output_len: int = 10) -> tuple:
     """Schedule *n* requests WITHOUT consuming their streams — the master
     has enqueued the batches and the ledgers hold live entries (the
-    chaos_inflight_ttl_cleanup precedent).  Returns (rids, error)."""
+    status_inflight_ttl_cleanup precedent).  Returns (rids, error)."""
     rids: list[int] = []
     for _ in range(n):
         rid = ops.next_request_id(base)
@@ -363,14 +343,100 @@ def _wait_scheduler_zero(ops, timeout_s: float = STALE_INFLIGHT_TTL_S + TTL_MARG
     return wait_for(lambda: ops.master_scheduler_inflight() == 0, timeout_s, 2.0)
 
 
+def _stale_inflight_clean(ops, timeout_s: float = 95.0) -> tuple:
+    """Master inflight drain with the TTL-aware window (30s TTL + margin)."""
+    return AssertUtils.inflight_clean(_master_http(ops), timeout_s)
+
+
+# ===========================================================================
+# Migrated from the legacy fault families: stuck-inflight TTL cleanup (S1)
+# ===========================================================================
+
+
+@case(
+    "status_inflight_ttl_cleanup",
+    profiles=["batch-window"],
+    source="flexlb_behavior_test.sh S1 (stuck inflight TTL cleanup)",
+)
+def inflight_ttl_cleanup(ctx: CaseContext):
+    """S1 port: slow prefill → inflight stuck → /stop_engine → TTL cleans.
+
+    Profile semantics (v2, task #55): the stuck-inflight state is built
+    from fire-and-forget requests whose master-side batch bookkeeping
+    never settles, and ttl_spec pins the legacy fault axes (PRIORITY +
+    FIXED_WINDOW + BATCH) via FLEXLB_CONFIG — the declaration stays
+    batch-window (label honesty + regression efficiency).  A NON_BATCH
+    variant would need its own stuck-direct-ledger construction
+    (dedicated-phase material).
+    """
+    env = ctx.env_manager.ensure(ttl_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "status")
+    try:
+        # Slow both prefills (10s) so scheduled requests stay inflight.
+        ops.set_perf("prefill-0", prefill_fixed_ms=10000.0)
+        ops.set_perf("prefill-1", prefill_fixed_ms=10000.0)
+
+        # Fire-and-forget: schedule without consuming the response stream —
+        # the master has already enqueued these batches into the engines.
+        rids = [ops.next_request_id(base) for _ in range(6)]
+        for rid in rids:
+            resp = ops.schedule(rid, output_len=10)
+            if resp.code != 200 or not resp.success:
+                return False, f"schedule failed for rid={rid}: {resp.error_message}"
+
+        enqueued = wait_for(lambda: _accepted(ops, "prefill-0") > 0, 15.0, 0.5)
+        inflight_before = ops.master_scheduler_inflight()
+
+        # Cut the engine mid-flight; its batches will never complete.
+        ops.stop_engine("prefill-0")
+        time.sleep(5.0)  # let the gRPC failures propagate
+        # Per-endpoint view: the evicted engine's row disappears from
+        # prefill_endpoints, so observe the stuck batches via the global
+        # scheduler inflight (survives eviction until TTL cleanup).
+        inflight_after_kill = ops.master_scheduler_inflight()
+
+        # TTL (30s) + sync margin: poll to zero within 90s.
+        cleanup_ok = wait_for(lambda: ops.master_scheduler_inflight() == 0, 90.0, 2.0)
+        inflight_final = ops.master_scheduler_inflight()
+
+        # The surviving prefill keeps serving normally.
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            enqueued
+            and inflight_after_kill > 0
+            and cleanup_ok
+            and inflight_final == 0
+            and recovery_ok
+        )
+        return passed, (
+            f"enqueued={enqueued}, inflight_before_stop={inflight_before}, "
+            f"stuck_after_kill={inflight_after_kill}, "
+            f"cleanup_within_90s={cleanup_ok}, inflight_final={inflight_final}, "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            snap = ops.snapshot_by_name()
+            if snap.get("prefill-0", {}).get("stopped"):
+                ops.start_engine("prefill-0")
+            ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
+            ops.set_perf("prefill-1", prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+
+
 # ===========================================================================
 # P0 — enqueue-ack fault shapes (3 cases)
 # ===========================================================================
 
 
 @case(
-    "chaos_status_ack_partial_fail",
-    profiles=["batch-window"],  # _status_spec pins the legacy chaos axes
+    "status_ack_partial_fail",
+    profiles=["batch-window"],  # _status_spec pins the legacy fault axes
     source="P0 status fault family: enqueue_ack_partial_fail(k=1) on a 4-request batch",
 )
 def status_ack_partial_fail(ctx: CaseContext):
@@ -387,7 +453,7 @@ def status_ack_partial_fail(ctx: CaseContext):
 
     Grade: P0."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -426,7 +492,7 @@ def status_ack_partial_fail(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_ack_multi_error",
+    "status_ack_multi_error",
     profiles=["batch-window"],
     source="P0 status fault family: enqueue_ack_error_code with two distinct codes",
 )
@@ -445,7 +511,7 @@ def status_ack_multi_error(ctx: CaseContext):
 
     Grade: P0."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -489,7 +555,7 @@ def status_ack_multi_error(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_ack_empty_no_crash",
+    "status_ack_empty_no_crash",
     profiles=["batch-window"],
     source="P0 status fault family: enqueue_ack_drop — empty ack (dispatch-uncertain)",
 )
@@ -512,7 +578,7 @@ def status_ack_empty_no_crash(ctx: CaseContext):
 
     Grade: P0."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -553,7 +619,7 @@ def status_ack_empty_no_crash(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_prefill_suppress_all",
+    "status_prefill_suppress_all",
     profiles=["batch-window"],
     source="P0 status fault family: status_suppress_running+finished on every prefill",
 )
@@ -577,7 +643,7 @@ def status_prefill_suppress_all(ctx: CaseContext):
     Grade: P0."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -639,7 +705,7 @@ def status_prefill_suppress_all(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_prefill_suppress_finished",
+    "status_prefill_suppress_finished",
     profiles=["batch-window"],
     source="P0 status fault family: status_suppress_finished on every prefill",
 )
@@ -661,7 +727,7 @@ def status_prefill_suppress_finished(ctx: CaseContext):
 
     Grade: P0."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -701,7 +767,7 @@ def status_prefill_suppress_finished(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_status_no_respond",
+    "status_status_no_respond",
     profiles=["batch-window"],
     source="P0 status fault family: status_no_respond — engine stops answering the status RPC",
 )
@@ -722,7 +788,7 @@ def status_status_no_respond(ctx: CaseContext):
     Grade: P0."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if len(names) < 2:
         return False, "need >=2 prefill engines"
@@ -800,7 +866,7 @@ def status_status_no_respond(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_unknown_rid_finished",
+    "status_unknown_rid_finished",
     profiles=["batch-window"],
     source="P0 status fault family: status_fake_task(finished, unknown rid), one-shot",
 )
@@ -818,7 +884,7 @@ def status_unknown_rid_finished(ctx: CaseContext):
 
     Grade: P0."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -859,7 +925,7 @@ def status_unknown_rid_finished(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_version_regress",
+    "status_version_regress",
     profiles=["batch-window"],
     source="P0 status fault family: status_version_regress — stale status version",
 )
@@ -879,7 +945,7 @@ def status_version_regress(ctx: CaseContext):
     Grade: P0."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -941,7 +1007,7 @@ def status_version_regress(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_decode_suppress_finished",
+    "status_decode_suppress_finished",
     profiles=["batch-window"],
     source="P1 status fault family: status_suppress_finished on every decode engine",
 )
@@ -962,7 +1028,7 @@ def status_decode_suppress_finished(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     dnames = _decode_names(ops)
     if not dnames:
         return False, "no decode engines found"
@@ -1012,7 +1078,7 @@ def status_decode_suppress_finished(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_decode_before_prefill",
+    "status_decode_before_prefill",
     profiles=["batch-window"],
     source="P1 status fault family: status_suppress_rids(full batch) on prefills, decodes normal",
 )
@@ -1033,7 +1099,7 @@ def status_decode_before_prefill(ctx: CaseContext):
     Grade: P1."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1095,7 +1161,7 @@ def status_decode_before_prefill(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_unknown_rid_running",
+    "status_unknown_rid_running",
     profiles=["batch-window"],
     source="P1 status fault family: status_fake_task(running, unknown rid), one-shot",
 )
@@ -1115,7 +1181,7 @@ def status_unknown_rid_running(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1153,7 +1219,7 @@ def status_unknown_rid_running(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_unknown_batchid",
+    "status_unknown_batchid",
     profiles=["batch-window"],
     source="P1 status fault family: status_fake_task(real rid + fake batchId, finished), concurrent with live traffic",
 )
@@ -1174,7 +1240,7 @@ def status_unknown_batchid(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1257,7 +1323,7 @@ def status_unknown_batchid(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_duplicate_finished",
+    "status_duplicate_finished",
     profiles=["batch-window"],
     source="P1 status fault family: status_duplicate_finished — same terminal reported twice",
 )
@@ -1276,7 +1342,7 @@ def status_duplicate_finished(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1323,7 +1389,7 @@ def status_duplicate_finished(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_cursor_regress",
+    "status_cursor_regress",
     profiles=["batch-window"],
     source="P1 status fault family: status_cursor_regress(3) — completion cursor rewinds",
 )
@@ -1342,7 +1408,7 @@ def status_cursor_regress(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1385,7 +1451,7 @@ def status_cursor_regress(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_finished_then_running",
+    "status_finished_then_running",
     profiles=["batch-window"],
     source="P1 status fault family: fake_task sequence — finished replay then persistent RUNNING for a settled rid",
 )
@@ -1403,7 +1469,7 @@ def status_finished_then_running(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1456,7 +1522,7 @@ def status_finished_then_running(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_zombie_completed_running",
+    "status_zombie_completed_running",
     profiles=["batch-window"],
     source="P1 status fault family: status_zombie_running — completed tasks re-reported RUNNING",
 )
@@ -1477,7 +1543,7 @@ def status_zombie_completed_running(ctx: CaseContext):
 
     Grade: P1."""
     ops = ctx.engine_ops(ctx.env_manager.ensure(_status_spec(ctx)))
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     dnames = _decode_names(ops)
     if not dnames:
         return False, "no decode engines found"
@@ -1534,7 +1600,7 @@ def status_zombie_completed_running(ctx: CaseContext):
 
 
 @case(
-    "chaos_status_zombie_fake_running",
+    "status_zombie_fake_running",
     profiles=["batch-window"],
     source="P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
 )
@@ -1559,7 +1625,7 @@ def status_zombie_fake_running(ctx: CaseContext):
     Grade: P2 (contract-level finding probe)."""
     env = ctx.env_manager.ensure(_status_spec(ctx))
     ops = ctx.engine_ops(env)
-    base = rid_base(ctx, "chaos")
+    base = rid_base(ctx, "status")
     names = _prefill_names(ops)
     if not names:
         return False, "no prefill engines found"
@@ -1615,3 +1681,81 @@ def status_zombie_fake_running(ctx: CaseContext):
         return False, f"exception: {exc!r}"
     finally:
         clear_type_all(ops, names, "status_fake_task")
+
+
+# ===========================================================================
+# Migrated from the legacy fault families: batch FetchResponse fault
+# ===========================================================================
+
+
+@case(
+    "status_fetch_error",
+    profiles=["batch-window"],
+    source="gap G6/G7: /inject type=fetch_error (cross-process, batch FetchResponse path)",
+)
+def inject_fetch_error(ctx: CaseContext):
+    """fetch_error makes the batch-mode FetchResponse stream fail after
+    emitting one unfinished output.  The client must observe the error;
+    the engine-side inflight drains immediately; the master-side ledger
+    entry is cleaned by the 30s stale-inflight TTL (verified contract);
+    a fresh request succeeds once the injection is cleared.
+
+    Profile semantics (v2, task #55): the fault is checked only at the
+    engine's fetchResponse entry, which exists only under the BATCH
+    dispatcher — and _fault_spec pins the legacy fault axes
+    (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG, so re-running
+    under another --profile would execute the identical configuration.
+    The declaration stays batch-window (regression efficiency + label
+    honesty); a NON_BATCH master-path generate_error variant is
+    dedicated-phase material.
+    """
+    ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
+    base = rid_base(ctx, "status")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    rid = ops.next_request_id(base)
+    try:
+        inject_type_all(ops, names, "fetch_error")
+        try:
+            response = ops.schedule(rid)
+            if response.code != 200 or not response.success:
+                surfaced, detail = True, (f"schedule failed: {response.error_message}")
+            else:
+                handle = ops.start_stream(response, rid, input_pb=None)
+                handle.wait_end(10.0)
+                if handle.snap.error:
+                    surfaced, detail = True, f"stream error: {handle.snap.error}"
+                elif not handle.snap.completed:
+                    surfaced, detail = True, "stream did not complete"
+                else:
+                    surfaced, detail = False, "request completed despite fetch_error"
+                # NOTE: no explicit master cancel here.  The stream already
+                # terminated with the engine's error, and a cancel would set
+                # cancellationReason, which the TTL cleaner SKIPS (it waits
+                # for an authoritative engine terminal through the cancel
+                # fence instead) — verified on the Java side
+                # (PriorityScheduler.cleanupInflight).
+        finally:
+            clear_type_all(ops, names, "fetch_error")
+
+        rid2 = ops.next_request_id(base)
+        _, err2 = ops.run_one_request(rid2, stream_timeout_s=STREAM_TIMEOUT_S)
+        inflight_ok, inflight_detail = _stale_inflight_clean(ops)
+        engine_clean, engine_detail = engine_inflight_clean(ops, names)
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            surfaced and err2 is None and inflight_ok and engine_clean and recovery_ok
+        )
+        return passed, (
+            f"error_surfaced={surfaced} ({detail}), "
+            f"recovered={err2 is None}, "
+            f"master_inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_inflight_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        clear_type_all(ops, names, "fetch_error")

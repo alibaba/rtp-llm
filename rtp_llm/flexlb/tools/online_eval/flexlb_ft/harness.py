@@ -1,7 +1,14 @@
-"""FlexLB functional + chaos e2e harness.
+"""FlexLB mock-engine case-test harness.
 
-Single-process test harness that replaces the legacy shell/python smoke and
-chaos scripts.  Provides:
+Terminology (unified 2026-09, suite-reorg task #85): the mock engine
+CASE test (场景测试) is this framework — flexlb_functional_tests.py plus
+flexlb_ft/ — while the mock engine STRESS test (压测) is the separate
+online_eval load pipeline.  The legacy "e2e test" / "chaos test" suite
+wording is retired; fault injection is a mechanism inside case tests,
+not a suite name.
+
+Single-process test harness that replaces the legacy shell/python smoke
+and fault scripts.  Provides:
 
   * EnvManager   — start/stop the Java mock engine cluster, the FlexLB master
                    (flexlb-api) and standalone victim JVMs, with health waits,
@@ -31,6 +38,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -604,9 +613,9 @@ def build_flexlb_config(
     """Unified strict schema-v2 FLEXLB_CONFIG generator.
 
     One template for every environment the framework boots: the four
-    built-in profiles (via :func:`flexlb_config_for_profile`), the chaos
-    suites (chaos_cases.chaos_flexlb_config) and the admission-gate cases
-    (injection_gate_cases._gate_config) all delegate here.  The router gets
+    built-in profiles (via :func:`flexlb_config_for_profile`), the fault
+    families (harness.fault_env_config) and the admission-gate cases
+    (harness.admission_config) all delegate here.  The router gets
     the FORMULA execution-time estimator with the production DSv4 fit
     injected EXPLICITLY (:data:`DSV4_PREFILL_EXPRESSION`): the online
     LEARNING estimator only trains from completed EnqueueBatch groups, so a
@@ -1457,3 +1466,423 @@ def ensure_schedule_proto_modules() -> tuple:
 
 def encode_unique_key(meta: dict) -> str:
     return "flexlb_eval:" + json.dumps(meta, separators=(",", ":"))
+
+
+# ===========================================================================
+# Shared case-level helpers (suite-reorg task #85)
+#
+# Environment constructors, traffic pumps and topology observers that used
+# to live in chaos_cases.py / injection_gate_cases.py and are shared by
+# several flexlb_ft/cases/ categories (elastic, master, engine_fault,
+# status, admission).  They depend only on this module (EnvSpec /
+# build_flexlb_config / default_perf / wait_for) plus duck-typed CaseContext
+# / EngineOps arguments (annotated as strings to avoid an import cycle:
+# context.py imports harness.py), so harness.py is their shared home.
+# ===========================================================================
+
+# Shared stream timeout for the fault-family helpers below (the per-category
+# case modules declare their own same-valued constant for case bodies).
+STREAM_TIMEOUT_S = 15.0
+
+PREFILL_DOMAIN = "mock.prefill.hosts.address"
+DECODE_DOMAIN = "mock.decode.hosts.address"
+
+
+def fault_env_config(
+    stale_inflight_ms: int = 30_000,
+    max_inflight_batches: int = 4,
+    status_rpc_ms: int = 1_000,
+) -> str:
+    """Fault-family FLEXLB_CONFIG (QUEUE + PRIORITY + FIXED_WINDOW + BATCH —
+    the legacy fault axes), generated through the unified
+    harness.build_flexlb_config template.
+
+    Shorter staleInflightTimeoutMs (30s vs the na130 default 300s) so the TTL
+    cleanup cases finish within their 90s caps.
+    """
+    return build_flexlb_config(
+        ordering="priority",
+        decision="fixed_window",
+        dispatcher="batch",
+        stale_inflight_ms=stale_inflight_ms,
+        max_inflight_batches=max_inflight_batches,
+        status_rpc_ms=status_rpc_ms,
+    )
+
+
+def fault_env_perf() -> dict:
+    """Fault/elastic perf: an EXPLICIT flat prefill (performance JSON
+    "prefill.fixed_ms" — the sanctioned explicit channel, cluster-wide so
+    dynamically added engines inherit it too).
+
+    The elastic cases measure discovery/removal/inflight semantics, not
+    ledger-driven routing. The formula-driven default (~220ms at 2048
+    tokens) doubles the in-flight window at removal time and amplifies a
+    pre-existing intermittent drain stall (requests orphaned by the removed
+    engine never complete decode) — the flat 100ms declaration restores the
+    historical timing envelope this family was calibrated on.
+    """
+    perf = default_perf()
+    perf["prefill"] = {"fixed_ms": 100.0, "scale": 1.0}
+    return perf
+
+
+def admission_config(
+    queue_timeout_ms: int = 60_000,
+    max_outstanding: int = 5_000,
+    stale_inflight_ms: int = 30_000,
+) -> str:
+    """FLEXLB_CONFIG for the admission-gate cases: the legacy fault axes
+    (QUEUE + PRIORITY + FIXED_WINDOW + BATCH) via the unified
+    harness.build_flexlb_config template, with the admission knobs
+    parameterised."""
+    return build_flexlb_config(
+        ordering="priority",
+        decision="fixed_window",
+        dispatcher="batch",
+        queue_timeout_ms=queue_timeout_ms,
+        max_outstanding=max_outstanding,
+        stale_inflight_ms=stale_inflight_ms,
+    )
+
+
+def elastic_spec(ctx: "CaseContext") -> EnvSpec:
+    """Shared elastic/fault env: 2P+4D, dynamic file discovery, TTL=30s."""
+    return EnvSpec(
+        label=f"fault_{ctx.profile}",
+        n_prefill=2,
+        n_decode=4,
+        perf=fault_env_perf(),
+        master_profile=ctx.profile,
+        discovery="discovery_file",
+        master_env={"FLEXLB_CONFIG": fault_env_config()},
+    )
+
+
+def ttl_spec(ctx: "CaseContext") -> EnvSpec:
+    """Inflight-TTL env (S1): 2P+2D, TTL=30s."""
+    return EnvSpec(
+        label=f"fault_ttl_{ctx.profile}",
+        n_prefill=2,
+        n_decode=2,
+        perf=fault_env_perf(),
+        master_profile=ctx.profile,
+        discovery="discovery_file",
+        master_env={"FLEXLB_CONFIG": fault_env_config()},
+    )
+
+
+def quota_spec(ctx: "CaseContext") -> EnvSpec:
+    """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via FLEXLB_CONFIG
+    (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env var
+    FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer)."""
+    return EnvSpec(
+        label=f"fault_quota_{ctx.profile}",
+        n_prefill=1,
+        n_decode=1,
+        perf=fault_env_perf(),
+        master_profile=ctx.profile,
+        discovery="discovery_file",
+        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_batches=1)},
+    )
+
+
+def coldstart_spec(ctx: "CaseContext") -> EnvSpec:
+    """Cold-start probe env: mirrors the default topology (2P+4D, static
+    file discovery, default config) but disables the master stability
+    window so traffic hits the master during the first-connect storm."""
+    return EnvSpec(
+        label=f"fault_coldstart_{ctx.profile}",
+        n_prefill=2,
+        n_decode=4,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_stable_window_s=0.0,
+    )
+
+
+def _fault_spec(ctx: "CaseContext") -> EnvSpec:
+    """Env for fault cases whose requests die mid-flight (fetch_error,
+    crash_after): short staleInflightTimeoutMs (30s vs the na130 default
+    300s) because the VERIFIED contract is that a request already
+    accepted by an engine but whose client stream dies is cleaned by the
+    stale-inflight TTL, not by an immediate terminal (engine-side inflight
+    DOES drain immediately; the master ledger entry lingers).  With the
+    default env's 300s TTL the case would have to wait 5 minutes."""
+    return EnvSpec(
+        label=f"inject_fault_{ctx.profile}",
+        n_prefill=2,
+        n_decode=2,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={"FLEXLB_CONFIG": admission_config(stale_inflight_ms=30_000)},
+    )
+
+
+def _elastic_env(ctx: "CaseContext"):
+    env = ctx.env_manager.ensure(elastic_spec(ctx))
+    return env, ctx.engine_ops(env)
+
+
+def _initial_engine_names(env) -> set:
+    return {f"prefill-{i}" for i in range(env.spec.n_prefill)} | {
+        f"decode-{i}" for i in range(env.spec.n_decode)
+    }
+
+
+def _dynamic_engines(ops, env) -> list:
+    """Engine names added at runtime (anything beyond the initial role set)."""
+    initial = _initial_engine_names(env)
+    return [
+        e["name"]
+        for e in ops.snapshot().get("engines", [])
+        if e.get("name") not in initial
+    ]
+
+
+def _cleanup_dynamic(ops, env) -> int:
+    """Remove every dynamically added engine (env restore between cases)."""
+    removed = 0
+    for name in _dynamic_engines(ops, env):
+        try:
+            status, _ = ops.remove_engine(engine_name=name)
+            removed += 1 if status == 200 else 0
+        except Exception:
+            pass
+    return removed
+
+
+def _discovery_payload(env) -> Optional[dict]:
+    """json.load the discovery file; None when missing/unparseable."""
+    try:
+        return json.loads(env.discovery_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _discovery_has_http_port(env, http_port: int) -> bool:
+    payload = _discovery_payload(env)
+    if payload is None:
+        return False
+    suffix = f":{http_port}"
+    for hosts in payload.values():
+        if isinstance(hosts, list) and any(str(h).endswith(suffix) for h in hosts):
+            return True
+    return False
+
+
+def _discovery_entry_count(env) -> tuple:
+    """(#prefill hosts, #decode hosts) per the discovery file domains."""
+    payload = _discovery_payload(env)
+    if payload is None:
+        return -1, -1
+    return (
+        len(payload.get(PREFILL_DOMAIN) or []),
+        len(payload.get(DECODE_DOMAIN) or []),
+    )
+
+
+def _accepted(ops, engine_name: str) -> int:
+    try:
+        snap = ops.snapshot_by_name()
+        return int(snap.get(engine_name, {}).get("accepted", 0))
+    except Exception:
+        return -1
+
+
+def _engine_alive(ops, role: str) -> int:
+    return ops.master_alive_count(role)
+
+
+def _wait_master_alive(ops, role: str, expected: int, timeout_s: float) -> bool:
+    return wait_for(lambda: _engine_alive(ops, role) >= expected, timeout_s, 0.5)
+
+
+def _wait_master_topology(ops, role: str, expected: int, timeout_s: float) -> bool:
+    """Wait until the master's discovery view of *role* is EXACTLY *expected*
+    workers, all alive (worker_summary ``discovered == alive == expected``).
+
+    ``discovered`` mirrors the master's workerStatusMap size, which only
+    shrinks when EngineSyncRunner evicts a detached engine.  The alive count
+    alone is NOT a safe convergence signal: the health 3-strike demotion
+    lands well before the eviction removes the endpoint from the routable
+    set, so waiting on alive lets traffic hit a dead-but-still-routable
+    port (see elastic_rebalance baseline).
+    """
+
+    def converged() -> bool:
+        info = ops.master_info()
+        if not info:
+            return False
+        entry = (info.get("worker_summary", {}) or {}).get(role) or {}
+        try:
+            discovered = int(entry.get("discovered", -1))
+            alive = int(entry.get("alive", -1))
+        except (TypeError, ValueError):
+            return False
+        return discovered == expected and alive == expected
+
+    return wait_for(converged, timeout_s, 0.2)
+
+
+def _request_with_ttft(ops, rid: int, output_len: int, keys: list):
+    """run_one_request variant that also measures TTFT.
+
+    TTFT = time from the schedule() call to the first streamed output (2ms
+    poll granularity — ``first_received`` is edge-triggered on the consume
+    thread, so the poller only has to catch the edge before termination).
+    Returns (prefill_addr, error, ttft_ms); ttft_ms is None when the first
+    output was never observed.
+    """
+    t0 = time.monotonic()
+    try:
+        response = ops.schedule(rid, output_len=output_len, block_keys=keys)
+        if response.code != 200 or not response.success:
+            return "", f"schedule failed: {response.error_message}", None
+        addr = ops.role_addr(response, "PREFILL")
+        input_pb = (
+            None if response.enqueued_by_master else ops.build_generate_input(rid)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        first_ms: Optional[float] = None
+        deadline = time.monotonic() + STREAM_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if handle.snap.first_received:
+                first_ms = (time.monotonic() - t0) * 1000.0
+                break
+            if handle.snap.terminated:
+                break
+            time.sleep(0.002)
+        handle.wait_end(STREAM_TIMEOUT_S)
+        snap = handle.snap
+        if snap.error:
+            return addr, snap.error, first_ms
+        if not snap.completed:
+            return addr, "stream did not complete", first_ms
+        return addr, None, first_ms
+    except Exception as exc:
+        return "", repr(exc), None
+
+
+def _ttft_p50(values: list) -> Optional[float]:
+    """Index-method p50 (same as harness.per_request_ttft_p50)."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * 50 / 100))]
+
+
+def _run_batch(
+    ops,
+    base: int,
+    n: int,
+    output_len: int = 2,
+    concurrency: int = 10,
+    collect_ttft: bool = False,
+) -> tuple:
+    """Send *n* small requests (up to *concurrency* in flight); returns
+    (ok, errors, prefill_addrs).
+
+    Error strings (first 60 chars, deduped) are stashed on the function as
+    ``last_error_types`` for failure diagnostics — batch paths routinely
+    fail with distinct gRPC/queue errors and the verdict alone cannot
+    distinguish "routed to a dead engine" from "queue admission reject".
+    With ``collect_ttft=True`` the per-request TTFTs of *successful*
+    requests are additionally stashed as ``last_ttfts`` (ms, unsorted).
+    """
+    rids = [ops.next_request_id(base) for _ in range(n)]
+
+    def run(rid: int):
+        keys = [rid * 100 + j for j in range(3)]
+        if collect_ttft:
+            return _request_with_ttft(ops, rid, output_len, keys)
+        addr, err = ops.run_one_request(
+            rid,
+            output_len=output_len,
+            block_keys=keys,
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        return addr, err, None
+
+    with ThreadPoolExecutor(max_workers=min(n, concurrency)) as pool:
+        results = list(pool.map(run, rids))
+    ok = sum(1 for _, err, _ttft in results if err is None)
+    addrs = [addr for addr, _err, _ttft in results]
+    _run_batch.last_error_types = sorted(
+        {str(err)[:60] for _, err, _ttft in results if err is not None}
+    )
+    if collect_ttft:
+        _run_batch.last_ttfts = [
+            ttft for _, err, ttft in results if err is None and ttft is not None
+        ]
+    return ok, n - ok, addrs
+
+
+class _BackgroundFlow:
+    """Lightweight loop: one request every *interval_s* on a daemon thread."""
+
+    def __init__(
+        self,
+        ops,
+        rid_base_value: int,
+        interval_s: float = 0.2,
+        output_len: int = 2,
+    ):
+        self._ops = ops
+        self._base = rid_base_value
+        self._interval = interval_s
+        self._output_len = output_len
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self.total = 0
+        self.ok = 0
+
+    def _loop(self) -> None:
+        while not self._stop_event.is_set():
+            rid = self._ops.next_request_id(self._base)
+            _, err = self._ops.run_one_request(
+                rid,
+                output_len=self._output_len,
+                block_keys=[rid * 100 + 1],
+                stream_timeout_s=10.0,
+            )
+            with self._lock:
+                self.total += 1
+                if err is None:
+                    self.ok += 1
+            self._stop_event.wait(self._interval)
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._loop, name="fault-flow", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout_s: float = 20.0) -> tuple:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout_s)
+        return self.total, self.ok
+
+    @property
+    def success_rate(self) -> float:
+        return (self.ok / self.total) if self.total else 0.0
+
+
+def _pump_until_accepted(ops, engine_name: str, base: int, timeout_s: float) -> bool:
+    """Send requests until *engine_name*'s accepted counter grows."""
+    start = _accepted(ops, engine_name)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        rid = ops.next_request_id(base)
+        ops.run_one_request(
+            rid,
+            output_len=2,
+            block_keys=[rid * 100 + 1],
+            stream_timeout_s=10.0,
+        )
+        if _accepted(ops, engine_name) > start:
+            return True
+        time.sleep(0.2)
+    return _accepted(ops, engine_name) > start
