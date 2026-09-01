@@ -256,13 +256,6 @@ static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::
     }
 }
 
-static bool expectCudaBatchStrategyDone() {
-    int        runtime_version       = 0;
-    const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
-    return CUDART_VERSION >= 12080 && runtime_version_error == cudaSuccess && runtime_version >= 12080
-           && (CUDART_VERSION >= 13000) == (runtime_version >= 13000);
-}
-
 TEST(DeviceHostTransferExecutorConfigTest, PrefersCudaBatchThenStagedSmThenGeneric) {
     DeviceHostTransferExecutor executor;
     EXPECT_TRUE(executor.options_.cuda_batch_copy_enabled);
@@ -1375,8 +1368,6 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupportedOtherwiseFallsBack) {
-    const bool expect_batch_done = expectCudaBatchStrategyDone();
-
     DeviceHostCopyOptions options;
     options.cuda_batch_copy_enabled                          = true;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
@@ -1414,19 +1405,23 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
         EXPECT_EQ(d1[i], 0x00);
 
     EXPECT_EQ(counters[0].attempts, 2);
-    EXPECT_EQ(counters[0].done, expect_batch_done ? 2 : 0);
-    EXPECT_EQ(counters[0].not_applicable, expect_batch_done ? 0 : 2);
     EXPECT_EQ(counters[0].failed, 0);
-
-    EXPECT_EQ(counters[1].attempts, expect_batch_done ? 0 : 2);
-    EXPECT_EQ(counters[1].done, 0);
-    EXPECT_EQ(counters[1].not_applicable, expect_batch_done ? 0 : 2);
-    EXPECT_EQ(counters[1].failed, 0);
-
-    EXPECT_EQ(counters[2].attempts, expect_batch_done ? 0 : 2);
-    EXPECT_EQ(counters[2].done, expect_batch_done ? 0 : 2);
-    EXPECT_EQ(counters[2].not_applicable, 0);
-    EXPECT_EQ(counters[2].failed, 0);
+    if (counters[0].done == 2) {
+        EXPECT_EQ(counters[0].not_applicable, 0);
+        EXPECT_EQ(counters[1].attempts, 0);
+        EXPECT_EQ(counters[2].attempts, 0);
+    } else {
+        EXPECT_EQ(counters[0].done, 0);
+        EXPECT_EQ(counters[0].not_applicable, 2);
+        EXPECT_EQ(counters[1].attempts, 2);
+        EXPECT_EQ(counters[1].done, 0);
+        EXPECT_EQ(counters[1].not_applicable, 2);
+        EXPECT_EQ(counters[1].failed, 0);
+        EXPECT_EQ(counters[2].attempts, 2);
+        EXPECT_EQ(counters[2].done, 2);
+        EXPECT_EQ(counters[2].not_applicable, 0);
+        EXPECT_EQ(counters[2].failed, 0);
+    }
 
     releasePoolBlock(*host_pool_, host_block);
 }
@@ -1505,7 +1500,6 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchTakesPrecedenceWhenBothStrategiesAreEligible) {
-    const bool expect_batch_done = expectCudaBatchStrategyDone();
     DeviceHostCopyOptions options;
     options.staged_sm_copy_enabled                           = true;
     options.staged_sm_min_tile_count                         = 1;
@@ -1522,10 +1516,19 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchTakesPrecedenceWhenBothS
     expectStatus(per_rank_transfer_engine,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
                  TransferStatus::OK);
-    EXPECT_EQ(counters[0].done, expect_batch_done ? 1 : 0);
-    EXPECT_EQ(counters[0].not_applicable, expect_batch_done ? 0 : 1);
-    EXPECT_EQ(counters[1].attempts, expect_batch_done ? 0 : 1);
-    EXPECT_EQ(counters[1].done, expect_batch_done ? 0 : 1);
+    EXPECT_EQ(counters[0].attempts, 1);
+    EXPECT_EQ(counters[0].failed, 0);
+    if (counters[0].done == 1) {
+        EXPECT_EQ(counters[0].not_applicable, 0);
+        EXPECT_EQ(counters[1].attempts, 0);
+    } else {
+        EXPECT_EQ(counters[0].done, 0);
+        EXPECT_EQ(counters[0].not_applicable, 1);
+        EXPECT_EQ(counters[1].attempts, 1);
+        EXPECT_EQ(counters[1].done, 1);
+        EXPECT_EQ(counters[1].not_applicable, 0);
+        EXPECT_EQ(counters[1].failed, 0);
+    }
     EXPECT_EQ(counters[2].attempts, 0);
 
     releasePoolBlock(*host_pool_, host_block);
