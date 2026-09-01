@@ -35,6 +35,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+# P0 slice 2 kill-test: per-process count of T=1 prefill-shaped forwards. The
+# FIRST one in each rank is the startup seeding pass (must run); the rest are
+# the decode-arm commit rounds (the bypass experiment's target).
+_T1_SEEN = [0]
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -1246,6 +1251,56 @@ class DeepSeekV4Model(GptModelBase):
             )
             return PyModelOutputs(hidden)
         attn = inputs.attention_inputs
+
+        # P0 slice 2 kill-test (Aug 31): decode-round commit rounds arrive here
+        # as tiny prefill-shaped inputs (the "decode-arm prefill") whose target
+        # pass duplicates what the verify graph already computed for the same
+        # gamma+1 rows. When DSV4_SKIP_DECODE_ARM_PREFILL=N > 0 and the WORLD-MAX
+        # prefill token count is <= N, return empty outputs: the draft commit
+        # reads verify hiddens (bound by decodeStep) and writes nothing here;
+        # run_commit_step handles zero-row inputs gracefully. The world-max
+        # all_reduce keeps the decision rank-invariant (a local guard deadlock
+        # mismatched collectives — see DSV4_SM120_EAGER_FIXED_EP lesson).
+        _skip_arm = int(os.environ.get("DSV4_SKIP_DECODE_ARM_PREFILL", "0"))
+        if (
+            _skip_arm != 0
+            and bool(getattr(attn, "is_prefill", False))
+            and not bool(getattr(attn, "is_target_verify", False))
+            and self.kv_cache is not None
+        ):
+            import torch.distributed as _dist
+
+            _total = int(inputs.input_ids.numel()) if inputs.input_ids is not None else 0
+            _dev = self.v4.embed.weight.device
+            # Kill-test predicate: skip T=1 prefill-shaped forwards EXCEPT THE
+            # FIRST TWO (boot-14 died on seen=1, boot-18 on seen=2 — startup has
+            # two T=1 seeding passes that must run). Per-rank order counter; the
+            # boolean is world-max'd so all ranks take identical collective paths.
+            _pred = 1 if (_total <= abs(_skip_arm) and _T1_SEEN[0] >= 2) else 0
+            _T1_SEEN[0] += 1
+            _t = torch.tensor([_pred], dtype=torch.int32, device=_dev)
+            _dist.all_reduce(_t, op=_dist.ReduceOp.MAX, group=_dist.group.WORLD)
+            _do_skip = int(_t.item()) == 1
+            if os.environ.get("DSV4_DIAG"):
+                print(
+                    f"[SKIPARM] rank={_dist.get_rank()} total={_total} "
+                    f"seen={_T1_SEEN[0]} pred={_pred} skip={_do_skip}",
+                    flush=True,
+                )
+            if _do_skip:
+                # Shape-preserving bypass: T rows of zeros (NOT 0 rows — the
+                # C++ prefill pipeline dereferences model_output fields and
+                # aborts on empty; boots #13/#14/#19 all died there). With a
+                # valid-shaped zeroed output the pipeline proceeds; if the
+                # skipped pass was load-bearing, acceptance collapses (gate 2)
+                # — if not, tokens are unchanged (gate 1).
+                return PyModelOutputs(
+                    torch.zeros(
+                        (_total, self._v4_args.dim),
+                        dtype=torch.bfloat16,
+                        device=_dev,
+                    )
+                )
 
         # Subclass-overridable hidden-state preparation hooks.  When a
         # subclass (e.g. ``DeepSeekV4MtpModel``) overrides

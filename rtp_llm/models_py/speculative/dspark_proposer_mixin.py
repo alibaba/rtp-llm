@@ -299,14 +299,22 @@ class DSparkProposerMixin:
         )
 
         main_x = self.combine_hidden_states(features)
-        self.commit_feature_rows(
-            main_x,
-            req,
-            positions,
-            committed_ends.to(torch.int32),
-            inputs,
-            commit_ctx=commit_ctx,
-        )
+        if __import__("os").environ.get("DSV4_SKIP_DRAFT_COMMIT") == "1":
+            # P0 slice 2 POSITIVE CONTROL (gate 0b): skip ONLY the draft
+            # feature-KV write; keep the output shape so the C++ pipeline
+            # proceeds. The next propose then reads stale KV and natural
+            # acceptance MUST collapse — proves the harness detects draft-
+            # context corruption. Never enable in serving.
+            pass
+        else:
+            self.commit_feature_rows(
+                main_x,
+                req,
+                positions,
+                committed_ends.to(torch.int32),
+                inputs,
+                commit_ctx=commit_ctx,
+            )
         # The fixed-width commit CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
         return PyModelOutputs(main_x)
