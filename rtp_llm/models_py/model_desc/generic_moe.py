@@ -1,4 +1,4 @@
-from typing import Any, Dict, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import torch
 from torch import nn
@@ -828,6 +828,26 @@ class GenericMoeModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
         self._cuda_graph_layers: Optional[nn.ModuleList] = None
+        self._prefix_prefetch_hooks: Dict[int, Optional[List[Optional[Any]]]] = {}
+
+    def _resolve_prefix_prefetch_hooks(
+        self, layers: nn.ModuleList
+    ) -> Optional[List[Optional[Any]]]:
+        key = id(layers)
+        if key not in self._prefix_prefetch_hooks:
+            hooks: List[Optional[Any]] = []
+            for layer in layers[: self.layer_num]:
+                attn = getattr(layer, "self_attn", None)
+                gate = getattr(attn, "cp_prefix_prefetch_enabled", None)
+                hooks.append(
+                    attn.maybe_prefetch_cp_prefix
+                    if gate is not None and gate()
+                    else None
+                )
+            self._prefix_prefetch_hooks[key] = (
+                hooks if any(hook is not None for hook in hooks) else None
+            )
+        return self._prefix_prefetch_hooks[key]
 
     def _begin_mtp_target_hidden_capture(
         self, hidden_states: torch.Tensor
@@ -924,7 +944,18 @@ class GenericMoeModel(GptModelBase):
         mtp_target_hidden_capture = self._begin_mtp_target_hidden_capture(hidden_states)
         prev_topk_indices = None
         layers = self._layers_for_forward()
+        prefetch_hooks = (
+            self._resolve_prefix_prefetch_hooks(layers)
+            if inputs.attention_inputs.is_prefill and self.kv_cache is not None
+            else None
+        )
         for i, decoder_layer in enumerate(layers[: self.layer_num]):
+            if prefetch_hooks is not None and i + 1 < self.layer_num:
+                next_prefetch = prefetch_hooks[i + 1]
+                if next_prefetch is not None:
+                    next_prefetch(
+                        self.kv_cache.get_layer_cache(i + 1), inputs.attention_inputs
+                    )
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
                 hidden_states,

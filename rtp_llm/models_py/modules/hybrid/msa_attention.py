@@ -38,8 +38,9 @@ The index branch (``index_q_proj`` / ``index_k_proj`` + per-head Gemma RMSNorm
 ``None`` and the index output ``idx_o`` is discarded.
 """
 
+import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -59,6 +60,9 @@ _USE_CP_DIRECT_PAGED_PREFILL = (
 # Fused paged->scratch main-K/V gather (one pass instead of torch's
 # index -> cast -> index_put). Set M3_MSA_FUSED_KV_GATHER=0 for the torch path.
 _FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
+_CP_PACKED_KV_OVERLAP = os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1"
+_CP_PREFIX_PREFETCH = os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1"
+_MAX_LIVE_PREFETCH = 2
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1818,6 +1822,11 @@ class MSAAttention(nn.Module):
     _cp_shared_meta: Optional[Dict[str, Any]] = None
     _paged_decode_shared_meta: Optional[Dict[str, Any]] = None
     _target_verify_shared_meta: Optional[Dict[str, Any]] = None
+    _cp_side_stream: Dict[torch.device, torch.cuda.Stream] = {}
+    _cp_side_event: Dict[torch.device, torch.cuda.Event] = {}
+    _cp_prefetch_stream: Dict[torch.device, torch.cuda.Stream] = {}
+    _cp_prefetch_entries: Dict[int, Dict[str, Any]] = {}
+    _cp_prefetch_disabled: bool = False
 
     @classmethod
     def _get_trtllm_workspace(cls, device: torch.device):
@@ -3198,26 +3207,32 @@ class MSAAttention(nn.Module):
             raise RuntimeError("MSA direct prefix restore requires idx-K scratch")
 
         block_table = self._physical_block_table(attn_inputs)
-        main_pages = gather_cp_sharded_prefix_pool(
-            self._paged_kv_base_view(kv_cache),
-            block_table,
-            prefix_cpu,
-            page_size=self.page_size,
-            cp_size=self._cp_size,
-            cp_rank=self._cp_rank,
-            gather_plan=gather_plan,
-            restore_logical_order=gather_plan is None,
+        prefetched = self._take_prefetched_cp_prefix(
+            kv_cache, attn_inputs, block_table, gather_plan
         )
-        idx_pages = gather_cp_sharded_prefix_pool(
-            self._idx_k_paged_view(kv_cache),
-            block_table,
-            prefix_cpu,
-            page_size=self.page_size,
-            cp_size=self._cp_size,
-            cp_rank=self._cp_rank,
-            gather_plan=gather_plan,
-            restore_logical_order=gather_plan is None,
-        )
+        if prefetched is not None:
+            main_pages, idx_pages = prefetched
+        else:
+            main_pages = gather_cp_sharded_prefix_pool(
+                self._paged_kv_base_view(kv_cache),
+                block_table,
+                prefix_cpu,
+                page_size=self.page_size,
+                cp_size=self._cp_size,
+                cp_rank=self._cp_rank,
+                gather_plan=gather_plan,
+                restore_logical_order=gather_plan is None,
+            )
+            idx_pages = gather_cp_sharded_prefix_pool(
+                self._idx_k_paged_view(kv_cache),
+                block_table,
+                prefix_cpu,
+                page_size=self.page_size,
+                cp_size=self._cp_size,
+                cp_rank=self._cp_rank,
+                gather_plan=gather_plan,
+                restore_logical_order=gather_plan is None,
+            )
 
         if dst_pages is None:
             dst_page_parts = []
@@ -3321,6 +3336,180 @@ class MSAAttention(nn.Module):
         )
 
         return base[:, 0], base[:, 1], phys_block_table, idx_view
+
+    @classmethod
+    def cp_prefix_prefetch_enabled(cls) -> bool:
+        return _CP_PREFIX_PREFETCH
+
+    @classmethod
+    def _drop_all_prefetch(cls) -> None:
+        while cls._cp_prefetch_entries:
+            cls._cp_prefetch_entries.popitem()[1]["event"].synchronize()
+
+    @classmethod
+    def _drop_stale_prefetch(cls, owner: PyAttentionInputs) -> None:
+        stale = [
+            layer_idx
+            for layer_idx, entry in cls._cp_prefetch_entries.items()
+            if entry["owner"] is not owner
+        ]
+        for layer_idx in stale:
+            cls._cp_prefetch_entries.pop(layer_idx)["event"].synchronize()
+        while len(cls._cp_prefetch_entries) > _MAX_LIVE_PREFETCH:
+            oldest = next(iter(cls._cp_prefetch_entries))
+            cls._cp_prefetch_entries.pop(oldest)["event"].synchronize()
+
+    def maybe_prefetch_cp_prefix(
+        self, kv_cache: Optional[LayerKVCache], attn_inputs: PyAttentionInputs
+    ) -> None:
+        if (
+            not _CP_PREFIX_PREFETCH
+            or MSAAttention._cp_prefetch_disabled
+            or kv_cache is None
+        ):
+            return
+        try:
+            self._issue_cp_prefix_prefetch(kv_cache, attn_inputs)
+        except Exception:
+            MSAAttention._cp_prefetch_disabled = True
+            MSAAttention._drop_all_prefetch()
+            logging.warning(
+                "[msa] disabling CP prefix prefetch after issue failure; "
+                "falling back to inline prefix gather",
+                exc_info=True,
+            )
+
+    def _issue_cp_prefix_prefetch(
+        self, kv_cache: LayerKVCache, attn_inputs: PyAttentionInputs
+    ) -> None:
+        self._drop_stale_prefetch(attn_inputs)
+        cp_size = int(self._cp_size)
+        if not self._kv_sharded or cp_size <= 1:
+            return
+        if self.layer_idx in MSAAttention._cp_prefetch_entries:
+            return
+
+        meta = MSAAttention._cp_shared_meta
+        if meta is None or meta.get("owner") is not attn_inputs:
+            return
+        if not meta.get("use_direct_paged") or int(meta.get("prefix_sum", 0)) <= 0:
+            return
+        addr = meta.get("addr")
+        if addr is None:
+            return
+
+        block_table = self._physical_block_table(attn_inputs)
+        plan = addr["prefix_gather_plans"].get(
+            (
+                block_table.device,
+                int(block_table.data_ptr()),
+                tuple(block_table.shape),
+            )
+        )
+        if plan is None or plan.total_logical_blocks == 0:
+            return
+
+        main_pool = self._paged_kv_base_view(kv_cache)
+        if main_pool is None or main_pool.dim() != 5 or not main_pool.is_cuda:
+            return
+        idx_pool = self._idx_k_paged_view(kv_cache)
+        device = main_pool.device
+        if idx_pool.dim() < 2 or idx_pool.device != device:
+            return
+        if plan.packed_block_ids.device != device:
+            return
+
+        stream = MSAAttention._cp_prefetch_stream.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            MSAAttention._cp_prefetch_stream[device] = stream
+
+        main_rows = int(plan.packed_block_ids.numel()) * cp_size
+        main_gathered = torch.empty(
+            (main_rows, *main_pool.shape[1:]), dtype=main_pool.dtype, device=device
+        )
+        idx_gathered = torch.empty(
+            (main_rows, *idx_pool.shape[1:]), dtype=idx_pool.dtype, device=device
+        )
+        main_stream = torch.cuda.current_stream(device)
+        stream.wait_stream(main_stream)
+        main_gathered.record_stream(stream)
+        idx_gathered.record_stream(stream)
+        with torch.cuda.stream(stream):
+            all_gather(
+                main_pool.index_select(0, plan.packed_block_ids),
+                group=Group.TP_PREFETCH,
+                out=main_gathered,
+            )
+            all_gather(
+                idx_pool.index_select(0, plan.packed_block_ids),
+                group=Group.TP_PREFETCH,
+                out=idx_gathered,
+            )
+        event = torch.cuda.Event()
+        event.record(stream)
+        MSAAttention._cp_prefetch_entries[self.layer_idx] = {
+            "owner": attn_inputs,
+            "plan": plan,
+            "block_table_ptr": int(block_table.data_ptr()),
+            "main_pool_ptr": int(main_pool.data_ptr()),
+            "main": main_gathered,
+            "idx": idx_gathered,
+            "event": event,
+            "device": device,
+        }
+
+    def _take_prefetched_cp_prefix(
+        self,
+        kv_cache: LayerKVCache,
+        attn_inputs: PyAttentionInputs,
+        block_table: torch.Tensor,
+        gather_plan,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        entry = MSAAttention._cp_prefetch_entries.pop(self.layer_idx, None)
+        if entry is None:
+            return None
+        main_pool = self._paged_kv_base_view(kv_cache)
+        if (
+            entry["owner"] is not attn_inputs
+            or entry["plan"] is not gather_plan
+            or entry["block_table_ptr"] != int(block_table.data_ptr())
+            or main_pool is None
+            or entry["main_pool_ptr"] != int(main_pool.data_ptr())
+        ):
+            entry["event"].synchronize()
+            return None
+        torch.cuda.current_stream(entry["device"]).wait_event(entry["event"])
+        return entry["main"], entry["idx"]
+
+    def _cp_all_gather_packed_kv(
+        self, packed_kv: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.cuda.Event]]:
+        cp_size = int(self.parallelism_config.tp_size)
+        if not _CP_PACKED_KV_OVERLAP or not packed_kv.is_cuda or cp_size <= 1:
+            return all_gather(packed_kv, group=Group.TP), None
+
+        device = packed_kv.device
+        stream = MSAAttention._cp_side_stream.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            MSAAttention._cp_side_stream[device] = stream
+            MSAAttention._cp_side_event[device] = torch.cuda.Event()
+        event = MSAAttention._cp_side_event[device]
+
+        main_stream = torch.cuda.current_stream(device)
+        all_packed = torch.empty(
+            (packed_kv.shape[0] * cp_size, *packed_kv.shape[1:]),
+            dtype=packed_kv.dtype,
+            device=device,
+        )
+        stream.wait_stream(main_stream)
+        packed_kv.record_stream(stream)
+        all_packed.record_stream(stream)
+        with torch.cuda.stream(stream):
+            all_gather(packed_kv, group=Group.TP_SIDE, out=all_packed)
+        event.record(stream)
+        return all_packed, event
 
     # ------------------------------------------------------------------
     def _forward_cp_prefill(
@@ -3792,7 +3981,7 @@ class MSAAttention(nn.Module):
                 dim=-1,
             )
 
-        all_packed = all_gather(packed_kv, group=Group.TP)
+        all_packed, packed_kv_event = self._cp_all_gather_packed_kv(packed_kv)
 
         q = _rows_to_contig(q)
         idx_q = idx_q.contiguous()
@@ -3814,6 +4003,9 @@ class MSAAttention(nn.Module):
                 del k_fb, v_fb
 
         token_count = token_count_py
+
+        if packed_kv_event is not None:
+            torch.cuda.current_stream(all_packed.device).wait_event(packed_kv_event)
 
         working_k_pages = None
         working_v_pages = None

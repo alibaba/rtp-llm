@@ -6,7 +6,7 @@ import os
 import re
 from datetime import timedelta
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed
@@ -26,6 +26,8 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     DP_AND_TP = "DP_AND_TP"
+    TP_SIDE = "TP_SIDE"
+    TP_PREFETCH = "TP_PREFETCH"
 
 
 # Global process group storage
@@ -289,6 +291,73 @@ def _create_process_groups(
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
+
+    if tp_size > 1 and side_comm_required():
+        _create_tp_side_groups(parallelism_config, backend)
+
+
+def required_side_groups() -> Tuple[Group, ...]:
+    groups = []
+    if os.environ.get("RTP_LLM_CP_PACKED_KV_OVERLAP", "0") == "1":
+        groups.append(Group.TP_SIDE)
+    if os.environ.get("RTP_LLM_CP_PREFIX_PREFETCH", "0") == "1":
+        groups.append(Group.TP_PREFETCH)
+    return tuple(groups)
+
+
+def side_comm_required() -> bool:
+    return bool(required_side_groups())
+
+
+def _create_tp_side_groups(
+    parallelism_config: ParallelismConfig,
+    backend: str,
+) -> None:
+    global _group_map
+
+    world_rank = parallelism_config.world_rank
+    world_size = parallelism_config.world_size
+    tp_size = parallelism_config.tp_size
+    dp_size = parallelism_config.dp_size
+
+    side_groups = []
+    for group in required_side_groups():
+        if world_size == tp_size:
+            side_groups.append((group, list(range(world_size))))
+        else:
+            side_groups.extend(
+                (
+                    group.name + str(dp_rank_val),
+                    [r for r in range(world_size) if r // tp_size == dp_rank_val],
+                )
+                for dp_rank_val in range(dp_size)
+            )
+
+    warmup_device = (
+        torch.device("cuda", parallelism_config.local_rank)
+        if backend == "nccl" and torch.cuda.is_available()
+        else None
+    )
+    for group_key, ranks in side_groups:
+        if not ranks:
+            continue
+        logging.info(
+            f"[rank: {world_rank}] Creating side group {group_key} with ranks: {ranks}"
+        )
+        side_group = torch.distributed.new_group(
+            ranks=ranks,
+            backend=backend,
+            timeout=timedelta(days=36500),
+        )
+        if world_rank in ranks:
+            _group_map[group_key] = side_group
+            if warmup_device is not None:
+                torch.distributed.all_gather_into_tensor(
+                    torch.empty(len(ranks), dtype=torch.float32, device=warmup_device),
+                    torch.zeros(1, dtype=torch.float32, device=warmup_device),
+                    group=side_group,
+                )
+        torch.distributed.barrier()
 
 
 def _register_process_groups_to_cpp():
@@ -634,6 +703,12 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
         dp_rank = torch.distributed.get_rank() // tp_size
         group_key = Group.TP.name + str(dp_rank)
+    elif group in (Group.TP_SIDE, Group.TP_PREFETCH):
+        group_key = (
+            group.name + str(torch.distributed.get_rank() // tp_size)
+            if tp_size > 1 and world_size != tp_size
+            else group
+        )
     else:
         # DP_AND_TP always uses Group.DP_AND_TP as key
         group_key = Group.DP_AND_TP
@@ -719,45 +794,64 @@ def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> 
     return tensor
 
 
-def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def all_gather(
+    tensor: torch.Tensor, group: Group, out: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """Gather tensors from all ranks in the group.
 
     Args:
         tensor: Tensor to gather from this rank
         group: Process group to use
+        out: Optional caller-owned destination
 
     Returns:
         Concatenated tensor containing all gathered tensors
         (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
-    rocm_rccl = _get_rocm_rccl()
-    if rocm_rccl is not None:
-        rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
-        if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-            return rocm_rccl.capture_all_gather(tensor)
+    if out is None:
+        rocm_rccl = _get_rocm_rccl()
+        if rocm_rccl is not None:
+            rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+            if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+                return rocm_rccl.capture_all_gather(tensor)
 
-    if group == Group.TP:
-        symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
-        if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(
-            tensor
-        ):
-            gathered = symm_mem_comm.all_gather(tensor)
-            if gathered is not None:
-                world_size = gathered.shape[0]
-                return gathered.view(
-                    [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
-                )
+        if group == Group.TP:
+            symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
+            if (
+                symm_mem_comm is not None
+                and symm_mem_comm.should_torch_symm_mem_allgather(tensor)
+            ):
+                gathered = symm_mem_comm.all_gather(tensor)
+                if gathered is not None:
+                    world_size = gathered.shape[0]
+                    return gathered.view(
+                        [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
+                    )
 
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
+    expected_shape = [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
 
-    tensor_list = torch.empty(
-        [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
-        device=tensor.device,
-        dtype=tensor.dtype,
-    )
-    torch.distributed.all_gather_into_tensor(tensor_list, tensor, group=process_group)
-    return tensor_list
+    if out is None:
+        out = torch.empty(
+            expected_shape,
+            device=tensor.device,
+            dtype=tensor.dtype,
+        )
+    elif (
+        list(out.shape) != expected_shape
+        or out.dtype != tensor.dtype
+        or out.device != tensor.device
+        or not out.is_contiguous()
+    ):
+        raise ValueError(
+            f"all_gather out must be a contiguous {expected_shape} {tensor.dtype} "
+            f"tensor on {tensor.device}, got {list(out.shape)} {out.dtype} on "
+            f"{out.device} (contiguous={out.is_contiguous()})"
+        )
+
+    torch.distributed.all_gather_into_tensor(out, tensor, group=process_group)
+    return out
 
     # reference old implementation
     # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
@@ -777,6 +871,7 @@ def barrier(group: Group) -> None:
 
 __all__ = [
     "Group",
+    "side_comm_required",
     "init_distributed_environment",
     "init_user_buffers_environment",
     "distributed_environment_initialized",
