@@ -289,11 +289,12 @@ class ComprehensiveFaultInjectionTest {
             double beforeRatio = 1.0 - (double) before.getAvailableKvCache() / before.getTotalKvCache();
             assertEquals(0.0, beforeRatio, 0.001, "baseline KV ratio should be ~0");
 
-            // Set KV pressure via HTTP — using 4M tokens for >0.5 ratio
-            // (50000 as suggested in the task spec is insufficient for >0.5 with total=6,291,456)
+            // Set KV pressure via HTTP — absolute active_kv_tokens semantics,
+            // 4M tokens for >0.5 ratio (50000 as suggested in the task spec is
+            // insufficient for >0.5 with total=6,291,456)
             long pressureTokens = 4_000_000L;
             httpPost(controlServer.getPort(), "/set_kv_pressure",
-                    "{\"port\":" + prefillPort + ",\"tokens\":" + pressureTokens + "}");
+                    "{\"port\":" + prefillPort + ",\"active_kv_tokens\":" + pressureTokens + "}");
             assertEquals(pressureTokens, prefill.getFaultConfig().getKvPressureTokens());
 
             // Get worker status — verify pressure
@@ -306,9 +307,9 @@ class ComprehensiveFaultInjectionTest {
             assertTrue(after.getAvailableKvCache() < after.getTotalKvCache(),
                     "available KV should be less than total under pressure");
 
-            // Clear KV pressure
+            // Clear KV pressure (absolute zero)
             httpPost(controlServer.getPort(), "/set_kv_pressure",
-                    "{\"port\":" + prefillPort + ",\"tokens\":0}");
+                    "{\"port\":" + prefillPort + ",\"active_kv_tokens\":0}");
             assertEquals(0, prefill.getFaultConfig().getKvPressureTokens());
 
             // Verify recovery

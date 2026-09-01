@@ -101,27 +101,6 @@ def _master_http(ops) -> str:
 # ===========================================================================
 
 
-def _engine_side_checks(ops, rid: int, response) -> tuple[str, str, str, str]:
-    """Common engine-side verification (recv / cancelled / inflight-clean)."""
-    method = "enqueue_batch" if response.enqueued_by_master else "generate_stream"
-    engine_recv, recv_detail = ops.verify_engine_received(rid, method)
-    engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
-    if response.enqueued_by_master:
-        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), 10.0
-        )
-    else:
-        inflight_ok, inflight_detail = True, "N/A"
-    return (
-        f"engine_recv={engine_recv}({recv_detail}), "
-        f"engine_cancelled={engine_cancelled}({cancel_detail}), "
-        f"inflight_clean={inflight_ok}({inflight_detail}), ",
-        recv_detail,
-        "",
-        "",
-    )
-
-
 @case("smoke_cancel_t1", source="cancel_smoke.py T1")
 def t1_basic_cancel(ctx: CaseContext):
     ops = ctx.ops()

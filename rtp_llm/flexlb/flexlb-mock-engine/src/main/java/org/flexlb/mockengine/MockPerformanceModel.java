@@ -138,7 +138,6 @@ final class MockPerformanceModel {
     // waiting queue) is unconditional and needs no switch.
     private final boolean reportQueuedAsKvAllocated;
     private volatile double jitterPct;
-    private volatile double cacheAdmissionRate;
     // Explicit performance-JSON "prefill.fixed_ms": a declared flat prefill
     // for duration-blind suites (chaos/elastic). Null = not declared ->
     // formula-driven. This is an explicit configuration channel, NOT the
@@ -164,8 +163,7 @@ final class MockPerformanceModel {
                                  double tokensPerStep,
                                  double decodeScale,
                                  boolean reportQueuedAsKvAllocated,
-                                 double jitterPct,
-                                 double cacheAdmissionRate) {
+                                 double jitterPct) {
         this.blockSize = blockSize;
         this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
@@ -181,7 +179,6 @@ final class MockPerformanceModel {
         this.decodeScale = decodeScale;
         this.reportQueuedAsKvAllocated = reportQueuedAsKvAllocated;
         this.jitterPct = jitterPct;
-        this.cacheAdmissionRate = cacheAdmissionRate;
     }
 
     static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
@@ -250,12 +247,11 @@ final class MockPerformanceModel {
                     + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
         }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
-        double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
                 prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax, formula,
                 List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
                 decode.path("scale").asDouble(1.0),
-                reportQueuedAsKvAllocated, jitterPct, cacheAdmissionRate);
+                reportQueuedAsKvAllocated, jitterPct);
     }
 
     /**
@@ -463,16 +459,6 @@ final class MockPerformanceModel {
      */
     long decodeStepDelayMs(int activeBatchSize) {
         return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale());
-    }
-
-    boolean shouldAdmitCache() {
-        if (cacheAdmissionRate >= 1.0) {
-            return true;
-        }
-        if (cacheAdmissionRate <= 0.0) {
-            return false;
-        }
-        return ThreadLocalRandom.current().nextDouble() < cacheAdmissionRate;
     }
 
     private double interpolateStepMs(int activeBatchSize) {

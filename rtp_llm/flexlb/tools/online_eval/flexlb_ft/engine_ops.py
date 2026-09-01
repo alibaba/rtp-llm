@@ -372,14 +372,6 @@ class EngineOps:
         snap = self.snapshot()
         return {e["grpc_addr"]: e["name"] for e in snap.get("engines", [])}
 
-    def requests_data(self) -> dict:
-        data = http_get_json(f"http://127.0.0.1:{self.mock_http_port}/requests")
-        return data or {}
-
-    def engine_health(self) -> dict:
-        data = http_get_json(f"http://127.0.0.1:{self.mock_http_port}/health")
-        return data or {}
-
     def inject(self, engine_name: str, config: dict) -> dict:
         status, body = http_post_json(
             f"http://127.0.0.1:{self.mock_http_port}/inject",
@@ -583,34 +575,3 @@ class EngineOps:
             return addr, None
         except Exception as exc:
             return "", repr(exc)
-
-    def inflight_count_for_port(self, grpc_port: int) -> int:
-        """Master-side prefill inflight_batches for the endpoint at grpc_port.
-
-        The master identifies prefill endpoints by their *control-plane*
-        (HTTP) port, which in the mock's base-port layout is grpc_port - 1
-        (e.g. base 57051 → mock http 57050). Match either form — the strict
-        grpc match alone returns -1 on the first engine of every environment
-        (its http port collides with nothing) and mis-attributes the count on
-        multi-prefill environments (prefill-1's http port == base).
-        """
-        data = self.master_inflight()
-        if data is None:
-            return -1
-        suffixes = (f":{grpc_port}", f":{grpc_port - 1}")
-        for ep in data.get("prefill_endpoints", []) or []:
-            ip_port = ep.get("ip_port", "")
-            if ip_port.endswith(suffixes):
-                batches = ep.get("inflight_batches", 0)
-                return len(batches) if isinstance(batches, list) else int(batches)
-        return -1
-
-    def mock_engine_field(self, engine_name: str, field_name: str, default=-1):
-        try:
-            engines = self.snapshot().get("engines", [])
-            for engine in engines:
-                if engine.get("name") == engine_name:
-                    return engine.get(field_name, default)
-        except Exception:
-            pass
-        return default

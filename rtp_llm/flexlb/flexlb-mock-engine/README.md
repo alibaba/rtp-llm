@@ -7,7 +7,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **Realistic timing simulation**: Uses `ScheduledExecutorService.schedule()` to wait for formula-computed prefill/decode durations
 - **Performance formula**: Supports `PrefillTimeFormula` AST evaluation with batch/input/hit-cache/compute token variables
 - **Fault injection**: 9 fault types (enqueue_error, generate_error, fetch_error, no_respond, kv_pressure, queue_depth, crash_after, enqueue_delay, generate_delay)
-- **HTTP control**: 12 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /metrics, +/cancel_request on this branch)
+- **HTTP control**: 14 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /cancel_request, /add_engine, /remove_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: LRU cache with prefix matching, pressure simulation
 - **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches`, default 0 = zero-waiting fail-fast, with backpressure rejection), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
@@ -50,19 +50,22 @@ bash run_online_eval.sh
 | /inject | POST | Inject fault (type, delay_ms, n, etc.) |
 | /clear_inject | POST | Clear all fault injections |
 | /set_perf | POST | Override prefill_fixed_ms, decode_scale, max_prefill_concurrency |
-| /set_kv_pressure | POST | Set KV pressure (`active_kv_tokens` absolute / `tokens` additive) |
+| /set_kv_pressure | POST | Set KV pressure (`active_kv_tokens` absolute) |
 | /set_queue_depth | POST | Set queue depth limit (real enqueue rejection) |
 | /stop_engine | POST | Stop engine (simulate crash) |
 | /start_engine | POST | Restart stopped engine (auto-clears faults) |
+| /cancel_request | POST | Cancel an in-flight request by request id |
+| /add_engine | POST | Dynamically add an engine to the running cluster |
+| /remove_engine | POST | Dynamically remove an engine (graceful drain) |
 | /requests | GET | List recent request/task records |
 
 The control server listens on `baseGrpcPort - 1` of the mock cluster.
 
-**Decode pending-queue capacity**: when `queue_depth_limit` is not explicitly set (via
-`/set_queue_depth` or fault injection), the effective decode pending cap defaults to
-`max(256, decode_max_concurrency × 2)`. This bounds the decode wait queue so that
-under overload the engine rejects excess requests with backpressure rather than
-queuing unbounded. Use `/set_queue_depth` to override at runtime.
+**Dynamic engine management**: `DynamicEngineManager` serves `/add_engine` and
+`/remove_engine` — a running cluster can be scaled up/down over HTTP without a
+restart. New engines register on the next port, write into the endpoints/
+discovery files, and are picked up by the master's file-discovery watcher;
+removal drains gracefully so in-flight requests finish first.
 
 **Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the
@@ -122,14 +125,14 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 - `/inject` accepts both the Java format (`{"type": ..., "enabled": ...}`) and the
   legacy Python format (`{"config": {"enqueue_error": bool, ...}}`).
 - `/set_kv_pressure`: `active_kv_tokens` sets the absolute active-KV-token count
-  (legacy Python semantics); `tokens` adds pressure tokens (original Java semantics).
+  (Python semantics; the field is the only accepted form).
 - `/set_queue_depth`: the `queue_depth` field name is accepted for compatibility,
   but unlike the legacy Python behavior (a display-only value bumping the snapshot
   `waiting` counter), the Java engine implements it as real enqueue rejection.
 - `/metrics`: aggregated by role by default; append `?per_engine=true` for
   per-engine labels (`engine_name`/`role`/`grpc_port`/`engine_ip`).
 
-## Test Suite (68 test methods)
+## Test Suite (209 test methods)
 
 | Test | Methods | Description |
 |------|---------|-------------|
@@ -165,7 +168,7 @@ entirely through environment variables (`Config.fromEnv`):
 | MAX_CONCURRENCY | 999999999 | Client-side concurrent request cap |
 | REPLAY_SPEED | 10.0 | Trace replay speed multiplier |
 | LOAD_CLIENT_WORKERS | 1 | Replay worker count |
-| OUTPUT_DIR | load_client_output | Output dir (summary.json, per_request.jsonl) |
+| OUTPUT_DIR | load_client_output | Output dir (per_request.jsonl, server_latency.json) |
 | NUM_SHARDS | 1 | Number of trace shards |
 | SHARD_INDEX | 0 | Shard index replayed by this instance |
 | LIMIT | 0 | Max requests to replay (0 = all) |
@@ -210,7 +213,7 @@ JavaMockEngineCluster
 ## Current-branch extensions (auto-tpm / priority)
 
 The sections above describe the shared `feat/flexlb_mock_engine_v2` baseline.
-This branch (`feat/flexlb_mock_engine_v2_intake`, based on
+This branch (`intake3-rebuild`, based on
 `codex/auto-tpm-request-mode`) additionally carries the following capabilities.
 
 ### Unique engine advertisement IPs
@@ -316,7 +319,7 @@ deep engine-side queues, so the cap must be explicitly requested. Do not
 ### Test-suite size on this branch
 
 The v2 baseline table above ("Test Suite (68 test methods)") is outdated
-here: this branch's test surface totals **138 test methods**. Two v2
+here: this branch's test surface totals **209 test methods**. Two v2
 baseline classes grew by one method each —
 `JavaLoadClientParityTest` 14 → **15** and `ClusterConfigParamTest` 7 → **8**
 — and the remainder of the delta are the new classes listed below (plus a

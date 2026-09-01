@@ -36,8 +36,7 @@ per-request send time (negative t = pre-send warmup).
 
 Phase A (aggregator-side unification): the summary section additionally
 carries validity_checks / test_valid (six checks, now also produced for
-single-worker runs), quick-stats (actual_send_qps, client_send_peak_qps /
-trace_due_peak_qps over the 1/10/100/1000ms windows, success/error/
+single-worker runs), quick-stats (actual_send_qps, success/error/
 completed qps, elapsed_s, counts, error_rate) and full-run percentiles for
 ttft/e2e/schedule (schedule dual-source adjudication via
 schedule_latency_source) — all computed from the merged per_request rows
@@ -216,12 +215,6 @@ def rank_rate(epoch_ms_values):
     return round((len(epoch_ms_values) - 1) * 1000.0 / (hi - lo), 3)
 
 
-def peak_bucket_qps(epoch_ms_values, window_ms):
-    """窗口桶峰值 QPS：bucket=int(ts//w)，max(桶计数)*1000/w（sh L1403-1405）。"""
-    buckets = Counter(int(v // window_ms) for v in epoch_ms_values)
-    return round(max(buckets.values(), default=0) * 1000.0 / window_ms, 3)
-
-
 def latency_summary(values, nd=1):
     """LatencySummary 形状：count/p50/p90/p95/p99/max/mean（nearest-rank）。"""
     if not values:
@@ -310,8 +303,7 @@ server_latency = load_json("load_client/server_latency.json")
 if not isinstance(server_latency, dict) or not server_latency:
     _embedded_sl = client_json.get("server_latency")
     server_latency = dict(_embedded_sl) if isinstance(_embedded_sl, dict) else {}
-rpc_start_ms = []  # stamped 行 send_start（actual_send_qps / client peak 轴）
-send_due_ms = []  # stamped 行 send_due（trace_due_peak_qps 轴）
+rpc_start_ms = []  # stamped 行 send_start（actual_send_qps 轴）
 pacing_lag_samples = []  # stamped 行 pacing_lag（Java 同规则：仅 send_start>0）
 ttft_samples = []  # is_ok 行 ttft_ms>0（全程分位，全量口径）
 e2e_samples = []  # is_ok 行 total_ms>0
@@ -431,11 +423,10 @@ for d in rows:
     if not _send_ts:
         per_second_unstamped += 1
         continue
-    # 三时间轴样本仅 stamped 行（sh 合并段 L1273-1278 同规则：
-    # send_start<=0 跳过——合成 timeout/exception 行无该键；send_due /
-    # pacing_lag 无值时记 0，与 sh 逐字一致）。
+    # 时间轴样本仅 stamped 行（sh 合并段 L1273-1278 同规则：
+    # send_start<=0 跳过——合成 timeout/exception 行无该键；pacing_lag
+    # 无值时记 0，与 sh 逐字一致）。
     rpc_start_ms.append(float(_send_ts))
-    send_due_ms.append(float(d.get("send_due_epoch_ms", 0.0) or 0.0))
     pacing_lag_samples.append(float(d.get("pacing_lag_ms", 0.0) or 0.0))
     t = int((_send_ts - epoch0) // 1000)
     b = per_sec[t]
@@ -671,12 +662,6 @@ else:
 # quick-stats 族（rows 非空才有意义；空 rows → None，no-backward-compat 无透传）
 if _have_rows:
     actual_send_qps_calc = rank_rate(rpc_start_ms)
-    client_send_peak_qps_calc = {
-        "%dms" % w: peak_bucket_qps(rpc_start_ms, w) for w in (1, 10, 100, 1000)
-    }
-    trace_due_peak_qps_calc = {
-        "%dms" % w: peak_bucket_qps(send_due_ms, w) for w in (1, 10, 100, 1000)
-    }
     _es = elapsed_s_calc or 0.0
     success_qps_calc = round(ok_count / _es, 3) if ok_count and _es else 0.0
     error_qps_calc = (
@@ -693,8 +678,6 @@ if _have_rows:
     )
 else:
     actual_send_qps_calc = None
-    client_send_peak_qps_calc = None
-    trace_due_peak_qps_calc = None
     success_qps_calc = None
     error_qps_calc = None
     completed_qps_calc = None
@@ -910,27 +893,12 @@ for kv in mock_stats:
     _prev_cancel, _prev_admitted = cancel_cum, admitted_cum
     _prev_master_cancel = master_cancel_cum
 
-# ---- batch size histogram + dispatch reason from flexlb structured logs ----
+# ---- flexlb structured log files (shared parser source below) ----
 # Legacy flexlb_logs/flexlb.log* first; master.log (the consolidated merge)
-# carries the same flexlb_batch_dispatch lines as the fallback.
-dec_re = re.compile(r"flexlb_batch_dispatch .*?reason=(\w+) batch_size=(\d+)")
-hist = Counter()
-reason_hist = defaultdict(Counter)
+# carries the same structured lines as the fallback.
 log_files = glob.glob("flexlb_logs/flexlb.log*")
 if not log_files and os.path.isfile("master.log"):
     log_files = ["master.log"]
-for f in log_files:
-    for line in open(f, errors="replace"):
-        m = dec_re.search(line)
-        if m:
-            reason, size = m.group(1), int(m.group(2))
-            hist[size] += 1
-            reason_hist[reason][size] += 1
-
-batch_distribution = {
-    "histogram": {str(k): hist[k] for k in sorted(hist)},
-    "by_reason": {r: {str(k): c[k] for k in sorted(c)} for r, c in reason_hist.items()},
-}
 
 # ---- engine_dist: per-engine routing distribution (from per_request rows) ----
 # Two scopes since 20260829: prefill/decode = ok rows only (matching
@@ -1687,7 +1655,6 @@ if batcher_pts or routing_pts:
 # (dispatch decisions happen asynchronously on each engine's batcher
 # thread; the sampling skew is bounded by the 1s poll interval).
 batcher_ts_by_role = []
-batcher_engine_quantile_ts = []
 batcher_top_engines_ts = []
 batcher_role_series = prom_ts_extract_role_engine(BATCHER_Q_BASE)
 if batcher_role_series:
@@ -1704,31 +1671,6 @@ if batcher_role_series:
     ]
 
     prefill_engines = batcher_role_series.get("PREFILL") or {}
-    vals_by_ts = defaultdict(list)
-    for pts in prefill_engines.values():
-        for ts, v in pts:
-            vals_by_ts[ts].append(v)
-
-    def _q(sorted_vals, frac):
-        idx = min(len(sorted_vals) - 1, int(round(frac * (len(sorted_vals) - 1))))
-        return round(sorted_vals[idx], 2)
-
-    q_rows = []
-    for ts, vals in sorted(vals_by_ts.items()):
-        s = sorted(vals)
-        q_rows.append(
-            (
-                ts,
-                {
-                    "p50": _q(s, 0.50),
-                    "p90": _q(s, 0.90),
-                    "p99": _q(s, 0.99),
-                    "max": round(s[-1], 2),
-                    "engines": len(s),
-                },
-            )
-        )
-    batcher_engine_quantile_ts = [{"t": t, **row} for t, row in rel_axis(q_rows)]
 
     # Top-5 prefill engines by peak depth, downsampled to the last sample
     # per 5s window to keep the aggregate compact.
@@ -1966,11 +1908,8 @@ out = {
         "error_qps": error_qps_calc,
         "completed_qps": completed_qps_calc,
         "client_pacing_lag_ms": _pacing_dist if _have_rows else None,
-        "client_send_peak_qps": client_send_peak_qps_calc,
-        "trace_due_peak_qps": trace_due_peak_qps_calc,
         # server_* 直读：server_latency 是当前格式正式输入，非 rows 依赖。
         "server_arrival_qps": server_latency.get("arrival_qps"),
-        "server_completion_qps": server_latency.get("completion_qps"),
         "schedule_latency_source": _schedule_source_calc,
         "schedule_latency_ms": _schedule_latency_calc,
         # 跨两侧全链路分位（聚合层新算，非 summary.json 原生字段）；
@@ -1985,15 +1924,7 @@ out = {
         "test_valid": test_valid_calc,
     },
     "batch": {
-        "config": slo.get("config"),
-        "decisions": {
-            k: v
-            for k, v in slo.get("decisions", {}).items()
-            if k != "invariant_violation_samples"
-        },
-        "completions": slo.get("completions"),
         "mock_last": slo.get("mock", {}).get("last"),
-        "distribution": batch_distribution,
     },
     "per_second": per_second,
     "master_arrivals_ts": master_arrivals_ts,
@@ -2010,7 +1941,6 @@ out = {
     "kv_ts": kv_ts,
     "batcher_ts": batcher_ts,
     "batcher_ts_by_role": batcher_ts_by_role,
-    "batcher_engine_quantile_ts": batcher_engine_quantile_ts,
     "batcher_top_engines_ts": batcher_top_engines_ts,
     "queue_top_bottom_ts": queue_top_bottom_ts,
     "dispatch_reason_ts": dispatch_reason_ts,

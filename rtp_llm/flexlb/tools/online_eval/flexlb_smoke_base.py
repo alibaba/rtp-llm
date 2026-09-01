@@ -95,19 +95,6 @@ class FlexLBSmokeBase:
         self._request_counter += 1
         return self._request_counter
 
-    @property
-    def _deploy_mode(self) -> str:
-        """Derive the smoke-test path label from strict FLEXLB_CONFIG axes."""
-        document = os.environ.get("FLEXLB_CONFIG")
-        if not document:
-            return "batch"
-        config = json.loads(document)
-        if config.get("dispatcher", {}).get("type") == "BATCH":
-            return "batch"
-        if config.get("scheduler", {}).get("type") == "DIRECT":
-            return "direct"
-        return "queue"
-
     def _master_target(self) -> str:
         return f"{self.args.master_ip}:{self.args.master_http_port + 2}"
 

@@ -39,29 +39,20 @@ import threading
 import time
 import urllib.request
 
-# G1 C whitelist — the six analyzer-consumed mock per-engine series.
+# G1 C whitelist — the two analyzer-consumed mock per-engine series.
 MOCK_KEEP_SERIES = {
     "mock_engine_running",
     "mock_engine_waiting",
-    "mock_engine_active_kv_tokens",
-    "mock_engine_available_kv_tokens",
-    "mock_engine_accepted_total",
-    "mock_engine_completed_total",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,
-# M3/S7 inflight age, S7 hit-ratio curves, dispatch reasons, cpu/mem).
+# M3/S7 inflight age, S7 hit-ratio curves, dispatch reasons).
 MASTER_PROMETHEUS_PREFIXES = (
     "flexlb_app_cache_",
     "flexlb_app_flexlb_batcher_queue_size",
-    "flexlb_app_routing_queue_length",
     "flexlb_app_flexlb_inflight_max_age_ms",
     "flexlb_app_engine_balancing_master_dispatch_reason_total",
     "flexlb_app_engine_balancing_master_batch_size",
-    "jvm_memory_used",
-    "jvm_gc_pause",
-    "process_cpu",
-    "system_cpu",
 )
 
 _STOP = threading.Event()
@@ -109,7 +100,7 @@ def run_master_counter_poller(http_addr, out_path, interval_s):
 def run_mock_per_engine_poller(port, out_path, interval_s):
     """G1 (was: start_mock_per_engine_poller heredoc).
 
-    GET http://127.0.0.1:{port}/metrics?per_engine=true, keep only the six
+    GET http://127.0.0.1:{port}/metrics?per_engine=true, keep only the two
     analyzer-consumed series, one "# ts=" grouped block per round."""
     keep = MOCK_KEEP_SERIES
     url = f"http://127.0.0.1:{port}/metrics?per_engine=true"
@@ -119,9 +110,10 @@ def run_mock_per_engine_poller(port, out_path, interval_s):
             try:
                 with urllib.request.urlopen(url, timeout=2) as response:
                     body = response.read().decode("utf-8", "replace")
-                # C: keep only the six analyzer-consumed series — the raw
+                # C: keep only the two analyzer-consumed series — the raw
                 # endpoint still emits the full ~22-per-engine surface (server
-                # cost unchanged), but the appended bytes drop to ~1/4.
+                # cost unchanged), but the appended bytes drop to a small
+                # fraction of it.
                 kept = [
                     line
                     for line in body.splitlines()

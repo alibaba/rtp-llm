@@ -627,7 +627,6 @@ def main():
     kv_ts = agg.get("kv_ts") or []
     batcher_ts = agg.get("batcher_ts") or []
     batcher_ts_by_role = agg.get("batcher_ts_by_role") or []
-    batcher_engine_quantile_ts = agg.get("batcher_engine_quantile_ts") or []
     batcher_top_engines_ts = agg.get("batcher_top_engines_ts") or []
     queue_top_bottom_ts = agg.get("queue_top_bottom_ts") or {}
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []

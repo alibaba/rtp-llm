@@ -259,14 +259,6 @@ def _measure_ttft(
     return ttft, None, response.enqueued_by_master
 
 
-def _any_engine_busy(ops, names: list[str]) -> bool:
-    snap = ops.snapshot_by_name()
-    return any(
-        snap.get(n, {}).get("waiting", 0) + snap.get(n, {}).get("running", 0) >= 1
-        for n in names
-    )
-
-
 def _all_engines_busy(ops, names: list[str]) -> bool:
     snap = ops.snapshot_by_name()
     return all(

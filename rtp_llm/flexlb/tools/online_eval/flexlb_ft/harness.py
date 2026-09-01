@@ -19,7 +19,6 @@ Only the Python standard library is used apart from ``grpc`` /
 
 from __future__ import annotations
 
-import atexit
 import json
 import os
 import shutil
@@ -259,16 +258,6 @@ def http_post_json(
         return 0, {"error": repr(exc)}
 
 
-def http_save(url: str, path: Path, timeout: float = 10.0) -> bool:
-    """GET a URL and save the body to *path* (returns False on failure)."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            path.write_bytes(resp.read())
-        return True
-    except Exception:
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Wait helpers
 # ---------------------------------------------------------------------------
@@ -408,28 +397,6 @@ class ProcessOps:
             os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-
-    @staticmethod
-    def pids_by_pattern(pattern: str) -> list[int]:
-        """pgrep -f pattern (own pid excluded)."""
-        try:
-            out = subprocess.run(
-                ["pgrep", "-f", pattern], capture_output=True, text=True, timeout=10
-            ).stdout
-            return [int(p) for p in out.split() if p.strip().isdigit()]
-        except Exception:
-            return []
-
-    @staticmethod
-    def kill9_pattern(pattern: str) -> int:
-        """Kill -9 every pid matching *pattern* (except ourselves). Returns count."""
-        count = 0
-        for pid in ProcessOps.pids_by_pattern(pattern):
-            if pid == os.getpid():
-                continue
-            ProcessOps.kill9(pid)
-            count += 1
-        return count
 
     @staticmethod
     def restart(
@@ -790,15 +757,6 @@ class FlexEnv:
 
     # -- addresses ---------------------------------------------------------
 
-    def grpc_port_of(self, role: str, index: int) -> int:
-        """Port layout mirrors JavaMockEngineCluster: prefill engines first."""
-        if role == "prefill":
-            return self.base_grpc_port + index
-        return self.base_grpc_port + self.spec.n_prefill + index
-
-    def mock_http(self, path: str) -> str:
-        return f"http://127.0.0.1:{self.mock_http_port}{path}"
-
     def master_http(self, path: str) -> str:
         return f"http://127.0.0.1:{self.master_http_port}{path}"
 
@@ -811,7 +769,6 @@ class EnvManager:
         self.keep = keep
         self.verbose = verbose
         self.current: Optional[FlexEnv] = None
-        self._registered = False
         self._env_seq = 0
 
     # -- logging -----------------------------------------------------------
@@ -865,17 +822,6 @@ class EnvManager:
             env.mock.terminate()
             env.mock = None
         time.sleep(1)
-
-    def register_atexit(self) -> None:
-        if not self._registered:
-            atexit.register(self._atexit_teardown)
-            self._registered = True
-
-    def _atexit_teardown(self) -> None:
-        try:
-            self.teardown()
-        except Exception:
-            pass
 
     # -- env construction --------------------------------------------------
 
@@ -1256,22 +1202,7 @@ class EnvManager:
         self._log(f"victim {role} up (pid={proc.pid}, grpc={grpc_port})")
         return proc
 
-    def restart_victim(
-        self, env: FlexEnv, role: str, perf_file: Optional[Path] = None
-    ) -> ManagedProcess:
-        key = f"victim-{role}"
-        old = env.victims.pop(key, None)
-        if old is not None:
-            old.kill9() if not old.alive() else old.terminate()
-        log = env.run_dir / f"victim_{role}_restart.log"
-        proc = self.start_victim(env, role, perf_file=perf_file)
-        # keep the same log naming scheme as start_victim for simplicity
-        return proc
-
     # -- load client registration (for teardown) ---------------------------
-
-    def track_load_client(self, env: FlexEnv, mp: ManagedProcess) -> None:
-        env.load_clients.append(mp)
 
 
 # ---------------------------------------------------------------------------
@@ -1322,18 +1253,6 @@ class LoadClientResult:
     def success_rate(self) -> float:
         return (self.ok / self.total) if self.total else 0.0
 
-    def ttft_p50(self) -> Optional[float]:
-        if not self.summary:
-            return None
-        latency = self.summary.get("latency") or {}
-        ttft = latency.get("ttft_ms") or {}
-        if "p50" in ttft:
-            try:
-                return float(ttft["p50"])
-            except (TypeError, ValueError):
-                return None
-        return None
-
     def per_request(self) -> list[dict]:
         path = self.output_dir / "per_request.jsonl"
         rows = []
@@ -1347,14 +1266,6 @@ class LoadClientResult:
                 except ValueError:
                     continue
         return rows
-
-    def describe(self) -> str:
-        if self.summary is None:
-            return f"no summary (rc={self.returncode})"
-        return (
-            f"total={self.total} ok={self.ok} errors={self.errors} "
-            f"ttft_p50={self.ttft_p50()}"
-        )
 
 
 def per_request_ttft_p50(rows: list[dict]) -> Optional[float]:
@@ -1423,16 +1334,6 @@ class ClientOps:
             proc.kill9()
         rc = proc.proc.returncode if proc.proc.returncode is not None else -1
         return LoadClientResult(output_dir, rc)
-
-    def start_background(
-        self, overrides: dict, output_dir: Path, log_file: Path
-    ) -> ManagedProcess:
-        """Start JavaLoadClient in the background (caller stops it later)."""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        argv = self._argv()
-        menv = self._base_env({**overrides, "OUTPUT_DIR": str(output_dir)})
-        proc = ProcessOps.start(argv, menv, log_file)
-        return proc
 
 
 # ---------------------------------------------------------------------------
@@ -1556,35 +1457,3 @@ def ensure_schedule_proto_modules() -> tuple:
 
 def encode_unique_key(meta: dict) -> str:
     return "flexlb_eval:" + json.dumps(meta, separators=(",", ":"))
-
-
-def filter_trace(
-    src: Path,
-    dst: Path,
-    max_ol: int,
-    max_lines: Optional[int] = None,
-    tag: Optional[str] = None,
-    tag_field: str = "tag",
-) -> int:
-    """Filter a trace file to rows with ol <= max_ol (optionally cap lines /
-    annotate each row so request ids stay unique across reruns — the legacy
-    engine-kill script injects a ``_rt`` field, smoke scripts use ``tag``)."""
-    count = 0
-    with open(src, "r", encoding="utf-8") as fin, open(
-        dst, "w", encoding="utf-8"
-    ) as fout:
-        for line in fin:
-            if max_lines is not None and count >= max_lines:
-                break
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if rec.get("ol", 0) > max_ol:
-                continue
-            if tag is not None:
-                rec[tag_field] = tag
-                line = json.dumps(rec)
-            fout.write(line if line.endswith("\n") else line + "\n")
-            count += 1
-    return count

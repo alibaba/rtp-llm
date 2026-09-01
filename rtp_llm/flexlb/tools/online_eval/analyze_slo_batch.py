@@ -312,15 +312,11 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
             "arrival_qps": server_latency.get(
                 "arrival_qps", summary.get("server_arrival_qps", 0.0)
             ),
-            "completion_qps": server_latency.get(
-                "completion_qps", summary.get("server_completion_qps", 0.0)
-            ),
+            "completion_qps": server_latency.get("completion_qps", 0.0),
             "error_count": summary.get("error_count", summary.get("errors", 0)),
             "test_valid": summary.get("test_valid"),
             "validity_checks": summary.get("validity_checks", {}),
             "client_pacing_lag_ms": summary.get("client_pacing_lag_ms", {}),
-            "client_send_peak_qps": summary.get("client_send_peak_qps", {}),
-            "trace_due_peak_qps": summary.get("trace_due_peak_qps", {}),
             "schedule_latency_ms": summary.get("schedule_latency_ms", {}),
         },
         "decisions": {

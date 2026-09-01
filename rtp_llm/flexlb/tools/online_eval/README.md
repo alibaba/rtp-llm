@@ -146,7 +146,7 @@ the per-second master collector exists for. Explicitly set
 `FLEXLB_MONITOR_MODE=critical-only` to restore the trimmed metric set.
 
 Skill-driven runs are **not** affected by this default change: the
-flexlb-online-eval skill exports `FLEXLB_MONITOR_MODE=full` unconditionally
+flexlb-mock-engine-test skill exports `FLEXLB_MONITOR_MODE=full` unconditionally
 (`MONITOR_MODE="${MONITOR_MODE:-full}"` in its launcher), and the Java side
 treats any value other than `critical-only` as the full metric surface —
 `full` and `all` are equivalent. So skill runs have always collected the
@@ -190,12 +190,6 @@ consumers (`analyze_slo_batch.py`, `aggregate_canvas_run.py`) read the
 a successful consolidation deletes the legacy files, so a legacy file that
 is present always means fresher data (RUN_DIR reuse), and **pre-consolidation
 run directories remain fully analyzable**.
-
-One skill caveat: `fetch_error_detail` in the current flexlb-online-eval
-skill still reads the per-shard `load_client/shard_*/per_request.jsonl`
-files, which consolidation deletes — upgrade the skill to read the run-root
-`per_request.jsonl[.gz]`; until then error-detail retrieval on consolidated
-runs degrades (summary metrics are unaffected).
 
 ## Manual flow
 

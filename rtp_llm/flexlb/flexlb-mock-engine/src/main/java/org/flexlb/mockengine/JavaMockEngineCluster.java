@@ -68,7 +68,7 @@ public final class JavaMockEngineCluster {
      * tokens) and the slowest decode step in the performance curve (25.1 ms
      * at batch 256), that gap reaches ~502 s — the legacy hard-coded 60 s
      * truncated e2e for long-output requests. 600 s leaves headroom over
-     * the 502 s worst case. Configurable via --response-poll-timeout-ms.
+     * the 502 s worst case.
      */
     static final long DEFAULT_RESPONSE_POLL_TIMEOUT_MS = 600_000L;
 
@@ -232,7 +232,7 @@ public final class JavaMockEngineCluster {
                 engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
                 services, scheduler, performance, cacheCapacity, stats,
                 config.totalKvTokens, config.decodeMaxConcurrency);
-        service.setResponsePollTimeoutMs(config.responsePollTimeoutMs);
+        service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         services.put(grpcPort, service);
         try {
             Server server = NettyServerBuilder.forPort(grpcPort)
@@ -1252,8 +1252,8 @@ public final class JavaMockEngineCluster {
 
         /**
          * Override the response-pump per-frame poll timeout (mainly for tests
-         * exercising the timeout path; production sets it from
-         * {@code --response-poll-timeout-ms} at startEngine time).
+         * exercising the timeout path; production keeps the
+         * {@link #DEFAULT_RESPONSE_POLL_TIMEOUT_MS} default).
          */
         void setResponsePollTimeoutMs(long responsePollTimeoutMs) {
             if (responsePollTimeoutMs < 1) {
@@ -1875,7 +1875,7 @@ public final class JavaMockEngineCluster {
                         responseQueues.remove(requestId);
                         cancelledRequests.remove(requestId);
                     }
-                    if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
+                    if (cache.admit(shape.blockKeys())) {
                         cacheVersion.incrementAndGet();
                     }
                 }
@@ -2308,7 +2308,7 @@ public final class JavaMockEngineCluster {
             }
             responseQueues.remove(requestId);
             cancelledRequests.remove(requestId);
-            if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
+            if (cache.admit(shape.blockKeys())) {
                 cacheVersion.incrementAndGet();
             }
         }
@@ -2832,8 +2832,6 @@ public final class JavaMockEngineCluster {
             snap.put("cache_evictions", cache.evictions());
             snap.put("active_kv_tokens", effectiveActiveKv);
             snap.put("available_kv_tokens", Math.max(0, totalKvTokens - effectiveActiveKv));
-            snap.put("status_version", statusVersion.get());
-            snap.put("cache_version", cacheVersion.get());
             Map<String, Object> injectConfig = new LinkedHashMap<>();
             injectConfig.put("enqueue_error", faultConfig.isFailOnEnqueue());
             injectConfig.put("fetch_error", faultConfig.isFetchError());
@@ -3079,12 +3077,6 @@ public final class JavaMockEngineCluster {
          * behavior (every engine declares Config.host).
          */
         boolean uniqueEngineIps = true;
-        /**
-         * Per-frame poll timeout for generate_stream / fetch_response pumps
-         * ({@code --response-poll-timeout-ms}, default
-         * {@link #DEFAULT_RESPONSE_POLL_TIMEOUT_MS}).
-         */
-        long responsePollTimeoutMs = DEFAULT_RESPONSE_POLL_TIMEOUT_MS;
 
         static Config parse(String[] args) {
             Config config = new Config();
@@ -3121,7 +3113,6 @@ public final class JavaMockEngineCluster {
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
-                    case "--response-poll-timeout-ms" -> config.responsePollTimeoutMs = Long.parseLong(value);
                     case UNIQUE_ENGINE_IPS_FLAG -> config.uniqueEngineIps =
                             parseBooleanFlag(value, UNIQUE_ENGINE_IPS_FLAG);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
@@ -3147,9 +3138,6 @@ public final class JavaMockEngineCluster {
             }
             if (config.statsIntervalMs < 1) {
                 throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
-            }
-            if (config.responsePollTimeoutMs < 1_000) {
-                throw new IllegalArgumentException("--response-poll-timeout-ms must be >= 1000");
             }
             return config;
         }

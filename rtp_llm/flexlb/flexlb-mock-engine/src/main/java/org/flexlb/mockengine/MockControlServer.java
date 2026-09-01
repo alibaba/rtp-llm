@@ -367,17 +367,9 @@ final class MockControlServer {
 
     private void handleSetKvPressure(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
-            if (body.has("active_kv_tokens")) {
-                // Python semantics (_http_set_kv_pressure): ABSOLUTE
-                // value — state._active_kv_tokens = value.
-                service.setAbsoluteActiveKvTokens(body.get("active_kv_tokens").asLong(0));
-            } else {
-                // Original Java semantics: additive pressure tokens.
-                long tokens = body.path("tokens").asLong(0);
-                FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
-                builder.kvPressureTokens(tokens);
-                service.setFaultConfig(builder.build());
-            }
+            // Python semantics (_http_set_kv_pressure): ABSOLUTE value —
+            // state._active_kv_tokens = value.
+            service.setAbsoluteActiveKvTokens(body.path("active_kv_tokens").asLong(0));
             return successResponse(service);
         });
     }
