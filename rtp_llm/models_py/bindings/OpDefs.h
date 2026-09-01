@@ -5,6 +5,7 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <cstdint>
+#include <optional>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -44,11 +45,13 @@ struct LayerKVCache {
 // Whole-model KV cache holding tensors for all layers.
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
+    size_t local_shard_count = 1;
     // Per-layer views
     std::vector<torch::Tensor> kv_cache_base_by_layer;
     std::vector<torch::Tensor> kv_scale_base_by_layer;
     int                        seq_size_per_block        = 0;
     int                        kernel_seq_size_per_block = 0;
+    int                        linear_step               = 1;
     int                        num_kv_heads              = 0;
     int                        head_dim                  = 0;
     bool                       use_mla                   = false;
@@ -75,6 +78,14 @@ struct KVCache {
         // Determine whether this layer is a full-attention layer.
         if (idx < 0 || static_cast<size_t>(idx) >= layer_group_types.size())
             throw std::runtime_error("Invalid layer index: " + std::to_string(idx));
+        const auto layer  = static_cast<size_t>(idx);
+        const auto region = static_cast<size_t>(rtp_llm::KVCacheRegionName::DEFAULT);
+        if (!layer_region_to_group_id.empty() && layer < layer_region_to_group_id.size()
+            && region < layer_region_to_group_id[layer].size()) {
+            layer_cache.group_id = layer_region_to_group_id[layer][region];
+        } else {
+            layer_cache.group_id = 0;
+        }
         auto          base = kv_cache_base_by_layer[idx];
         torch::Tensor scale;
         if (!kv_scale_base_by_layer.empty()) {
@@ -85,8 +96,9 @@ struct KVCache {
 
         if (!is_full) {
             // Linear/SSM attention layer: return the raw cache tensor unchanged.
-            // Use the physical block size so the layer sees the full per-block storage.
-            layer_cache.seq_size_per_block = seq_size_per_block;
+            // Its block-table row advances by the group span, which can be a
+            // virtual checkpoint wider than the physical FULL-cache page.
+            layer_cache.seq_size_per_block = groupSeqSizePerBlock(layer_cache.group_id);
             layer_cache.kv_cache_base      = base;
             layer_cache.kv_scale_base      = scale;
         } else {
@@ -158,14 +170,6 @@ struct KVCache {
                         scale.reshape({kernel_block_num, scale.size(1) / kernel_blocks_per_kv_block});
                 }
             }
-        }
-        const auto layer  = static_cast<size_t>(idx);
-        const auto region = static_cast<size_t>(rtp_llm::KVCacheRegionName::DEFAULT);
-        if (!layer_region_to_group_id.empty() && layer < layer_region_to_group_id.size()
-            && region < layer_region_to_group_id[layer].size()) {
-            layer_cache.group_id = layer_region_to_group_id[layer][region];
-        } else {
-            layer_cache.group_id = 0;
         }
         return layer_cache;
     }

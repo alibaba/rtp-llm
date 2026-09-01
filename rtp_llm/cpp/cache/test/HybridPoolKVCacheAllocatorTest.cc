@@ -4,6 +4,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -161,6 +162,69 @@ static ModelConfig makeProModelConfig() {
     ratios.push_back(0);
     mc.attn_config.layer_compress_ratios = ratios;
     return mc;
+}
+
+static ModelConfig makeTinyKimiK3ModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                   = 4;
+    mc.hidden_size                  = 128;
+    mc.data_type                    = rtp_llm::DataType::TYPE_BF16;
+    mc.attn_config.head_num         = 8;
+    mc.attn_config.kv_head_num      = 1;
+    mc.attn_config.size_per_head    = 16;
+    mc.attn_config.tokens_per_block = 128;
+    mc.attn_config.use_mla          = true;
+    mc.attn_config.kv_lora_rank     = 16;
+    mc.attn_config.rope_head_dim    = 4;
+    mc.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.hybrid_attention_config.hybrid_attention_types            = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+
+    mc.linear_attention_config.linear_conv_kernel_dim = 4;
+    mc.linear_attention_config.linear_key_head_dim    = 4;
+    mc.linear_attention_config.linear_value_head_dim  = 4;
+    mc.linear_attention_config.linear_num_key_heads   = 8;
+    mc.linear_attention_config.linear_num_value_heads = 8;
+    return mc;
+}
+
+static CacheConfig makeTinyKimiK3HybridPoolConfig(RoleType role_type,
+                                                  bool     local_kv_page_rr_enabled,
+                                                  int64_t  prefill_cp_size,
+                                                  uint32_t block_num   = 64,
+                                                  uint32_t page_tokens = 128) {
+    ParallelismConfig pc;
+    pc.role_type                          = role_type;
+    pc.tp_rank                            = 0;
+    pc.tp_size                            = 8;
+    pc.prefill_cp_config.kv_cache_sharded = local_kv_page_rr_enabled;
+    pc.prefill_cp_config.prefill_cp_size  = prefill_cp_size;
+
+    auto model                         = makeTinyKimiK3ModelConfig();
+    model.attn_config.tokens_per_block = page_tokens;
+    KVCacheConfig kv_config;
+    kv_config.seq_size_per_block = page_tokens;
+    auto config                  = HybridPoolConfigCreator::createConfig(model, pc, kv_config, false, 0);
+    config.block_num             = block_num;
+    config.finalizeBlockNums(block_num, RuntimeConfig{});
+    return config;
+}
+
+static int findGroupId(const CacheConfig& config, CacheGroupType group_type) {
+    const auto it = std::find(config.group_types.begin(), config.group_types.end(), group_type);
+    return it == config.group_types.end() ? -1 : static_cast<int>(std::distance(config.group_types.begin(), it));
+}
+
+static CacheKeysType makeSequentialCacheKeys(size_t count, CacheKeyType first = 1000) {
+    CacheKeysType keys;
+    keys.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        keys.push_back(first + static_cast<CacheKeyType>(i));
+    }
+    return keys;
 }
 
 // Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
@@ -925,6 +989,238 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocAndFreeCycleAcrossPerGroupPools) {
     FreeInfo free_info{batch_res, token_ids};
     allocator->free(free_info);
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+// ---------------------------------------------------------------------------
+// Kimi K3 TP + page-RR compact LINEAR checkpoints
+// ---------------------------------------------------------------------------
+
+TEST_F(HybridPoolKVCacheAllocatorTest, KimiK3ReplicatedDecodeAllocatesCanonicalFullPagesAndCompactLinearSlots) {
+    constexpr int kPhysicalPageTokens = 128;
+    const auto    config              = makeTinyKimiK3HybridPoolConfig(RoleType::DECODE,
+                                                       /*local_kv_page_rr_enabled=*/false,
+                                                       /*prefill_cp_size=*/8);
+    const int     full_gid            = findGroupId(config, CacheGroupType::FULL);
+    const int     linear_gid          = findGroupId(config, CacheGroupType::LINEAR);
+    ASSERT_GE(full_gid, 0);
+    ASSERT_GE(linear_gid, 0);
+
+    auto allocator = makeAllocator(config, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+    const auto counters_before = snapshotPoolCounters(allocator);
+
+    const std::vector<std::tuple<int, size_t, size_t>> cases = {
+        {127, 1, 1}, {128, 1, 1}, {129, 2, 1}, {1023, 8, 1}, {1024, 8, 1}, {1025, 9, 2}};
+    for (const auto& [seq_len, expected_full_blocks, expected_linear_blocks] : cases) {
+        auto       batch_res = makeBatchResource(/*batch_size=*/1, config);
+        auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, seq_len, kPhysicalPageTokens);
+        MallocInfo malloc_info{batch_res, token_ids};
+        malloc_info.enable_device_cache = false;
+        malloc_info.reuse_cache         = true;
+        ASSERT_EQ(malloc_info.cp_slot_mapper, nullptr);
+        ASSERT_TRUE(allocator->malloc(malloc_info).success) << "seq_len=" << seq_len;
+        EXPECT_EQ(batch_res->blocksNum(0, full_gid), expected_full_blocks) << "seq_len=" << seq_len;
+        EXPECT_EQ(batch_res->blocksNum(0, linear_gid), expected_linear_blocks) << "seq_len=" << seq_len;
+
+        FreeInfo free_info{batch_res, token_ids};
+        allocator->free(free_info);
+        expectPoolCountersEq(allocator, counters_before);
+    }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, KimiK3PageRRUsesVirtualSpanWithoutGrowingLinearStateBytes) {
+    constexpr size_t kPhysicalPageTokens = 128;
+    constexpr size_t kShardCount         = 8;
+    constexpr size_t kCheckpointTokens   = kPhysicalPageTokens * kShardCount;
+
+    const auto replicated = makeTinyKimiK3HybridPoolConfig(RoleType::PDFUSION,
+                                                           /*local_kv_page_rr_enabled=*/false,
+                                                           /*prefill_cp_size=*/0);
+    const auto page_rr    = makeTinyKimiK3HybridPoolConfig(RoleType::PREFILL,
+                                                        /*local_kv_page_rr_enabled=*/true,
+                                                        /*prefill_cp_size=*/8);
+
+    struct RoleCase {
+        RoleType role;
+        bool     page_rr;
+        int      upstream_shards;
+        size_t   checkpoint;
+    };
+    for (const auto row : {RoleCase{RoleType::DECODE, false, 0, kPhysicalPageTokens},
+                           RoleCase{RoleType::DECODE, false, 8, kCheckpointTokens},
+                           RoleCase{RoleType::PDFUSION, false, 8, kPhysicalPageTokens},
+                           RoleCase{RoleType::PREFILL, true, 8, kCheckpointTokens}}) {
+        SCOPED_TRACE(testing::Message() << static_cast<int>(row.role) << "/" << row.upstream_shards);
+        const auto config     = makeTinyKimiK3HybridPoolConfig(row.role, row.page_rr, row.upstream_shards);
+        const int  full_gid   = findGroupId(config, CacheGroupType::FULL);
+        const int  linear_gid = findGroupId(config, CacheGroupType::LINEAR);
+        ASSERT_GE(full_gid, 0);
+        ASSERT_GE(linear_gid, 0);
+        ASSERT_EQ(config.group_types, replicated.group_types);
+        EXPECT_EQ(config.group_seq_size_per_block[full_gid], kPhysicalPageTokens);
+        EXPECT_EQ(config.group_seq_size_per_block[linear_gid], row.checkpoint);
+        EXPECT_EQ(config.cache_specs[linear_gid]->seq_size_per_block, row.checkpoint);
+        EXPECT_EQ(config.linear_step, 1);
+        EXPECT_EQ(config.group_kv_block_stride_bytes[linear_gid], replicated.group_kv_block_stride_bytes[linear_gid]);
+        EXPECT_EQ(config.group_block_size_bytes[linear_gid], replicated.group_block_size_bytes[linear_gid]);
+        EXPECT_EQ(config.cache_specs[linear_gid]->block_size_bytes(),
+                  replicated.cache_specs[linear_gid]->block_size_bytes());
+    }
+
+    auto replicated_allocator = makeAllocator(replicated);
+    auto page_rr_allocator    = makeAllocator(page_rr);
+    ASSERT_TRUE(replicated_allocator->init());
+    ASSERT_TRUE(page_rr_allocator->init());
+    page_rr_allocator->setCPSlotMapper(
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/kShardCount, /*block_size=*/kPhysicalPageTokens));
+    EXPECT_EQ(page_rr_allocator->totalTokensNum(), replicated_allocator->totalTokensNum() * kShardCount);
+}
+
+class KimiK3PageRRAllocatorTest: public HybridPoolKVCacheAllocatorTest {
+protected:
+    static constexpr int kPhysicalPageTokens = 128;
+    static constexpr int kShardCount         = 8;
+    static constexpr int kCheckpointTokens   = kPhysicalPageTokens * kShardCount;
+
+    void SetUp() override {
+        HybridPoolKVCacheAllocatorTest::SetUp();
+        config     = makeTinyKimiK3HybridPoolConfig(RoleType::PREFILL, true, kShardCount);
+        full_gid   = findGroupId(config, CacheGroupType::FULL);
+        linear_gid = findGroupId(config, CacheGroupType::LINEAR);
+        ASSERT_GE(full_gid, 0);
+        ASSERT_GE(linear_gid, 0);
+        allocator = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+    }
+
+    CacheConfig config;
+    int full_gid;
+    int linear_gid;
+    HybridPoolKVCacheAllocatorPtr allocator;
+    const std::shared_ptr<CPSlotMapper> mapper = std::make_shared<CPSlotMapper>(0, kShardCount, kPhysicalPageTokens);
+};
+
+TEST_F(KimiK3PageRRAllocatorTest, KimiK3CompactLinearAllocatesOneSlotPerVirtualStripe) {
+    allocator->setCPSlotMapper(mapper);
+    const auto counters_before = snapshotPoolCounters(allocator);
+
+    const std::vector<int> lengths = {0, 127, 128, 129, 1023, 1024, 1025, 2047, 2048};
+    for (int seq_len : lengths) {
+        const size_t expected_slots =
+            seq_len == 0 ? 0u : static_cast<size_t>((seq_len + kCheckpointTokens - 1) / kCheckpointTokens);
+        auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+        EXPECT_EQ(allocator->singleBatchNeedBlocks(batch_res, seq_len, /*reserve_step=*/0),
+                  static_cast<int>(expected_slots * 2))
+            << "seq_len=" << seq_len;
+        if (seq_len == 0) {
+            continue;
+        }
+
+        auto       token_ids = makeCompleteTokenIds(1, seq_len, kPhysicalPageTokens);
+        MallocInfo malloc_info{batch_res, token_ids};
+        malloc_info.enable_device_cache = false;
+        malloc_info.reuse_cache         = true;
+        malloc_info.cp_slot_mapper      = mapper;
+        ASSERT_TRUE(allocator->malloc(malloc_info).success) << "seq_len=" << seq_len;
+        EXPECT_EQ(batch_res->blocksNum(0, full_gid), expected_slots) << "seq_len=" << seq_len;
+        EXPECT_EQ(batch_res->blocksNum(0, linear_gid), expected_slots) << "seq_len=" << seq_len;
+        EXPECT_EQ(validBlockCount(batch_res->blocks(0, full_gid)), expected_slots) << "seq_len=" << seq_len;
+        EXPECT_EQ(validBlockCount(batch_res->blocks(0, linear_gid)), expected_slots) << "seq_len=" << seq_len;
+
+        FreeInfo free_info{batch_res, token_ids};
+        allocator->free(free_info);
+        expectPoolCountersEq(allocator, counters_before);
+    }
+
+    auto multi_res    = makeBatchResource(/*batch_size=*/2, config);
+    auto multi_tokens = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/1025, kPhysicalPageTokens);
+    multi_tokens->setReserveStep(2);
+    MallocInfo multi_info{multi_res, multi_tokens};
+    multi_info.reuse_cache    = true;
+    multi_info.cp_slot_mapper = mapper;
+    // With batch_size=2, CompleteTokenIds aligns common_len down to B: 1024.
+    // FULL and LINEAR each need one common slot and two per-batch slots
+    // (the 1025-token tail plus reserve), for 2 + 2 * 4 = 10 blocks.
+    EXPECT_EQ(allocator->getNeedBlocks(multi_info), 10);
+}
+
+TEST_F(KimiK3PageRRAllocatorTest, KimiK3TerminalPartialLinearStateIsRequestPrivate) {
+    constexpr int kSeqLen             = kCheckpointTokens + 1;
+
+    const auto counters_before = snapshotPoolCounters(allocator);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    auto keys      = makeSequentialCacheKeys(/*count=*/9);
+    batch_res->setBatchCacheKeys(0, keys);
+    auto       token_ids = makeCompleteTokenIds(1, kSeqLen, kPhysicalPageTokens);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache = false;
+    malloc_info.reuse_cache         = true;
+    malloc_info.cp_slot_mapper      = mapper;
+    ASSERT_TRUE(allocator->malloc(malloc_info).success);
+    ASSERT_EQ(batch_res->blocksNum(0, full_gid), 2u);
+    ASSERT_EQ(batch_res->blocksNum(0, linear_gid), 2u);
+
+    InsertInfo insert_info{batch_res, token_ids, /*is_resident=*/false};
+    insert_info.cp_slot_mapper = mapper;
+    allocator->insertIntoCache(insert_info);
+
+    const CacheKeyType checkpoint_key = keys[7];
+    const CacheKeyType terminal_key   = keys[8];
+    EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(checkpoint_key, full_gid)));
+    EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(checkpoint_key, linear_gid)));
+    EXPECT_TRUE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(terminal_key, full_gid)));
+    EXPECT_TRUE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(terminal_key, linear_gid)));
+
+    FreeInfo free_info{batch_res, token_ids};
+    allocator->free(free_info);
+    EXPECT_EQ(allocator->requestRefBlocksNum(), 0u);
+    EXPECT_EQ(allocator->blockCacheRefBlocksNum(), 2u);
+
+    auto evicted = allocator->popBlocksFromCache(/*min_blocks_to_free=*/2);
+    ASSERT_NE(evicted, nullptr);
+    ASSERT_EQ(evicted->cacheKeys(0), CacheKeysType{checkpoint_key});
+    ASSERT_EQ(evicted->blocksNum(0, full_gid), 1u);
+    ASSERT_EQ(evicted->blocksNum(0, linear_gid), 1u);
+    EXPECT_FALSE(isNullBlockIdx(evicted->blocks(0, full_gid)[0]));
+    EXPECT_FALSE(isNullBlockIdx(evicted->blocks(0, linear_gid)[0]));
+    allocator->blockCacheFree(evicted);
+    expectPoolCountersEq(allocator, counters_before);
+}
+
+TEST_F(KimiK3PageRRAllocatorTest, KimiK3JointReuseBacksOffAndUsesCompactLinearCoordinates) {
+    constexpr int kSeqLen             = 2 * kCheckpointTokens + 1;
+
+    auto       keys       = makeSequentialCacheKeys(/*count=*/17);
+    const auto first_full = seedNonResidentCacheItem(allocator, full_gid, keys[7]);
+    const auto next_full  = seedNonResidentCacheItem(allocator, full_gid, keys[15]);
+    const auto first_kda  = seedNonResidentCacheItem(allocator, linear_gid, keys[7]);
+
+    auto run_reuse = [&](int expected_reuse_len, BlockIdxType expected_kda_tail, size_t expected_kda_pos) {
+        auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+        batch_res->setBatchCacheKeys(0, keys);
+        auto       token_ids = makeCompleteTokenIds(1, kSeqLen, kPhysicalPageTokens);
+        MallocInfo malloc_info{batch_res, token_ids};
+        malloc_info.enable_device_cache = true;
+        malloc_info.reuse_cache         = true;
+        malloc_info.cp_slot_mapper      = mapper;
+        const auto result               = allocator->malloc(malloc_info);
+        EXPECT_TRUE(result.success);
+        EXPECT_EQ(result.reuse_len, expected_reuse_len);
+        ASSERT_EQ(batch_res->blocksNum(0, full_gid), 3u);
+        ASSERT_EQ(batch_res->blocksNum(0, linear_gid), 3u);
+        EXPECT_EQ(batch_res->blocks(0, full_gid)[0], first_full);
+        EXPECT_EQ(batch_res->blocks(0, linear_gid)[expected_kda_pos], expected_kda_tail);
+
+        FreeInfo free_info{batch_res, token_ids};
+        allocator->free(free_info);
+    };
+
+    run_reuse(kCheckpointTokens, first_kda, /*expected_kda_pos=*/0);
+
+    const auto next_kda = seedNonResidentCacheItem(allocator, linear_gid, keys[15]);
+    run_reuse(2 * kCheckpointTokens, next_kda, /*expected_kda_pos=*/1);
+    EXPECT_FALSE(isNullBlockIdx(next_full));
 }
 
 // ---------------------------------------------------------------------------

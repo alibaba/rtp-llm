@@ -15,6 +15,8 @@ struct BlockBufferPtrInfo {
 };
 
 struct CacheLayerLayout {
+    size_t local_shard_count = 1;
+    int    linear_step = 1;
     std::vector<int>              layer_to_groups;
     std::vector<std::vector<int>> layer_to_group_ids;
     std::vector<std::vector<int>> layer_region_to_group_id;

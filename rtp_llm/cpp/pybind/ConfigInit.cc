@@ -1194,6 +1194,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("to_string", &ParallelismConfig::to_string)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
         .def("get_attn_tp_rank", &ParallelismConfig::get_attn_tp_rank)
+        .def("kv_page_rr_enabled", &ParallelismConfig::kv_page_rr_enabled)
         .def("get_ffn_tp_size", &ParallelismConfig::get_ffn_tp_size)
         .def("get_ffn_tp_rank", &ParallelismConfig::get_ffn_tp_rank)
         .def(py::pickle(

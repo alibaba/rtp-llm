@@ -35,12 +35,14 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
+        .def_readonly("local_shard_count", &KVCache::local_shard_count, "Allocator cache shard count")
         .def_readwrite("kv_cache_base_by_layer", &KVCache::kv_cache_base_by_layer, "Per-layer KV cache tensors")
         .def_readwrite("kv_scale_base_by_layer", &KVCache::kv_scale_base_by_layer, "Per-layer KV scale tensors")
         .def_readwrite("seq_size_per_block", &KVCache::seq_size_per_block, "Physical (logical) block size in tokens")
         .def_readwrite("kernel_seq_size_per_block",
                        &KVCache::kernel_seq_size_per_block,
                        "Kernel block size (0 = same as seq_size_per_block)")
+        .def_readonly("linear_step", &KVCache::linear_step, "Linear attention checkpoint step")
         .def_readwrite("num_kv_heads", &KVCache::num_kv_heads, "Number of KV heads per TP rank")
         .def_readwrite("head_dim", &KVCache::head_dim, "Head dimension")
         .def_readwrite("use_mla", &KVCache::use_mla, "Whether MLA cache layout is used")

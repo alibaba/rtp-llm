@@ -5,6 +5,17 @@
 
 namespace rtp_llm {
 
+bool usesVirtualBlockCacheLayout(CacheGroupType group_type,
+                                 size_t         physical_page_tokens,
+                                 size_t         group_block_tokens,
+                                 int            shard_size) {
+    if (group_type == CacheGroupType::FULL || physical_page_tokens == 0 || shard_size <= 1) {
+        return false;
+    }
+    return group_block_tokens % physical_page_tokens == 0
+           && group_block_tokens / physical_page_tokens == static_cast<size_t>(shard_size);
+}
+
 std::vector<size_t>
 blockPositionsForCacheTransfer(size_t block_num, size_t first_full_block, bool use_hybrid, CacheGroupType group_type) {
     std::vector<size_t> block_pos_list;
@@ -32,16 +43,25 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
                                                           bool           use_hybrid,
                                                           CacheGroupType group_type,
                                                           int            cp_rank,
-                                                          int            cp_size) {
+                                                          int            cp_size,
+                                                          bool           virtual_block_cache_layout) {
     std::vector<CacheStoreBlockPair> plan;
+    if (total_logical_blocks == 0) {
+        return plan;
+    }
+    if (cp_size < 1 || cp_rank < 0 || cp_rank >= cp_size) {
+        throw std::invalid_argument("invalid cache-store CP rank/size");
+    }
 
     const bool sharded_full        = (cp_size > 1) && (group_type == CacheGroupType::FULL);
-    const bool compact_swa_by_cp   = (cp_size > 1) && (group_type == CacheGroupType::SWA);
-    if (compact_swa_by_cp) {
+    const bool compact_virtual_blocks = (cp_size > 1) && virtual_block_cache_layout
+                                        && (group_type == CacheGroupType::SWA || group_type == CacheGroupType::LINEAR);
+    if (compact_virtual_blocks) {
         const size_t cp_size_t        = static_cast<size_t>(cp_size);
         const size_t canonical_blocks = (total_logical_blocks + cp_size_t - 1) / cp_size_t;
-        const size_t start            = use_hybrid ? (canonical_blocks > 2 ? canonical_blocks - 2 : 0) :
-                                                     std::min(first_full_block, canonical_blocks);
+        const size_t retained_tail    = group_type == CacheGroupType::LINEAR ? 1 : 2;
+        const size_t start = use_hybrid ? (canonical_blocks > retained_tail ? canonical_blocks - retained_tail : 0) :
+                                          std::min(first_full_block, canonical_blocks);
         plan.reserve(canonical_blocks - start);
         for (size_t compact_idx = start; compact_idx < canonical_blocks; ++compact_idx) {
             const size_t key_index = std::min((compact_idx + 1) * cp_size_t - 1, total_logical_blocks - 1);
@@ -54,7 +74,7 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
 
     plan.reserve(positions.size());
 
-    if (!sharded_full && !compact_swa_by_cp) {
+    if (!sharded_full) {
         for (auto pos : positions) {
             const int p = static_cast<int>(pos);
             plan.push_back({p, p});
@@ -71,16 +91,15 @@ std::vector<CacheStoreBlockPair> buildCacheStoreBlockPlan(size_t         total_l
     return plan;
 }
 
-std::vector<CacheStoreBlockPair>
-buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_blocks,
-                                    size_t                        reuse_block_size,
-                                    bool                          use_hybrid,
-                                    CacheGroupType                group_type,
-                                    int                           cp_rank,
-                                    int                           cp_size,
-                                    const CacheStorePublishRange& publish_range) {
-    if (publish_range.begin_block > publish_range.end_block
-        || publish_range.end_block > total_logical_blocks) {
+std::vector<CacheStoreBlockPair> buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_blocks,
+                                                                     size_t                        reuse_block_size,
+                                                                     bool                          use_hybrid,
+                                                                     CacheGroupType                group_type,
+                                                                     int                           cp_rank,
+                                                                     int                           cp_size,
+                                                                     const CacheStorePublishRange& publish_range,
+                                                                     bool virtual_block_cache_layout) {
+    if (publish_range.begin_block > publish_range.end_block || publish_range.end_block > total_logical_blocks) {
         throw std::invalid_argument("incremental cache-store range is outside the logical block table");
     }
 
@@ -91,15 +110,20 @@ buildIncrementalCacheStoreBlockPlan(size_t                        total_logical_
         if (publish_range.end_block != total_logical_blocks) {
             throw std::invalid_argument("terminal LINEAR publication must reach the final logical block");
         }
-        return buildCacheStoreBlockPlan(
-            total_logical_blocks, reuse_block_size, /*use_hybrid=*/true, group_type, cp_rank, cp_size);
+        return buildCacheStoreBlockPlan(total_logical_blocks,
+                                        reuse_block_size,
+                                        /*use_hybrid=*/true,
+                                        group_type,
+                                        cp_rank,
+                                        cp_size,
+                                        virtual_block_cache_layout);
     }
     if (group_type != CacheGroupType::FULL) {
         throw std::invalid_argument("incremental cache-store only supports FULL and LINEAR groups");
     }
 
     auto plan = buildCacheStoreBlockPlan(
-        total_logical_blocks, reuse_block_size, use_hybrid, group_type, cp_rank, cp_size);
+        total_logical_blocks, reuse_block_size, use_hybrid, group_type, cp_rank, cp_size, virtual_block_cache_layout);
 
     plan.erase(std::remove_if(plan.begin(),
                               plan.end(),

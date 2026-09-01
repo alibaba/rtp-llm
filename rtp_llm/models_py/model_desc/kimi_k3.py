@@ -53,6 +53,10 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import (
     DenseMLPParallelExecutor,
 )
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import configure_all_gather_gemm
+from rtp_llm.models_py.modules.kimi_k3.cache_geometry import (
+    bind_kimi_k3_cache_geometry,
+    validate_kimi_k3_page_rr_target,
+)
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkCachePublisher,
     KimiK3ChunkPublishContext,
@@ -451,12 +455,16 @@ class KimiK3Model(GptModelBase):
         self._prefill_mtp_draft_workspace: Optional[torch.Tensor] = None
         self._whole_chunk_prefill_active = False
         self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
+        self._k3_page_tokens: Optional[int] = None
+        self._kda_checkpoint_tokens: Optional[int] = None
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve Prefill collective workspaces."""
 
         super().initialize(init_resource)
         self._is_decode_role = bool(init_resource.is_decode_role)
+        self._initialize_k3_cache_geometry()
+        self._validate_page_rr_target()
         if self._is_decode_role and os.environ.get("SP_TYPE", "").lower() in (
             "eagle3",
             "mtp",
@@ -529,6 +537,36 @@ class KimiK3Model(GptModelBase):
                 )
             self._gemm_reduce_scatter_configured = True
         return True
+
+    def _validate_page_rr_target(self) -> None:
+        # Warmup precedes CacheManager; the executor initializes again with cache.
+        if self.kv_cache is None:
+            return
+        parallelism = self.parallelism_config
+        if not parallelism.kv_page_rr_enabled() and not (
+            self._is_decode_role and parallelism.prefill_cp_config.prefill_cp_size > 1
+        ):
+            return
+        validate_kimi_k3_page_rr_target(
+            parallelism=parallelism,
+            model_config=self.config,
+            kv_cache=self.kv_cache,
+            page_tokens=self._k3_page_tokens,
+            checkpoint_tokens=self._kda_checkpoint_tokens,
+            is_decode_role=self._is_decode_role,
+            kda_head_dim=self._kda_head_dim,
+            whole_model_query_budget_tokens=prefill_chunk_tokens(),
+            compute_capability=torch.cuda.get_device_capability(
+                self.embedding_weight.device
+            ),
+        )
+        logging.info(
+            "[K3_PAGE_RR_TARGET] role=%s TP=%d B=%d V=%d",
+            "Decode" if self._is_decode_role else "Prefill",
+            parallelism.tp_size,
+            self._k3_page_tokens,
+            self._kda_checkpoint_tokens,
+        )
 
     def _write_mtp_hidden_buffer(
         self, hidden_states: torch.Tensor, *, is_cuda_graph: bool
@@ -852,16 +890,14 @@ class KimiK3Model(GptModelBase):
         chunk_tokens: int,
         chunk_prefill_round_hook: Any = None,
     ) -> PyModelOutputs:
+        if self._kda_checkpoint_tokens is None:
+            raise RuntimeError("Kimi K3 cache geometry is not initialized")
         validate_whole_chunk_prefill(
             inputs,
             chunk_tokens,
             tp_size=int(self.parallelism_config.get_attn_tp_size()),
             ep_size=int(self.parallelism_config.ep_size),
-            page_size=(
-                int(self.kv_cache.seq_size_per_block)
-                if self.kv_cache is not None
-                else None
-            ),
+            alignment_tokens=self._kda_checkpoint_tokens,
         )
         input_ids = inputs.input_ids.reshape(-1)
         attention_inputs = inputs.attention_inputs
@@ -877,7 +913,6 @@ class KimiK3Model(GptModelBase):
                 "whole-model K3 packed lengths do not cover input tokens: "
                 f"lengths={sum(input_lengths)} tokens={total_tokens}"
             )
-        page_size = int(self.kv_cache.seq_size_per_block)
         if self._layer_group_ids is None:
             layer_map_host = getattr(
                 attention_inputs, "kv_cache_layer_to_group_host", None
@@ -893,7 +928,7 @@ class KimiK3Model(GptModelBase):
             input_lengths,
             prefix_lengths,
             chunk_budget=chunk_tokens,
-            page_size=page_size,
+            alignment_tokens=self._kda_checkpoint_tokens,
         )
         chunk_cache_publisher = KimiK3ChunkCachePublisher.create(
             attention_inputs,
@@ -901,37 +936,39 @@ class KimiK3Model(GptModelBase):
             self.layers,
             input_lengths=input_lengths,
             prefix_lengths=prefix_lengths,
-            page_size=page_size,
+            transfer_page_tokens=self._k3_page_tokens,
         )
         barrier(Group.TP)
         logging.info(
             "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d "
-            "requests=%d rounds=%d chunk_tokens=%d page_size=%d TP=%d EP=%d "
+            "requests=%d rounds=%d chunk_tokens=%d mla_page_tokens=%d "
+            "checkpoint_tokens=%d shard_size=%d shard_rank=%d TP=%d EP=%d "
             "chunkwise_rdma=%s",
             total_tokens,
             len(input_lengths),
             len(rounds),
             chunk_tokens,
-            page_size,
+            self._k3_page_tokens,
+            self._kda_checkpoint_tokens,
+            self.kv_cache.local_shard_count,
+            (
+                int(self.parallelism_config.tp_rank)
+                if self.parallelism_config.kv_page_rr_enabled()
+                else 0
+            ),
             int(self.parallelism_config.get_attn_tp_size()),
             int(self.parallelism_config.ep_size),
             chunk_cache_publisher.enabled,
         )
         terminal_hidden: Optional[torch.Tensor] = None
         terminal_mtp_hidden: Optional[torch.Tensor] = None
+        force_disable_sp_run = inputs.force_disable_sp_run
+        mtp_hidden_enabled = (
+            chunk_prefill_round_hook is not None and not force_disable_sp_run
+        )
         terminal_written = [False] * len(input_lengths)
         final_params: Any = None
         current_state_registry = KimiKDACurrentStateRegistry(len(input_lengths))
-        for layer_idx, layer in enumerate(self.layers):
-            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA):
-                layer_cache = self.kv_cache.get_layer_cache(layer_idx)
-                if int(layer_cache.seq_size_per_block) != page_size:
-                    raise RuntimeError(
-                        "whole-model K3 KDA/cache checkpoint step mismatch: "
-                        f"layer={layer_idx} linear_page="
-                        f"{layer_cache.seq_size_per_block} "
-                        f"physical_page={page_size}"
-                    )
         chunk_cache_publisher.publish_prefix()
         for round_idx, round_plan in enumerate(rounds):
             terminal_count = sum(int(item.terminal) for item in round_plan.slices)
@@ -945,7 +982,7 @@ class KimiK3Model(GptModelBase):
                 round_plan=round_plan,
                 multimodal_inputs=inputs.multimodal_inputs,
                 embedding_inputs=inputs.embedding_inputs,
-                force_disable_sp_run=inputs.force_disable_sp_run,
+                force_disable_sp_run=force_disable_sp_run,
             )
             chunk_attention = chunk_inputs.attention_inputs
             prepare_round_fmha(fmha_impl, chunk_attention)
@@ -969,33 +1006,34 @@ class KimiK3Model(GptModelBase):
                 # Target projections have consumed MLA's aliased output. Its
                 # historical KV scratch must not overlap the draft's expansion.
                 fmha_impl.release_forward_workspace()
-                round_mtp_hidden = self.get_mtp_target_hidden_states(-1)
-                if round_mtp_hidden is None:
-                    raise RuntimeError(
-                        "whole-model K3 Prefill did not publish MTP target hidden rows"
-                    )
-                if terminal_mtp_hidden is None:
-                    terminal_mtp_hidden = torch.empty(
-                        (len(input_lengths), *round_mtp_hidden.shape[1:]),
-                        dtype=round_mtp_hidden.dtype,
-                        device=round_mtp_hidden.device,
-                    )
-                draft_row_indices: list[int] = []
-                packed_start = 0
-                for item in round_plan.slices:
-                    packed_end = packed_start + item.new_length
-                    draft_end = packed_end - (1 if item.terminal else 0)
-                    draft_row_indices.extend(range(packed_start, draft_end))
-                    if item.terminal:
-                        terminal_mtp_hidden[item.original_batch_idx].copy_(
-                            round_mtp_hidden[packed_end - 1]
+                if mtp_hidden_enabled:
+                    round_mtp_hidden = self.get_mtp_target_hidden_states(-1)
+                    if round_mtp_hidden is None:
+                        raise RuntimeError(
+                            "whole-model K3 Prefill did not publish MTP target hidden rows"
                         )
-                    packed_start = packed_end
-                self._mtp_hidden_buffer = self._select_prefill_mtp_draft_rows(
-                    round_mtp_hidden,
-                    draft_row_indices,
-                )
-                self._mtp_hidden_valid_tokens = len(draft_row_indices)
+                    if terminal_mtp_hidden is None:
+                        terminal_mtp_hidden = torch.empty(
+                            (len(input_lengths), *round_mtp_hidden.shape[1:]),
+                            dtype=round_mtp_hidden.dtype,
+                            device=round_mtp_hidden.device,
+                        )
+                    draft_row_indices: list[int] = []
+                    packed_start = 0
+                    for item in round_plan.slices:
+                        packed_end = packed_start + item.new_length
+                        draft_end = packed_end - (1 if item.terminal else 0)
+                        draft_row_indices.extend(range(packed_start, draft_end))
+                        if item.terminal:
+                            terminal_mtp_hidden[item.original_batch_idx].copy_(
+                                round_mtp_hidden[packed_end - 1]
+                            )
+                        packed_start = packed_end
+                    self._mtp_hidden_buffer = self._select_prefill_mtp_draft_rows(
+                        round_mtp_hidden,
+                        draft_row_indices,
+                    )
+                    self._mtp_hidden_valid_tokens = len(draft_row_indices)
                 chunk_prefill_round_hook(round_plan, round_plan is rounds[-1])
             if terminal_hidden is None:
                 terminal_hidden = torch.empty(
@@ -1023,7 +1061,7 @@ class KimiK3Model(GptModelBase):
                 idx for idx, written in enumerate(terminal_written) if not written
             ]
             raise RuntimeError(f"whole-model K3 missing terminal rows for {missing}")
-        if chunk_prefill_round_hook is not None:
+        if mtp_hidden_enabled:
             if terminal_mtp_hidden is None:
                 raise RuntimeError("whole-model K3 missing terminal MTP hidden rows")
             self._mtp_hidden_buffer = terminal_mtp_hidden
@@ -1041,6 +1079,18 @@ class KimiK3Model(GptModelBase):
         """Drop state retained by an interrupted whole-chunk session."""
 
         self._release_prefill_mtp_hidden_buffer()
+
+    def _initialize_k3_cache_geometry(self) -> None:
+        """Bind planning units once, after the live cache becomes available."""
+        if self._kda_checkpoint_tokens is None and self.kv_cache is not None:
+            self._k3_page_tokens, self._kda_checkpoint_tokens = (
+                bind_kimi_k3_cache_geometry(
+                    self.kv_cache,
+                    self.layers,
+                    self.parallelism_config,
+                    is_decode_role=self._is_decode_role,
+                )
+            )
 
     def _forward_impl_one(
         self,
@@ -1155,7 +1205,9 @@ class KimiK3Model(GptModelBase):
                 raise RuntimeError(
                     "cache-backed K3 Prefill requires host sequence metadata"
                 )
-            page_size = int(self.kv_cache.seq_size_per_block)
+            checkpoint_tokens = self._kda_checkpoint_tokens
+            if checkpoint_tokens is None:
+                raise RuntimeError("Kimi K3 cache geometry is not initialized")
             materialized_maps = kda_materialized_block_maps(
                 attention_inputs,
                 layer_group_ids=self._layer_group_ids,
@@ -1170,7 +1222,7 @@ class KimiK3Model(GptModelBase):
                 cu_host,
                 lengths_host,
                 prefixes_host,
-                page_size=page_size,
+                checkpoint_tokens=checkpoint_tokens,
                 local_heads=self._kda_local_heads,
                 head_dim=self._kda_head_dim,
                 device=input_ids.device,

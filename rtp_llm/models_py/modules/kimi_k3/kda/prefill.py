@@ -30,8 +30,8 @@ class KimiKDAPrefillMetadata:
 
     cu_seqlens_cpu: torch.Tensor
     sequence_count: int
-    page_size: int
-    required_pages: int
+    checkpoint_tokens: int
+    required_slots: int
     conv: KimiKDAShortConvMetadata
     recurrent: KimiKDARecurrentCheckpointMetadata
     recurrent_checkpoints: torch.Tensor
@@ -99,7 +99,7 @@ def prepare_kimi_kda_prefill_metadata(
     input_lengths_host: torch.Tensor,
     prefix_lengths_host: torch.Tensor,
     *,
-    page_size: int,
+    checkpoint_tokens: int,
     local_heads: int,
     head_dim: int,
     device: torch.device,
@@ -117,10 +117,10 @@ def prepare_kimi_kda_prefill_metadata(
     for name, tensor in host_tensors.items():
         if tensor is None or tensor.device.type != "cpu" or tensor.ndim != 1:
             raise ValueError(f"KDA Prefill requires one-dimensional CPU {name}")
-    if page_size <= 0 or page_size % 64:
+    if checkpoint_tokens <= 0 or checkpoint_tokens % 64:
         raise ValueError(
-            "KDA Prefill page size must be a positive multiple of 64, "
-            f"got {page_size}"
+            "KDA Prefill checkpoint span must be a positive multiple of 64, "
+            f"got {checkpoint_tokens}"
         )
     if local_heads <= 0 or head_dim <= 0:
         raise ValueError(
@@ -155,18 +155,19 @@ def prepare_kimi_kda_prefill_metadata(
             f"KDA Prefill input lengths must be positive: {input_lengths_cpu.tolist()}"
         )
     if torch.any(prefix_lengths_cpu < 0) or torch.any(
-        prefix_lengths_cpu % page_size != 0
+        prefix_lengths_cpu % checkpoint_tokens != 0
     ):
         raise ValueError(
-            "KDA Prefill prefixes must be non-negative and page-aligned: "
-            f"prefixes={prefix_lengths_cpu.tolist()} page_size={page_size}"
+            "KDA Prefill prefixes must be non-negative and checkpoint-aligned: "
+            f"prefixes={prefix_lengths_cpu.tolist()} "
+            f"checkpoint_tokens={checkpoint_tokens}"
         )
 
-    required_pages = int(
+    required_slots = int(
         torch.max(
             torch.div(
-                prefix_lengths_cpu + input_lengths_cpu + page_size - 1,
-                page_size,
+                prefix_lengths_cpu + input_lengths_cpu + checkpoint_tokens - 1,
+                checkpoint_tokens,
                 rounding_mode="floor",
             )
         )
@@ -175,7 +176,7 @@ def prepare_kimi_kda_prefill_metadata(
     recurrent = prepare_kimi_kda_recurrent_checkpoint_metadata(
         input_lengths_cpu,
         prefix_lengths_cpu,
-        page_size,
+        checkpoint_tokens,
         device,
         materialized_block_maps_host=materialized_block_maps_host,
     )
@@ -207,8 +208,8 @@ def prepare_kimi_kda_prefill_metadata(
     return KimiKDAPrefillMetadata(
         cu_seqlens_cpu=cu_seqlens_cpu,
         sequence_count=sequence_count,
-        page_size=page_size,
-        required_pages=required_pages,
+        checkpoint_tokens=checkpoint_tokens,
+        required_slots=required_slots,
         conv=conv,
         recurrent=recurrent,
         recurrent_checkpoints=recurrent_checkpoints,
@@ -389,7 +390,7 @@ class KimiK3KDAPrefill(nn.Module):
             linear_block_map,
             attention_inputs.prefix_lengths,
             cu_seqlens,
-            metadata.page_size,
+            metadata.checkpoint_tokens,
             metadata.conv,
             current_conv_state=current_conv,
             continuation_mask=(
@@ -398,7 +399,10 @@ class KimiK3KDAPrefill(nn.Module):
             return_final_state=current_state is not None,
         )
         physical_initial_state = self.cache.load_recurrent_state(
-            kv_cache, attention_inputs, linear_block_map
+            kv_cache,
+            attention_inputs,
+            linear_block_map,
+            checkpoint_tokens=metadata.checkpoint_tokens,
         )
         if current_state is not None:
             registry_initial_state = current_state.recurrent.index_select(
@@ -421,7 +425,7 @@ class KimiK3KDAPrefill(nn.Module):
             recurrent_state,
             cu_seqlens=cu_seqlens,
             cu_seqlens_cpu=metadata.cu_seqlens_cpu,
-            checkpoint_interval=metadata.page_size,
+            checkpoint_interval=metadata.checkpoint_tokens,
             checkpoint_states=metadata.recurrent_checkpoints,
         )
         self.cache.store_recurrent_checkpoints(
@@ -477,11 +481,9 @@ class KimiK3KDAPrefill(nn.Module):
                 "cache-backed KDA Prefill requires round-scoped metadata"
             )
         sequence_count = int(cu_seqlens.numel()) - 1
-        page_size = int(kv_cache.seq_size_per_block)
         prefix_lengths = attention_inputs.prefix_lengths
         if (
             metadata.sequence_count != sequence_count
-            or metadata.page_size != page_size
             or prefix_lengths is None
             or prefix_lengths.ndim != 1
             or prefix_lengths.numel() != sequence_count
@@ -490,14 +492,14 @@ class KimiK3KDAPrefill(nn.Module):
                 "KDA Prefill metadata does not match the active cache batch: "
                 f"metadata_sequences={metadata.sequence_count} "
                 f"active_sequences={sequence_count} "
-                f"metadata_page={metadata.page_size} cache_page={page_size}"
+                f"checkpoint_tokens={metadata.checkpoint_tokens}"
             )
         linear_block_map = self.cache.linear_state_block_map_device(attention_inputs)
-        if metadata.required_pages > linear_block_map.shape[1]:
+        if metadata.required_slots > linear_block_map.shape[1]:
             raise ValueError(
                 "KDA LINEAR block table is too short for Prefill: "
-                f"required_pages={metadata.required_pages}, "
-                f"available_pages={linear_block_map.shape[1]}"
+                f"required_slots={metadata.required_slots}, "
+                f"available_slots={linear_block_map.shape[1]}"
             )
         current_state = (
             current_state_registry.get_or_create(

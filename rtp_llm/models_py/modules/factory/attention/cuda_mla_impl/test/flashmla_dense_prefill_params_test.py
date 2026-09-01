@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
     flashinfer_mla_wrapper,
     flashmla_dense_prefill,
@@ -21,6 +22,13 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_pr
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
     FlashMLAForwardRoute,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache import (
+    MlaPageRRCacheAdapter,
+)
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.models_py.modules.factory.linear.quantized_activation import (
+    QuantizedActivation,
 )
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -56,6 +64,65 @@ class FlashMlaWorkspaceLifetimeTest(TestCase):
         self.assertTrue(all(ref() is None for ref in refs))
         self.assertIs(op._forward_plan, plan)
         torch.testing.assert_close(consumed_output, torch.arange(16))
+
+
+class FlashMlaCanonicalPrefixQuantizedActivationTest(TestCase):
+    def setUp(self) -> None:
+        self.op = object.__new__(MlaFlashMLAPrefillOp)
+        self.op.kv_lora_rank = 512
+        self.op.qk_rope_head_dim = 64
+        self.op.q_lens = [1, 2]
+        self.op.batch_reuse_info_host = ((0, 2, 0, 0), (0, 1, 0, 0))
+        self.op.external_prefix_cache = True
+        self.op.has_reuse_cache = True
+        self.op._canonical_prefix_offsets = (0, 2, 3)
+        self.op._forward_plan = SimpleNamespace(route=FlashMLAForwardRoute.FULL)
+        self.latent = torch.tensor([3, 5, 6], dtype=torch.bfloat16)[:, None].repeat(
+            1, 512
+        )
+        self.quantized = QuantizedActivation(
+            torch.zeros((3, 512), dtype=torch.float8_e4m3fn),
+            torch.zeros((1, 4), dtype=torch.int32),
+            self.latent,
+        )
+        self.k_pe = self.latent[:, :64] * 10
+        prefix = torch.tensor([1, 2, 4], dtype=torch.bfloat16)[:, None]
+        self.prefix = torch.cat((prefix.repeat(1, 512), prefix.repeat(1, 64) * 10), 1)
+
+    def test_materialized_prefix_interleaves_retained_bf16_query_rows(self) -> None:
+        latent, rope = self.op._gather_reused_kv(
+            self.quantized, self.k_pe, None, self.prefix
+        )
+        expected = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.bfloat16)[:, None]
+        torch.testing.assert_close(latent, expected.repeat(1, 512), rtol=0, atol=0)
+        torch.testing.assert_close(rope, expected.repeat(1, 64) * 10, rtol=0, atol=0)
+
+    def test_external_prefix_validation_preserves_quantized_projection_input(
+        self,
+    ) -> None:
+        q = torch.empty((3, 1, 192), dtype=torch.bfloat16)
+        with (
+            patch.object(self.op, "_create_kv_b_proj", return_value=None),
+            patch.object(self.op, "_packed_kv_projection", return_value=None),
+            patch.object(
+                self.op,
+                "_forward_full",
+                side_effect=lambda q, compressed_kv, *args, **kwargs: compressed_kv,
+            ),
+        ):
+            actual = self.op.forward(q, self.quantized, self.k_pe, None, 0, self.prefix)
+        self.assertIs(actual, self.quantized)
+
+    def test_external_prefix_still_rejects_non_bf16_cache_rows(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "canonical prefix mismatch"):
+            self.op.forward(
+                torch.empty((3, 1, 192), dtype=torch.bfloat16),
+                self.quantized,
+                self.k_pe,
+                None,
+                0,
+                self.prefix.float(),
+            )
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
@@ -108,6 +175,102 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
             )
 
         self.assertEqual(captured["expanded_kv_budget_bytes"], 5 * 1024**3)
+
+    def test_wrapper_does_not_expand_prefill_cp_config(self) -> None:
+        configs = AttentionConfigs()
+        configs.head_num = 96
+        configs.kv_lora_rank = 512
+        configs.rope_head_dim = 64
+        configs.nope_head_dim = 128
+        configs.v_head_dim = 128
+        configs.kernel_tokens_per_block = 128
+        configs.softmax_extra_scale = 1.0
+        configs.use_mla = True
+        configs.mla_prefill_expanded_kv_budget_bytes = 5 * 1024**3
+        parallelism = SimpleNamespace(
+            tp_size=8,
+            tp_rank=5,
+            kv_page_rr_enabled=lambda: False,
+            prefill_cp_config=SimpleNamespace(kv_cache_sharded=True),
+        )
+        captured: dict[str, object] = {}
+
+        def make_op(*args: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return object()
+
+        with patch.object(
+            flashmla_dense_prefill,
+            "MlaFlashMLAPrefillOp",
+            side_effect=make_op,
+        ), patch.object(
+            flashinfer_mla_wrapper,
+            "NewMlaRotaryEmbeddingOp",
+            return_value=object(),
+        ), patch.object(
+            flashinfer_mla_wrapper,
+            "MlaKVCacheWriteOp",
+            return_value=object(),
+        ), patch.object(
+            flashinfer_mla_wrapper.MlaFlashInferImplBase,
+            "__init__",
+            return_value=None,
+        ):
+            impl = MlaFlashMLAPrefillImpl(
+                configs,
+                SimpleNamespace(),
+                [],
+                torch.empty(0),
+                parallelism_config=parallelism,
+            )
+
+        self.assertFalse(captured["external_prefix_cache"])
+        self.assertIsNone(impl.page_rr_cache_adapter)
+
+    def test_factory_skips_mla_impl_without_page_rr_prefill_capability(self) -> None:
+        class UnsupportedImpl(MlaImplBase):
+            @staticmethod
+            def support(attn_configs: object, attn_inputs: object) -> bool:
+                return True
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+        class SupportedImpl(UnsupportedImpl):
+            @classmethod
+            def support_page_rr_prefill(cls) -> bool:
+                return True
+
+        weight = SimpleNamespace(
+            weights=[],
+            get_global_weight=lambda _name: torch.empty(0),
+        )
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            is_mtp_draft_update=False,
+            input_lengths_host=torch.tensor([1], dtype=torch.int32),
+            prefix_lengths_host=torch.tensor([0], dtype=torch.int32),
+        )
+        configs = SimpleNamespace(indexer_topk=128, is_sparse=False)
+        parallelism = SimpleNamespace(
+            kv_page_rr_enabled=lambda: True,
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
+        )
+
+        with patch.object(
+            attn_factory,
+            "PREFILL_MLA_IMPS",
+            [UnsupportedImpl, SupportedImpl],
+        ):
+            impl = attn_factory.get_mla_impl(
+                configs,
+                weight,
+                attn_inputs,
+                parallelism_config=parallelism,
+            )
+
+        self.assertIsInstance(impl, SupportedImpl)
 
 
 def _indptr(lengths: list[int]) -> torch.Tensor:
@@ -177,6 +340,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         op.v_head_dim = 128
         op.page_size = self.page_size
         op.expanded_kv_budget_bytes = expanded_kv_budget_bytes
+        op.external_prefix_cache = False
         op.flash_mla_cuda = SimpleNamespace(dense_prefill_fwd=lambda *args: None)
         op.fp8_compute = False
         op._prefix_producer = None
@@ -528,6 +692,132 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         params = build_flashmla_device_params(attn_inputs, self.page_size)
 
         self.assertFalse(params.has_reuse_cache)
+
+    def test_rejects_query_write_past_block_table(self) -> None:
+        block_table = torch.tensor([[17]], dtype=torch.int32, device="cuda")
+        attn_inputs = _attention_inputs(
+            q_lens=[4],
+            prefix_lens=[127],
+            block_tables=[block_table],
+            current_group=0,
+        )
+
+        params = build_flashmla_device_params(attn_inputs, self.page_size)
+        impl = object.__new__(MlaFlashMLAPrefillImpl)
+        impl.page_rr_cache_adapter = None
+        impl.seq_size_per_block = self.page_size
+        with self.assertRaisesRegex(RuntimeError, "query write exceeds"):
+            impl._validate_direct_cache_capacity(params, block_table)
+
+    def test_page_rr_validates_rank_local_block_table_width(self) -> None:
+        rank_zero_table = torch.tensor([[17, 18]], dtype=torch.int32, device="cuda")
+        rank_seven_table = torch.tensor([[27]], dtype=torch.int32, device="cuda")
+        # Nine global pages: rank 0 owns pages 0 and 8, while rank 7 owns only
+        # page 7.  The cache adapter must validate those local widths rather
+        # than requiring nine columns on every rank.
+        for rank, table in ((0, rank_zero_table), (7, rank_seven_table)):
+            with self.subTest(rank=rank):
+                attn_inputs = _attention_inputs(
+                    q_lens=[1],
+                    prefix_lens=[8 * self.page_size],
+                    block_tables=[table],
+                    current_group=0,
+                )
+                params = build_flashmla_device_params(attn_inputs, self.page_size)
+                adapter = MlaPageRRCacheAdapter(
+                    page_tokens=self.page_size,
+                    shard_size=8,
+                    shard_rank=rank,
+                )
+                adapter.validate_block_table_capacity(table, params.kv_lens_host)
+                self.assertIs(params.attn_inputs.kv_cache_kernel_block_id_device, table)
+                self.assertEqual(params.batch_reuse_info_host[0], (0, 1024, 0, 8))
+
+        too_narrow = _attention_inputs(
+            q_lens=[1],
+            prefix_lens=[8 * self.page_size],
+            block_tables=[rank_zero_table[:, :1]],
+            current_group=0,
+        )
+        with self.assertRaisesRegex(RuntimeError, "rank-local block table"):
+            MlaPageRRCacheAdapter(
+                page_tokens=self.page_size,
+                shard_size=8,
+                shard_rank=0,
+            ).validate_block_table_capacity(
+                too_narrow.kv_cache_kernel_block_id_device,
+                (8 * self.page_size + 1,),
+            )
+
+    def test_page_rr_slot_mapping_writes_only_owner_pages(self) -> None:
+        block_table = torch.tensor([[11, 12]], dtype=torch.int32, device="cuda")
+        attn_inputs = _attention_inputs(
+            q_lens=[4],
+            prefix_lens=[127],
+            block_tables=[block_table],
+            current_group=0,
+        )
+        params = build_flashmla_device_params(attn_inputs, self.page_size)
+        impl = object.__new__(MlaFlashMLAPrefillImpl)
+        impl.fmha_params = params
+        impl.attn_inputs = attn_inputs
+        impl.seq_size_per_block = self.page_size
+        impl.page_rr_cache_adapter = MlaPageRRCacheAdapter(
+            page_tokens=self.page_size,
+            shard_size=8,
+            shard_rank=0,
+        )
+
+        slot_mapping = impl._device_slot_mapping()
+
+        self.assertIsNotNone(slot_mapping)
+        assert slot_mapping is not None
+        torch.testing.assert_close(
+            slot_mapping.cpu(),
+            torch.tensor([11 * 128 + 127, -1, -1, -1], dtype=torch.int64),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_page_rr_unused_tail_rank_accepts_empty_local_block_table(self) -> None:
+        block_table = torch.empty((1, 0), dtype=torch.int32, device="cuda")
+        attn_inputs = _attention_inputs(
+            q_lens=[4],
+            prefix_lens=[1],
+            block_tables=[block_table],
+            current_group=0,
+        )
+        params = build_flashmla_device_params(attn_inputs, self.page_size)
+        impl = object.__new__(MlaFlashMLAPrefillImpl)
+        impl.fmha_params = params
+        impl.attn_inputs = attn_inputs
+        impl.seq_size_per_block = self.page_size
+        impl.page_rr_cache_adapter = MlaPageRRCacheAdapter(
+            page_tokens=self.page_size,
+            shard_size=8,
+            shard_rank=7,
+        )
+
+        slot_mapping = impl._device_slot_mapping()
+
+        self.assertIsNotNone(slot_mapping)
+        assert slot_mapping is not None
+        torch.testing.assert_close(
+            slot_mapping.cpu(),
+            torch.full((4,), -1, dtype=torch.int64),
+            rtol=0,
+            atol=0,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "rank-local block table"):
+            MlaPageRRCacheAdapter(
+                page_tokens=self.page_size,
+                shard_size=8,
+                shard_rank=0,
+            ).validate_block_table_capacity(
+                block_table,
+                (5,),
+            )
 
 
 if __name__ == "__main__":

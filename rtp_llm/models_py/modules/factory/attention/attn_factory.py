@@ -49,10 +49,14 @@ def get_mla_impl(
     # forward_decode dispatch.  Routing the draft update through dense
     # FlashMLA prefill would gather and expand the whole reused prefix KV,
     # OOMing on long contexts.
-    mla_impls = (
-        PREFILL_MLA_IMPS
-        if attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
-        else DECODE_MLA_IMPS
+    is_prefill = (
+        attn_inputs.is_prefill and not is_target_verify and not is_mtp_draft_update
+    )
+    mla_impls = PREFILL_MLA_IMPS if is_prefill else DECODE_MLA_IMPS
+    page_rr_prefill = bool(
+        is_prefill
+        and parallelism_config is not None
+        and parallelism_config.kv_page_rr_enabled()
     )
     for impl in mla_impls:
         if attn_configs.mla_fp8_compute and impl.__name__ not in (
@@ -61,6 +65,8 @@ def get_mla_impl(
             continue
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
+            continue
+        if page_rr_prefill and not impl.support_page_rr_prefill():
             continue
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)

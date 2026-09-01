@@ -10,8 +10,37 @@ py_test(
     name = "flashmla_state_merge_test",
     srcs = ["flashmla_state_merge_test.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
-    tags = ["B300"],
-    exec_properties = {'gpu': 'B300'},
+    tags = ["L20D"],
+    exec_properties = {'gpu': 'L20D'},
+)
+
+py_test(
+    name = "mla_page_rr_cache_test",
+    srcs = ["mla_page_rr_cache_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
+    name = "mla_page_rr_nccl_test",
+    srcs = ["mla_page_rr_nccl_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {"gpu": "L20D", "gpu_count": "2"},
+    tags = ["L20D"],
+    timeout = "moderate",
+)
+
+py_test(
+    name = "mla_page_rr_prefix_kernel_test",
+    srcs = ["mla_page_rr_prefix_kernel_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    exec_properties = {"gpu": "L20D"},
+    tags = ["L20D"],
+    timeout = "moderate",
 )
 
 # only can run in cu129 so mark as manual
@@ -92,8 +121,8 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["B300"],
-    exec_properties = {'gpu': 'B300'},
+    tags = ["L20D"],
+    exec_properties = {'gpu': 'L20D'},
 )
 
 py_binary(
@@ -102,8 +131,8 @@ py_binary(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual", "B300"],
-    exec_properties = {'gpu': 'B300'},
+    tags = ["manual", "L20D"],
+    exec_properties = {'gpu': 'L20D'},
 )
 
 py_test(

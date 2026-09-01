@@ -5,12 +5,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -25,6 +28,33 @@
 namespace rtp_llm {
 
 namespace {
+
+void validateK3CacheSpecs(const CacheConfig& config) {
+    if (!config.use_mla
+        || std::find(config.group_types.begin(), config.group_types.end(), CacheGroupType::LINEAR)
+               == config.group_types.end()) {
+        return;
+    }
+    if (config.cache_specs.size() != config.group_types.size()
+        || config.group_seq_size_per_block.size() != config.group_types.size()) {
+        throw std::invalid_argument("Kimi K3 requires one physical spec and token span per group");
+    }
+    for (size_t gid = 0; gid < config.group_types.size(); ++gid) {
+        const auto* spec = config.cache_specs[gid].get();
+        if (!spec || spec->seq_size_per_block == 0
+            || spec->seq_size_per_block != config.group_seq_size_per_block[gid]) {
+            throw std::invalid_argument("Kimi K3 physical spec/group span mismatch");
+        }
+        const auto kind     = config.group_types[gid];
+        const bool matching = (kind == CacheGroupType::FULL && spec->type == KVCacheSpecType::MultiHeadLatentAttention
+                               && dynamic_cast<const MLAKVCacheSpec*>(spec))
+                              || (kind == CacheGroupType::LINEAR && spec->type == KVCacheSpecType::LinearAttention
+                                  && dynamic_cast<const LinearKVCacheSpec*>(spec));
+        if (!matching) {
+            throw std::invalid_argument("Kimi K3 physical spec/group kind mismatch");
+        }
+    }
+}
 
 size_t expectedCPShardedLocalBlocks(const CPSlotMapper& mapper, int seq_len, int reserve_step) {
     const int effective_seq_len = mapper.effectiveSeqLenForAlloc(std::max(seq_len, 0));
@@ -73,12 +103,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     // malloc()/insertIntoCache().  When kv_cache_sharded=false (or tp_size==1),
     // cp_slot_mapper_ stays nullptr and every call site stays bit-equal to the
     // pre-RR behaviour.
-    const auto& cp_cfg = parallelism_config_.prefill_cp_config;
-    if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
+    if (parallelism_config_.kv_page_rr_enabled()) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
-        RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
+        RTP_LLM_LOG_INFO("Page-RR sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
                          "virtual_block_size=%d",
                          (int)parallelism_config_.tp_rank,
                          (int)parallelism_config_.tp_size,
@@ -403,6 +432,9 @@ CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
 
 CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     CacheLayerLayout layout;
+    layout.linear_step = config_.linear_step;
+    validateK3CacheSpecs(config_);
+    layout.local_shard_count = parallelism_config_.local_kv_page_rr_shard_count();
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     auto& all_layer_tensors = all_layout.layers_to_kv_buffer_ptrs;
@@ -477,6 +509,9 @@ CacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id)
 
     const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
+    validateK3CacheSpecs(*mtp_sub_config);
+    layout.local_shard_count     = parallelism_config_.local_kv_page_rr_shard_count();
+    layout.linear_step           = mtp_sub_config->linear_step;
     const uint32_t mtp_layer_num = mtp_sub_config->layer_num;
     RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->local_to_global_layer_ids.size() == mtp_layer_num,
                             "mtp_sub_configs[%d] local-to-global mapping size %zu != layer_num %u",

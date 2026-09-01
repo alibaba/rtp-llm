@@ -15,9 +15,12 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
 )
 
 
-@unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
     def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "fused_paged_prefill_test is a mandatory L20D CUDA/cuLA gate"
+            )
         torch.manual_seed(20260816)
 
     @staticmethod
@@ -66,9 +69,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         mixed_qkv = torch.randn(
             token_count, channels, dtype=torch.bfloat16, device="cuda"
         )
-        weight = torch.randn(
-            channels, width, dtype=torch.bfloat16, device="cuda"
-        )
+        weight = torch.randn(channels, width, dtype=torch.bfloat16, device="cuda")
         fla_convs = []
         for projection in range(3):
             layer = ShortConvolution(
@@ -109,9 +110,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             if prefix:
                 initial_page = (prefix - 1) // page_size
                 initial_block = host_map[sequence][initial_page]
-                history = (
-                    initial_cache[initial_block].transpose(0, 1).contiguous()
-                )
+                history = initial_cache[initial_block].transpose(0, 1).contiguous()
             else:
                 history = torch.zeros(
                     channels,
@@ -208,9 +207,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         page_size = 64
         projection_size = 32
         channels = 3 * projection_size
-        mixed_qkv = torch.randn(
-            130, channels, dtype=torch.bfloat16, device="cuda"
-        )
+        mixed_qkv = torch.randn(130, channels, dtype=torch.bfloat16, device="cuda")
         weight = torch.randn(channels, 4, dtype=torch.bfloat16, device="cuda")
         block_map = torch.tensor([[1, 2, 3]], dtype=torch.int32, device="cuda")
 
@@ -244,18 +241,12 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         full_output, full_final = run(
             mixed_qkv,
             0,
-            torch.zeros(
-                4, 3, channels, dtype=torch.bfloat16, device="cuda"
-            ),
+            torch.zeros(4, 3, channels, dtype=torch.bfloat16, device="cuda"),
         )
-        split_cache = torch.zeros(
-            4, 3, channels, dtype=torch.bfloat16, device="cuda"
-        )
+        split_cache = torch.zeros(4, 3, channels, dtype=torch.bfloat16, device="cuda")
         first_output, first_final = run(mixed_qkv[:64], 0, split_cache)
         split_cache[1].fill_(123)
-        second_output, second_final = run(
-            mixed_qkv[64:], 64, split_cache, first_final
-        )
+        second_output, second_final = run(mixed_qkv[64:], 64, split_cache, first_final)
 
         torch.testing.assert_close(
             torch.cat((first_output, second_output), dim=1),
@@ -323,9 +314,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             for local_checkpoint in range(count):
                 local_end = min((local_checkpoint + 1) * page_size, length)
                 page = (prefix + local_end - 1) // page_size
-                expected_cache[host_map[sequence][page]].copy_(
-                    checkpoints[checkpoint]
-                )
+                expected_cache[host_map[sequence][page]].copy_(checkpoints[checkpoint])
                 checkpoint += 1
 
         kimi_kda_store_recurrent_checkpoints(
@@ -340,9 +329,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
 
     def test_out_of_range_physical_id_cannot_access_cache(self) -> None:
         page_size = 64
-        cache = torch.randn(
-            4, 1, 4, 4, dtype=torch.float32, device="cuda"
-        )
+        cache = torch.randn(4, 1, 4, 4, dtype=torch.float32, device="cuda")
         initial_cache = cache.clone()
         prefix_lengths = torch.tensor([64], dtype=torch.int32, device="cuda")
         block_map = torch.tensor([[99]], dtype=torch.int32, device="cuda")
@@ -360,9 +347,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             cache.device,
         )
         kimi_kda_store_recurrent_checkpoints(
-            torch.randn(
-                1, 1, 4, 4, dtype=torch.float32, device="cuda"
-            ),
+            torch.randn(1, 1, 4, 4, dtype=torch.float32, device="cuda"),
             metadata,
             block_map,
             cache,
@@ -390,9 +375,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         k = torch.randn_like(q)
         v = torch.randn_like(q)
         gate = torch.randn_like(q)
-        beta = torch.randn(
-            1, token_count, heads, dtype=torch.bfloat16, device="cuda"
-        )
+        beta = torch.randn(1, token_count, heads, dtype=torch.bfloat16, device="cuda")
         initial = torch.randn(
             len(lengths),
             heads,
@@ -407,9 +390,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             (length + interval - 1) // interval for length in lengths
         )
         alog = torch.randn(heads, dtype=torch.float32, device="cuda")
-        dt_bias = torch.randn(
-            heads * state_dim, dtype=torch.float32, device="cuda"
-        )
+        dt_bias = torch.randn(heads * state_dim, dtype=torch.float32, device="cuda")
 
         def run(output_final_state: bool):
             checkpoint_buffer = torch.empty(
@@ -466,15 +447,14 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         )
 
     @torch.inference_mode()
-    def test_two_round_physical_cache_reload_matches_unsplit_kda(self) -> None:
+    def test_split_and_unsplit_match_across_checkpoint_boundaries(self) -> None:
         chunk_kda = self._chunk_kda()
-        page_size = 64
         heads = 1
         state_dim = 128
         channels = 3 * state_dim
-        lengths = [130, 77]
+        lengths = [1023, 1024, 1025]
         token_count = sum(lengths)
-        block_map = self._linear_block_map(len(lengths), 4)
+        block_map = self._linear_block_map(len(lengths), 3)
         block_count = int(block_map.max().item()) + 3
         mixed_qkv = torch.randn(
             token_count, channels, dtype=torch.bfloat16, device="cuda"
@@ -483,13 +463,9 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         raw_gate = torch.randn(
             token_count, heads, state_dim, dtype=torch.bfloat16, device="cuda"
         )
-        raw_beta = torch.randn(
-            token_count, heads, dtype=torch.bfloat16, device="cuda"
-        )
+        raw_beta = torch.randn(token_count, heads, dtype=torch.bfloat16, device="cuda")
         a_log = torch.randn(heads, dtype=torch.float32, device="cuda")
-        dt_bias = torch.randn(
-            heads * state_dim, dtype=torch.float32, device="cuda"
-        )
+        dt_bias = torch.randn(heads * state_dim, dtype=torch.float32, device="cuda")
         initial_conv = torch.randn(
             block_count, 3, channels, dtype=torch.bfloat16, device="cuda"
         )
@@ -501,6 +477,10 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             dtype=torch.float32,
             device="cuda",
         )
+
+        source_starts = [0, lengths[0], lengths[0] + lengths[1]]
+
+        checkpoint_tokens = 1024
 
         def run_batch(
             batch_qkv: torch.Tensor,
@@ -517,12 +497,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
                 dtype=torch.int32,
             )
             cu_device = cu_host.cuda()
-            prefix_device = torch.tensor(
-                prefixes, dtype=torch.int32, device="cuda"
-            )
-            lengths_device = torch.tensor(
-                batch_lengths, dtype=torch.int32, device="cuda"
-            )
+            prefix_device = torch.tensor(prefixes, dtype=torch.int32, device="cuda")
             q, k, v, final_conv = kimi_kda_short_conv_paged_prefill(
                 batch_qkv,
                 weight,
@@ -530,14 +505,14 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
                 linear_block_map,
                 prefix_device,
                 cu_device,
-                page_size,
+                checkpoint_tokens,
                 prepare_kimi_kda_short_conv_metadata(cu_host, batch_qkv.device),
             )
             self.assertIsNone(final_conv)
             checkpoint_metadata = prepare_kimi_kda_recurrent_checkpoint_metadata(
                 torch.tensor(batch_lengths, dtype=torch.int32),
                 torch.tensor(prefixes, dtype=torch.int32),
-                page_size,
+                checkpoint_tokens,
                 batch_qkv.device,
             )
             checkpoints = torch.empty(
@@ -557,7 +532,10 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
                 batch_beta.reshape(1, -1, heads),
                 scale=state_dim**-0.5,
                 initial_state=kimi_kda_load_recurrent_state(
-                    prefix_device, linear_block_map, ssm_cache, page_size
+                    prefix_device,
+                    linear_block_map,
+                    ssm_cache,
+                    checkpoint_tokens,
                 ),
                 output_final_state=False,
                 use_qk_l2norm_in_kernel=True,
@@ -571,7 +549,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
                 use_intracard_cp=False,
                 A_log=a_log,
                 dt_bias=dt_bias,
-                checkpoint_interval=page_size,
+                checkpoint_interval=checkpoint_tokens,
                 checkpoint_states=checkpoints,
             )
             self.assertIsNone(final_state)
@@ -591,7 +569,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
             raw_gate,
             raw_beta,
             lengths,
-            [0, 0],
+            [0, 0, 0],
             block_map,
             unsplit_conv,
             unsplit_ssm,
@@ -600,35 +578,40 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         split_conv = initial_conv.clone()
         split_ssm = initial_ssm.clone()
         split_output = torch.empty_like(unsplit_output)
-        source_starts = [0, lengths[0]]
-        processed = [0, 0]
-        for round_lengths in ([64, 64], [66, 13]):
-            pieces = []
-            gate_pieces = []
-            beta_pieces = []
-            for sequence, round_length in enumerate(round_lengths):
-                source = source_starts[sequence] + processed[sequence]
-                pieces.append(mixed_qkv[source : source + round_length])
-                gate_pieces.append(raw_gate[source : source + round_length])
-                beta_pieces.append(raw_beta[source : source + round_length])
-            round_output = run_batch(
-                torch.cat(pieces),
-                torch.cat(gate_pieces),
-                torch.cat(beta_pieces),
-                list(round_lengths),
-                list(processed),
-                block_map,
-                split_conv,
-                split_ssm,
+        first_round_lengths = [1023, 1024, 1024]
+        first_round_slices = [
+            slice(source, source + length)
+            for source, length in zip(source_starts, first_round_lengths)
+        ]
+        first_round_output = run_batch(
+            torch.cat([mixed_qkv[item] for item in first_round_slices]),
+            torch.cat([raw_gate[item] for item in first_round_slices]),
+            torch.cat([raw_beta[item] for item in first_round_slices]),
+            first_round_lengths,
+            [0, 0, 0],
+            block_map,
+            split_conv,
+            split_ssm,
+        )
+        packed_start = 0
+        for source, length in zip(source_starts, first_round_lengths):
+            split_output[source : source + length].copy_(
+                first_round_output[packed_start : packed_start + length]
             )
-            packed_start = 0
-            for sequence, round_length in enumerate(round_lengths):
-                source = source_starts[sequence] + processed[sequence]
-                split_output[source : source + round_length].copy_(
-                    round_output[packed_start : packed_start + round_length]
-                )
-                processed[sequence] += round_length
-                packed_start += round_length
+            packed_start += length
+
+        last_token = source_starts[2] + 1024
+        second_round_output = run_batch(
+            mixed_qkv[last_token : last_token + 1],
+            raw_gate[last_token : last_token + 1],
+            raw_beta[last_token : last_token + 1],
+            [1],
+            [1024],
+            block_map[2:3],
+            split_conv,
+            split_ssm,
+        )
+        split_output[last_token].copy_(second_round_output[0])
 
         torch.cuda.synchronize()
         torch.testing.assert_close(split_output, unsplit_output, rtol=0, atol=0)

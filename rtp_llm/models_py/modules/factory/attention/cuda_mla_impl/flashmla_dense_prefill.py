@@ -322,6 +322,7 @@ class MlaFlashMLAPrefillOp:
         fp8_compute: bool = False,
         q_scale: float = 1.0,
         kv_scale: float = 1.0,
+        external_prefix_cache: bool = False,
     ) -> None:
         if weights is None:
             raise ValueError("FlashMLA Prefill requires MLA projection weights")
@@ -374,6 +375,8 @@ class MlaFlashMLAPrefillOp:
         self.v_head_dim = v_head_dim
         self.page_size = page_size
         self.expanded_kv_budget_bytes = expanded_kv_budget_bytes
+        self.external_prefix_cache = bool(external_prefix_cache)
+        self._canonical_prefix_offsets: tuple[int, ...] = ()
         self.scale = (
             (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
         ) * softmax_extra_scale
@@ -414,6 +417,7 @@ class MlaFlashMLAPrefillOp:
         self.q_lens = list(mla_params.q_lens_host)
         self.kv_lens = list(mla_params.kv_lens_host)
         prefix_lens = list(mla_params.prefix_lens_host)
+        self._canonical_prefix_offsets = tuple(_prefix_sum(prefix_lens))
         self.qo_indptr = mla_params.qo_indptr_d
         self.kv_indptr = mla_params.prefill_ragged_kv_len_indptr_d
         self.has_reuse_cache = mla_params.has_reuse_cache
@@ -537,8 +541,25 @@ class MlaFlashMLAPrefillOp:
         compressed_kv: torch.Tensor,
         k_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
+        canonical_prefix_kv: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
+        if canonical_prefix_kv is not None:
+            prefix_lens = [row[1] for row in self.batch_reuse_info_host]
+
+            def merge(prefix: torch.Tensor, query: torch.Tensor) -> torch.Tensor:
+                parts = zip(
+                    prefix.split(prefix_lens), query.split(self.q_lens), strict=True
+                )
+                return torch.cat([rows for pair in parts for rows in pair])
+
+            return (
+                merge(
+                    canonical_prefix_kv[:, : self.kv_lora_rank],
+                    retained_bf16(compressed_kv),
+                ),
+                merge(canonical_prefix_kv[:, self.kv_lora_rank :], flat_k_pe),
+            )
         if not self.has_reuse_cache:
             return compressed_kv, flat_k_pe
         kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
@@ -808,15 +829,16 @@ class MlaFlashMLAPrefillOp:
         layer_id: int,
         kv_b_proj: LinearBase,
         packed_projection: Optional[LinearBase],
+        canonical_prefix_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         projected_kv = None
-        if packed_projection is not None:
+        if packed_projection is not None and canonical_prefix_kv is None:
             projected_kv = self._project_reused_kv_with_gap_fill(
                 compressed_kv, k_pe, kv_cache, packed_projection
             )
         if projected_kv is None:
             gathered_compressed_kv, gathered_k_pe = self._gather_reused_kv(
-                compressed_kv, k_pe, kv_cache
+                compressed_kv, k_pe, kv_cache, canonical_prefix_kv
             )
             projected_kv = self._project_kv(
                 gathered_compressed_kv,
@@ -855,17 +877,38 @@ class MlaFlashMLAPrefillOp:
         kv_cache: Optional[LayerKVCache],
         packed_projection: LinearBase,
         canonical_output: torch.Tensor,
+        canonical_prefix_kv: Optional[torch.Tensor] = None,
     ) -> None:
-        fused_gather = rtp_llm_ops._gather_mla_latent_and_fill_k_pe
         flat_k_pe = k_pe.view(-1, self.qk_rope_head_dim)
-        kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
+        if canonical_prefix_kv is None:
+            fused_gather = rtp_llm_ops._gather_mla_latent_and_fill_k_pe
+            kv_cache_base, reuse_cache_page_indice = self._reuse_cache_inputs(kv_cache)
         packed_head_dim = sum(_K3_PACKED_KV_HEAD_SPLITS)
 
         for launch in self._prefix_runtime_launches:
             kv_tokens = launch.spec.expanded_kv_tokens
             launch_compressed = workspace.compressed_kv_buffer(kv_tokens)
             launch_packed_kv = workspace.packed_kv_buffer(kv_tokens)
-            if self.fp8_compute or self._prefix_producer is not None:
+            if canonical_prefix_kv is not None:
+                packed_k_pe = launch_packed_kv.view(
+                    kv_tokens, self.num_heads, packed_head_dim
+                )[..., self.qk_nope_head_dim : -self.v_head_dim]
+                cursor = 0
+                for item in launch.spec.slices:
+                    prefix = canonical_prefix_kv.narrow(
+                        0,
+                        self._canonical_prefix_offsets[item.request_idx]
+                        + item.prefix_start,
+                        item.prefix_len,
+                    )
+                    launch_compressed.narrow(0, cursor, item.prefix_len).copy_(
+                        prefix[:, : self.kv_lora_rank]
+                    )
+                    packed_k_pe.narrow(0, cursor, item.prefix_len).copy_(
+                        prefix[:, self.kv_lora_rank :].unsqueeze(1)
+                    )
+                    cursor += item.prefix_len
+            elif self.fp8_compute or self._prefix_producer is not None:
                 launch_rope = self._fp8_prefix_rope[:kv_tokens]
                 launch_compressed = self._gather_cache(
                     launch_compressed,
@@ -939,6 +982,7 @@ class MlaFlashMLAPrefillOp:
         layer_id: int,
         kv_b_proj: LinearBase,
         packed_projection: LinearBase,
+        canonical_prefix_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         expected_tokens = sum(self.q_lens)
         # Initialize FlashMLA's device scratch before entering the physical
@@ -1011,6 +1055,7 @@ class MlaFlashMLAPrefillOp:
             kv_cache,
             packed_projection,
             canonical_output,
+            canonical_prefix_kv=canonical_prefix_kv,
         )
         if workspace.fp32_output is not None:
             workspace.output_bf16.copy_(workspace.fp32_output)
@@ -1023,7 +1068,33 @@ class MlaFlashMLAPrefillOp:
         k_pe: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         layer_id: int,
+        canonical_prefix_kv: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self._forward_plan is None:
+            raise RuntimeError("FlashMLA Prefill must be planned before forward")
+        if self.external_prefix_cache and self.has_reuse_cache:
+            cache_kv = retained_bf16(compressed_kv)
+            expected_shape = (
+                self._canonical_prefix_offsets[-1],
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            )
+            if (
+                canonical_prefix_kv is None
+                or tuple(canonical_prefix_kv.shape) != expected_shape
+                or canonical_prefix_kv.device != cache_kv.device
+                or canonical_prefix_kv.dtype != cache_kv.dtype
+                or not canonical_prefix_kv.is_contiguous()
+            ):
+                raise RuntimeError(
+                    "FlashMLA external canonical prefix mismatch: "
+                    f"expected={expected_shape}/{cache_kv.device}/"
+                    f"{cache_kv.dtype}/contiguous"
+                )
+        elif canonical_prefix_kv is not None:
+            raise RuntimeError(
+                "FlashMLA received an external prefix without an external "
+                "cache reader or reusable prefix"
+            )
         plan = cast(FlashMLAForwardPlan, self._forward_plan)
         kv_b_proj = self._create_kv_b_proj(layer_id)
         packed_projection = self._packed_kv_projection(compressed_kv, kv_b_proj)
@@ -1036,6 +1107,7 @@ class MlaFlashMLAPrefillOp:
                 layer_id,
                 kv_b_proj,
                 packed_projection,
+                canonical_prefix_kv=canonical_prefix_kv,
             )
         return self._forward_hybrid(
             q,
@@ -1045,4 +1117,5 @@ class MlaFlashMLAPrefillOp:
             layer_id,
             kv_b_proj,
             cast(LinearBase, packed_projection),
+            canonical_prefix_kv=canonical_prefix_kv,
         )

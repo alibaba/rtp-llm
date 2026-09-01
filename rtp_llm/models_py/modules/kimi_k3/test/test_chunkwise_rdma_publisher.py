@@ -1,11 +1,10 @@
 import importlib.util
 import os
-from pathlib import Path
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
-
 
 compute_ops = types.ModuleType("rtp_llm.ops.compute_ops")
 compute_ops.PyAttentionInputs = type("PyAttentionInputs", (), {})
@@ -15,13 +14,14 @@ rtp_llm_package = types.ModuleType("rtp_llm")
 rtp_llm_package.__path__ = [str(Path(__file__).resolve().parents[4])]
 ops_package = types.ModuleType("rtp_llm.ops")
 ops_package.__path__ = []
-ops_package.CPRotateMethod = type("CPRotateMethod", (), {})
 sys.modules.setdefault("rtp_llm", rtp_llm_package)
 sys.modules.setdefault("rtp_llm.ops", ops_package)
 sys.modules.setdefault("rtp_llm.ops.compute_ops", compute_ops)
 
 module_path = Path(__file__).resolve().parents[1] / "chunk_prefill.py"
-spec = importlib.util.spec_from_file_location("kimi_k3_chunk_prefill_tested", module_path)
+spec = importlib.util.spec_from_file_location(
+    "kimi_k3_chunk_prefill_tested", module_path
+)
 assert spec is not None and spec.loader is not None
 chunk_prefill = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = chunk_prefill
@@ -38,7 +38,8 @@ def _publish_all(
     prefix_lengths: list[int],
     *,
     budget: int,
-    page_size: int,
+    alignment_tokens: int,
+    transfer_page_tokens: int,
 ) -> tuple[
     KimiK3ChunkRdmaPublisher,
     list[tuple[tuple[int, ...], tuple[int, ...]]],
@@ -47,7 +48,7 @@ def _publish_all(
     publisher = KimiK3ChunkRdmaPublisher(
         input_lengths,
         prefix_lengths,
-        page_size=page_size,
+        transfer_page_tokens=transfer_page_tokens,
         kda_layer_indices=kda_layers,
     )
     ranges = []
@@ -58,7 +59,7 @@ def _publish_all(
         input_lengths,
         prefix_lengths,
         chunk_budget=budget,
-        page_size=page_size,
+        alignment_tokens=alignment_tokens,
     )
     for round_plan in rounds:
         step = publisher.round_step(round_plan)
@@ -72,6 +73,44 @@ def _publish_all(
 
 
 class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
+    def test_64k_is_an_upper_bound_and_nonterminal_ends_align_to_v(self) -> None:
+        rounds = plan_kimi_k3_chunk_rounds(
+            [65537],
+            [0],
+            chunk_budget=65536,
+            alignment_tokens=1024,
+        )
+
+        self.assertEqual([round_plan.token_count for round_plan in rounds], [65536, 1])
+        self.assertFalse(rounds[0].slices[0].terminal)
+        self.assertEqual(rounds[0].slices[0].absolute_end, 65536)
+        self.assertTrue(rounds[1].slices[0].terminal)
+        self.assertEqual(rounds[1].slices[0].absolute_end, 65537)
+
+    def test_multi_request_rounds_may_leave_budget_holes(self) -> None:
+        rounds = plan_kimi_k3_chunk_rounds(
+            [2048, 2048],
+            [0, 0],
+            chunk_budget=1536,
+            alignment_tokens=1024,
+        )
+
+        self.assertEqual([round_plan.token_count for round_plan in rounds], [1024] * 4)
+        self.assertTrue(all(round_plan.token_count < 1536 for round_plan in rounds))
+        for round_plan in rounds:
+            for item in round_plan.slices:
+                if not item.terminal:
+                    self.assertEqual(item.absolute_end % 1024, 0)
+
+    def test_planner_fails_when_budget_cannot_reach_a_checkpoint(self) -> None:
+        with self.assertRaisesRegex(ValueError, "checkpoint"):
+            plan_kimi_k3_chunk_rounds(
+                [2048],
+                [0],
+                chunk_budget=512,
+                alignment_tokens=1024,
+            )
+
     def test_cache_publisher_owns_prefix_round_and_layer_publication(self) -> None:
         class FakeLayer:
             def __init__(self, is_kda: bool) -> None:
@@ -99,7 +138,10 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
             )
 
         publisher = KimiK3ChunkRdmaPublisher(
-            [700], [512], page_size=512, kda_layer_indices=[1]
+            [700],
+            [1024],
+            transfer_page_tokens=128,
+            kda_layer_indices=[1],
         )
         cache_publisher = KimiK3ChunkCachePublisher(
             writer=writer,
@@ -109,7 +151,7 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
         )
         cache_publisher.publish_prefix()
         for round_plan in plan_kimi_k3_chunk_rounds(
-            [700], [512], chunk_budget=512, page_size=512
+            [700], [1024], chunk_budget=1024, alignment_tokens=1024
         ):
             context = cache_publisher.begin_round(round_plan)
             self.assertIsNotNone(context)
@@ -118,8 +160,8 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
             cache_publisher.commit_round(context)
         cache_publisher.validate_complete()
 
-        self.assertEqual([write[0] for write in writes], [0, 0, 0, 1])
-        self.assertEqual(writes[-1][1:], ((2,), (3,), (True,)))
+        self.assertEqual([write[0] for write in writes], [0, 0, 1])
+        self.assertEqual(writes[-1][1:], ((8,), (14,), (True,)))
         self.assertEqual(layers[1].prepared, 1)
 
     def test_multi_batch_frontiers_cover_each_page_and_tail_once(self) -> None:
@@ -127,56 +169,62 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
             [1369, 1209, 1813],
             [0, 0, 0],
             budget=1024,
-            page_size=512,
+            alignment_tokens=1024,
+            transfer_page_tokens=128,
         )
 
-        self.assertEqual(publisher.frontier, (3, 3, 4))
+        self.assertEqual(publisher.frontier, (11, 10, 15))
         covered = [[], [], []]
         for begins, ends in ranges:
             for request_idx, (begin, end) in enumerate(zip(begins, ends)):
                 covered[request_idx].extend(range(begin, end))
-        self.assertEqual(
-            covered, [list(range(3)), list(range(3)), list(range(4))]
-        )
+        self.assertEqual(covered, [list(range(11)), list(range(10)), list(range(15))])
 
     def test_prefix_hit_and_inactive_rows_keep_monotonic_frontiers(self) -> None:
         publisher, ranges = _publish_all(
             [600, 900],
             [1024, 0],
-            budget=512,
-            page_size=512,
+            budget=1024,
+            alignment_tokens=1024,
+            transfer_page_tokens=128,
         )
 
-        self.assertEqual(ranges[0], ((0, 0), (2, 0)))
-        self.assertEqual(publisher.frontier, (4, 2))
+        self.assertEqual(ranges[0], ((0, 0), (8, 0)))
+        self.assertEqual(publisher.frontier, (13, 8))
         self.assertTrue(any(begin[1] == end[1] for begin, end in ranges[1:]))
 
     def test_terminal_tail_is_not_exposed_by_nonterminal_step(self) -> None:
         rounds = plan_kimi_k3_chunk_rounds(
-            [700], [0], chunk_budget=512, page_size=512
+            [1153], [0], chunk_budget=1024, alignment_tokens=1024
         )
         publisher = KimiK3ChunkRdmaPublisher(
-            [700], [0], page_size=512, kda_layer_indices=[1]
+            [1153],
+            [0],
+            transfer_page_tokens=128,
+            kda_layer_indices=[1],
         )
         publisher.commit(publisher.prefix_step())
 
         first = publisher.round_step(rounds[0])
         self.assertEqual(first.begin_blocks, (0,))
-        self.assertEqual(first.end_blocks, (1,))
+        self.assertEqual(first.end_blocks, (8,))
         self.assertEqual(first.terminal, (False,))
         publisher.commit(first)
 
         tail = publisher.round_step(rounds[1])
-        self.assertEqual(tail.begin_blocks, (1,))
-        self.assertEqual(tail.end_blocks, (2,))
+        self.assertEqual(tail.begin_blocks, (8,))
+        self.assertEqual(tail.end_blocks, (10,))
         self.assertEqual(tail.terminal, (True,))
 
     def test_stale_commit_and_duplicate_kda_are_rejected(self) -> None:
         rounds = plan_kimi_k3_chunk_rounds(
-            [700], [0], chunk_budget=512, page_size=512
+            [1153], [0], chunk_budget=1024, alignment_tokens=1024
         )
         publisher = KimiK3ChunkRdmaPublisher(
-            [700], [0], page_size=512, kda_layer_indices=[1]
+            [1153],
+            [0],
+            transfer_page_tokens=128,
+            kda_layer_indices=[1],
         )
         publisher.commit(publisher.prefix_step())
         first = publisher.round_step(rounds[0])

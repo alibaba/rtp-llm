@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/core/DeviceData.h"
 
 namespace rtp_llm {
 namespace test {
@@ -51,6 +52,62 @@ protected:
         createDevice();
     }
 };
+
+struct ParallelismGateCase {
+    const char*    name;
+    CPRotateMethod method_input;
+    bool           kv_cache_sharded_input;
+    int            tp_size_input;
+    int            tp_rank_input;
+    bool           expected_query_cp_enabled;
+    bool           expected_page_rr_enabled;
+};
+
+class KVCacheManagerParallelismGateTest:
+    public KVCacheManagerCPSlotMapperTest,
+    public ::testing::WithParamInterface<ParallelismGateCase> {};
+
+TEST_P(KVCacheManagerParallelismGateTest, KeepsQueryCPAndPageRRGatesIndependent) {
+    const auto& test_case = GetParam();
+
+    ParallelismConfig par;
+    par.tp_rank                            = test_case.tp_rank_input;
+    par.tp_size                            = test_case.tp_size_input;
+    par.prefill_cp_config.method           = test_case.method_input;
+    par.prefill_cp_config.kv_cache_sharded = test_case.kv_cache_sharded_input;
+
+    EXPECT_EQ(par.prefill_cp_config.is_enabled(), test_case.expected_query_cp_enabled);
+    EXPECT_EQ(par.kv_page_rr_enabled(), test_case.expected_page_rr_enabled);
+    EXPECT_EQ(par.get_attn_tp_size(), test_case.expected_query_cp_enabled ? 1 : par.tp_size);
+    EXPECT_EQ(par.get_attn_tp_rank(), test_case.expected_query_cp_enabled ? 0 : par.tp_rank);
+
+    DeviceResourceConfig device_resource_config;
+    const auto           exec_properties = buildExecProperties(par, device_resource_config);
+    EXPECT_EQ(exec_properties.enable_prefill_cp, test_case.expected_query_cp_enabled);
+    EXPECT_EQ(exec_properties.prefill_cp_kv_cache_sharded, test_case.expected_page_rr_enabled);
+
+    auto mgr = std::make_shared<KVCacheManager>(makeTestConfig(), /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+    if (test_case.expected_page_rr_enabled) {
+        auto mapper = mgr->cpSlotMapper();
+        ASSERT_NE(mapper, nullptr);
+        EXPECT_EQ(mapper->cpRank(), par.tp_rank);
+        EXPECT_EQ(mapper->cpSize(), par.tp_size);
+    } else {
+        EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    QueryAndCacheGateMatrix,
+    KVCacheManagerParallelismGateTest,
+    ::testing::Values(
+        ParallelismGateCase{"QueryCPDisabled_CachePageRR", CPRotateMethod::DISABLED, true, 8, 3, false, true},
+        ParallelismGateCase{"QueryCPEnabled_CacheReplicated", CPRotateMethod::ALL_GATHER, false, 8, 3, true, false},
+        ParallelismGateCase{"QueryCPEnabled_CachePageRR", CPRotateMethod::ALL_GATHER, true, 8, 3, true, true},
+        ParallelismGateCase{"DecodeMarker_CacheReplicated", CPRotateMethod::PREFILL_CP, false, 8, 3, false, false},
+        ParallelismGateCase{"DecodeMarker_CachePageRR", CPRotateMethod::PREFILL_CP, true, 8, 3, false, true}),
+    [](const ::testing::TestParamInfo<ParallelismGateCase>& info) { return info.param.name; });
 
 // When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
 TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {

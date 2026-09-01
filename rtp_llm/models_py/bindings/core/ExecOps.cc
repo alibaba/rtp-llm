@@ -177,8 +177,10 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const int32_t* offset_addr          = nullptr;
     size_t         max_blocks_per_batch = 0;
 
-    const size_t group_num = param.kv_cache_group_types_host.defined() ? param.kv_cache_group_types_host.size(0) : 1;
-    const bool   use_group_cache_transfer_policy = group_num > 1;
+    const bool has_authoritative_group_types =
+        param.kv_cache_group_types_host.defined() && param.kv_cache_group_types_host.numel() > 0;
+    const size_t group_num = has_authoritative_group_types ? param.kv_cache_group_types_host.size(0) : 1;
+    const bool   use_group_cache_transfer_policy = has_authoritative_group_types;
 
     int  gid             = 0;
     auto mapped_group_id = [&param, group_num]() -> int {
@@ -278,11 +280,24 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.data_ptr<int>()[batch_id] % seq_size_per_block == 0,
                                     "prefix_length %% seq_size_per_block != 0");
         }
-        const bool is_cp_compact_fixed_region =
-            param.cp_size > 1 && isDsv4FixedRegion(param.region_name) && seq_size_per_block % param.cp_size == 0;
-        const size_t canonical_seq_size_per_block =
-            is_cp_compact_fixed_region ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
-        int canonical_reuse_block_num =
+        CacheGroupType group_type = CacheGroupType::FULL;
+        if (param.kv_cache_group_types_host.defined()) {
+            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
+        }
+
+        const size_t group_tokens_per_block =
+            param.group_tokens_per_block > 0 ? param.group_tokens_per_block : seq_size_per_block;
+        const bool virtual_block_cache_layout =
+            usesVirtualBlockCacheLayout(group_type, seq_size_per_block, group_tokens_per_block, param.cp_size);
+        // DSV4 fixed regions retain their historical byte-sliced canonical key
+        // granularity. The virtual-block predicate itself is geometry-based and
+        // shared with K3 LINEAR and allocator/connector paths.
+        const bool dsv4_byte_sliced_virtual_block = virtual_block_cache_layout && isDsv4FixedRegion(param.region_name)
+                                                    && seq_size_per_block % param.cp_size == 0;
+        const size_t canonical_seq_size_per_block = dsv4_byte_sliced_virtual_block ?
+                                                        seq_size_per_block / static_cast<size_t>(param.cp_size) :
+                                                        seq_size_per_block;
+        int          canonical_reuse_block_num =
             param.prefix_lengths_host.data_ptr<int>()[batch_id] / canonical_seq_size_per_block;
         int canonical_block_num = (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
                                    + canonical_seq_size_per_block - 1)
@@ -303,11 +318,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
         auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
-
-        CacheGroupType group_type = CacheGroupType::FULL;
-        if (param.kv_cache_group_types_host.defined()) {
-            group_type = static_cast<CacheGroupType>(param.kv_cache_group_types_host.data_ptr<int32_t>()[gid]);
-        }
 
         // An explicit plan is authoritative: attention may execute a terminal
         // singleton at an unaligned prefix while CacheStore republishes the
@@ -457,16 +467,17 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 param.cp_size,
                 CacheStorePublishRange{static_cast<size_t>(publish_begin_block),
                                        static_cast<size_t>(publish_end_block),
-                                       publish_plan.terminal_host.data_ptr<bool>()[batch_id]});
+                                       publish_plan.terminal_host.data_ptr<bool>()[batch_id]},
+                virtual_block_cache_layout);
         } else {
-            block_plan = buildCacheStoreBlockPlan(planned_total_blocks,
-                                                  param.cache_store_full_from_begin ?
-                                                      0 :
-                                                      static_cast<size_t>(canonical_reuse_block_num),
-                                                  use_group_cache_transfer_policy,
-                                                  group_type,
-                                                  param.cp_rank,
-                                                  param.cp_size);
+            block_plan = buildCacheStoreBlockPlan(
+                planned_total_blocks,
+                param.cache_store_full_from_begin ? 0 : static_cast<size_t>(canonical_reuse_block_num),
+                use_group_cache_transfer_policy,
+                group_type,
+                param.cp_rank,
+                param.cp_size,
+                virtual_block_cache_layout);
         }
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);

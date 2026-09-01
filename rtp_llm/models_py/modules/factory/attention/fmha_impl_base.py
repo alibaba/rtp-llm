@@ -87,6 +87,12 @@ class MlaImplBase(object):
     def support_prefill_cp(cls) -> bool:
         return False
 
+    @classmethod
+    def support_page_rr_prefill(cls) -> bool:
+        """Whether this implementation can read/write page-RR Prefill cache."""
+
+        return False
+
     def forward(
         self,
         q: torch.Tensor,

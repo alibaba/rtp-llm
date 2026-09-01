@@ -63,6 +63,14 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps() + cuda12_torch_link_deps
 
+cc_test(
+    name = "k3_cache_geometry_manager_test",
+    srcs = ["K3CacheGeometryManagerTest.cc"],
+    copts = copts(),
+    deps = test_deps + [":block_pool_test_helper"],
+    exec_properties = {"gpu": "H20"},
+)
+
 block_cache_test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
@@ -250,6 +258,7 @@ cc_test(
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/models_py/bindings/core:device_data",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

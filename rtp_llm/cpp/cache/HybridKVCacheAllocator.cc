@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -36,8 +37,8 @@ inline int cpVirtualBlockSize(const std::shared_ptr<CPSlotMapper>& mapper, int b
 }
 
 // Per-group gate: only paged FULL groups are RR-sharded by changing the
-// sequence length fed into their allocator. Fixed/SWA groups use their own
-// group seq_size_per_block, which may already be CP-compact.
+// sequence length fed into their allocator. LINEAR/SWA groups use their own
+// group seq_size_per_block, which may already span one page-RR stripe.
 inline bool cpShardThisGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGroupType group_type) {
     return mapper && mapper->isSharded() && group_type == CacheGroupType::FULL;
 }
@@ -63,6 +64,26 @@ inline size_t groupSeqSize(const CacheConfig& config, int gid, size_t fallback) 
                fallback;
 }
 
+inline size_t canonicalKeyTokens(const CacheConfig& config, const std::shared_ptr<CPSlotMapper>& mapper) {
+    return (mapper && mapper->isSharded()) ? static_cast<size_t>(mapper->virtualBlockSize()) :
+                                             config.seq_size_per_block;
+}
+
+inline size_t groupSlotsForCanonicalKeys(const CacheConfig&                   config,
+                                         int                                  gid,
+                                         const std::shared_ptr<CPSlotMapper>& mapper,
+                                         size_t                               key_count) {
+    const size_t key_tokens   = canonicalKeyTokens(config, mapper);
+    const size_t group_tokens = groupSeqSize(config, gid, config.seq_size_per_block);
+    RTP_LLM_CHECK_WITH_INFO(key_tokens > 0 && group_tokens > 0,
+                            "invalid cache key/group span: key_tokens=%zu group_tokens=%zu gid=%d",
+                            key_tokens,
+                            group_tokens,
+                            gid);
+    const size_t total_tokens = key_count * key_tokens;
+    return (total_tokens + group_tokens - 1) / group_tokens;
+}
+
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
     BlockIndicesType valid;
     if (begin >= blocks.size()) {
@@ -84,13 +105,18 @@ bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
            && skipReuseCacheRegion(config_.group_region_names[static_cast<size_t>(gid)]);
 }
 
-bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
-    if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= config_.group_types.size()
-        || config_.group_types[static_cast<size_t>(gid)] != CacheGroupType::SWA) {
+bool HybridKVCacheAllocator::groupUsesVirtualBlockCacheLayout(int                                  gid,
+                                                              const std::shared_ptr<CPSlotMapper>& mapper) const {
+    if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= config_.group_types.size()) {
+        return false;
+    }
+    const auto group_type = config_.group_types[static_cast<size_t>(gid)];
+    if (group_type != CacheGroupType::SWA && group_type != CacheGroupType::LINEAR) {
         return false;
     }
     const auto row_tokens = groupSeqSize(config_, gid, seqSizePerBlock());
-    return row_tokens == static_cast<size_t>(mapper->virtualBlockSize());
+    return usesVirtualBlockCacheLayout(
+        group_type, static_cast<size_t>(seqSizePerBlock()), row_tokens, mapper->cpSize());
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
@@ -102,12 +128,10 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper) {
-    // Under cp shard, FULL groups index block_ids by cp-virtual-block units
-    // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
-    // raw block_size logical blocks. So when populating tail blocks for
-    // LINEAR/SWA we need to scale the array length and matched-block position
-    // back to the logical-block coordinate system.
-    const int                     cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
+    // Under page-RR sharding, FULL groups and virtual-block cache groups index
+    // block_ids by stripe units (one entry covers cp_size physical pages). Other
+    // LINEAR/SWA groups retain raw physical-page coordinates, so their tail
+    // arrays still need the cp_size scale below.
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
 
@@ -173,28 +197,29 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
     }
 
-    // LINEAR/SWA arrays are sized in logical-block units (cp_size× larger
-    // than the FULL groups' cp-virtual-block units). The matched tail block
-    // corresponds to the LAST logical block in the canonical (last-rank)
-    // namespace, so its index is `(reuse_blocks_len * cp_size) - 1` in
-    // logical units, NOT `reuse_blocks_len - 1`.
-    const int logical_reuse_len = reuse_blocks_len * cp_scale;
+    // Convert the canonical FULL-key prefix back into each group's own block
+    // coordinates.  This covers both page-RR Prefill (one key spans V) and
+    // replicated Decode with compact K3 LINEAR slots (one slot spans V while
+    // each FULL key still spans B).
     for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-        const int gid = linear_group_ids_[i];
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(logical_reuse_len - 1), linear_tail_blocks[i]);
+        const int    gid = linear_group_ids_[i];
+        const size_t group_reuse_len =
+            groupSlotsForCanonicalKeys(config_, gid, cp_mapper, static_cast<size_t>(reuse_blocks_len));
+        RTP_LLM_CHECK_WITH_INFO(
+            group_reuse_len > 0, "matched LINEAR tail has no group slot: gid=%d reuse_keys=%d", gid, reuse_blocks_len);
+        kv_resource.mutableBlockIds(0, gid).assign(BlockIndicesType(group_reuse_len, NULL_BLOCK_IDX));
+        kv_resource.mutableBlockIds(0, gid).setAt(group_reuse_len - 1, linear_tail_blocks[i]);
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
-        const int gid             = swa_group_ids_[i];
-        const int group_reuse_len = cpCompactSwaGroup(gid, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
-        kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
+        const int    gid = swa_group_ids_[i];
+        const size_t group_reuse_len =
+            groupSlotsForCanonicalKeys(config_, gid, cp_mapper, static_cast<size_t>(reuse_blocks_len));
+        kv_resource.mutableBlockIds(0, gid).assign(BlockIndicesType(group_reuse_len, NULL_BLOCK_IDX));
         if (skipReuseCacheGroup(gid)) {
             continue;
         }
         const size_t tail_begin =
-            static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
+            group_reuse_len > swa_tail_blocks[i].size() ? group_reuse_len - swa_tail_blocks[i].size() : 0;
         for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
             kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
         }
@@ -222,14 +247,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     std::vector<BlockIndicesType> referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
 
     if (malloc_info.enable_device_cache) {
-        // CP-sharded: subsample to last-rank canonical key namespace before matching.
-        CacheKeysType cp_keys = cpEffectiveCacheKeys(cp_mapper, cache_keys);
         // Always drop the last match key. It may be a partial tail; even when
         // aligned, fully reusing the input leaves no prefill tokens to compute.
-        CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
-        auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
-        match_cost_time_us     = currentTimeUs() - begin_us;
+        // Drop it before CP subsampling so a partial page owned by another rank
+        // cannot hide the final complete canonical V checkpoint.
+        CacheKeysType matchable_keys(cache_keys.begin(), cache_keys.empty() ? cache_keys.end() : cache_keys.end() - 1);
+        CacheKeysType match_keys = cpEffectiveCacheKeys(cp_mapper, matchable_keys);
+        auto          begin_us   = currentTimeUs();
+        reuse_blocks             = reuseCache(match_keys, *kv_resource, cp_mapper);
+        match_cost_time_us       = currentTimeUs() - begin_us;
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             const auto&      blocks = kv_resource->blocks(0, gid);
@@ -392,10 +418,19 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
+        bool needs_group_key_mapping = false;
         if (!cp_active) {
-            // Preserve the legacy non-CP GPU reuse surface: aggregate all groups
-            // under one key. The prefix tree only receives extra dependency
-            // metadata here.
+            for (int gid = 0; gid < group_nums; ++gid) {
+                if (!skipReuseCacheGroup(gid)
+                    && groupSeqSize(config_, gid, seqSizePerBlock()) != static_cast<size_t>(seqSizePerBlock())) {
+                    needs_group_key_mapping = true;
+                    break;
+                }
+            }
+        }
+
+        if (!cp_active && !needs_group_key_mapping) {
+            // Groups with equal spans share one key.
             const size_t max_keys = full_keys.size();
             for (size_t pos = max_keys; pos > 0; --pos) {
                 const size_t              i = pos - 1;
@@ -432,10 +467,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         // merges multiple puts on the same key into a single item with each group's slot
         // populated independently (NULL_BLOCK_IDX entries are skipped by the merge path).
         //
-        // CP per-group key namespace: paged FULL groups use cp-subsampled (last-rank) keys
-        // to align 1:1 with rank-local blocks; non-paged groups (SWA / LINEAR) keep the
-        // full key sequence so their tail blocks (real entries at positions >= length-2)
-        // get inserted alongside the keys that the reuseCache tail-loop later queries.
+        // With CP active, FULL and virtual-block LINEAR/SWA groups use stripe-end
+        // keys. Other groups use physical-page keys. Each group's span determines
+        // the key stride.
         CacheKeysType         cp_keys = cpEffectiveCacheKeys(cp_mapper, full_keys);
         BlockDependenciesType cp_dependencies;
         cp_dependencies.reserve(cp_keys.size());
@@ -468,21 +502,30 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
                 continue;
             }
-            const bool           gp_sharded   = cpShardThisGroup(cp_mapper, group_type);
-            const bool           compact_swa  = cpCompactSwaGroup(gid, cp_mapper);
-            const bool           use_cp_keys  = cp_active && (gp_sharded || compact_swa);
-            const CacheKeysType& src_keys     = use_cp_keys ? cp_keys : full_keys;
-            const auto&          dependencies = use_cp_keys ? cp_dependencies : full_dependencies;
+            const bool           gp_sharded           = cpShardThisGroup(cp_mapper, group_type);
+            const bool           virtual_block_layout = groupUsesVirtualBlockCacheLayout(gid, cp_mapper);
+            const bool           use_cp_keys          = cp_active && (gp_sharded || virtual_block_layout);
+            const CacheKeysType& src_keys             = use_cp_keys ? cp_keys : full_keys;
+            const auto&          dependencies         = use_cp_keys ? cp_dependencies : full_dependencies;
             const auto           namespace_id =
                 use_cp_keys ? SharedBlockCache::kGpuCpCanonicalNamespace : SharedBlockCache::kGpuLogicalNamespace;
             if (src_keys.empty()) {
                 continue;
             }
-            const int    group_seq_size  = cpVirtualBlockSizeForGroup(cp_mapper, group_type, raw_group_seq);
+            const int    group_seq_size = cpVirtualBlockSizeForGroup(cp_mapper, group_type, raw_group_seq);
+            const size_t source_key_tokens =
+                use_cp_keys ? canonicalKeyTokens(config_, cp_mapper) : config_.seq_size_per_block;
+            RTP_LLM_CHECK_WITH_INFO(group_seq_size > 0 && source_key_tokens > 0
+                                        && static_cast<size_t>(group_seq_size) % source_key_tokens == 0,
+                                    "cache group span %d is not an integer multiple of source key span %zu for gid=%d",
+                                    group_seq_size,
+                                    source_key_tokens,
+                                    gid);
+            const size_t key_stride      = static_cast<size_t>(group_seq_size) / source_key_tokens;
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
-            const size_t n               = std::min(src_keys.size(), full_blocks_num);
+            const size_t blocks_by_keys  = src_keys.size() / key_stride;
             const auto&  blocks          = kv_cache_resource->blocks(batch_id, gid);
-            const size_t loop_end        = std::min(n, blocks.size());
+            const size_t loop_end        = std::min({full_blocks_num, blocks_by_keys, blocks.size()});
 
             // Reverse iterate so prefix-base keys land at MRU end (matches non-CP path).
             for (size_t pos = loop_end; pos > 0; --pos) {
@@ -490,16 +533,22 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 if (isNullBlockIdx(blocks[i])) {
                     continue;
                 }
+                const size_t              key_index = (i + 1) * key_stride - 1;
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 std::vector<bool>         matchable_slots(static_cast<size_t>(group_nums), true);
                 group_slots[static_cast<size_t>(gid)] = blocks[i];
                 if (static_cast<size_t>(gid) >= config_.group_types.size() && group_type != CacheGroupType::FULL) {
                     matchable_slots[static_cast<size_t>(gid)] = false;
                 }
-                const auto dependency =
-                    i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                shared_block_cache_->put(
-                    src_keys[i], group_slots, insert_info.is_resident, namespace_id, dependency, matchable_slots);
+                const auto dependency = key_index < dependencies.size() ?
+                                            dependencies[key_index] :
+                                            BlockDependency{false, 0, static_cast<uint32_t>(key_index)};
+                shared_block_cache_->put(src_keys[key_index],
+                                         group_slots,
+                                         insert_info.is_resident,
+                                         namespace_id,
+                                         dependency,
+                                         matchable_slots);
             }
         }
     }

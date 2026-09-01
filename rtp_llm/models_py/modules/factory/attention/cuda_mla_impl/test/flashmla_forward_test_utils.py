@@ -144,7 +144,9 @@ def make_case_inputs(q_lens: Sequence[int], prefix_lens: Sequence[int]) -> CaseI
     return CaseInputs(params, q, compressed_kv, k_pe, kv_cache)
 
 
-def make_op(*, expanded_kv_capacity_tokens: int) -> MlaFlashMLAPrefillOp:
+def make_op(
+    *, expanded_kv_capacity_tokens: int, external_prefix_cache: bool = False
+) -> MlaFlashMLAPrefillOp:
     return MlaFlashMLAPrefillOp(
         num_heads=NUM_HEADS,
         kv_lora_rank=KV_LORA_RANK,
@@ -155,27 +157,35 @@ def make_op(*, expanded_kv_capacity_tokens: int) -> MlaFlashMLAPrefillOp:
         softmax_extra_scale=1.0,
         use_mla=True,
         weights=[{}],
+        external_prefix_cache=external_prefix_cache,
         expanded_kv_budget_bytes=(
             expanded_kv_capacity_tokens * EXPANDED_KV_BYTES_PER_TOKEN
         ),
     )
 
 
-def call_op(op: MlaFlashMLAPrefillOp, inputs: Any) -> torch.Tensor:
+def call_op(
+    op: MlaFlashMLAPrefillOp,
+    inputs: Any,
+    canonical_prefix_kv: torch.Tensor | None = None,
+) -> torch.Tensor:
     return op.forward(
         inputs.q,
         inputs.compressed_kv,
         inputs.k_pe,
         inputs.kv_cache,
         0,
+        canonical_prefix_kv=canonical_prefix_kv,
     )
 
 
 def output_and_lse(
-    op: MlaFlashMLAPrefillOp, inputs: Any
+    op: MlaFlashMLAPrefillOp,
+    inputs: Any,
+    canonical_prefix_kv: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if op._forward_plan.route is FlashMLAForwardRoute.HYBRID:
-        output = call_op(op, inputs)
+        output = call_op(op, inputs, canonical_prefix_kv)
         torch.cuda.synchronize()
         return output.clone(), op._forward_workspace.canonical_lse.clone()
 
@@ -189,7 +199,7 @@ def output_and_lse(
 
     op._run_dense_attention = capture
     try:
-        output = call_op(op, inputs)
+        output = call_op(op, inputs, canonical_prefix_kv)
         torch.cuda.synchronize()
     finally:
         op._run_dense_attention = original

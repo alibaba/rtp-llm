@@ -1,5 +1,12 @@
 test_envs = {}
 
+py_test(
+    name = "kimi_k3_cache_geometry_test",
+    srcs = ["kimi_k3_cache_geometry_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    timeout = "short",
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }
@@ -44,8 +51,8 @@ py_test(
         "//rtp_llm:testlib",
     ],
     timeout = "short",
-    exec_properties = {"gpu": "B300"},
-    tags = ["B300"],
+    exec_properties = {"gpu": "L20D"},
+    tags = ["L20D"],
 )
 
 py_test(
