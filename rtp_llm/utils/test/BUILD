@@ -176,10 +176,45 @@ py_test(
     name = "rtp_llm_cuda12_9_wheel_metadata_test",
     srcs = ["rtp_llm_wheel_metadata_test.py"],
     main = "rtp_llm_wheel_metadata_test.py",
-    args = ["$(location //rtp_llm:rtp_llm_whl)"],
+    args = [
+        "cuda12_9_x86",
+        "$(location //rtp_llm:rtp_llm_whl)",
+    ],
     data = ["//rtp_llm:rtp_llm_whl"],
     target_compatible_with = select({
         "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "rtp_llm_cuda13_x86_wheel_metadata_test",
+    srcs = ["rtp_llm_wheel_metadata_test.py"],
+    main = "rtp_llm_wheel_metadata_test.py",
+    args = [
+        "cuda13_x86",
+        "$(location //rtp_llm:rtp_llm_whl)",
+    ],
+    data = ["//rtp_llm:rtp_llm_whl"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "rtp_llm_cuda13_arm_wheel_metadata_test",
+    srcs = ["rtp_llm_wheel_metadata_test.py"],
+    main = "rtp_llm_wheel_metadata_test.py",
+    args = [
+        "cuda13_arm",
+        "$(location //rtp_llm:rtp_llm_whl)",
+    ],
+    data = ["//rtp_llm:rtp_llm_whl"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )

@@ -293,13 +293,23 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
 
     def test_full_stacked_mode_clones_only_rank_local_experts(self) -> None:
         source_tensor = torch.tensor([[1, 2], [3, 4]])
+        observed_filter_results = {}
 
         class FakeAutoLoader:
-            def __init__(self, pg, files, device, **kwargs) -> None:
-                pass
+            def __init__(
+                self, pg, files, device, local_copyout_filter=None, **kwargs
+            ) -> None:
+                self.local_copyout_filter = local_copyout_filter
 
             def iterate_weights(self):
-                yield "stacked", source_tensor
+                for key, tensor in (
+                    ("unrelated", torch.tensor([9, 9])),
+                    ("stacked", source_tensor),
+                ):
+                    accepted = self.local_copyout_filter(key)
+                    observed_filter_results[key] = accepted
+                    if accepted:
+                        yield key, tensor
 
             def close(self) -> None:
                 pass
@@ -307,7 +317,7 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
         _install_fake_fastsafetensors(FakeAutoLoader)
         database = object.__new__(CkptDatabase)
         database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
-        local_keys = {"stacked", "experts.1.weight"}
+        local_keys = {"experts.1.weight"}
 
         result = list(
             database.fastsafetensors_weights_iterator(
@@ -318,6 +328,10 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
             )
         )
 
+        self.assertEqual(
+            observed_filter_results,
+            {"unrelated": False, "stacked": True},
+        )
         self.assertEqual([name for name, _tensor in result], ["experts.1.weight"])
         torch.testing.assert_close(result[0][1], torch.tensor([3, 4]))
 

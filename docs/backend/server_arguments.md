@@ -216,9 +216,11 @@ consumer-side filtering. A missing package/`AutoLoader`, an import/ABI failure,
 an unmet AUTO prerequisite, or an insufficient AUTO memory preflight falls back
 to `scratch`. Explicit `LOAD_METHOD=fastsafetensors` treats `per-expert` as a
 user override and skips the memory preflight; explicit `full-stacked` keeps the
-preflight because it materializes a complete stacked tensor. Clear import, API,
-constructor, and ABI compatibility failures fall back to scratch in either
-entry mode, while checkpoint/data errors remain fail-fast.
+preflight when RTP detects a raw stacked MoE checkpoint, because that path
+materializes a complete stacked tensor. Dense and already per-expert checkpoints
+do not run this stacked-tensor preflight. Clear import, API, constructor, and ABI
+compatibility failures fall back to scratch in either entry mode, while
+checkpoint/data errors remain fail-fast.
 The two optional keywords control independent optimizations:
 
 | Capability | Present | Missing |
