@@ -386,8 +386,8 @@ TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
     const BlockTreeInsertResult result = tree.insertNode({100}, replacement, /*collect_path=*/false);
     EXPECT_TRUE(result.inserted_nodes.empty());
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
-    EXPECT_EQ(result.adopted_nodes[0].first, node);
-    EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{1}));
+    EXPECT_EQ(result.adopted_nodes[0].node, node);
+    EXPECT_EQ(result.adopted_nodes[0].group_set_ids, (std::vector<size_t>{1}));
     EXPECT_EQ(result.accepted_resource_count, 1u);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{10}));
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{30}));
@@ -406,8 +406,8 @@ TEST(BlockTreeTest, InsertAggregatesAdoptedGroupSetsPerNode) {
     const BlockTreeInsertResult result = tree.insertNode({100}, replacement, /*collect_path=*/false);
 
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
-    EXPECT_EQ(result.adopted_nodes[0].first, node);
-    EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{0, 1}));
+    EXPECT_EQ(result.adopted_nodes[0].node, node);
+    EXPECT_EQ(result.adopted_nodes[0].group_set_ids, (std::vector<size_t>{0, 1}));
     EXPECT_EQ(result.accepted_resource_count, 2u);
 }
 
@@ -450,7 +450,7 @@ TEST(BlockTreeTest, InsertHardStopsAtBusyFullGroup) {
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
 }
 
-TEST(BlockTreeTest, InsertHardStopsAtExistingHostFullNode) {
+TEST(BlockTreeTest, InsertAddsDeviceCopyToExistingHostFullNodeAndSuffix) {
     BlockTree tree(makeGroupSets(1));
     TreeNode* host_node = insertAndGetNode(tree, {100, 200}, make2DResources(1, 2, 10));
     ASSERT_NE(host_node, nullptr);
@@ -464,14 +464,40 @@ TEST(BlockTreeTest, InsertHardStopsAtExistingHostFullNode) {
     const BlockTreeInsertResult result =
         tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), /*collect_path=*/true);
 
-    ASSERT_EQ(result.path.size(), 2u);
+    ASSERT_EQ(result.path.size(), 3u);
     EXPECT_EQ(result.path[0], host_node->parent);
     EXPECT_EQ(result.path[1], host_node);
-    EXPECT_TRUE(result.adopted_nodes.empty());
-    EXPECT_TRUE(result.inserted_nodes.empty());
-    EXPECT_TRUE(host_node->children.empty());
-    EXPECT_EQ(host_resource.getTopTier(), Tier::HOST);
+    ASSERT_EQ(result.adopted_nodes.size(), 1u);
+    EXPECT_EQ(result.adopted_nodes[0].node, host_node);
+    EXPECT_EQ(result.adopted_nodes[0].group_set_ids, (std::vector<size_t>{0}));
+    EXPECT_EQ(result.adopted_nodes[0].old_top_tiers, (std::vector<Tier>{Tier::HOST}));
+    EXPECT_EQ(result.adopted_nodes[0].new_top_tiers, (std::vector<Tier>{Tier::DEVICE}));
+    ASSERT_EQ(result.inserted_nodes.size(), 1u);
+    EXPECT_EQ(result.inserted_nodes[0]->cache_key, 300);
+    EXPECT_FALSE(host_node->children.empty());
+    EXPECT_EQ(host_resource.getTopTier(), Tier::DEVICE);
+    EXPECT_EQ(host_resource.device_blocks, (BlockIndicesType{21}));
     EXPECT_EQ(host_resource.host_block, 7);
+}
+
+TEST(BlockTreeTest, InsertAddsMissingHostCopyWithoutReplacingDeviceCopy) {
+    BlockTree tree(makeGroupSets(1));
+    TreeNode* node = insertAndGetNode(tree, {100}, make2DResources(1, 1, 10));
+    ASSERT_NE(node, nullptr);
+
+    GroupSetResource host;
+    host.host_block                    = 7;
+    const BlockTreeInsertResult result = tree.insertNode({100}, {{host}}, /*collect_path=*/false);
+
+    ASSERT_EQ(result.adopted_nodes.size(), 1u);
+    EXPECT_EQ(result.adopted_nodes[0].old_top_tiers, (std::vector<Tier>{Tier::DEVICE}));
+    EXPECT_EQ(result.adopted_nodes[0].new_top_tiers, (std::vector<Tier>{Tier::DEVICE}));
+    EXPECT_EQ(result.accepted_resource_count, 1u);
+    const GroupSetResource& resource = node->group_set_resources[0];
+    EXPECT_EQ(resource.device_blocks, (BlockIndicesType{10}));
+    EXPECT_EQ(resource.host_block, 7);
+    EXPECT_EQ(resource.servingTierCount(), 2u);
+    EXPECT_TRUE(resource.isValidSteadyState());
 }
 
 TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
@@ -488,8 +514,8 @@ TEST(BlockTreeTest, InsertAdoptsIdleEmptyFullNodeBeforeAddingSuffix) {
         tree.insertNode({100, 200, 300}, make2DResources(1, 3, 20), /*collect_path=*/false);
 
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
-    EXPECT_EQ(result.adopted_nodes[0].first, empty_node);
-    EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{0}));
+    EXPECT_EQ(result.adopted_nodes[0].node, empty_node);
+    EXPECT_EQ(result.adopted_nodes[0].group_set_ids, (std::vector<size_t>{0}));
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 300);
     EXPECT_EQ(empty_resource.device_blocks, (BlockIndicesType{21}));

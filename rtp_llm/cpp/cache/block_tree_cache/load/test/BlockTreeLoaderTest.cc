@@ -93,6 +93,99 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     environment->expectFullyReclaimed();
 }
 
+TEST(BlockTreeLoaderTest, HostOnlyPolicyReadsHostCopyWhenDeviceCopyAlsoExists) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 2;
+    options.enable_disk = false;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    environment->insertRequestPath();
+    std::vector<std::vector<GroupSetResource>> source_resources(
+        options.path_length, std::vector<GroupSetResource>(environment->groups.size()));
+    for (size_t path_index = 0; path_index < options.path_length; ++path_index) {
+        for (size_t group_set_id = 0; group_set_id < environment->groups.size(); ++group_set_id) {
+            source_resources[path_index][group_set_id].device_blocks =
+                environment->request_blocks[group_set_id][path_index];
+        }
+    }
+    environment->cache->insert(environment->keys, source_resources, Tier::HOST);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
+
+    BlockTreeMatchPolicy policy;
+    policy.enable_device = false;
+    policy.enable_host   = true;
+    policy.enable_disk   = false;
+    policy.enable_remote = false;
+
+    // Rolling back a HOST-only match must re-admit the resource's real top
+    // (DEVICE) candidate, not create a stale HOST-heap entry.
+    BlockTreeMatchResult aborted_result  = environment->cache->match(environment->keys, policy);
+    auto                 aborted_context = std::dynamic_pointer_cast<LoadAsyncContext>(aborted_result.async_context);
+    ASSERT_NE(aborted_context, nullptr);
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 0u);
+    EXPECT_TRUE(environment->cache->abortPendingLoad(aborted_context));
+    aborted_result.async_context.reset();
+    aborted_context.reset();
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
+
+    BlockTreeMatchResult result = environment->cache->match(environment->keys, policy);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->matchedBlocks(), options.path_length);
+    EXPECT_EQ(load_context->matchedBlocks(Tier::HOST), options.path_length);
+
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
+    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+        const TransferDescriptor& desc = load_context->loadDescs()[desc_index];
+        EXPECT_EQ(desc.source_tier, Tier::HOST);
+        EXPECT_FALSE(desc.install_target_in_cache);
+        std::vector<BlockIdxType> targets;
+        for (const DeviceBlockPoolPtr& pool : environment->groups.at(desc.group_set_id)->devicePools()) {
+            const BlockIdList blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks);
+            targets.push_back(blocks.front());
+            request_targets.emplace_back(pool, blocks.front());
+        }
+        load_context->setTargetBlocks(desc_index, std::move(targets));
+    }
+
+    ASSERT_TRUE(load_context->commit());
+    load_context->waitDone();
+    ASSERT_TRUE(load_context->success());
+    for (size_t path_index = 0; path_index < options.path_length; ++path_index) {
+        for (const GroupSetResource& resource : environment->resourcesForPathNode(path_index)) {
+            EXPECT_TRUE(resource.hasTier(Tier::DEVICE));
+            EXPECT_TRUE(resource.hasTier(Tier::HOST));
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        }
+    }
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
+    for (const auto& source_pool : environment->host_pools) {
+        EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::CACHE), options.path_length);
+        EXPECT_EQ(source_pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+    }
+
+    result.async_context.reset();
+    load_context.reset();
+    for (const auto& [pool, block] : request_targets) {
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+    }
+    environment->releaseRequestRefs();
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
 TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     constexpr size_t path_length = 4;
     auto             full        = std::make_shared<FullGroupSet>(

@@ -17,10 +17,12 @@ public:
     bool start(TreeNode*                                node,
                size_t                                   group_set_id,
                const std::vector<BlockIdxType>&         target_blocks,
-               const std::shared_ptr<LoadAsyncContext>& context);
+               const std::shared_ptr<LoadAsyncContext>& context,
+               bool                                     install_target_in_cache = true);
     bool join(const std::shared_ptr<LoadAsyncContext>& context);
     bool finish(TreeNode* node, size_t group_set_id, bool success);
     bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
+    bool installTargetInCache(TreeNode* node, size_t group_set_id) const;
 
 private:
     struct Key {
@@ -41,7 +43,11 @@ private:
     };
 
     struct Record {
-        using ContextMap = std::unordered_map<uint64_t, std::weak_ptr<LoadAsyncContext>>;
+        struct ContextEntry {
+            std::weak_ptr<LoadAsyncContext> context;
+            bool                            install_target_in_cache{true};
+        };
+        using ContextMap = std::unordered_map<uint64_t, ContextEntry>;
 
         std::vector<BlockIdxType> target_blocks;
         // Joining a load must not extend its context lifetime; the context owns RAII abort.
