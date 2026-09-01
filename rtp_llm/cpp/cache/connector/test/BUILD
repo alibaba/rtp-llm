@@ -20,10 +20,11 @@ cuda13_torch_link_deps = select({
 })
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
+    "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
     "//rtp_llm/cpp/utils:core_utils",
+    "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
@@ -43,7 +44,6 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

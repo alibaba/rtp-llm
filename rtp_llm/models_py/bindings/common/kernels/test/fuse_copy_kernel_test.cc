@@ -9,7 +9,7 @@
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
 
-#include "rtp_llm/models_py/bindings/common/kernels/fuse_copy_kernel.h"
+#include "rtp_llm/cpp/kernels/FusedCopyKernel.h"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -246,7 +246,7 @@ TEST_F(FusedCopyTest, MicroBatchedAccumulationWorstCase) {
 
     static_assert(TOTAL_COPIES <= rtp_llm::MAX_FUSED_D2D_COPIES,
                   "MAX_FUSED_D2D_COPIES is below the documented forwardMicroBatched worst case; "
-                  "see fuse_copy_util.h sizing rationale.");
+                  "see FusedCopyTypes.h capacity constants.");
 
     std::vector<std::vector<uint8_t>> host_srcs(TOTAL_COPIES);
     std::vector<uint8_t*>             d_srcs(TOTAL_COPIES);

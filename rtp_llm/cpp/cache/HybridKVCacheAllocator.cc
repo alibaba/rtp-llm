@@ -9,8 +9,7 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 
 namespace rtp_llm {
 namespace {
@@ -935,7 +934,7 @@ void HybridKVCacheAllocator::copyBlockMappingForGroup(int                       
         }
     }
 
-    execBatchCopy(copy_params);
+    runtimeBatchCopy(copy_params);
 }
 
 int HybridKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {

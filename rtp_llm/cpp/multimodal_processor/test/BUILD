@@ -18,7 +18,7 @@ cc_test(
     deps = torch_deps() + [
         "//rtp_llm/cpp/testing:device_test_utils",
 
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
         "//rtp_llm/cpp/config:config_modules",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

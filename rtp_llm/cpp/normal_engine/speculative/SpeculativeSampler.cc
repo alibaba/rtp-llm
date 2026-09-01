@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
 #include <vector>
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/SamplingOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -110,7 +110,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                      SamplerOutput&                      draft_sampler_output,
                                      SamplerOutput&                      target_sampler_output) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
-    torch::Device target_device = getTorchCudaDevice();
+    torch::Device target_device = torch::Device(torch::kCUDA);
 
     int batch_size = streams.size();
 

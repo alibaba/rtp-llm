@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "autil/EnvUtil.h"
 #include <stdexcept>
 
@@ -33,7 +33,7 @@ void EngineBase::initRuntime(const EngineInitParams& params) {
                                          params.profiling_debug_logging_config.trace_memory,
                                          params.device_resource_config.enable_comm_overlap,
                                          params.model_config_.mla_ops_type);
-    warmupNoBlockCopy();
+    runtimeWarmupNoBlockCopy();
 }
 
 std::shared_ptr<KVCacheManager> EngineBase::getCacheManager() const {

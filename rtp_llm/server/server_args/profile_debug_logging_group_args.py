@@ -14,7 +14,7 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         bind_to=(profiling_debug_config, "trace_memory"),
         type=str2bool,
         default=False,
-        help="控制是否在BufferManager中启用内存追踪功能。可选值: True (启用), False (禁用)。默认为 False",
+        help="控制是否启用进程内存分配堆栈追踪并写入 rtp_llm_stack.log。可选值: True (启用), False (禁用)。默认为 False",
     )
     profile_debug_logging_group.add_argument(
         "--enable_device_perf",

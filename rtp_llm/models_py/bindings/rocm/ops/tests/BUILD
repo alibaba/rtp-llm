@@ -4,9 +4,9 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 cc_test = cc_test_wrapper
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/testing:base_tests",
+    "//rtp_llm/models_py/bindings/core:device_ops_test_impls",
 ] + torch_deps()
 
 cc_test(
@@ -17,6 +17,20 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps,
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+cc_test(
+    name = "runtime_ops_test",
+    srcs = ["RocmRuntimeOpsTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/core:copy_ops_hdrs",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
+    ] + torch_deps(),
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )

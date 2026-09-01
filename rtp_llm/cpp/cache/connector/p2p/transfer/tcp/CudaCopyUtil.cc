@@ -1,5 +1,5 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/CudaCopyUtil.h"
-#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 
@@ -30,7 +30,7 @@ bool CudaCopyUtil::batchCopyToHost(std::vector<CopyTask>& tasks) {
         params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size, torch::kCPU));
     }
 
-    execNoBlockCopy(params);
+    runtimeNoBlockCopy(params);
     return true;
 }
 
@@ -52,7 +52,7 @@ bool CudaCopyUtil::batchCopyToDevice(std::vector<CopyTask>& tasks) {
         params.multi_dst.push_back(wrapRawPtr(task.dst_ptr, task.size, torch::kCUDA));
     }
 
-    execNoBlockCopy(params);
+    runtimeNoBlockCopy(params);
     return true;
 }
 

@@ -207,17 +207,3 @@ def select_py_bindings():
             "@rtp_llm//rtp_llm/models_py/bindings:dummy_register",
         ],
     })
-
-def no_block_copy_link_deps():
-    """Deps for the cc_library that defines execNoBlockCopy / warmupNoBlockCopy (per device)."""
-    return select({
-        "@rtp_llm//:using_cuda12": [
-            "@rtp_llm//rtp_llm/models_py/bindings/cuda:no_block_copy",
-        ],
-        "@rtp_llm//:using_rocm": [
-            "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
-        ],
-        "//conditions:default": [
-            "@rtp_llm//rtp_llm/models_py/bindings:no_block_copy_default",
-        ],
-    })

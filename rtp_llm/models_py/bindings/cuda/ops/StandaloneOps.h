@@ -5,7 +5,7 @@
 
 namespace rtp_llm {
 
-// Standalone op functions that call CUDA kernels directly without exec_ctx_-> dispatch.
+// Standalone op functions that call CUDA kernels directly.
 
 // In-place softmax over rows (no mask, no bias).
 // input: [batch, n] on CUDA, must be FP32/FP16/BF16

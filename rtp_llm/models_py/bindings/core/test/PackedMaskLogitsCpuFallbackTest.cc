@@ -1,4 +1,4 @@
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 
 #include <gtest/gtest.h>
 

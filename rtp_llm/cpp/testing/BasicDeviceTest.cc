@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
-
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 using namespace std;
 using namespace rtp_llm;
 

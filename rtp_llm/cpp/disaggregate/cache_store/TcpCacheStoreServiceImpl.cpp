@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <torch/torch.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
@@ -131,7 +131,7 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
                                                {(int64_t)block_info.len()},
                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
 
-            execNoBlockCopy({dst_tensor, src_tensor});
+            runtimeNoBlockCopy({dst_tensor, src_tensor});
             resp_block_info->set_content(tmp_buffer, block_info.len());
             free(tmp_buffer);
         }
