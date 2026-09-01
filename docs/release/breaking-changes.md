@@ -29,13 +29,16 @@ At startup, degraded-but-usable FastSafeTensors paths report
 `requested_mode`, `effective_mode` and `degraded_reason`. Scratch fallbacks use
 the `falls back to scratch` marker. Missing optional APIs independently disable
 bounded per-expert delivery or rank-local copy-out; a missing package,
-AutoLoader/import failure, unmet AUTO prerequisite or insufficient memory
-preflight selects scratch.
+AutoLoader/import/API/ABI compatibility failure, unmet AUTO prerequisite or
+insufficient AUTO memory preflight selects scratch. Explicit per-expert loading
+is a user override and skips preflight; checkpoint/data errors remain fail-fast.
+AUTO reserves the wrapper-reported peak plus an empirical 2 GiB for RTP-owned
+TensorCollector overlap, pending stacked-MoE peak-memory calibration.
 
 **Rollback:** Set `LOAD_METHOD=scratch` for the conservative native loader, or
 temporarily set `RTP_FASTSAFETENSORS_STACKED_MOE_MODE=full-stacked` when the
-installed AutoLoader lacks bounded dim-0 splitting and sufficient GPU memory is
-available.
+installed AutoLoader lacks `stacked_moe_tensors` (or its legacy
+`dim0_split_templates` alias) and sufficient GPU memory is available.
 
 ---
 

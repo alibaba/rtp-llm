@@ -208,28 +208,35 @@ The following legacy options and environment variables were removed and must no 
 When `LOAD_METHOD=fastsafetensors`, or when the default `auto` mode selects the
 FastSafeTensors path, RTP-LLM uses the config-driven `AutoLoader`. RTP checks
 the installed package capabilities before loading: the full capability set uses
-bounded `per-expert` delivery, a package without `dim0_split_templates` falls
+bounded `per-expert` delivery, a package without `stacked_moe_tensors` (or the
+legacy `dim0_split_templates` alias) falls
 back to the higher-memory `full-stacked` compatibility path, and a package
 without `local_copyout_filter` continues with full materialization and RTP
 consumer-side filtering. A missing package/`AutoLoader`, an import/ABI failure,
-an unmet AUTO prerequisite, or an insufficient memory preflight falls back to
-`scratch`. These compatibility paths apply to both `auto` and an explicit
-`LOAD_METHOD=fastsafetensors`, so package age alone does not fail model startup.
+an unmet AUTO prerequisite, or an insufficient AUTO memory preflight falls back
+to `scratch`. Explicit `LOAD_METHOD=fastsafetensors` treats `per-expert` as a
+user override and skips the memory preflight; explicit `full-stacked` keeps the
+preflight because it materializes a complete stacked tensor. Clear import, API,
+constructor, and ABI compatibility failures fall back to scratch in either
+entry mode, while checkpoint/data errors remain fail-fast.
 The two optional keywords control independent optimizations:
 
 | Capability | Present | Missing |
 |---|---|---|
 | `local_copyout_filter` | rank-local copy-out | full materialization, RTP consumer filtering |
-| `dim0_split_templates` | bounded `per-expert` MoE delivery | `full-stacked` MoE delivery |
+| `stacked_moe_tensors` (legacy alias: `dim0_split_templates`) | bounded `per-expert` MoE delivery | `full-stacked` MoE delivery |
 
 When a degraded FastSafeTensors mode remains usable, RTP logs
-`requested_mode`, `effective_mode` and `degraded_reason`. A scratch fallback
-contains `falls back to scratch`; package absence is INFO and other fallback
-causes are WARNING. CI or image builds that require both optimizations must
-install the matching wheel and treat a missing capability as a packaging
-failure. Set `RTP_LLM_EXPECT_FASTSAFETENSORS_TIER=per-expert` for the installed
-wheel contract test to turn a lower tier into a test failure; supported tiers
-are `scratch`, `consumer-filter`, `full-stacked`, and `per-expert`.
+`requested_mode`, `effective_mode` and `degraded_reason`; rank-local copy-out
+degradation uses the same fields with `effective_mode=consumer-filter`. Every
+scratch fallback contains `falls back to scratch`; package absence is INFO and
+normal AUTO prerequisite rejection is also INFO. Compatibility, capability and
+memory-preflight fallback causes are WARNING. CI or image builds that require
+both optimizations must install the matching wheel and treat a missing
+capability as a packaging failure. Set
+`RTP_LLM_EXPECT_FASTSAFETENSORS_TIER=per-expert` for the installed wheel
+contract test to turn a lower tier into a test failure; supported tiers are
+`scratch`, `consumer-filter`, `full-stacked`, and `per-expert`.
 
 Pass the standard fastsafetensors configuration as either an inline JSON string
 or a JSON file path. The installed FastSafeTensors version defines the precise
@@ -245,9 +252,13 @@ export FASTSAFETENSORS_CONFIG=/path/to/fastsafetensors.json
 
 The same configuration also affects `auto` selection. RTP reads
 `estimated_peak_device_bytes` from the installed package; missing or invalid
-values use the historical `3 × max checkpoint shard` estimate. Larger buffers,
-queues or producer counts can raise `transient_mem` enough for `auto` to choose
-`scratch`. Inspect the `fastsafetensor memory check` log and its `enough` field.
+values use the historical `3 × max checkpoint shard` estimate. RTP then adds a
+2 GiB empirical reserve for TensorCollector inputs that overlap final weight
+materialization. This reserve is an integration estimate pending calibration
+with stacked-MoE peak-memory measurements. Larger buffers, queues or producer
+counts can raise `transient_mem` enough for `auto` to choose `scratch`. Inspect
+the `fastsafetensor memory check` log and its `enough` field; this log is not
+emitted for explicit per-expert loading because that mode skips preflight.
 
 For compatibility with existing development environments,
 `FASTSAFETENSORS_NOGDS=1` remains supported. Before memory preflight or
@@ -270,9 +281,11 @@ export RTP_FASTSAFETENSORS_STACKED_MOE_MODE=full-stacked
 ```
 
 The accepted values are `per-expert` (default) and `full-stacked`; an empty
-value also selects the default. `full-stacked` adds a conservative extra shard
-to the FastSafeTensors memory preflight because it materializes a whole stacked
-tensor before RTP clones expert slices. A passive downgrade logs a warning with
+value also selects the default. When the checkpoint actually contains raw
+stacked MoE tensors, `full-stacked` adds a conservative extra shard to the
+FastSafeTensors memory preflight because it materializes a whole stacked tensor
+before RTP clones expert slices. Dense or already per-expert checkpoints do not
+pay this add-on. A passive downgrade logs a warning with
 `degraded_reason`; an explicit request is reported as the selected mode. The
 additional warning is emitted only when the checkpoint actually contains raw
 stacked MoE tensors. Use `LOAD_METHOD=scratch` as the more conservative

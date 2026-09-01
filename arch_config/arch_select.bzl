@@ -4,6 +4,8 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13="requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm="requirement")
+load("@pip_cuda12_arm_torch//:requirements.bzl", requirement_cuda12_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
@@ -25,12 +27,14 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        cuda13_arm_deps = [] if name in _CUDA13_DEFERRED else [requirement_cuda13_arm(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
                 deps = select({
                     "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                    "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                     "//conditions:default": [],
                 }),
                 visibility = ["//visibility:public"],
@@ -42,6 +46,8 @@ def requirement(names):
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
+                "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -90,6 +96,23 @@ def whl_deps():
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
             "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_x86_64.whl",
         ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "torchvision@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "deep_gemm@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_gb300/deep_gemm-2.5.0%2B6053f00-cp310-cp310-linux_aarch64.whl#sha256=0b2b85be56f2f2f4401025f3d113dc1af59ac745aeac638be06a277c82f2abe9",
+            "flash-mla@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl",
+            "rtp-kernel@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0608/arm_pkg/rtp_kernel-0.1.0%2Bcu13.fb4b4ab-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_aarch64.whl",
+            "tilelang@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
+        ],
+        "@rtp_llm//:using_cuda12_arm": [
+            "torch@https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl#sha256=37780eb80e4319d6e004ea9597353da0b3947681866d7adff4757ece164a5cd9",
+            "torchvision@https://download.pytorch.org/whl/cu128/torchvision-0.24.0-cp310-cp310-manylinux_2_28_aarch64.whl#sha256=6d78b43c9e94e6941fd80a8dc79ab6618e0277a96d225370d801ac6e0017f07e",
+            "flashinfer-python==0.2.5",
+            "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl#sha256=b778ac8445b5257ded89c4e8612cd9ac650f446cdf0408e5fdb4319be0c78706",
+            "flash-mla@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2B47c35a7-cp310-cp310-linux_aarch64.whl#sha256=ea9225f2c5ebf6fa37ee41d967796d1d3d6d925c3bef187e12ace67c67baf36f",
+        ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
@@ -134,6 +157,16 @@ def torch_deps():
             "@torch_2.11_py310_cuda//:torch",
             "@torch_2.11_py310_cuda//:torch_libs",
         ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda_aarch64//:torch_api",
+            "@torch_2.11_py310_cuda_aarch64//:torch",
+            "@torch_2.11_py310_cuda_aarch64//:torch_libs",
+        ],
+        "@rtp_llm//:using_cuda12_arm": [
+            "@torch_2.9_py310_cuda_aarch64//:torch_api",
+            "@torch_2.9_py310_cuda_aarch64//:torch",
+            "@torch_2.9_py310_cuda_aarch64//:torch_libs",
+        ],
         "@rtp_llm//:using_cuda12_9_x86": [
             "@torch_2.8_py310_cuda//:torch_api",
             "@torch_2.8_py310_cuda//:torch",
@@ -152,6 +185,7 @@ def flashinfer_deps():
         name = "flashinfer",
         actual = select({
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
+            "@rtp_llm//:using_cuda13_arm": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })
     )

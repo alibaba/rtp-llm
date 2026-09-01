@@ -27,13 +27,19 @@ from rtp_llm.utils.database import (
     FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
     BaseDatabase,
     CkptDatabase,
+    FastSafeTensorsCompatibilityError,
     _apply_fastsafetensors_env_compat,
-    _callable_accepts_keyword,
+    _fastsafetensors_stacked_moe_keyword,
     _normalize_fastsafetensors_stacked_moe_mode,
 )
 from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.time_util import timer_wrapper
 from rtp_llm.utils.util import check_with_info
+
+# Empirical integration reserve for RTP-owned TensorCollector inputs that
+# overlap with final weight materialization. Keep this separate from the
+# wrapper-owned estimate and recalibrate with stacked-MoE peak-memory data.
+_FASTSAFETENSORS_RTP_COLLECTOR_RESERVE_BYTES = 2 * 1024**3
 
 
 class ModelLoader:
@@ -284,11 +290,20 @@ class ModelLoader:
                         logging.warning(
                             "AUTO fastsafetensors requested_mode=%s "
                             "effective_mode=scratch degraded_reason="
-                            "memory-preflight-failed",
+                            "memory-preflight-failed falls back to scratch",
                             requested_mode,
                         )
                         load_method = LoadMethod.SCRATCH
             else:
+                logging.info(
+                    "AUTO fastsafetensors requested_mode=auto "
+                    "effective_mode=scratch degraded_reason="
+                    "prerequisite-failed: is_safetensor=%s convert_device=%s "
+                    "unique_tensor_names=%s falls back to scratch",
+                    is_safetensor,
+                    convert_device,
+                    not_same_name_tensors,
+                )
                 load_method = LoadMethod.SCRATCH
 
         logging.info(
@@ -304,16 +319,35 @@ class ModelLoader:
                     return self._load_from_scratch(device)
                 if (
                     stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED
+                    and self._has_raw_stacked_moe_weights()
                     and not self._is_memory_enough_for_fastsafetensor(stacked_moe_mode)
                 ):
                     logging.warning(
                         "explicit fastsafetensors requested_mode=%s "
                         "effective_mode=scratch degraded_reason="
-                        "full-stacked-memory-preflight-failed",
+                        "full-stacked-memory-preflight-failed "
+                        "falls back to scratch",
                         requested_mode,
                     )
                     return self._load_from_scratch(device)
-            return self._load_from_fastsafetensor(device, stacked_moe_mode)
+            compatibility_error = None
+            try:
+                return self._load_from_fastsafetensor(device, stacked_moe_mode)
+            except FastSafeTensorsCompatibilityError as error:
+                # Keep neither the exception nor its traceback alive while
+                # scratch loading: the traceback may retain partially loaded
+                # model_weights and their GPU tensors.
+                compatibility_error = str(error)
+            if compatibility_error is not None:
+                logging.warning(
+                    "fastsafetensors requested_mode=%s effective_mode=scratch "
+                    "degraded_reason=runtime-compatibility-failed: %s "
+                    "falls back to scratch",
+                    stacked_moe_mode,
+                    compatibility_error,
+                )
+                self.force_clean_cuda_memory()
+                return self._load_from_scratch(device)
         elif load_method.lower() == LoadMethod.SCRATCH:
             return self._load_from_scratch(device)
         else:
@@ -374,7 +408,12 @@ class ModelLoader:
             )
         max_file_mem = max_file_size / (1024.0**2)
         transient_mem = self._fastsafetensors_transient_budget_bytes(
-            max_file_size, stacked_moe_mode
+            max_file_size,
+            stacked_moe_mode,
+            has_raw_stacked_moe=(
+                stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED
+                and self._has_raw_stacked_moe_weights()
+            ),
         ) / (1024.0**2)
         enough = (free_mem - model_mem) > transient_mem
         logging.info(
@@ -389,6 +428,7 @@ class ModelLoader:
     def _fastsafetensors_transient_budget_bytes(
         max_file_size: int,
         stacked_moe_mode: str = FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
+        has_raw_stacked_moe: bool = False,
     ) -> int:
         """Return the configured bounded-loader peak or the legacy estimate.
 
@@ -443,7 +483,15 @@ class ModelLoader:
                 f"use legacy estimate: {error}"
             )
             budget = legacy_budget
-        if stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED:
+        # The wrapper estimate only accounts for loader-owned buffers. RTP's
+        # TensorCollector retains component tensors while weight.load creates
+        # the final output. Reserve an empirical 2 GiB for this overlap until
+        # model-level stacked-MoE measurements justify a tighter value.
+        budget += _FASTSAFETENSORS_RTP_COLLECTOR_RESERVE_BYTES
+        if (
+            stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED
+            and has_raw_stacked_moe
+        ):
             # The wrapper estimate covers loader-owned buffers. The temporary
             # compatibility path additionally keeps a complete stacked tensor
             # while RTP owns the current expert clone. One max shard is a
@@ -451,26 +499,41 @@ class ModelLoader:
             budget += max_file_size
         logging.info(
             "fastsafetensors memory budget final_budget_bytes=%d "
-            "stacked_moe_mode=%s",
+            "rtp_collector_reserve_bytes=%d stacked_moe_mode=%s "
+            "has_raw_stacked_moe=%s",
             budget,
+            _FASTSAFETENSORS_RTP_COLLECTOR_RESERVE_BYTES,
             stacked_moe_mode,
+            has_raw_stacked_moe,
         )
         return budget
+
+    def _has_raw_stacked_moe_weights(self) -> bool:
+        """Return whether this checkpoint needs RTP's full-stacked add-on."""
+
+        _, weight_info_list = self._generate_weight_info()
+        return bool(
+            self._build_stacked_key_config(weight_info_list, self._load_config.database)
+        )
 
     @staticmethod
     def _fastsafetensors_capability_error(stacked_moe_mode: str) -> Optional[str]:
         """Return why the installed wrapper cannot serve this RTP path."""
 
         try:
-            from fastsafetensors import AutoLoader
+            from fastsafetensors import AutoLoader, SingleGroup
         except ModuleNotFoundError as error:
             return f"package-not-installed: {error}"
         except (AttributeError, ImportError, OSError, RuntimeError) as error:
             return f"package-import-failed: {type(error).__name__}: {error}"
+        del SingleGroup
         if stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED:
             return None
-        if not _callable_accepts_keyword(AutoLoader.__init__, "dim0_split_templates"):
-            return "AutoLoader.__init__ is missing dim0_split_templates"
+        if _fastsafetensors_stacked_moe_keyword(AutoLoader.__init__) is None:
+            return (
+                "AutoLoader.__init__ is missing stacked_moe_tensors and "
+                "legacy dim0_split_templates"
+            )
         return None
 
     @classmethod
@@ -542,7 +605,7 @@ class ModelLoader:
         stacked_key_config = {}
         for wi in weight_info_list:
             for moe_weight in iter_stacked_moe_weights(wi.weight):
-                stacked_keys = moe_weight._raw_stacked_tensor_names(wi.layer_id)
+                stacked_keys = moe_weight.raw_stacked_tensor_names(wi.layer_id)
                 if database is not None and not moe_weight.uses_stacked_expert_keys(
                     database, wi.layer_id
                 ):

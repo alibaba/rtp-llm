@@ -104,6 +104,51 @@ py_test(
 )
 
 py_test(
+    name = "ckpt_database_fastsafetensors_contract_test",
+    srcs = ["ckpt_database_test.py"],
+    main = "ckpt_database_test.py",
+    args = ["InstalledFastsafetensorsContractTest"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm:config",
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:lora",
+        "//rtp_llm:fastsafetensors",
+    ],
+    data = ["//rtp_llm/utils/test:testdata"],
+    env = {"RTP_LLM_EXPECT_FASTSAFETENSORS_TIER": "per-expert"},
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "ckpt_database_fastsafetensors_multirank_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["ckpt_database_fastsafetensors_multirank_test.py"],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:fast-safetensors",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:lora",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+    exec_properties = {"gpu": "H20", "gpu_count": "2"},
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     # Verifies load_tensor_slice / copy-out on a real ROCm build (hip asserted).
     name = "ckpt_database_test_rocm",
     srcs = ["ckpt_database_test.py"],

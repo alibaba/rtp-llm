@@ -18,7 +18,6 @@ from rtp_llm.model_loader.linear_attn_weight import (
     W8A8Fp8PerChannelLinearAttnAtomicWeight,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import StackSplitTensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
@@ -803,37 +802,22 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             if kernel.data_type is not None
             else load_config.compute_dtype
         )
-        selected_experts = load_config.get_selected_experts(
-            layer_id, kernel.config.expert_num
-        )
+        layout = kernel.resolve_expert_layout(tensor_source, layer_id, load_config)
+        selected_experts = layout.selected_experts
+        tensor_source = layout.tensor_source
+        ckpt_weights = layout.ckpt_weights
         num_experts = len(selected_experts)
-
-        uses_stacked_keys = kernel.uses_stacked_expert_keys(
-            tensor_source.get_database(), layer_id
-        ) or kernel._has_logical_expert_tensors(
-            tensor_source, layer_id, selected_experts
-        )
-        source_contains_raw_stacked = uses_stacked_keys and (
-            kernel._has_raw_stacked_tensors(tensor_source, layer_id)
-        )
-        if source_contains_raw_stacked:
-            tensor_source = StackSplitTensorSource(
-                tensor_source, kernel._build_split_config(layer_id, load_config)
-            )
-        ckpt_weights = (
-            kernel._get_expert_weights() if uses_stacked_keys else kernel.weights
-        )
         num_ckpt = len(ckpt_weights)
 
-        is_w1 = kernel._process_fun_name == "stack_moe_w1"
-        if kernel._process_fun_name not in (
+        is_w1 = kernel.process_fun_name == "stack_moe_w1"
+        if kernel.process_fun_name not in (
             "stack_moe_w1",
             "transpose_stack_moe_w1",
             "stack_",
         ):
             return None
 
-        first_name, first_tensor = kernel._load_expert_tensor(
+        first_name, first_tensor = kernel.load_expert_tensor(
             ckpt_weights[0], layer_id, selected_experts[0], tensor_source, convert_type
         )
         if first_tensor.dim() != 2:
@@ -858,7 +842,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             for cw_idx, ckpt_weight in enumerate(ckpt_weights):
                 row_offset = cw_idx * dim0
                 for local_idx, expert_id in enumerate(selected_experts):
-                    name, t = kernel._load_expert_tensor(
+                    name, t = kernel.load_expert_tensor(
                         ckpt_weight,
                         layer_id,
                         expert_id,
@@ -889,7 +873,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
             assert num_ckpt == 1, f"stack_ expects 1 ckpt_weight, got {num_ckpt}"
             ckpt_weight = ckpt_weights[0]
             for local_idx, expert_id in enumerate(selected_experts):
-                name, t = kernel._load_expert_tensor(
+                name, t = kernel.load_expert_tensor(
                     ckpt_weight,
                     layer_id,
                     expert_id,
@@ -909,7 +893,7 @@ class LoadQuantPerChannelFp8Weight(PerChannelFp8Weight):
                 del t
             first_tensor = None
 
-        if kernel._process_fun_name == "transpose_stack_moe_w1":
+        if kernel.process_fun_name == "transpose_stack_moe_w1":
             # Swap upper/lower halves (gate/up reorder).
             # Avoid torch.cat on FP8 tensors directly — ROCm does not support it.
             # Instead pre-allocate and copy_ each half into swapped positions.

@@ -24,6 +24,22 @@ _FASTSAFETENSORS_STACKED_MOE_MODES = frozenset(
     }
 )
 _FASTSAFETENSORS_NOGDS_CONFIG_JSON = '{"loader":"base","base":{"copier_type":"nogds"}}'
+_FASTSAFETENSORS_STACKED_MOE_KEYWORDS = (
+    "stacked_moe_tensors",
+    "dim0_split_templates",
+)
+_FASTSAFETENSORS_RUNTIME_COMPATIBILITY_MARKERS = (
+    "abi",
+    "cannot open shared object file",
+    "incompatible fast_safetensors",
+    "missing fuse-shm apis",
+    "symbol not found",
+    "undefined symbol",
+)
+
+
+class FastSafeTensorsCompatibilityError(RuntimeError):
+    """An installed wrapper/native combination cannot satisfy RTP's loader API."""
 
 
 def _apply_fastsafetensors_env_compat() -> None:
@@ -87,6 +103,53 @@ def _callable_accepts_keyword(callable_obj: Any, keyword: str) -> bool:
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
         inspect.Parameter.KEYWORD_ONLY,
     )
+
+
+def _fastsafetensors_stacked_moe_keyword(callable_obj: Any) -> Optional[str]:
+    """Return the supported public stacked-MoE keyword, newest name first."""
+
+    for keyword in _FASTSAFETENSORS_STACKED_MOE_KEYWORDS:
+        if _callable_accepts_keyword(callable_obj, keyword):
+            return keyword
+    return None
+
+
+def _is_fastsafetensors_compatibility_error(error: BaseException) -> bool:
+    """Classify package/API/ABI failures without hiding checkpoint errors."""
+
+    if isinstance(error, (AttributeError, ImportError, ModuleNotFoundError)):
+        return True
+    if isinstance(error, OSError):
+        # dlopen/native ABI failures can surface directly as OSError, but
+        # checkpoint paths and storage failures use the same exception family.
+        # Only the former are safe to degrade to scratch; data I/O must remain
+        # fail-fast so that a second loader does not hide or repeat the fault.
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in _FASTSAFETENSORS_RUNTIME_COMPATIBILITY_MARKERS
+        )
+    if isinstance(error, TypeError):
+        # Constructor signature drift surfaces as an unexpected/missing argument.
+        message = str(error).lower()
+        return "argument" in message or "keyword" in message
+    if isinstance(error, RuntimeError):
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in _FASTSAFETENSORS_RUNTIME_COMPATIBILITY_MARKERS
+        )
+    return False
+
+
+def _raise_fastsafetensors_compatibility_error(
+    context: str, error: BaseException
+) -> None:
+    if _is_fastsafetensors_compatibility_error(error):
+        raise FastSafeTensorsCompatibilityError(
+            f"{context}: {type(error).__name__}: {error}"
+        ) from error
+    raise error
 
 
 def _iter_fastsafetensors_weights(
@@ -414,18 +477,23 @@ class CkptDatabase(BaseDatabase):
     ):
         stacked_moe_mode = _normalize_fastsafetensors_stacked_moe_mode(stacked_moe_mode)
         _apply_fastsafetensors_env_compat()
-        from fastsafetensors import AutoLoader, SingleGroup
+        try:
+            from fastsafetensors import AutoLoader, SingleGroup
+        except Exception as error:
+            _raise_fastsafetensors_compatibility_error(
+                "failed to import FastSafeTensors AutoLoader contract", error
+            )
 
+        stacked_moe_keyword = _fastsafetensors_stacked_moe_keyword(AutoLoader.__init__)
         if (
             stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT
-            and not _callable_accepts_keyword(
-                AutoLoader.__init__, "dim0_split_templates"
-            )
+            and stacked_moe_keyword is None
         ):
             logging.warning(
-                "installed fastsafetensors AutoLoader does not support "
-                "dim0_split_templates; use the temporary full-stacked "
-                "compatibility path"
+                "fastsafetensors stacked MoE requested_mode=per-expert "
+                "effective_mode=full-stacked degraded_reason="
+                "AutoLoader.__init__ is missing stacked_moe_tensors and "
+                "legacy dim0_split_templates"
             )
             stacked_moe_mode = FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED
 
@@ -453,25 +521,54 @@ class CkptDatabase(BaseDatabase):
                 loader_kwargs["local_copyout_filter"] = local_copyout_filter
             elif local_copyout_filter is not None:
                 logging.warning(
-                    "installed fastsafetensors AutoLoader does not support "
-                    "local_copyout_filter; materialize all tensors and filter "
-                    "at the RTP consumer"
+                    "fastsafetensors copyout requested_mode=rank-local "
+                    "effective_mode=consumer-filter degraded_reason="
+                    "AutoLoader.__init__ is missing local_copyout_filter; "
+                    "materialize all tensors and filter at the RTP consumer"
                 )
+            effective_copyout_filter = local_copyout_filter
+            if (
+                stacked_key_config
+                and stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_FULL_STACKED
+                and local_copyout_filter is not None
+            ):
+                # The per-expert caller filter excludes raw stacked keys. If a
+                # legacy wrapper forces full-stacked delivery, admit those raw
+                # keys here and apply the original filter after RTP splits.
+                raw_stacked_keys = frozenset(stacked_key_config)
+                original_copyout_filter = local_copyout_filter
+
+                def effective_copyout_filter(key: str) -> bool:
+                    return key in raw_stacked_keys or original_copyout_filter(key)
+
+                if "local_copyout_filter" in loader_kwargs:
+                    loader_kwargs["local_copyout_filter"] = effective_copyout_filter
             if (
                 stacked_key_config
                 and stacked_moe_mode == FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT
             ):
-                loader_kwargs["dim0_split_templates"] = stacked_key_config
-            loader = AutoLoader(
-                pg,
-                hf_weights_files,
-                device=device,
-                **loader_kwargs,
-            )
+                assert stacked_moe_keyword is not None
+                loader_kwargs[stacked_moe_keyword] = stacked_key_config
             try:
-                yield from _iter_fastsafetensors_weights(
-                    loader, stacked_key_config, local_copyout_filter
+                loader = AutoLoader(
+                    pg,
+                    hf_weights_files,
+                    device=device,
+                    **loader_kwargs,
                 )
+            except Exception as error:
+                _raise_fastsafetensors_compatibility_error(
+                    "failed to construct FastSafeTensors AutoLoader", error
+                )
+            try:
+                try:
+                    yield from _iter_fastsafetensors_weights(
+                        loader, stacked_key_config, effective_copyout_filter
+                    )
+                except Exception as error:
+                    _raise_fastsafetensors_compatibility_error(
+                        "FastSafeTensors iteration compatibility failure", error
+                    )
             finally:
                 loader.close()
 

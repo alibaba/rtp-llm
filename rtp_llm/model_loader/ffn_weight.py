@@ -311,6 +311,16 @@ _PURE_TP_LAYOUTS = {
 }
 
 
+class MoeExpertLayout(NamedTuple):
+    """Resolved checkpoint/source layout shared by MoE loading policies."""
+
+    selected_experts: Tuple[int, ...]
+    tensor_source: TensorSource
+    ckpt_weights: Tuple[CkptWeightInfo, ...]
+    uses_stacked_keys: bool
+    source_contains_raw_stacked: bool
+
+
 class MoeAtomicWeight(AtomicWeight):
     # A pre-sharded tensor reaching an online-quant clone crashes the load;
     # capable clones opt back in (see per_block_fp8_quant_weight).
@@ -361,7 +371,11 @@ class MoeAtomicWeight(AtomicWeight):
             for idx in range(len(self.weights))
         ]
 
-    def _raw_stacked_tensor_names(self, layer_id: Optional[int]) -> List[str]:
+    @property
+    def process_fun_name(self) -> str:
+        return self._process_fun_name
+
+    def raw_stacked_tensor_names(self, layer_id: Optional[int]) -> List[str]:
         """Return concrete raw stacked keys, or empty for per-expert templates."""
 
         if not self.stacked_ckpt_keys or not self.weights:
@@ -376,10 +390,14 @@ class MoeAtomicWeight(AtomicWeight):
             names.append(ckpt_weight.tensor_name(layer_id))
         return names
 
+    # Compatibility alias for existing in-class tests and callers. New code
+    # should use the public layout resolver instead of composing private probes.
+    _raw_stacked_tensor_names = raw_stacked_tensor_names
+
     def _has_raw_stacked_tensors(self, tensor_source, layer_id: Optional[int]) -> bool:
         """Return whether every raw tensor required by this atomic weight exists."""
 
-        names = self._raw_stacked_tensor_names(layer_id)
+        names = self.raw_stacked_tensor_names(layer_id)
         return bool(names) and all(tensor_source.has_tensor(name) for name in names)
 
     def uses_stacked_expert_keys(self, database, layer_id: Optional[int]) -> bool:
@@ -420,7 +438,7 @@ class MoeAtomicWeight(AtomicWeight):
         selected_experts = load_config.get_selected_experts(
             layer_id, self.config.expert_num
         )
-        stacked_keys = self._raw_stacked_tensor_names(layer_id)
+        stacked_keys = self.raw_stacked_tensor_names(layer_id)
         for idx, (ckpt_weight, stacked_key) in enumerate(
             zip(self.weights, stacked_keys)
         ):
@@ -435,6 +453,44 @@ class MoeAtomicWeight(AtomicWeight):
                     ckpt_weight.merge_fun,
                 )
         return split_config
+
+    def resolve_expert_layout(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        load_config: LoadConfig,
+    ) -> MoeExpertLayout:
+        """Resolve selected experts, source wrapping, and logical ckpt keys once."""
+
+        selected_experts = tuple(
+            load_config.get_selected_experts(layer_id, self.config.expert_num)
+        )
+        uses_stacked_keys = self.uses_stacked_expert_keys(
+            tensor_source.get_database(), layer_id
+        ) or self._has_logical_expert_tensors(
+            tensor_source, layer_id, list(selected_experts)
+        )
+        source_contains_raw_stacked = uses_stacked_keys and (
+            self._has_raw_stacked_tensors(tensor_source, layer_id)
+        )
+        resolved_source = tensor_source
+        if source_contains_raw_stacked:
+            resolved_source = StackSplitTensorSource(
+                tensor_source,
+                self._build_split_config(layer_id, load_config),
+            )
+        ckpt_weights = (
+            tuple(self._get_expert_weights())
+            if uses_stacked_keys
+            else tuple(self.weights)
+        )
+        return MoeExpertLayout(
+            selected_experts=selected_experts,
+            tensor_source=resolved_source,
+            ckpt_weights=ckpt_weights,
+            uses_stacked_keys=uses_stacked_keys,
+            source_contains_raw_stacked=source_contains_raw_stacked,
+        )
 
     def _postprocess(
         self,
@@ -466,21 +522,10 @@ class MoeAtomicWeight(AtomicWeight):
         if pre_sharded is not None:
             return {self.name: PreShardedTensor(pre_sharded)}
 
-        selected_experts = load_config.get_selected_experts(
-            layer_id, self.config.expert_num
-        )
-        uses_stacked_keys = self.uses_stacked_expert_keys(
-            tensor_source.get_database(), layer_id
-        ) or self._has_logical_expert_tensors(tensor_source, layer_id, selected_experts)
-        source_contains_raw_stacked = uses_stacked_keys and (
-            self._has_raw_stacked_tensors(tensor_source, layer_id)
-        )
-        if source_contains_raw_stacked:
-            tensor_source = StackSplitTensorSource(
-                tensor_source,
-                self._build_split_config(layer_id, load_config),
-            )
-        ckpt_weights = self._get_expert_weights() if uses_stacked_keys else self.weights
+        layout = self.resolve_expert_layout(tensor_source, layer_id, load_config)
+        selected_experts = layout.selected_experts
+        tensor_source = layout.tensor_source
+        ckpt_weights = layout.ckpt_weights
 
         convert_type = (
             self.data_type if self.data_type is not None else load_config.compute_dtype
@@ -627,7 +672,7 @@ class MoeAtomicWeight(AtomicWeight):
                 dst += shard_size
         return output
 
-    def _load_expert_tensor(
+    def load_expert_tensor(
         self,
         ckpt_weight,
         layer_id,
@@ -667,7 +712,7 @@ class MoeAtomicWeight(AtomicWeight):
         )
 
         # Peek at first tensor to get shape
-        first_name, first_tensor = self._load_expert_tensor(
+        first_name, first_tensor = self.load_expert_tensor(
             ckpt_weights[0],
             layer_id,
             selected_experts[0],
@@ -695,7 +740,7 @@ class MoeAtomicWeight(AtomicWeight):
             for cw_idx, ckpt_weight in enumerate(ckpt_weights):
                 row_offset = cw_idx * dim0
                 for local_idx, expert_id in enumerate(selected_experts):
-                    _, t = self._load_expert_tensor(
+                    _, t = self.load_expert_tensor(
                         ckpt_weight,
                         layer_id,
                         expert_id,
@@ -718,7 +763,7 @@ class MoeAtomicWeight(AtomicWeight):
             for cw_idx, ckpt_weight in enumerate(ckpt_weights):
                 target = gate_scales if cw_idx == 0 else up_scales
                 for expert_id in selected_experts:
-                    _, t = self._load_expert_tensor(
+                    _, t = self.load_expert_tensor(
                         ckpt_weight,
                         layer_id,
                         expert_id,
@@ -743,7 +788,7 @@ class MoeAtomicWeight(AtomicWeight):
             )
             ckpt_weight = ckpt_weights[0]
             for local_idx, expert_id in enumerate(selected_experts):
-                _, t = self._load_expert_tensor(
+                _, t = self.load_expert_tensor(
                     ckpt_weight,
                     layer_id,
                     expert_id,
