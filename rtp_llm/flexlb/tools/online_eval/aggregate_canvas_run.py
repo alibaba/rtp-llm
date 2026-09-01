@@ -393,6 +393,8 @@ per_sec = defaultdict(
         "full_e2e": [],
         "prefill_exec": [],
         "decode_exec": [],
+        "input_len": [],
+        "output_len": [],
     }
 )
 for d in rows:
@@ -431,6 +433,13 @@ for d in rows:
     t = int((_send_ts - epoch0) // 1000)
     b = per_sec[t]
     b["arrivals"] += 1
+    # token 形状时序（20260901）：input_len/output_len 按出生秒分桶，
+    # 全部带时间戳请求行（含错误行——形状刻画的是输入组成，与幸存者
+    # 口径的 sched/e2e 不同）；缺字段行跳过，桶样本数走 input_len_n。
+    if d.get("input_len") is not None:
+        b["input_len"].append(d["input_len"])
+    if d.get("output_len") is not None:
+        b["output_len"].append(d["output_len"])
     if _bucket_key is None:
         b["success"] += 1
         b["sched"].append(d.get("schedule_ms", 0))
@@ -533,6 +542,15 @@ for t in sorted(per_sec):
             "decode_exec_n": len(b["decode_exec"]),
             "decode_exec_p50": pct(b["decode_exec"], 0.5),
             "decode_exec_p95": pct(b["decode_exec"], 0.95),
+            # token 长度时序（出生秒分桶，全部带时间戳行）：replay run
+            # 的长度组成随 trace loop 周期变化，供报告层与 batch size
+            # 时序对照（输入侧驱动识别）。旧 run 无字段时桶为空 -> n=0。
+            "input_len_n": len(b["input_len"]),
+            "input_len_p50": pct(b["input_len"], 0.5),
+            "input_len_p95": pct(b["input_len"], 0.95),
+            "output_len_n": len(b["output_len"]),
+            "output_len_p50": pct(b["output_len"], 0.5),
+            "output_len_p95": pct(b["output_len"], 0.95),
         }
     )
 

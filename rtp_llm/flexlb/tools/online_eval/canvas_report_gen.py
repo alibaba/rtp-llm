@@ -777,6 +777,10 @@ def main():
     # per_second 分支下自检块引用安全。
     has_birth_pe = has_birth_de = False
     used_completion_pe = used_completion_de = False
+    # token 长度时序（20260901）：input/output len per-second p50/p95；
+    # 旧 aggregate 无 input_len_n 键时保持 None -> 2.2 节整体省略。
+    input_len_p50 = input_len_p95 = None
+    output_len_p50 = output_len_p95 = None
     if per_second:
         ps_by_t = {int(p.get("t", 0) or 0): p for p in per_second}
         tsec_vals = rel_ts
@@ -816,6 +820,34 @@ def main():
             "schedP99",
             num_arr([(ps_by_t.get(t) or {}).get("sched_p99", 0) for t in tsec_vals]),
         )
+        # token 长度时序常量：仅当 per_second 带 input_len_n/output_len_n
+        # 且存在非零样本秒时注册（区分「旧 aggregate 无键」与「全零」）。
+        if any((p.get("input_len_n") or 0) for p in per_second):
+            input_len_p50 = const(
+                "inputLenP50",
+                num_arr(
+                    [(ps_by_t.get(t) or {}).get("input_len_p50", 0) for t in tsec_vals]
+                ),
+            )
+            input_len_p95 = const(
+                "inputLenP95",
+                num_arr(
+                    [(ps_by_t.get(t) or {}).get("input_len_p95", 0) for t in tsec_vals]
+                ),
+            )
+        if any((p.get("output_len_n") or 0) for p in per_second):
+            output_len_p50 = const(
+                "outputLenP50",
+                num_arr(
+                    [(ps_by_t.get(t) or {}).get("output_len_p50", 0) for t in tsec_vals]
+                ),
+            )
+            output_len_p95 = const(
+                "outputLenP95",
+                num_arr(
+                    [(ps_by_t.get(t) or {}).get("output_len_p95", 0) for t in tsec_vals]
+                ),
+            )
 
     # 阶段延迟（终态分位）：取数键带 _ms 后缀，展示类目去后缀。
     # sched_lat_count：schedule 分位全终态样本量（幸存者口径阶段样本量
@@ -2242,6 +2274,59 @@ def main():
             lines.append("      <H2>2.1 队列 Top-5 / Bottom-5 引擎（同图对比）</H2>")
             lines.extend(emit_grid(tb_containers))
             lines.append("")
+
+    # 2.2 输入/输出 token 长度时序（出生秒分桶）：replay run 的长度
+    # 组成随 trace loop 周期变化，与「平均 batch size」/队列时序上下
+    # 对照可识别输入侧驱动（长请求簇 -> 攒批慢 -> 小批）。口径：全部
+    # 带时间戳请求行（含错误行——形状刻画输入组成）；p50/p95 为
+    # nearest-rank 分位；旧 aggregate 无 input_len_n 键时整节省略。
+    tok_containers = []
+    if input_len_p50 is not None:
+        il_max = max((p.get("input_len_p95", 0) or 0) for p in per_second)
+        tok_containers.append(
+            emit_container(
+                "输入 token 长度（每秒 p50 / p95）",
+                "x = 压测时间（s，1s 采样）；y = input_len（token）；"
+                "按出生秒（send_start）分桶，含全部带时间戳请求行",
+                emit_chart(
+                    "LineChart",
+                    TSEC,
+                    230,
+                    [
+                        ("ilp50", "input p50", input_len_p50, "info"),
+                        ("ilp95", "input p95", input_len_p95, "warning"),
+                    ],
+                    suffix=" tok",
+                    domain="[0, " + num(nice_max(il_max * 1.1)) + "]",
+                ),
+            )
+        )
+    if output_len_p50 is not None:
+        ol_max = max((p.get("output_len_p95", 0) or 0) for p in per_second)
+        tok_containers.append(
+            emit_container(
+                "输出 token 长度（每秒 p50 / p95）",
+                "x = 压测时间（s，1s 采样）；y = output_len（token）；"
+                "按出生秒（send_start）分桶，含全部带时间戳请求行",
+                emit_chart(
+                    "LineChart",
+                    TSEC,
+                    230,
+                    [
+                        ("olp50", "output p50", output_len_p50, "success"),
+                        ("olp95", "output p95", output_len_p95, "danger"),
+                    ],
+                    suffix=" tok",
+                    domain="[0, " + num(nice_max(ol_max * 1.1)) + "]",
+                ),
+            )
+        )
+    if tok_containers:
+        lines.append("      <Divider />")
+        lines.append("")
+        lines.append("      <H2>2.2 输入 / 输出 token 长度（出生秒分桶）</H2>")
+        lines.extend(emit_grid(tok_containers))
+        lines.append("")
 
     # 3. 调度均衡性（窗口 Gini，仅当 engine_dist 有数据）
     if p_wg_pts or d_wg_pts:
