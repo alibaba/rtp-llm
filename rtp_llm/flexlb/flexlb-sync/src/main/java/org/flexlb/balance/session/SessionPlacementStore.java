@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 @Component
@@ -14,6 +15,7 @@ public final class SessionPlacementStore {
 
     private final Cache<Key, State> placements;
     private final LongSupplier clock;
+    private final AtomicLong epochs = new AtomicLong();
 
     public SessionPlacementStore() {
         this(DEFAULT_MAXIMUM_SIZE, System::currentTimeMillis);
@@ -53,7 +55,7 @@ public final class SessionPlacementStore {
         Placement placement = new Placement(ipPort, requestId, clock.getAsLong());
         placements.asMap().compute(key, (ignored, state) -> {
             if (state == null) {
-                return expectedEpoch == 0L ? new State(0L, placement) : null;
+                return null;
             }
             if (state.epoch() != expectedEpoch) {
                 return state;
@@ -66,8 +68,9 @@ public final class SessionPlacementStore {
         if (!valid(sessionId)) {
             return -1L;
         }
-        State state = placements.getIfPresent(new Key(model, sessionId));
-        return state == null ? 0L : state.epoch();
+        State state = placements.asMap().computeIfAbsent(
+                new Key(model, sessionId), ignored -> new State(nextEpoch(), null));
+        return state.epoch();
     }
 
     public long reset(String model, String sessionId) {
@@ -75,8 +78,7 @@ public final class SessionPlacementStore {
             return -1L;
         }
         State state = placements.asMap().compute(new Key(model, sessionId),
-                (ignored, current) -> new State(
-                        current == null ? 1L : current.epoch() + 1L, null));
+                (ignored, current) -> new State(nextEpoch(), null));
         return state.epoch();
     }
 
@@ -91,6 +93,11 @@ public final class SessionPlacementStore {
     private static boolean valid(String sessionId) {
         return sessionId != null && !sessionId.isBlank()
                 && sessionId.length() <= MAX_SESSION_ID_LENGTH;
+    }
+
+    private long nextEpoch() {
+        long epoch = epochs.incrementAndGet();
+        return epoch == 0L ? epochs.incrementAndGet() : epoch;
     }
 
     private record Key(String model, String sessionId) {
