@@ -54,8 +54,23 @@ import java.util.concurrent.atomic.LongAdder;
 public final class JavaMockEngineCluster {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
-    /** Default KV cache token capacity per engine (Python --prefill/--decode-total-kv-tokens default). */
+    /** Default PREFILL pool token capacity per engine (Python --prefill/--decode-total-kv-tokens default). */
     static final long DEFAULT_TOTAL_KV_TOKENS = 6_291_456L;
+    /**
+     * Default DECODE pool token capacity per engine — deliberately heterogeneous
+     * (2/3 of the prefill pool): decode engines hold each request's KV for its
+     * whole life (input + growing output), so a smaller decode pool lets the
+     * master's cross-engine comparisons (min kvCacheUsed / KV% gates) see real
+     * per-role capacity divergence instead of a uniform static constant.
+     */
+    static final long DEFAULT_DECODE_TOTAL_KV_TOKENS = 4_194_304L;
+    /**
+     * Engine-side KV admission failure code (production C++ ErrorCode::MALLOC_FAILED
+     * = 602; the master's own 8431 RESOURCE_EXHAUSTED is NOT valid from an engine).
+     * Surfaced synchronously in the EnqueueBatch error list so the master's
+     * DefaultBatchDispatcher raises EngineRejectedException on the dispatch path.
+     */
+    static final long LACK_MEM_ERROR_CODE = 602L;
     /** Default decode available_concurrency reported to the master (CONCURRENCY_LIMIT-aligned, previously 132). */
     static final int DEFAULT_DECODE_MAX_CONCURRENCY = 128;
     /** CLI flag for unique per-engine loopback advertisement IPs (default on). */
@@ -227,12 +242,23 @@ public final class JavaMockEngineCluster {
         EngineRpcService.RoleTypePB roleType = "decode".equalsIgnoreCase(roleName)
                 ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                 : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
-        int cacheCapacity = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+        // Per-role KV pool sizing (capacity model v2): totalKvTokens decides the
+        // reported token capacity, the pool itself is sized in blocks
+        // (ceil(total/spb)); --prefill-cache-blocks/--decode-cache-blocks override
+        // the block count directly (legacy flags repurposed from key-count caps
+        // to pool-size overrides so the load scripts keep working unchanged).
+        long roleTotalKvTokens = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
+        int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillCacheBlocks : config.decodeCacheBlocks;
+        int spb = performance.blockSize();
+        int totalBlocks = blocksOverride > 0
+                ? blocksOverride
+                : (int) ((roleTotalKvTokens + spb - 1) / spb);
         FastRpcService service = new FastRpcService(
                 engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
-                services, scheduler, performance, cacheCapacity, stats,
-                config.totalKvTokens, config.decodeMaxConcurrency);
+                services, scheduler, performance, totalBlocks, stats,
+                roleTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         services.put(grpcPort, service);
         try {
@@ -505,7 +531,10 @@ public final class JavaMockEngineCluster {
         private final MockPerformanceModel performance;
         private final MockLruBlockCache cache;
         private final ClusterStats stats;
+        /** Reported token capacity (per-role; pool is ceil(total/spb) blocks). */
         private final long totalKvTokens;
+        /** Blocks per cache block (spb) — the pool's token<->block conversion factor. */
+        private final int seqSizePerBlock;
         private final int decodeMaxConcurrency;
         // Per-method RPC counters (Python _rpc_counts, snapshot "rpc_counts").
         private final AtomicLong rpcEnqueueBatch = new AtomicLong();
@@ -533,7 +562,14 @@ public final class JavaMockEngineCluster {
         private final AtomicLong completionVersion = new AtomicLong();
         private final AtomicLong cacheVersion = new AtomicLong(1);
         private final Map<Integer, AtomicLong> nextPrefillAvailableNanosByDp = new ConcurrentHashMap<>();
-        private final AtomicLong activeKvTokens = new AtomicLong();
+        // ── KV capacity model v2: single block-pool truth ──
+        // In-flight requests pin blocks via per-request leases (acquired at
+        // prefill enqueue / decode run-start, grown per decode step, handed to
+        // the LRU on completion, returned to free on cancel). Occupied tokens
+        // are derived from the pool — never tracked as an independent counter.
+        private final Map<Long, MockLruBlockCache.BlockLease> activeBlockLeases = new ConcurrentHashMap<>();
+        /** Decode requests that ran un-pooled because admission/growth failed (overflow observability). */
+        private final LongAdder kvAdmissionFails = new LongAdder();
         // Per-engine busy time. Prefill engines accumulate batch execution ms
         // (maxPrefillConcurrency=1 -> busy == wall-clock occupancy; utilization =
         // busy/elapsed). Decode engines accumulate per-request execution ms under
@@ -605,6 +641,10 @@ public final class JavaMockEngineCluster {
              * admission (MTP fold — every step emits tokensPerStep tokens).
              * Decremented once per step. */
             int remainingSteps;
+            /** Total step budget at admission — with remainingSteps it yields
+             * tokens generated so far (tokensPerStep x (total - remaining)),
+             * which drives the per-step KV block growth (production incrMalloc). */
+            final int totalSteps;
             /** Σ actual step durations (the per-step exec caliber). */
             double accumulatedExecMs;
             /** Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first). */
@@ -623,6 +663,7 @@ public final class JavaMockEngineCluster {
                 this.shape = shape;
                 this.batchId = batchId;
                 this.responseQueue = responseQueue;
+                this.totalSteps = totalSteps;
                 this.remainingSteps = totalSteps;
                 this.awaitsFirstStep = awaitsFirstStep;
             }
@@ -706,13 +747,14 @@ public final class JavaMockEngineCluster {
                        Map<Integer, FastRpcService> services,
                        ScheduledExecutorService scheduler,
                        MockPerformanceModel performance,
-                       int cacheCapacity,
+                       int totalBlocks,
                        ClusterStats stats,
                        long totalKvTokens,
                        int decodeMaxConcurrency) {
             this.engineName = engineName;
             this.host = host;
             this.totalKvTokens = totalKvTokens;
+            this.seqSizePerBlock = Math.max(1, performance.blockSize());
             this.decodeMaxConcurrency = decodeMaxConcurrency;
             this.roleName = roleName.toUpperCase();
             this.roleType = roleType;
@@ -720,7 +762,7 @@ public final class JavaMockEngineCluster {
             this.services = services;
             this.scheduler = scheduler;
             this.performance = performance;
-            this.cache = new MockLruBlockCache(cacheCapacity);
+            this.cache = new MockLruBlockCache(totalBlocks);
             this.responseExecutor = Executors.newCachedThreadPool(r -> {
                 Thread thread = new Thread(r, "mock-response-poller-" + grpcPort);
                 thread.setDaemon(true);
@@ -792,7 +834,30 @@ public final class JavaMockEngineCluster {
                     // missing response queue.
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                         long requestId = input.getInput().getRequestId();
-                        shapes.add(performance.shape(input.getInput(), cache));
+                        MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
+                        // Phase 1.5 (KV capacity model v2): block-pool admission.
+                        // A request whose blocks cannot be provisioned (free + LRU
+                        // below need, or the reserve watermark would be breached) is
+                        // rejected SYNCHRONOUSLY in this ack with MALLOC_FAILED —
+                        // the engine-side KV gate the master turns into
+                        // EngineRejectedException on its dispatch path. Rejected
+                        // requests leave no residue (state rolled back below).
+                        MockLruBlockCache.BlockLease lease =
+                                acquireBlockLease(requestId, shape);
+                        if (lease == null) {
+                            String message = String.format(
+                                    "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
+                                    needBlocks(shape), cache.availableBlocks(), seqSizePerBlock);
+                            response.addErrorsBuilder()
+                                    .setRequestId(requestId)
+                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                            .setErrorCode(LACK_MEM_ERROR_CODE)
+                                            .setErrorMessage(message)
+                                            .build());
+                            requestStates.put(requestId, "rejected");
+                            continue;
+                        }
+                        shapes.add(shape);
                         responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
                         requestStates.put(requestId, "running");
                     }
@@ -919,7 +984,10 @@ public final class JavaMockEngineCluster {
             long runningCount = runningTasks.values().stream()
                     .filter(task -> task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .count();
-            long usedKv = Math.min(totalKvTokens, activeKvTokens.get() + faultConfig.getKvPressureTokens());
+            // Capacity model v2: used/available both derive from the block pool
+            // (occupied = held + referenced-key blocks) plus injected pressure —
+            // the same caliber getCacheStatus and /snapshot report, so the master
+            // sees one consistent number on every surface.
             EngineRpcService.WorkerStatusPB.Builder status = EngineRpcService.WorkerStatusPB.newBuilder()
                     .setAlive(!stopped)
                     .setRole("RoleType." + roleName)
@@ -935,7 +1003,7 @@ public final class JavaMockEngineCluster {
                     .setWaitingQueryLen(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                             ? waitingPrefillRequests.get() : decodePendingQueueSize())
                     .setRunningQueryLen((int) runningCount)
-                    .setAvailableKvCache(totalKvTokens - usedKv)
+                    .setAvailableKvCache(availableKvTokens())
                     .setTotalKvCache(totalKvTokens)
                     .setStatusVersion(statusVersion.incrementAndGet())
                     .setLatestFinishedVersion(latestVersion)
@@ -1116,11 +1184,28 @@ public final class JavaMockEngineCluster {
                     return;
                 }
             } else {
+                // KV capacity model v2: direct-prefill admission mirrors the
+                // EnqueueBatch Phase-1.5 gate — provision blocks BEFORE claiming
+                // any queue state so a LACK_MEM rejection leaves no residue.
+                // Same master-visible surface as the enqueue path (synchronous
+                // error on the dispatch RPC, code MALLOC_FAILED=602 in the
+                // EnqueueBatch flavor; generate_stream carries it in the
+                // RuntimeException message).
+                if (acquireBlockLease(requestId, shape) == null) {
+                    responseQueues.remove(requestId);
+                    requestStates.put(requestId, "rejected");
+                    observer.onError(new RuntimeException(String.format(
+                            "LACK_MEM: insufficient KV cache blocks (need=%d, avail=%d, spb=%d)",
+                            needBlocks(shape), cache.availableBlocks(), seqSizePerBlock)));
+                    return;
+                }
                 if (!admitDirectPrefill(shape)) {
                     // Backpressure: direct waiting-queue cap hit — reject so the
                     // caller (client/master) perceives prefill overload. Clean up
                     // the per-request state set up above; the cap check rejects
-                    // before claiming any counter.
+                    // before claiming any counter. The lease provisioned above
+                    // returns to the pool too.
+                    releaseBlockLease(requestId);
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
                     observer.onError(new RuntimeException(String.format(
@@ -1363,10 +1448,10 @@ public final class JavaMockEngineCluster {
                 synchronized (decodeQueueLock) {
                     // If the request is still parked in the decode pending queue
                     // (not yet running), it has NOT been counted in
-                    // activeDecodeRequests (and, in default mode, not in
-                    // activeKvTokens either), so those must not be decremented.
-                    // The opt-in accepted-layer mode DID count its KV at enqueue
-                    // — released in the else-if below. removeIf under the
+                    // activeDecodeRequests (and, in default mode, holds no block
+                    // lease either), so those must not be released.
+                    // The opt-in accepted-layer mode DID claim its lease at
+                    // enqueue — released in the else-if below. removeIf under the
                     // admission lock atomically
                     // determines queued-vs-running: if the task is still in the
                     // queue it is removed here (wasQueued=true); if it was already
@@ -1380,7 +1465,10 @@ public final class JavaMockEngineCluster {
                         pendingRequests.decrementAndGet();
                         if (!wasQueuedDecode) {
                             activeDecodeRequests.decrementAndGet();
-                            activeKvTokens.addAndGet(-removed.getInputLength());
+                            // Capacity model v2: the running stream's block lease
+                            // goes back to the pool (no LRU handover — a
+                            // cancelled request leaves no cache).
+                            releaseBlockLease(requestId);
                             // Drop the stream from the per-step loop (no further
                             // step advances it) and hand the freed slot to queued
                             // requests in the SAME locked section — release +
@@ -1391,11 +1479,11 @@ public final class JavaMockEngineCluster {
                             topUpDecodeRunningLocked();
                             scheduleDecodeStepLocked();
                         } else if (performance.reportQueuedAsKvAllocated()) {
-                            // Opt-in KV fidelity (P2-5): the queued request's KV
-                            // was counted at enqueue — release it here. Default
-                            // OFF queued entries were never counted; nothing to
-                            // release.
-                            activeKvTokens.addAndGet(-removed.getInputLength());
+                            // Opt-in KV fidelity (P2-5): the queued request's block
+                            // lease was claimed at enqueue — release it here.
+                            // Default OFF queued entries never claimed a lease;
+                            // nothing to release.
+                            releaseBlockLease(requestId);
                         }
                     }
                 }
@@ -1404,11 +1492,15 @@ public final class JavaMockEngineCluster {
                 // requests in the batch may still be alive); the drain's anyAlive
                 // check drops fully-cancelled batches and the completion's
                 // !alreadyCancelled guard prevents double-decrement of
-                // pendingRequests for cancelled members.
+                // pendingRequests for cancelled members. The block lease is
+                // released here for BOTH queued and running members (the
+                // completion callback's alreadyCancelled release is idempotent —
+                // activeBlockLeases.remove() wins exactly once).
                 EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
                 if (removed != null) {
                     cancelledPhase = removed.getPhase();
                     pendingRequests.decrementAndGet();
+                    releaseBlockLease(requestId);
                 }
             }
             requestStates.put(requestId, "cancelled");
@@ -2091,7 +2183,11 @@ public final class JavaMockEngineCluster {
                         responseQueues.remove(requestId);
                         cancelledRequests.remove(requestId);
                     }
-                    if (cache.admit(shape.blockKeys())) {
+                    if (alreadyCancelled) {
+                        // Cancelled member: blocks return to the pool directly
+                        // (no LRU handover — a cancelled request leaves no cache).
+                        releaseBlockLease(requestId);
+                    } else if (admitBlockLease(requestId, shape)) {
                         cacheVersion.incrementAndGet();
                     }
                 }
@@ -2266,13 +2362,16 @@ public final class JavaMockEngineCluster {
                     // checkLeakDrain / periodicCleanup see net zero.
                     activeDecodeRequests.incrementAndGet();
                     pendingRequests.incrementAndGet();
-                    // KV is added exactly once here for both modes (the admission
-                    // point reserves it either way): default mode counts KV at run
-                    // start (run start == admission into the step loop), the opt-in
-                    // accepted-layer mode counts it at admission — "KV reserved".
-                    // Only the WAITING-queue path differs: opt-in counts at enqueue
-                    // (see below), so the drain must not count it again.
-                    activeKvTokens.addAndGet(shape.inputLen());
+                    // KV capacity model v2: run start provisions the request's
+                    // blocks from the pool (default mode counts KV at run start,
+                    // the opt-in accepted-layer mode counts it at admission — both
+                    // funnel through the same lease). Admission failure degrades
+                    // to un-pooled execution (the request is NOT rejected here:
+                    // the decode engine parks/retries, never rejects) and bumps
+                    // kvAdmissionFails for overflow observability.
+                    if (acquireBlockLease(requestId, shape) == null) {
+                        kvAdmissionFails.increment();
+                    }
                     // awaitsFirstStep: if a step tick is already pending (another
                     // stream is running), this stream joins MID-step and first
                     // produces a token at the next boundary — production: a
@@ -2299,12 +2398,15 @@ public final class JavaMockEngineCluster {
                         runningTasks.put(requestId, task(shape, batchId, 0,
                                 EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED));
                         // Opt-in KV fidelity (P2-5): a queued request holds its
-                        // KV reservation from ENQUEUE (counted exactly once here;
-                        // the drain into a running slot must not count it again),
-                        // so KV-deficit scenarios (M3/M4) see queued backlog
-                        // pressure like a real engine. Default OFF queued entries
-                        // stay uncounted until run start — zero behavior change.
-                        activeKvTokens.addAndGet(shape.inputLen());
+                        // KV reservation from ENQUEUE — modeled as a real block
+                        // lease claimed at park time (exactly once; the drain into
+                        // a running slot must not claim it again). Failure degrades
+                        // to un-pooled (kvAdmissionFails). Default OFF queued
+                        // entries stay uncounted until run start — zero behavior
+                        // change.
+                        if (acquireBlockLease(requestId, shape) == null) {
+                            kvAdmissionFails.increment();
+                        }
                     }
                     decodePendingQueue.addLast(new DecodePendingTask(shape, batchId, responseQueue));
                     pendingRequests.incrementAndGet();
@@ -2368,6 +2470,13 @@ public final class JavaMockEngineCluster {
                     // admission, so the tick only decrements whole steps.
                     stream.remainingSteps--;
                     stream.accumulatedExecMs += stepDelayMs;
+                    // Per-step KV growth (production incrMalloc): extend the
+                    // lease toward ceil((inputLen + generated)/spb) blocks — a
+                    // no-op except at spb/tokensPerStep step boundaries. Runs
+                    // under decodeQueueLock (lock order: queue -> cache).
+                    growDecodeLeaseLocked(stream.shape.input().getRequestId(),
+                            stream.shape.inputLen() + (int) Math.ceil(
+                                    performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps)));
                     if (stream.remainingSteps <= 0) {
                         it.remove();
                         finished.add(stream);
@@ -2423,12 +2532,17 @@ public final class JavaMockEngineCluster {
                 decodePendingQueue.pollFirst();
                 activeDecodeRequests.incrementAndGet();
                 // Run-start bookkeeping, mirroring the immediate-admission path:
-                // default mode counts KV at run start; the opt-in accepted-layer
-                // mode counted it at enqueue and only needs the phase flip.
-                if (!performance.reportQueuedAsKvAllocated()) {
-                    activeKvTokens.addAndGet(candidate.shape().inputLen());
-                } else {
-                    runningTasks.computeIfPresent(candidateId, (rid, tracked) ->
+                // default mode provisions blocks at run start; the opt-in
+                // accepted-layer mode claimed them at enqueue and only needs the
+                // phase flip. A queued request whose opt-in claim degraded takes
+                // its second chance here.
+                if (activeBlockLeases.get(candidateId) == null) {
+                    if (acquireBlockLease(candidateId, candidate.shape()) == null) {
+                        kvAdmissionFails.increment();
+                    }
+                }
+                if (performance.reportQueuedAsKvAllocated()) {
+                    runningTasks.computeIfPresent(candidateId, (id, tracked) ->
                             tracked.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED
                                     ? tracked.toBuilder()
                                             .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
@@ -2476,7 +2590,9 @@ public final class JavaMockEngineCluster {
             }
             stream.owned = true;
             activeDecodeRequests.decrementAndGet();
-            activeKvTokens.addAndGet(-stream.shape.inputLen());
+            // Capacity model v2: the lease is handed to the LRU OUTSIDE this
+            // lock by publishDecodeCompletion (admitBlockLease) — release !=
+            // delete — so cancelling cannot double-release it.
             pendingRequests.decrementAndGet();
         }
 
@@ -2524,7 +2640,10 @@ public final class JavaMockEngineCluster {
             }
             responseQueues.remove(requestId);
             cancelledRequests.remove(requestId);
-            if (cache.admit(shape.blockKeys())) {
+            // Capacity model v2: the stream's block lease hands its key blocks
+            // to the LRU (release != delete: cache_keys grows, availability is
+            // restored because pure-LRU blocks count as available).
+            if (admitBlockLease(requestId, shape)) {
                 cacheVersion.incrementAndGet();
             }
         }
@@ -2625,9 +2744,14 @@ public final class JavaMockEngineCluster {
         public void getCacheStatus(EngineRpcService.CacheVersionPB request,
                                    StreamObserver<EngineRpcService.CacheStatusPB> observer) {
             stats.cacheRpcs.increment();
-            long usedKv = Math.min(totalKvTokens, activeKvTokens.get());
+            // Capacity model v2 + pressure consistency: available derives from
+            // the block pool (free + pure-LRU blocks count) minus injected
+            // pressure, clamped to the reported total — the SAME caliber as
+            // WorkerStatus.availableKvCache and /snapshot available_kv_tokens
+            // (previously getCacheStatus ignored kv_pressure while WorkerStatus
+            // subtracted it).
             EngineRpcService.CacheStatusPB.Builder status = EngineRpcService.CacheStatusPB.newBuilder()
-                    .setAvailableKvCache(totalKvTokens - usedKv)
+                    .setAvailableKvCache(availableKvTokens())
                     .setTotalKvCache(totalKvTokens)
                     .setBlockSize(performance.blockSize())
                     .setVersion(cacheVersion.get());
@@ -2657,6 +2781,108 @@ public final class JavaMockEngineCluster {
                 cacheVersion.incrementAndGet();
             }
             return changed;
+        }
+
+        // ──────────── KV capacity model v2: block-pool helpers ────────────
+
+        /**
+         * A request's total block demand: the hash-channel block count when the
+         * request carries block_cache_keys, else ceil(inputLen/spb) computed live
+         * (the ~22% empty-bh share of the production trace).
+         */
+        private int needBlocks(MockPerformanceModel.RequestShape shape) {
+            List<Long> keys = shape.blockKeys();
+            if (!keys.isEmpty()) {
+                return keys.size();
+            }
+            return (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
+        }
+
+        /**
+         * Try to provision {@code shape}'s blocks from the pool (TOTAL_AND_AVAILABLE
+         * gate + LRU-tail eviction coupling). On success the lease is registered in
+         * {@code activeBlockLeases} so completion/cancel can hand it back.
+         *
+         * @return the lease, or null = LACK_MEM (nothing claimed — callers either
+         *         reject the request or degrade with a kvAdmissionFails bump)
+         */
+        private MockLruBlockCache.BlockLease acquireBlockLease(long requestId,
+                                                                MockPerformanceModel.RequestShape shape) {
+            MockLruBlockCache.BlockLease lease = cache.acquire(needBlocks(shape), shape.blockKeys());
+            if (lease == null) {
+                return null;
+            }
+            activeBlockLeases.put(requestId, lease);
+            return lease;
+        }
+
+        /**
+         * Normal completion: release the request's lease and hand its cache-keyed
+         * blocks to the LRU (release != delete: the key set grows, availability is
+         * restored because pure-LRU blocks count as available). Keyless held
+         * blocks return to free.
+         */
+        private boolean admitBlockLease(long requestId, MockPerformanceModel.RequestShape shape) {
+            MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
+            if (lease == null) {
+                return false;
+            }
+            return cache.admit(lease, shape.blockKeys());
+        }
+
+        /** Cancel path: return the lease's blocks to the pool without LRU handover. */
+        private void releaseBlockLease(long requestId) {
+            MockLruBlockCache.BlockLease lease = activeBlockLeases.remove(requestId);
+            if (lease != null) {
+                cache.release(lease);
+            }
+        }
+
+        /**
+         * Per-step decode growth (production incrMalloc): extend the running
+         * request's allocation toward ceil((inputLen+grown)/spb) blocks. Free
+         * blocks first, LRU-tail eviction second; on exhaustion the growth
+         * stalls (counted in kvAdmissionFails) — the request keeps running with
+         * its current allocation rather than being aborted.
+         */
+        private void growDecodeLeaseLocked(long requestId, int totalTokensSoFar) {
+            MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
+            if (lease == null) {
+                return; // un-pooled degraded request (admission failed earlier)
+            }
+            int targetBlocks = (totalTokensSoFar + seqSizePerBlock - 1) / seqSizePerBlock;
+            while (lease.totalBlocks() < targetBlocks) {
+                if (!cache.grow(lease)) {
+                    kvAdmissionFails.increment();
+                    return;
+                }
+            }
+        }
+
+        /** Tokens pinned by in-flight requests: (held + referenced key blocks) x spb. */
+        private long occupiedKvTokens() {
+            return (long) (cache.heldBlocks() + cache.referencedKeyBlocks()) * seqSizePerBlock;
+        }
+
+        /** Tokens available per the pool (free + pure-LRU blocks count) — LRU included. */
+        private long poolAvailableKvTokens() {
+            return (long) cache.availableBlocks() * seqSizePerBlock;
+        }
+
+        /**
+         * Master-facing available tokens: pool availability clamped to the reported
+         * total, minus injected KV pressure. The clamp keeps total/spb non-divisible
+         * configs reporting at most totalKvTokens when idle (legacy compatibility).
+         */
+        private long availableKvTokens() {
+            return Math.max(0L,
+                    Math.min(totalKvTokens, poolAvailableKvTokens()) - faultConfig.getKvPressureTokens());
+        }
+
+        /** Master-facing used tokens (occupied + pressure, clamped to total). */
+        private long usedKvTokens() {
+            return Math.min(totalKvTokens,
+                    occupiedKvTokens() + faultConfig.getKvPressureTokens());
         }
 
         /** Current cache version (gRPC getCacheStatus / /cache_evict echo). */
@@ -2758,7 +2984,7 @@ public final class JavaMockEngineCluster {
          * cancel every in-flight request through the existing {@link #cancel}
          * bookkeeping (verified idempotent against racing completion callbacks
          * via the runningTasks remove-guard), so pendingRequests /
-         * activeDecodeRequests / activeKvTokens / waitingPrefillRequests and
+         * activeDecodeRequests / activeBlockLeases / waitingPrefillRequests and
          * both pending queues net to zero without waiting for the simulated
          * completions (up to ~90s for long decodes) to fire. Called from the
          * JVM shutdown hook; completes in milliseconds.
@@ -2852,7 +3078,19 @@ public final class JavaMockEngineCluster {
         long getAcceptedCount() { return acceptedCount.get(); }
         long getCompletedCount() { return completedCount.get(); }
         long getCancelledCount() { return cancelledCount.get(); }
-        long getActiveKvTokens() { return activeKvTokens.get(); }
+        /** Master-facing used tokens (occupied + pressure, clamped to total) —
+         * the pool-derived caliber behind "active" everywhere. */
+        long getActiveKvTokens() { return usedKvTokens(); }
+        /** Blocks currently pinned by in-flight leases (held + referenced). */
+        long getOccupiedKvTokens() { return occupiedKvTokens(); }
+        /** Pool availability (free + pure-LRU) clamped to total, minus pressure. */
+        long getAvailableKvTokens() { return availableKvTokens(); }
+        /** Total pool blocks (ceil(totalKvTokens/spb) or explicit override). */
+        int getCacheBlocks() { return cache.totalBlocks(); }
+        /** spb — the pool's token<->block conversion factor (reported as block_size). */
+        int getSeqSizePerBlock() { return seqSizePerBlock; }
+        /** Count of KV admission/growth failures (LACK_MEM degradations + stalls). */
+        long getKvAdmissionFails() { return kvAdmissionFails.sum(); }
         boolean isLeakDetected() { return leakDetected.get(); }
         boolean isShuttingDown() { return shuttingDown; }
         int getActiveDecodeCount() { return activeDecodeRequests.get(); }
@@ -2868,7 +3106,10 @@ public final class JavaMockEngineCluster {
          * convert the requested absolute value into the equivalent additive pressure.
          */
         void setAbsoluteActiveKvTokens(long absoluteTokens) {
-            long pressure = Math.max(0, absoluteTokens - activeKvTokens.get());
+            // occupied (not used) so the injected pressure lands on TOP of the
+            // live pool occupancy — repeated absolute injections stay additive
+            // relative to what is really running.
+            long pressure = Math.max(0, absoluteTokens - occupiedKvTokens());
             faultConfig = faultConfig.toBuilder().kvPressureTokens(pressure).build();
             statusVersion.incrementAndGet();
         }
@@ -3048,7 +3289,13 @@ public final class JavaMockEngineCluster {
          */
         Map<String, Object> getSnapshot() {
             Map<String, Object> snap = new LinkedHashMap<>();
-            long effectiveActiveKv = activeKvTokens.get() + faultConfig.getKvPressureTokens();
+            // Capacity model v2: one pool-derived caliber everywhere —
+            // active = occupied + pressure (clamped), available = pool
+            // availability (free + pure-LRU, LRU counts as available) clamped
+            // to total minus pressure. cache_keys growth shows up as occupancy
+            // only while requests are RUNNING; parked LRU keys restore
+            // availability, matching the production master's view.
+            long effectiveActiveKv = usedKvTokens();
             snap.put("name", engineName);
             snap.put("role", roleName.toLowerCase());
             snap.put("grpc_addr", host + ":" + grpcPort);
@@ -3077,7 +3324,16 @@ public final class JavaMockEngineCluster {
             cacheKeySet.sort(Long::compareTo);
             snap.put("cache_key_set", cacheKeySet);
             snap.put("active_kv_tokens", effectiveActiveKv);
-            snap.put("available_kv_tokens", Math.max(0, totalKvTokens - effectiveActiveKv));
+            snap.put("available_kv_tokens", availableKvTokens());
+            // Pool observability (per-engine series, /metrics passthrough):
+            // spb and the block-level split of the same capacity model.
+            snap.put("total_kv_tokens", totalKvTokens);
+            snap.put("block_size", seqSizePerBlock);
+            snap.put("cache_blocks", cache.totalBlocks());
+            snap.put("available_blocks", cache.availableBlocks());
+            snap.put("held_blocks", cache.heldBlocks());
+            snap.put("referenced_blocks", cache.referencedKeyBlocks());
+            snap.put("kv_admission_fails", kvAdmissionFails.sum());
             Map<String, Object> injectConfig = new LinkedHashMap<>();
             injectConfig.put("enqueue_error", faultConfig.isFailOnEnqueue());
             injectConfig.put("fetch_error", faultConfig.isFetchError());
@@ -3307,8 +3563,15 @@ public final class JavaMockEngineCluster {
         int baseGrpcPort = 61_000;
         int eventLoopThreads = 32;
         int completionThreads = 8;
-        int prefillCacheBlocks = 6_000;
-        int decodeCacheBlocks = 3_000;
+        /**
+         * Block-count pool overrides (capacity model v2): 0 = derive the pool
+         * from the per-role token capacity (ceil(totalKvTokens/spb)). The legacy
+         * flag NAMES are kept (run_online_eval.sh L861-862 / lib_load_client.sh /
+         * harness.py still pass them) but the MEANING changed from "max cache
+         * keys" to "total pool blocks" — a non-zero value overrides derivation.
+         */
+        int prefillCacheBlocks = 0;
+        int decodeCacheBlocks = 0;
         String host = "127.0.0.1";
         String prefillDomain = "mock.prefill.hosts.address";
         String decodeDomain = "mock.decode.hosts.address";
@@ -3317,7 +3580,17 @@ public final class JavaMockEngineCluster {
         String discoveryFile;
         String performanceFile;
         String masterConfigFile;
+        /** Legacy uniform token-capacity knob — applies to BOTH per-role pools when set. */
         long totalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
+        /**
+         * Per-role token capacities (capacity model v2, heterogeneous defaults):
+         * prefill 6,291,456 (6144 blocks x 1024 spb) vs decode 4,194,304 (2/3)
+         * — decode engines hold each request's KV for its whole life, so the
+         * smaller pool lets the master's cross-engine comparisons (min
+         * kvCacheUsed / KV% gates) exercise real per-role divergence.
+         */
+        long prefillTotalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
+        long decodeTotalKvTokens = DEFAULT_DECODE_TOTAL_KV_TOKENS;
         int blockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
         int statsIntervalMs = 5000;
@@ -3360,7 +3633,15 @@ public final class JavaMockEngineCluster {
                     case "--discovery-file" -> config.discoveryFile = value;
                     case "--performance" -> config.performanceFile = value;
                     case "--master-config" -> config.masterConfigFile = value;
-                    case "--total-kv-tokens" -> config.totalKvTokens = Long.parseLong(value);
+                    // --total-kv-tokens stays the uniform knob: sets BOTH
+                    // per-role pools (Python compat: one number, both roles).
+                    case "--total-kv-tokens" -> {
+                        config.totalKvTokens = Long.parseLong(value);
+                        config.prefillTotalKvTokens = config.totalKvTokens;
+                        config.decodeTotalKvTokens = config.totalKvTokens;
+                    }
+                    case "--prefill-total-kv-tokens" -> config.prefillTotalKvTokens = Long.parseLong(value);
+                    case "--decode-total-kv-tokens" -> config.decodeTotalKvTokens = Long.parseLong(value);
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);

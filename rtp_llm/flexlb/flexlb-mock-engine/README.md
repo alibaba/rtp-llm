@@ -9,7 +9,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **Fault injection**: 9 fault types (enqueue_error, generate_error, fetch_error, no_respond, kv_pressure, queue_depth, crash_after, enqueue_delay, generate_delay)
 - **HTTP control**: 14 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /cancel_request, /add_engine, /remove_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
-- **KV cache modeling**: LRU cache with prefix matching, pressure simulation
+- **KV cache modeling**: block-pool capacity model v2 — heterogeneous prefill/decode pools, LRU-coupled admission/eviction (LACK_MEM), per-step decode KV growth, pressure simulation
 - **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches`, default 0 = zero-waiting fail-fast, with backpressure rejection), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
 
 ## Quick Start
@@ -132,7 +132,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 - `/metrics`: aggregated by role by default; append `?per_engine=true` for
   per-engine labels (`engine_name`/`role`/`grpc_port`/`engine_ip`).
 
-## Test Suite (209 test methods)
+## Test Suite (223 test methods)
 
 | Test | Methods | Description |
 |------|---------|-------------|
@@ -151,7 +151,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | HighConcurrencyStressTest | 1 | 500 requests @ 100 concurrency |
 | InflightTtlExpiryTest | 1 | TTL cleanup mechanism |
 | MatrixSweepTest | 1 | P/D config × concurrency sweep |
-| MetricsValidationTest | 1 | /metrics + /snapshot validation |
+| MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
 | RealisticTimingTest | 1 | Real timing verification |
 
 ## JavaLoadClient
@@ -207,7 +207,7 @@ JavaMockEngineCluster
 ├── ScheduledExecutorService  — timing simulation (schedule completions)
 ├── responseExecutor          — blocking queue poll for response delivery
 ├── FastRpcService            — gRPC service (enqueue, generate, status, cancel)
-└── MockCacheStore            — LRU KV cache with prefix matching
+└── MockLruBlockCache         — KV block pool + LRU prefix cache (capacity model v2)
 ```
 
 ## Current-branch extensions (auto-tpm / priority)
@@ -271,6 +271,64 @@ End-to-end QoS priority, from trace to engine tombstone:
   upstream prefill owner (`upstreamPrefillOwners`), so cancel/finish on
   either side can release the counterpart's inflight entry exactly once.
 
+### KV capacity model v2 (block pool)
+
+The KV cache is now a **token-counted block pool** (`MockLruBlockCache`), aligning the
+mock's KV behaviour with the real engine's CacheManager/BlockCache semantics so the
+master-side curves are indistinguishable from production:
+
+- **Pool derivation**: `totalBlocks = ceil(totalKvTokens / spb)` — a block is the unit
+  of admission, eviction and accounting.
+  `available_kv_tokens = (free + evictable-LRU blocks) × spb − kv_pressure`:
+  pure-LRU blocks count as AVAILABLE (evictable at the cost of prefix reuse),
+  mirroring the real `available = free + LRU` semantics. Held (running) blocks and
+  referenced (running-with-keys) LRU blocks are NOT available.
+- **Role-heterogeneous defaults**: prefill pool defaults to 6,291,456 tokens
+  (6,144 blocks), decode to 4,194,304 (4,096) — decode holds each request's KV for
+  its full lifetime, so the smaller pool lets the master's cross-engine comparisons
+  (`min kvCacheUsed` / KV% gates) actually see role divergence. Per-role overrides:
+  `--prefill-total-kv-tokens` / `--decode-total-kv-tokens`; the legacy
+  `--total-kv-tokens` still sets BOTH pools uniformly.
+- **Lease lifecycle**: prefill holds `ceil(inputLen/spb)` blocks for the duration of
+  the batch and hands them to LRU on completion (release ≠ delete — availability
+  recovers, `cache_keys` stay). Decode provisions its blocks at run start (opt-in
+  queued-mode provisions at enqueue) and **grows the lease per decode step** toward
+  `ceil((inputLen + generated)/spb)` (production `incrMalloc` semantics), handing
+  over to LRU at completion.
+- **Admission/eviction coupling**: allocation needs `keys.size` blocks
+  (hash-present requests) or `ceil(inputLen/spb)` (empty-key requests, computed on
+  the spot); the gate is TOTAL_AND_AVAILABLE with a 5% reserve watermark.
+  Free-block shortage first evicts LRU-tail blocks (sacrificing prefix reuse), and
+  only returns **LACK_MEM** (error 602 `MALLOC_FAILED`, synchronous in the
+  `enqueue_batch` ack `errors` with `request_states: "rejected"`; direct
+  `generate_stream` fails the stream) when eviction cannot satisfy the request —
+  the master's rejection-response path is now observable under load. Running leases
+  reference their LRU blocks, making them non-evictable and non-available: the
+  hotter the cache while requests run, the lower available drops — the
+  scheduling-pressure shape the previous model could not express.
+- **Decode never rejects**: on pool exhaustion a decode request degrades to un-pooled
+  execution and bumps the `kv_admission_fails` counter (production
+  `waiting_streams_` semantics — parking, not rejecting).
+- **Flag semantics change**: `--prefill-cache-blocks` / `--decode-cache-blocks` have
+  RETIRED their old meaning ("max cached key count") and now override the pool
+  block count (default `0` = derive from token capacity). The 6000/3000 defaults
+  still passed by `run_online_eval.sh` / `lib_load_client.sh` / `harness.py` remain
+  valid — they now size the pools (6,000 blocks = 6,144,000 tokens prefill;
+  3,000 = 3,072,000 decode) instead of capping key counts.
+- **Surface alignment**: `block_size` in snapshots now reports the actual spb (was
+  hardcoded 1024); `/snapshot` and `/metrics` expose `total_kv_tokens`,
+  `cache_blocks`, `available_blocks`, `held_blocks`, `referenced_blocks` and
+  `kv_admission_fails` alongside the existing `active_kv_tokens` /
+  `available_kv_tokens` (per-engine series preserved); injected `kv_pressure` now
+  consistently lowers availability across ALL surfaces (`getCacheStatus`,
+  `WorkerStatus.availableKvCache`, `/snapshot`, `/metrics`).
+
+**Baseline caliber (IMPORTANT)**: v2 changes the *shape* of the available/active KV
+curves (prefill now occupies capacity while running; LRU holdings reduce available;
+decode grows per step). Numbers from the mock3 baseline (available ≈ total −
+in-flight decode inputLen) are NOT comparable across this version — re-baseline
+before any cross-version comparison.
+
 ### Decode hard-admission gate (unconditional)
 
 `decodeMaxConcurrency` (default 132, overridable via
@@ -319,13 +377,14 @@ deep engine-side queues, so the cap must be explicitly requested. Do not
 ### Test-suite size on this branch
 
 The v2 baseline table above ("Test Suite (68 test methods)") is outdated
-here: this branch's test surface totals **209 test methods**. Two v2
-baseline classes grew by one method each —
-`JavaLoadClientParityTest` 14 → **15** and `ClusterConfigParamTest` 7 → **8**
-— and the remainder of the delta are the new classes listed below (plus a
-few new fixtures such as `ClusterStatsDecodeWindowTest`,
-`LoopShardRidDisjointTest`, `PrefillWaitingQueueCapTest`,
-`ShutdownDrainTest` and `UniformSendModeTest`).
+here: this branch's test surface totals **223 test methods**. Three v2
+baseline classes grew — `JavaLoadClientParityTest` 14 → **15**,
+`ClusterConfigParamTest` 7 → **9** (one auto-tpm param + one per-role KV pool
+override) and `MetricsValidationTest` 1 → **3** (KV pool tracking +
+pressure-surface consistency) — and the remainder of the delta are the new
+classes listed below (plus a few new fixtures such as
+`ClusterStatsDecodeWindowTest`, `LoopShardRidDisjointTest`,
+`PrefillWaitingQueueCapTest`, `ShutdownDrainTest` and `UniformSendModeTest`).
 
 ### Additional tests on this branch
 
@@ -337,6 +396,8 @@ Representative additions beyond the v2 baseline suite (full list under
 - `MockEngineCancelChannelTest` — in-process cancel channel contract
 - `DecodePendingQueueHardGateTest` — unconditional decode hard gate semantics
 - `KvAllocatedReportOptInTest` — queued-as-KV_ALLOCATED reporting
+- `BlockPoolCapacityTest` — KV block-pool admit/evict/match: LRU-coupled
+  allocation, LACK_MEM rejection, reserve watermark, lease growth/handover
 - `LoadClientPriorityTest` — PRIORITY env vs trace-record priority, wire
   propagation, priority_stats
 - `PreemptionPhasesE2ETest` — preemption phase fidelity across stages
