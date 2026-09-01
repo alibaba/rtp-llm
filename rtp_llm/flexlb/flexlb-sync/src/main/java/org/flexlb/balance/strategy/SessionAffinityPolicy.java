@@ -26,20 +26,22 @@ final class SessionAffinityPolicy {
         }
         String model = request.getModel();
         String sessionId = request.getInferenceSessionId();
-        synchronized (request) {
-            if (request.getSessionPlacementEpoch() < 0) {
-                request.setSessionPlacementEpoch(
-                        request.getInferenceSessionState() == Request.SessionState.NEW
-                                ? store.reset(model, sessionId)
-                                : store.currentEpoch(model, sessionId));
+        Request.SessionState state = request.getInferenceSessionState();
+        if (state == Request.SessionState.NEW) {
+            synchronized (request) {
+                if (request.getSessionPlacementEpoch() < 0) {
+                    request.setSessionPlacementEpoch(store.reset(model, sessionId));
+                }
             }
-        }
-        if (request.getInferenceSessionState() == Request.SessionState.NEW) {
             return Decision.none(Reason.NEW_SESSION);
         }
-        if (config == null
-                || request.getInferenceSessionState() != Request.SessionState.ESTABLISHED) {
+        if (config == null || state != Request.SessionState.ESTABLISHED) {
             return Decision.none(Reason.DISABLED);
+        }
+        synchronized (request) {
+            if (request.getSessionPlacementEpoch() < 0) {
+                request.setSessionPlacementEpoch(store.currentEpoch(model, sessionId));
+            }
         }
         for (int i = 0; i < candidateCount; i++) {
             if (cacheHit.applyAsLong(i) > 0) {
