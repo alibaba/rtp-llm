@@ -31,6 +31,13 @@ from flexlb_ft.injection_gate_cases import INJECTION_GATE_CASES  # noqa: E402
 
 ALL_CASES = ALL_CASES + INJECTION_GATE_CASES
 
+# Task #83 (status-report fault family): engine→master status channel
+# faults, 17 cases asserting the correct master contract (chaos suite).
+# See flexlb_ft/status_fault_cases.py.
+from flexlb_ft.status_fault_cases import STATUS_FAULT_CASES  # noqa: E402
+
+ALL_CASES = ALL_CASES + STATUS_FAULT_CASES
+
 
 def main():
     parser = argparse.ArgumentParser(description="FlexLB functional test runner")
