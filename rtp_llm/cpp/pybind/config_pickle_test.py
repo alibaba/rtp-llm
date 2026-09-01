@@ -1,11 +1,15 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import GrammarConfig, KVCacheConfig
 
 
 def _new_grammar_config():
     return GrammarConfig.__new__(GrammarConfig)
+
+
+def _new_kv_cache_config():
+    return KVCacheConfig.__new__(KVCacheConfig)
 
 
 class _LegacyGrammarConfig:
@@ -24,6 +28,18 @@ class _PreviousSixTupleGrammarConfig:
     def __reduce__(self):
         previous_state = (True, 6, "six-tokenizer-info", [13, 17], 4096, True)
         return _new_grammar_config, (), previous_state
+
+
+class _Previous57TupleKVCacheConfig:
+    def __init__(self, hca_blocks: int):
+        self.hca_blocks = hca_blocks
+
+    def __reduce__(self):
+        state = list(KVCacheConfig().__getstate__())
+        if len(state) != 58:
+            raise AssertionError(f"expected current 58-field state, got {len(state)}")
+        state[55] = self.hca_blocks
+        return _new_kv_cache_config, (), tuple(state[:57])
 
 
 class GrammarConfigPickleTest(unittest.TestCase):
@@ -82,6 +98,31 @@ class GrammarConfigPickleTest(unittest.TestCase):
             ):
                 config = _new_grammar_config()
                 config.__setstate__(state)
+
+
+class KVCacheConfigPickleTest(unittest.TestCase):
+    def test_current_format_round_trip_preserves_explicit_clear(self):
+        config = KVCacheConfig()
+        config.dsv4_hca_state_pool_blocks = -1
+        config.dsv4_hca_state_pool_clear = True
+
+        self.assertEqual(len(config.__getstate__()), 58)
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.dsv4_hca_state_pool_blocks, -1)
+        self.assertTrue(restored.dsv4_hca_state_pool_clear)
+
+    def test_previous_zero_means_unset(self):
+        restored = pickle.loads(pickle.dumps(_Previous57TupleKVCacheConfig(0)))
+
+        self.assertEqual(restored.dsv4_hca_state_pool_blocks, -1)
+        self.assertFalse(restored.dsv4_hca_state_pool_clear)
+
+    def test_previous_positive_override_is_preserved(self):
+        restored = pickle.loads(pickle.dumps(_Previous57TupleKVCacheConfig(96)))
+
+        self.assertEqual(restored.dsv4_hca_state_pool_blocks, 96)
+        self.assertFalse(restored.dsv4_hca_state_pool_clear)
 
 
 if __name__ == "__main__":

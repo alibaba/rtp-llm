@@ -29,6 +29,20 @@ def _jit_env(**values):
 
 
 class ServerConfigPortLayoutTest(TestCase):
+    def test_dsv4_hca_pool_clear_rejects_positive_override(self):
+        from rtp_llm.config.server_config_setup import setup_default_args
+
+        config = PyEnvConfigs()
+        config.model_args.model_type = "fake_model"
+        config.kv_cache_config.dsv4_hca_state_pool_blocks = 64
+        config.kv_cache_config.dsv4_hca_state_pool_clear = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DSV4_HCA_STATE_POOL_CLEAR cannot be enabled together",
+        ):
+            setup_default_args(config)
+
     def test_dash_sc_rejects_legacy_stride_eight(self):
         config = ServerConfig()
         config.worker_info_port_num = 8

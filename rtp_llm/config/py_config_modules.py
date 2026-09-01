@@ -152,7 +152,9 @@ class PyMiscellaneousConfig:
         self.dashscope_api_key: str = "EMPTY"
         self.dashscope_http_url: Optional[str] = None
         self.dashscope_websocket_url: Optional[str] = None
-        self.dsv4_startup_real_warmup: bool = True
+        # Kept raw until the only consumer (a DSV4 PREFILL worker) is known;
+        # unrelated roles/models must not reject a stale DSV4-only env value.
+        self.dsv4_startup_real_warmup: str | bool = "true"
 
     def to_string(self):
         return (

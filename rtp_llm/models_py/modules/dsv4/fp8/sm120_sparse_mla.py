@@ -5,12 +5,12 @@ from typing import Optional, Sequence
 import torch
 
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
-_PACKED_CACHE: dict[tuple, torch.Tensor] = {}
-_GATHERED_CACHE: dict[tuple, torch.Tensor] = {}
-_SLOT_CACHE: dict[tuple, torch.Tensor] = {}
-_REMAP_CACHE: dict[tuple, torch.Tensor] = {}
-_LOOKUP_CACHE: dict[tuple, torch.Tensor] = {}
-_NEGATIVE_MASK_CACHE: dict[tuple, torch.Tensor] = {}
+_PACKED_CACHE: dict[tuple, list[torch.Tensor]] = {}
+_GATHERED_CACHE: dict[tuple, list[torch.Tensor]] = {}
+_SLOT_CACHE: dict[tuple, list[torch.Tensor]] = {}
+_REMAP_CACHE: dict[tuple, list[torch.Tensor]] = {}
+_LOOKUP_CACHE: dict[tuple, list[torch.Tensor]] = {}
+_NEGATIVE_MASK_CACHE: dict[tuple, list[torch.Tensor]] = {}
 
 # FlashInfer's DSV4 sparse-decode dispatcher specializes on the static index
 # width.  HCA compresses one entry per 128 input tokens, so a 1M context needs
@@ -21,36 +21,39 @@ SM120_EXTRA_TOPK_WIDTHS = (2, 128, 512, 1024, 2048, 4096, 8192)
 
 
 def _cached_buffer(
-    cache: dict[tuple, torch.Tensor],
+    cache: dict[tuple, list[torch.Tensor]],
     key: tuple,
     shape: tuple[int, ...],
     *,
     dtype: torch.dtype,
     device: torch.device,
 ) -> torch.Tensor:
-    """Return a grow-only buffer, reusing the largest shape seen for a key.
+    """Return a stable-address arena buffer for a device/layout key.
 
-    Decode graph capture uses a small set of static top-k widths but may see
-    different batch sizes.  Keying by capacity would retain one large tensor
-    for every batch/sequence combination and eventually exhaust HBM.  A
-    grow-only buffer per device/layout instead bounds the cache while keeping
-    the eager-to-graph reuse that avoids allocations in the hot path.
+    A captured graph owns the address it observed. Growing a single cached
+    tensor by replacement would free that address and leave the graph with a
+    dangling pointer. Keep power-of-two generations alive and reuse the
+    smallest generation that covers the request. This bounds growth
+    logarithmically while preserving every captured address.
     """
     needed = 1
     for extent in shape:
         needed *= int(extent)
-    result = cache.get(key)
-    if result is None or result.numel() < needed:
+    buffers = cache.setdefault(key, [])
+    result = min(
+        (buffer for buffer in buffers if buffer.numel() >= needed),
+        key=lambda buffer: buffer.numel(),
+        default=None,
+    )
+    if result is None:
         if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
             raise RuntimeError(
                 "SM120 sparse MLA packed buffers must be materialized before "
                 "CUDA graph capture"
             )
-        result = torch.empty(shape, dtype=dtype, device=device)
-        cache[key] = result
-    # Reuse the prefix of a larger grow-only allocation.  ``view(shape)`` on
-    # the full tensor would fail as soon as a later request has fewer slots
-    # than the largest request seen so far.
+        capacity = 1 if needed <= 1 else 1 << (needed - 1).bit_length()
+        result = torch.empty((capacity,), dtype=dtype, device=device)
+        buffers.append(result)
     return result.reshape(-1)[:needed].view(shape)
 
 

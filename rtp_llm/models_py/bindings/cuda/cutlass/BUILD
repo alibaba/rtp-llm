@@ -54,5 +54,9 @@ cc_library(
         "-DCUTLASS_ARCH_MMA_SM120_SUPPORTED",
     ],
     alwayslink = True,
+    target_compatible_with = select({
+        "@//:using_cuda13_sm120": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     visibility = ["//visibility:public"],
 )

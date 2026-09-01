@@ -48,7 +48,9 @@ from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 # DeepGEMM contiguous requires per-expert M to be a multiple of the kernel's
 # alignment (128 on SM100). We use the same constant.
 _GROUPED_ALIGNMENT = 128
-_SM120_FUSED_MOE_WORKSPACES = {}
+# Base layout -> stable-address power-of-two generations. Older generations
+# stay alive because already-captured CUDA graphs may still reference them.
+_SM120_FUSED_MOE_WORKSPACES: dict[tuple, list[tuple[int, torch.Tensor]]] = {}
 
 
 def _has_sm120_flashinfer_grouped_fp4_kernels() -> bool:
@@ -190,6 +192,10 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
             )
             self._s13 = self._s2 = None
             self._s13_dense_t = self._s2_dense_t = None
+            # Return the raw staging scales to the allocator before flushing
+            # its cache; otherwise these live locals survive empty_cache() and
+            # reduce the memory observed by KV-cache capacity planning.
+            del s13_raw, s2_raw
             torch.cuda.empty_cache()
             return
 
@@ -504,30 +510,46 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         )
         key = (
             device.index,
-            workspace_tokens,
             cfg.dim,
             cfg.moe_inter_dim,
             cfg.n_routed_experts,
             cfg.n_activated_experts,
         )
-        workspace = _SM120_FUSED_MOE_WORKSPACES.get(key)
-        if workspace is None:
-            workspace_bytes = cutlass_fused_moe_workspace_size(
-                workspace_tokens,
-                cfg.dim,
-                cfg.moe_inter_dim,
-                cfg.n_routed_experts,
-                cfg.n_activated_experts,
-                x_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch.long,
-                output_dtype=torch.bfloat16,
-                activation_type=ActivationType.Swiglu,
-                use_mxfp8_act_scaling=True,
-                use_fused_finalize=False,
-                device=device,
+        generations = _SM120_FUSED_MOE_WORKSPACES.setdefault(key, [])
+        reusable = [
+            (capacity, workspace)
+            for capacity, workspace in generations
+            if capacity >= workspace_tokens
+        ]
+        if reusable:
+            return min(reusable, key=lambda item: item[0])[1]
+
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "SM120 fused MoE workspace must be materialized before CUDA "
+                f"graph capture for at least {workspace_tokens} tokens"
             )
-            workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
-            _SM120_FUSED_MOE_WORKSPACES[key] = workspace
+
+        workspace_capacity = (
+            1 if workspace_tokens <= 1 else 1 << (workspace_tokens - 1).bit_length()
+        )
+        workspace_bytes = cutlass_fused_moe_workspace_size(
+            workspace_capacity,
+            cfg.dim,
+            cfg.moe_inter_dim,
+            cfg.n_routed_experts,
+            cfg.n_activated_experts,
+            x_dtype=torch.float8_e4m3fn,
+            weight_dtype=torch.long,
+            output_dtype=torch.bfloat16,
+            activation_type=ActivationType.Swiglu,
+            use_mxfp8_act_scaling=True,
+            use_fused_finalize=False,
+            device=device,
+        )
+        workspace = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+        generations.append((workspace_capacity, workspace))
+        generations.sort(key=lambda item: item[0])
         return workspace
 
     def _forward_capture_sm120(self, x, weights, indices) -> torch.Tensor:
