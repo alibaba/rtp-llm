@@ -135,15 +135,29 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
-        self.use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
-        )
+        # The fold is legal exactly when the routed output is still TP-partial on
+        # its way out of the router, and supports_skip_tp_allreduce is the property
+        # that says so: it advertises that finalize() owns the TP reduce and can be
+        # asked to skip it.  ep_size is deliberately not part of the predicate.  A
+        # pure-TP router with ep_size == tp_size gives every rank whole experts and
+        # sums the per-rank partial results in finalize(), so its routed output is
+        # partial for the same reason the ep_size == 1 intermediate-dim slicing is;
+        # an EP router (DeepEP, MoriEP) returns an output its own combine already
+        # completed and does not advertise the capability.  Restricting the fold to
+        # ep_size == 1 therefore left the ep_size == tp_size layout -- which
+        # PureTpRouterBase.check_conditions admits on CUDA -- paying two small TP
+        # collectives per MoE layer where one is enough.
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
             and self.ffn_tp_size > 1
-            and self.ep_size == 1
             and self.ffn_tp_size == router_tp_size
             and router.supports_skip_tp_allreduce
+        )
+        self.use_ep_shared_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and not self.use_unified_tp_allreduce
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
