@@ -167,16 +167,17 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Four strategies are available (registered with `LoadBalanceStrategyFactory`):
+Five strategies are available (registered with `LoadBalanceStrategyFactory`):
 
 - **RANDOM**: Random worker selection
 - **COST_BASED_PREFILL**: Select worker with lowest cost for prefill requests
 - **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
 - **SHORTEST_TTFT**: Select worker with lowest predicted TTFT (prefill time + queue time) using candidate pool mechanism (RATIO/FIXED modes) with CAS fairness
-- **WEIGHTED_CACHE**: Cache-aware selection prioritizing workers with matching KV cache blocks
 - **ROUND_ROBIN**: Cursor-based round-robin with an O(alive) liveness filter and per-`(role, group)` cursors. It supports both single selection and batch-aware `selectBatch`, trading load-skew awareness for a very cheap selection path.
 
-Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in flexlb-common.
+Each `RoleType` can use a different registered strategy. `WEIGHTED_CACHE` is currently only a
+reserved enum value and has no `LoadBalanceStrategyFactory` registration, so it is not deployable.
+See `LoadBalanceStrategyEnum` in flexlb-common.
 
 ### Queue-Based Request Scheduling
 
@@ -330,7 +331,7 @@ New configuration fields:
   - **LLM**: *within* the window the window governs membership, and liveness stays probe-driven. Discovery never was the liveness signal here — gRPC probing is — so during the outage the known workers keep being probed and their staleness clocks are refreshed by probe success alone. A worker that dies mid-outage fails its probe, is marked dead, stops being refreshed, and ages out on the normal `ExpirationCleaner` schedule (~3 s), **not** at the end of the grace window; a fleet that genuinely scaled to zero therefore drains at probe speed. Past the window the probing stops as well (`rideOutDiscoveryGap` returns before submitting any), so the clocks go stale and the roster drains whether or not the workers are healthy: the window bounds how long an outage can be ridden out at all, not merely how long membership additions/removals stay frozen. A discovery outage that outlives the window takes a healthy LLM fleet out of rotation.
   - **EMBEDDING**: the window governs *routability*, because discovery presence is the only liveness signal (no `GetWorkerStatus` to probe). During the outage the staleness clocks of workers still marked alive are refreshed so they survive; workers a previous authoritative round already marked dead are left to age out. Here a fleet that scaled to zero does drain only after the window.
 
-Env override semantics (`EnvConfigOverrides`, applies to every field above via `FIELD_NAME_UPPER_SNAKE` env vars — e.g. `BATCH_SCHEDULE_MAX_COUNT`): **behavior changed vs. older builds** — an invalid *enum* value (e.g. a mistyped `LOAD_BALANCE_STRATEGY` or `ENGINE_TYPE`) now fails startup instead of being silently ignored, and enum values are now case-insensitive (a lowercase value that older builds ignored now takes effect). Audit lingering env vars before upgrading. Numeric typos still log-and-keep-default; booleans follow `Boolean.parseBoolean` (anything but "true" reads as false).
+Env override semantics (`EnvConfigOverrides`, applies to every field above via `FIELD_NAME_UPPER_SNAKE` env vars — e.g. `BATCH_SCHEDULE_MAX_COUNT`): enum values are case-sensitive Java constant names. An invalid enum value (including wrong case) or numeric value is logged and leaves the existing/default field value unchanged; booleans follow `Boolean.parseBoolean` (anything but "true" reads as false). Audit lingering env vars after an upgrade because an ignored override can otherwise look like an applied setting.
 
 ### MODEL_SERVICE_CONFIG (required)
 ```json
@@ -405,7 +406,6 @@ An empty batch array on a registered path is short-circuited locally by the disp
 - Direct-to-FE remains the bypass for any client that can't change URLs.
 
 **Known limits (deferred):**
-- Bare `POST /dispatcher` (no trailing slash) does not match the root batch route; it is passthrough-forwarded with the path normalized to `/`, i.e. it reaches one FE unsplit.
 - Bare `POST /` aliases `/batch_infer`: it batches only when the body carries `prompt_batch` (rtp_llm FE historically exposes batch generation on the root path with the same wire shape). The `prompt: [...]` variant is NOT batched (known FE-side footgun) — such requests fall through to passthrough-forward to a single FE.
 - `request_id` set by `frontend_server.py` overwrites any upstream id — dispatcher to FE trace linkage is broken. Tracked in `project_frontend_request_id_overwrite.md`.
 - BE pre-assignment is disabled by default (`DISPATCH_PRE_ASSIGN_BE=false`) for rolling-upgrade safety and applies **only to the `prompt_batch` endpoints** (`/`, `/batch_infer`): FE's pydantic models for `/v1/batch/chat/completions`, `/v1/embeddings`, and `/v1/reranker` do not consume dispatcher-stamped BE `role_addrs`, so those endpoints get no BE stamping. When enabled, the dispatcher resolves N BE targets through master `/rtp_llm/batch_schedule` and stamps each chunk's `generate_config.role_addrs` with `{role, ip, http_port, grpc_port}` so FE skips its own master round-trip (existing FE path: `backend_rpc_server_visitor.route_ips` honors non-empty `role_addrs`). **FE version precondition**: the FE build must include `RoleAddr.validate_role` (`@field_validator("role", mode="before")` in `rtp_llm/config/generate_config.py`, on main since `53dc319bd`); older FE builds leave `role_addrs` as `list[dict]` and 500 every stamped request at `model_rpc_client`'s `addr.role` — verified in production 2026-05-28. Enable `DISPATCH_PRE_ASSIGN_BE=true` only after the FE fleet satisfies that contract. `/batch_schedule`'s strategy is decoupled from `/schedule`'s via `FlexlbConfig.batchLoadBalanceStrategy` (default `ROUND_ROBIN`). Failed pre-assigned BE targets still do not auto-failover at the dispatcher; FE handles dead-target fallback by re-invoking `/schedule`.
