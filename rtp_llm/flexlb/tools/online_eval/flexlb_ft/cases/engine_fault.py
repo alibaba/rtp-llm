@@ -25,12 +25,33 @@ Case map:
                                    latency (delay, not failure)
     engine_fault_generate_delay   inflated prefill execution inflates TTFT
                                    under every profile
+
+    Recovery family (E1-E6, expected-behavior assertions):
+    engine_fault_recovery_generation_bump   E1 — recovery must publish a
+                                   fresh endpoint generation; old ledger
+                                   must not leak into it
+    engine_fault_recovery_kv_resync         E2 — recovery must rebuild the
+                                   engine's cache view from a FULL snapshot
+                                   (with and without surviving KV memory)
+    engine_fault_recovery_no_resurrect      E3 — inflight requests from
+                                   before the outage must not resurrect on
+                                   the recovered engine
+    engine_fault_status_gap_no_bump          E4 — a short (2-tick) status
+                                   gap must NOT retire the generation
+    engine_fault_status_gap_long_retire      E5 — a long status gap must
+                                   retire the generation and fence its
+                                   ledger/inflight
+    engine_fault_recovery_kv_usage_reset     E6 — after a full restart the
+                                   engine's KV usage must restart from zero,
+                                   not resume from the old reading
 """
 
 from __future__ import annotations
 
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Optional
 
 from ..context import CaseContext, CaseDef, rid_base
@@ -44,14 +65,20 @@ from ..engine_ops import (
 from ..harness import (
     TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
+    EnvSpec,
     _BackgroundFlow,
     _cleanup_dynamic,
     _elastic_env,
     _fault_spec,
+    _pump_until_accepted,
     _run_batch,
     _ttft_p50,
+    _wait_master_alive,
     _wait_master_topology,
+    fault_env_config,
+    fault_env_perf,
     http_get_status,
+    http_post_json,
     wait_for,
 )
 
@@ -741,3 +768,898 @@ def inject_generate_delay(ctx: CaseContext):
         return False, f"exception: {exc!r}"
     finally:
         clear_type_all(ops, names, "generate_delay")
+
+
+# ===========================================================================
+# Elastic/fault recovery contracts (E1-E6) — expected-behavior assertions
+# ===========================================================================
+#
+# Assertion policy (task E1-E6 mandate): every assertion below states the
+# CORRECT contract for engine recovery, never the current behaviour.  A
+# failing case is a FINDING on the master (or, where the observation is the
+# mock's own self-report, on the mock's restart fidelity) and is recorded,
+# not worked around.  Observation surfaces used:
+#
+#   * master log lifecycle lines — "Created WorkerStatus generation {} for
+#     worker: {ipPort}" (INFO, EngineSyncRunner), "worker {ipPort} marked
+#     dead after 3 consecutive gRPC failures" (ERROR, GrpcWorkerStatusRunner
+#     — the transport-failure retire path), "[remove]/[replace] retiring ..."
+#     (INFO — discovery-driven retires);
+#   * /rtp_llm/inflight_status per-endpoint ledger (inflight_requests /
+#     inflight_batches per prefill ip_port);
+#   * /rtp_llm/master/info worker_summary (discovered / alive per role);
+#   * routing landing points + mock /snapshot (cache_key_set,
+#     kv_tokens_used) for the KV-view contracts.
+#
+# The six cases share a DEDICATED env (recovery_{profile}, 2P+2D, file
+# discovery, fault axes, 30s stale-inflight TTL) so the stop/start/
+# injection cycles cannot leak state into — or inherit residue from — the
+# shared fault_/kv_ family envs (the task-#87 family-env leakage lesson).
+
+
+# Retire wait cap: connection-refused failures accumulate one per status
+# poll tick (20ms) and the transport retire fires at 3 consecutive
+# failures, so the bounded stop in these cases retires within ~1s; the cap
+# stays at the fault-family precedent for slow CI machines.
+RECOVERY_EVICT_S = 30.0
+# Engine restart channel-reconnect settle (engine_down Phase-4 precedent).
+RECOVERY_SETTLE_S = 3.0
+# Status-gap shapes: E4 is a 2-tick (2 x 20ms poll) transient gap; E5 must
+# exceed the 3-consecutive-failure retire threshold with no_respond's
+# per-RPC 1s deadline (fault_env_config statusRpcTimeoutMs=1000) — 5s gives
+# >= 4 timed-out polls, comfortably past 3.
+E4_GAP_S = 0.045
+E5_GAP_S = 5.0
+# Post-recovery cache-status poll convergence.  The master's prefill cache
+# poll is dynamically intervalled (DynamicCacheIntervalService, default
+# 50ms..3000ms) and gated on status ticks, so this window must comfortably
+# exceed the 3s ceiling to guarantee the poller has pulled the post-change
+# key set (kv.py KV_SYNC_CONVERGENCE_S caliber, widened for the ceiling).
+RECOVERY_KV_SYNC_S = 4.5
+# The master routes its sync loggers (EngineSyncRunner / GrpcWorkerStatusRunner
+# log through the logback "syncLogger") to <flexlb.log.path>/sync.log — by
+# default the SHARED ~/ai-whale/logs/sync.log, NOT the per-env stdout capture
+# in flexlb_master.log (that one only holds the Spring banner).  The recovery
+# env pins the path to a per-env directory so generation/retire observations
+# cannot be polluted by sibling runs; every read is an incremental scan from
+# a byte offset snapshotted at case start (late async flushes of earlier
+# cases then land before the offset only).
+SYNC_LOG_ROOT = Path(tempfile.gettempdir()) / "flexlb_ft_sync"
+
+
+def _recovery_spec(ctx: CaseContext, suffix: str = "") -> EnvSpec:
+    """Dedicated E1-E6 env: 2P+2D, dynamic file discovery, fault axes, 30s
+    TTL — deliberately a separate label from the shared fault_/kv_ envs.
+    A non-empty *suffix* gives a case its OWN env: E2's routing-shape
+    assertions (regime A stick / regime B spread) are perturbed by a
+    shared env's accumulated soft state (an earlier case's retire storm
+    leaves the stormed engine with a routing penalty that skews the
+    no-affinity distribution toward the other engine — observed as a
+    stable 4/5 bias in the shared-env runs).
+    """
+    label = f"recovery{suffix}_{ctx.profile}"
+    return EnvSpec(
+        label=label,
+        n_prefill=2,
+        n_decode=2,
+        perf=fault_env_perf(),
+        master_profile=ctx.profile,
+        discovery="discovery_file",
+        master_env={"FLEXLB_CONFIG": fault_env_config()},
+        # Route ALL master logback output (application/sync/flexlb/pv) into
+        # a per-env directory — the generation/retire observations below read
+        # <dir>/sync.log instead of the shared ~/ai-whale/logs.
+        master_extra_args=[f"--flexlb.log.path={SYNC_LOG_ROOT / label}"],
+    )
+
+
+def _recovery_env(ctx: CaseContext, suffix: str = ""):
+    env = ctx.env_manager.ensure(_recovery_spec(ctx, suffix))
+    return env, ctx.engine_ops(env)
+
+
+def _engine_ip_port(ops, engine_name: str) -> str:
+    """Master-facing address of *engine_name* (discovery-file http port,
+    i.e. grpc port - 1 — the ipPort the master logs and keys workerStatus
+    entries by)."""
+    snap = ops.snapshot_by_name().get(engine_name, {})
+    grpc_port = int(snap.get("port", 0))
+    if grpc_port <= 0:
+        raise RuntimeError(f"no grpc port for engine {engine_name}: {snap!r}")
+    return f"127.0.0.1:{grpc_port - 1}"
+
+
+def _sync_log_path(env) -> Path:
+    """Per-env sync log (logback syncLogger → <flexlb.log.path>/sync.log)."""
+    return SYNC_LOG_ROOT / env.spec.label / "sync.log"
+
+
+def _master_log_offset(env) -> int:
+    """Byte offset of the sync log at case start — every count below scans
+    incrementally from here, so residue from earlier cases (and sibling runs)
+    cannot leak into the observation."""
+    try:
+        return _sync_log_path(env).stat().st_size
+    except OSError:
+        return 0
+
+
+def _master_log_count(env, needle: str, offset: int = 0) -> int:
+    """Count sync-log lines containing *needle* (generation lifecycle
+    observations), scanning from *offset* onward.  Returns 0 when the log
+    is unavailable."""
+    path = _sync_log_path(env)
+    if not path.is_file():
+        return 0
+    count = 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            if offset > 0:
+                fh.seek(offset)
+            for line in fh:
+                if needle in line:
+                    count += 1
+    except OSError:
+        return 0
+    return count
+
+
+def _created_generation_count(env, ip_port: str, offset: int = 0) -> int:
+    """How many WorkerStatus generations the master has CREATED for *ip_port*
+    since *offset* — "Created WorkerStatus generation {} for worker: {ip}"."""
+    return _master_log_count(env, f"for worker: {ip_port}", offset)
+
+
+def _retire_count(env, ip_port: str, offset: int = 0) -> int:
+    """Transport-failure retirements logged for *ip_port* since *offset* —
+    "worker {ip} marked dead after {} consecutive gRPC failures"."""
+    return _master_log_count(env, f"worker {ip_port} marked dead", offset)
+
+
+def _prefill_endpoint_ledger(ops, ip_port: str) -> Optional[dict]:
+    """The /rtp_llm/inflight_status prefill entry for *ip_port*, or None."""
+    data = ops.master_inflight()
+    if not data:
+        return None
+    for ep in data.get("prefill_endpoints", []):
+        if ep.get("ip_port") == ip_port:
+            return ep
+    return None
+
+
+def _recovery_cache_keys(ops, engine_name: str) -> set:
+    """Per-engine LRU key set from mock /snapshot (same shape as kv.py's
+    _engine_cache_keys — kept local so category modules stay independent)."""
+    entry = ops.snapshot_by_name().get(engine_name, {})
+    if "cache_key_set" not in entry:
+        raise RuntimeError(f"no 'cache_key_set' for engine {engine_name} in /snapshot")
+    return set(int(k) for k in entry["cache_key_set"])
+
+
+def _recovery_cache_evict(ops, engine_name: str, keys) -> None:
+    """POST /cache_evict (same endpoint as kv.py — bumps cacheVersion so the
+    master's next cache poll re-pulls the key set)."""
+    status, body = http_post_json(
+        f"http://127.0.0.1:{ops.mock_http_port}/cache_evict",
+        {"engine": engine_name, "keys": [int(k) for k in keys]},
+    )
+    if status != 200:
+        raise RuntimeError(
+            f"cache_evict({engine_name}, {len(keys)} keys) failed: {status} {body}"
+        )
+
+
+def _fire_inflight(ops, base: int, n: int, **kwargs) -> list:
+    """Fire *n* requests without consuming their streams — the master
+    ledger entries stay live until consumed/cancelled (S4 drainage lesson:
+    unconsumed entries linger and poison later phases).  Returns
+    [(rid, response, engine_name)]."""
+    fired = []
+    for _ in range(n):
+        rid = ops.next_request_id(base)
+        try:
+            resp = ops.schedule(rid, **kwargs)
+        except Exception:
+            continue
+        if resp.code != 200 or not resp.success:
+            continue
+        addr = ops.role_addr(resp, "PREFILL")
+        fired.append((rid, resp, ops.addr_to_name().get(addr, addr)))
+    return fired
+
+
+def _consume_fired(ops, fired: list, wait_s: float = STREAM_TIMEOUT_S) -> list:
+    """Consume every fired request to a terminal state (cancel fallback).
+    Returns [(rid, engine_name, completed)] for resurrection bookkeeping."""
+    outcomes = []
+    for rid, resp, name in fired:
+        completed = False
+        try:
+            handle = ops.start_stream(resp, rid)
+            ended = handle.wait_end(wait_s)
+            completed = bool(ended and handle.snap.completed and not handle.snap.error)
+        except Exception:
+            completed = False
+        if not completed:
+            try:
+                ops.cancel(rid, resp)
+            except Exception:
+                pass
+        outcomes.append((rid, name, completed))
+    return outcomes
+
+
+def _ensure_started(ops, names) -> None:
+    """Restore any stopped engine (env hygiene for the shared recovery env)."""
+    try:
+        snap = ops.snapshot_by_name()
+        for n in names:
+            if snap.get(n, {}).get("stopped"):
+                ops.start_engine(n)
+    except Exception:
+        pass
+
+
+@case(
+    "engine_fault_recovery_generation_bump",
+    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    source="E1: engine recovery must publish a fresh endpoint generation",
+)
+def recovery_generation_bump(ctx: CaseContext):
+    """E1 — expected behaviour: an engine that goes unavailable (gRPC
+    refusal for a bounded window) and then recovers must come back under a
+    NEW WorkerStatus generation (or an equivalent full resync signal), and
+    the old generation's queue/ledger must not leak into the new one.
+
+    Mechanism under test: the transport retire path — 3 consecutive status
+    RPC failures (GrpcWorkerStatusRunner.recordStatusCheckFailure) retire
+    the generation; the discovery loop then re-creates a fresh one.
+
+    Assertions (contract, not implementation):
+      * the retire landed ("marked dead after 3 consecutive gRPC failures");
+      * the master created at least one NEW generation for the endpoint
+        after the outage began (created-count strictly grows);
+      * the recovered endpoint's ledger starts from zero (inflight_requests
+        == 0 and inflight_batches == 0 before any new traffic);
+      * a fresh request completes after recovery.
+
+    FINDING if it fails: recovery without a generation bump — the old
+    generation's stale KV baseline / ledger silently survives the outage.
+    """
+    env, ops = _recovery_env(ctx)
+    base = rid_base(ctx, "engine_fault")
+    try:
+        _cleanup_dynamic(ops, env)
+        # Cascade hygiene (task #87): drain earlier residue on this env.
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+
+        ip = _engine_ip_port(ops, "prefill-0")
+        log_offset = _master_log_offset(env)
+        created_before = _created_generation_count(env, ip, log_offset)
+
+        # Baseline traffic: 6 requests must all succeed.
+        ok0, err0, _ = _run_batch(ops, base, 6)
+        if err0:
+            return False, f"baseline batch had {err0} errors"
+
+        # Outage: stop prefill-0; the refused connections accumulate the 3
+        # consecutive transport failures that must retire the generation.
+        ops.stop_engine("prefill-0")
+        retired = wait_for(
+            lambda: _retire_count(env, ip, log_offset) > 0, RECOVERY_EVICT_S, 0.2
+        )
+
+        # Recovery: restart and wait for the endpoint to serve again.
+        ops.start_engine("prefill-0")
+        alive_back = _wait_master_alive(
+            ops, "PREFILL", env.spec.n_prefill, RECOVERY_EVICT_S
+        )
+        time.sleep(RECOVERY_SETTLE_S)
+
+        created_after = _created_generation_count(env, ip, log_offset)
+        generation_bumped = created_after > created_before
+
+        # The recovered generation's ledger must start from zero BEFORE any
+        # new traffic is scheduled against it.
+        ledger = _prefill_endpoint_ledger(ops, ip)
+        ledger_clean = bool(
+            ledger
+            and int(ledger.get("inflight_requests", -1)) == 0
+            and int(ledger.get("inflight_batches", -1)) == 0
+        )
+
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = retired and alive_back and generation_bumped and recovery_ok
+        return passed, (
+            f"ip={ip}, created_generations={created_before}->{created_after}, "
+            f"transport_retired={retired}, alive_restored={alive_back}, "
+            f"recovered_ledger_zero={ledger_clean}"
+            f"(ledger={ledger}), recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        _ensure_started(ops, ["prefill-0", "prefill-1"])
+
+
+@case(
+    "engine_fault_recovery_kv_resync",
+    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    source="E2: recovery must rebuild the cache view from a full snapshot",
+)
+def recovery_kv_resync(ctx: CaseContext):
+    """E2 — expected behaviour: on engine recovery the master must rebuild
+    the engine's cache view from a FULL snapshot, never from the old
+    generation's incremental baseline, in BOTH memory regimes:
+
+      * A (memory intact): the engine keeps its LRU through the outage —
+        after recovery the holder relationship must survive, so same-prefix
+        requests keep landing on the recovered engine (>= 4/5);
+      * B (memory lost): the engine's key set is wiped across the restart
+        (cache_evict models the reboot) — the rebuilt view must reflect the
+        EMPTY key set, so same-prefix requests spread instead of sticking
+        to the old holder (<= 3/5).
+
+    Regime A also pins the generation bump: the retire
+    (WorkerGenerationRetirement) clears the address-keyed cache index
+    (removeEngineBlockCache) and the new generation re-pulls the full key
+    set from version -1 — a master that instead kept the old version
+    baseline would reject the (unchanged) engine version and LOSE the
+    holder relationship (spread), failing the regime-A gate.
+
+    FINDING if it fails: incremental-baseline resync across a generation
+    boundary (stale holder or lost holder).
+    """
+    # Own env (see _recovery_spec): the regime-B spread bar is a routing
+    # shape, and a shared env's earlier retire storms bias it.
+    env, ops = _recovery_env(ctx, "_e2")
+    base = rid_base(ctx, "engine_fault")
+    try:
+        _cleanup_dynamic(ops, env)
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+        names = _prefill_names(ops)
+        if len(names) < 2:
+            return False, "need >=2 prefill engines"
+
+        # A 10-block prefix family (kv.py caliber: 10 x 1024 tokens keeps a
+        # full-hit continuation past the affinity line, 9216 >= 8192).
+        fam = [base + 900_000 + j for j in range(10)]
+
+        # Seed: one request admits the family onto its landing engine X.
+        rid = ops.next_request_id(base)
+        addr, err = ops.run_one_request(
+            rid,
+            input_len=10_240,
+            output_len=2,
+            block_keys=fam,
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        if err:
+            return False, f"seed request failed: {err}"
+        holder = ops.addr_to_name().get(addr, addr)
+        other = [n for n in names if n != holder][0]
+
+        # Holder must actually own the family before the outage.
+        owner_ok = wait_for(
+            lambda: set(fam) <= _recovery_cache_keys(ops, holder),
+            8.0,
+            0.5,
+        )
+        if not owner_ok:
+            return False, (
+                f"seed never admitted the family onto {holder} "
+                f"(keys={sorted(_recovery_cache_keys(ops, holder))[:5]}...)"
+            )
+        # Master-side convergence (>= 3.5s quiet — kv.py caliber).
+        time.sleep(RECOVERY_KV_SYNC_S)
+
+        ip = _engine_ip_port(ops, holder)
+        log_offset = _master_log_offset(env)
+        created_before = _created_generation_count(env, ip, log_offset)
+
+        # Outage + recovery (mock keeps the LRU: memory-intact regime).
+        ops.stop_engine(holder)
+        retired = wait_for(
+            lambda: _retire_count(env, ip, log_offset) > 0, RECOVERY_EVICT_S, 0.2
+        )
+        ops.start_engine(holder)
+        alive_back = _wait_master_alive(
+            ops, "PREFILL", env.spec.n_prefill, RECOVERY_EVICT_S
+        )
+        time.sleep(RECOVERY_SETTLE_S)
+        created_after = _created_generation_count(env, ip, log_offset)
+        generation_bumped = created_after > created_before
+
+        # Regime A: after the full rebuild, the holder relationship must
+        # survive — 5 same-prefix requests, >= 4 must land on the holder.
+        landings_a = []
+        for _ in range(5):
+            rid = ops.next_request_id(base)
+            addr, err = ops.run_one_request(
+                rid,
+                input_len=10_240,
+                output_len=2,
+                block_keys=fam,
+                stream_timeout_s=STREAM_TIMEOUT_S,
+            )
+            if err:
+                landings_a.append(f"ERR:{str(err)[:40]}")
+            else:
+                landings_a.append(ops.addr_to_name().get(addr, addr))
+        hits_a = sum(1 for x in landings_a if x == holder)
+        regime_a_ok = hits_a >= 4
+
+        # Regime B: wipe the engine's key set (reboot semantics) and let
+        # the master's view converge — same-prefix requests must now
+        # spread; sticking to the wiped holder means the master kept a
+        # stale view.
+        _recovery_cache_evict(ops, holder, fam)
+        owner_gone = wait_for(
+            lambda: not (set(fam) & _recovery_cache_keys(ops, holder)),
+            8.0,
+            0.5,
+        )
+        time.sleep(RECOVERY_KV_SYNC_S)
+        landings_b = []
+        for _ in range(5):
+            rid = ops.next_request_id(base)
+            addr, err = ops.run_one_request(
+                rid,
+                input_len=10_240,
+                output_len=2,
+                block_keys=fam,
+                stream_timeout_s=STREAM_TIMEOUT_S,
+            )
+            if err:
+                landings_b.append(f"ERR:{str(err)[:40]}")
+            else:
+                landings_b.append(ops.addr_to_name().get(addr, addr))
+        hits_b = sum(1 for x in landings_b if x == holder)
+        regime_b_ok = hits_b <= 3
+
+        passed = (
+            retired
+            and alive_back
+            and generation_bumped
+            and owner_gone
+            and regime_a_ok
+            and regime_b_ok
+        )
+        return passed, (
+            f"holder={holder}(other={other}), ip={ip}, "
+            f"created_generations={created_before}->{created_after}, "
+            f"retired={retired}, alive_restored={alive_back}, "
+            f"regime_A_stick={hits_a}/5 (need >=4), "
+            f"regime_B_spread={hits_b}/5 (need <=3, wipe_ok={owner_gone}), "
+            f"landings_A={landings_a}, landings_B={landings_b}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        _ensure_started(ops, ["prefill-0", "prefill-1"])
+
+
+@case(
+    "engine_fault_recovery_no_resurrect",
+    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    source="E3: pre-outage inflight requests must not resurrect after recovery",
+)
+def recovery_no_resurrect(ctx: CaseContext):
+    """E3 — expected behaviour: requests that were in flight on an engine
+    when it went down must NOT leak into the recovered generation's
+    bookkeeping:
+
+      * the master's per-endpoint ledger for the recovered engines must
+        read zero inflight (old entries fenced or TTL-settled), and the
+        global inflight must drain to zero within the TTL cap;
+      * the engine side must not keep the old rids registered after the
+        drain;
+      * fresh traffic must schedule normally after recovery (the new
+        generation serves new requests).
+
+    MOCK-FIDELITY CAVEAT (recorded, not asserted): the mock's stop/start
+    pair keeps running tasks in memory (the SAME semantics E2's regime A
+    depends on), so pre-outage tasks finish executing after the restart —
+    that is engine-internal continuation, not a master-side re-dispatch,
+    and a zero-completion resurrection bar is therefore not assertable
+    against this mock.  The completion count is reported as an
+    observation; a true crash-loses-tasks injection would need a new mock
+    capability (TODO(mock-agent)).
+
+    FINDING if the asserted master-side bars fail: F1 permanent-ledger-leak
+    elastic variant — old generation requests surviving into the new one's
+    ledger.
+    """
+    env, ops = _recovery_env(ctx)
+    base = rid_base(ctx, "engine_fault")
+    names = ["prefill-0", "prefill-1"]
+    try:
+        _cleanup_dynamic(ops, env)
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+
+        # Widen the in-flight window so the outage lands mid-execution:
+        # slow prefills keep requests waiting/running on the engines while
+        # we take them down.
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=2000.0)
+        time.sleep(1.5)  # master perf sync
+
+        fired = _fire_inflight(ops, base, 8, input_len=512, output_len=2)
+        if len(fired) < 4:
+            for n in names:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+            return False, f"only {len(fired)}/8 requests fired successfully"
+        time.sleep(0.5)  # let the batcher dispatch them onto the engines
+
+        targets = sorted({name for _rid, _resp, name in fired})
+        target_ips = {n: _engine_ip_port(ops, n) for n in targets}
+        log_offset = _master_log_offset(env)
+
+        # Outage: stop every engine that holds fired inflight requests.
+        retired_all = True
+        for n in targets:
+            ops.stop_engine(n)
+        for n, ip in target_ips.items():
+            if not wait_for(
+                lambda ip=ip: _retire_count(env, ip, log_offset) > 0,
+                RECOVERY_EVICT_S,
+                0.2,
+            ):
+                retired_all = False
+
+        # Recovery.
+        for n in targets:
+            ops.start_engine(n)
+        alive_back = _wait_master_alive(
+            ops, "PREFILL", env.spec.n_prefill, RECOVERY_EVICT_S
+        )
+        time.sleep(RECOVERY_SETTLE_S)
+
+        # The recovered generation's ledger must start from zero.
+        ledger_clean = True
+        ledger_detail = {}
+        for n, ip in target_ips.items():
+            ledger = _prefill_endpoint_ledger(ops, ip)
+            zero = bool(
+                ledger
+                and int(ledger.get("inflight_requests", -1)) == 0
+                and int(ledger.get("inflight_batches", -1)) == 0
+            )
+            ledger_clean = ledger_clean and zero
+            ledger_detail[n] = ledger
+
+        # Consume the fired requests to terminal states.  With the mock's
+        # memory-intact stop semantics, completions after restart are
+        # engine-internal continuation (observation, see docstring) — the
+        # master-side bars below are the asserted contract.
+        outcomes = _consume_fired(ops, fired, wait_s=5.0)
+        resurrected = [
+            (rid, name)
+            for rid, name, completed in outcomes
+            if completed and name in targets
+        ]
+
+        # Engine side must not keep the old rids registered.
+        engine_clean, engine_detail = engine_inflight_clean(ops, targets)
+
+        # Master global ledger drains within the TTL cap (fence or TTL).
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+        )
+
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            retired_all
+            and alive_back
+            and ledger_clean
+            and engine_clean
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={len(fired)} onto {targets}, retired_all={retired_all}, "
+            f"alive_restored={alive_back}, "
+            f"recovered_ledger_zero={ledger_clean}({ledger_detail}), "
+            f"post-restart_completions={len(resurrected)}/{len(fired)} "
+            f"(mock memory-intact continuation, observation only), "
+            f"engine_inflight_clean={engine_clean}({engine_detail}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        _ensure_started(ops, names)
+        for n in names:
+            try:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+            except Exception:
+                pass
+
+
+@case(
+    "engine_fault_status_gap_no_bump",
+    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    source="E4: a short status-reporting gap must not retire the generation",
+)
+def status_gap_no_bump(ctx: CaseContext):
+    """E4 — expected behaviour: a SHORT status-reporting gap (2 poll ticks,
+    ~40ms) is network jitter, not an outage — the master must tolerate it
+    WITHOUT retiring the endpoint's generation:
+
+      * no new WorkerStatus generation is created for the endpoint over
+        the whole case window (created-count unchanged);
+      * the discovery view stays intact (discovered == alive == 2);
+      * traffic through the gap keeps succeeding.
+
+    Mechanism: status_no_respond hangs the in-flight getWorkerStatus RPC;
+    with the 1s RPC deadline the transient gap costs at most ONE failed
+    poll — well below the 3-consecutive-failure retire threshold.
+
+    FINDING if it fails: over-sensitive retire threshold — jitter-level
+    gaps churn generations (and with them the KV baseline / ledger).
+    """
+    env, ops = _recovery_env(ctx)
+    base = rid_base(ctx, "engine_fault")
+    try:
+        _cleanup_dynamic(ops, env)
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+
+        ip = _engine_ip_port(ops, "prefill-0")
+        log_offset = _master_log_offset(env)
+        created_before = _created_generation_count(env, ip, log_offset)
+
+        # Baseline traffic succeeds.
+        ok0, err0, _ = _run_batch(ops, base, 4)
+        if err0:
+            return False, f"baseline batch had {err0} errors"
+
+        # Transient gap: 2 poll ticks (~40ms) of no_respond, then clear.
+        # The hung RPC times out once (1s deadline) — a single failed poll,
+        # below the retire threshold.
+        inject_type(ops, "prefill-0", "status_no_respond", enabled=True)
+        time.sleep(E4_GAP_S)
+        inject_type(ops, "prefill-0", "status_no_respond", enabled=False)
+
+        # Let the hung RPC's deadline land and the poller resume.
+        time.sleep(2.0)
+
+        created_after = _created_generation_count(env, ip, log_offset)
+        generation_bumped = created_after > created_before
+
+        # Topology untouched.
+        info = ops.master_info() or {}
+        entry = (info.get("worker_summary", {}) or {}).get("PREFILL") or {}
+        discovered = int(entry.get("discovered", -1))
+        alive = int(entry.get("alive", -1))
+        topology_intact = (
+            discovered == env.spec.n_prefill and alive == env.spec.n_prefill
+        )
+
+        # Traffic still succeeds through/after the gap.
+        ok1, err1, _ = _run_batch(ops, base, 4)
+
+        passed = not generation_bumped and topology_intact and err1 == 0
+        return passed, (
+            f"ip={ip}, created_generations={created_before}->{created_after} "
+            f"(bump={generation_bumped}, must be False), "
+            f"topology(discovered={discovered}, alive={alive}, "
+            f"need {env.spec.n_prefill}/{env.spec.n_prefill}), "
+            f"post_gap_batch={ok1}/4, baseline={ok0}/4"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            inject_type(ops, "prefill-0", "status_no_respond", enabled=False)
+        except Exception:
+            pass
+
+
+@case(
+    "engine_fault_status_gap_long_retire",
+    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    source="E5: a long status gap must retire the generation and fence its ledger",
+)
+def status_gap_long_retire(ctx: CaseContext):
+    """E5 — expected behaviour: a status gap LONGER than the retire
+    threshold (5s of no_respond ≈ 4+ timed-out polls > 3 consecutive
+    failures) is a crash — the master must actively retire the endpoint's
+    generation and FENCE its queue/ledger/inflight:
+
+      * the retire landed ("marked dead after 3 consecutive gRPC
+        failures") and a fresh generation is created once reporting
+        resumes;
+      * the fenced engine's master ledger/inflight settles to zero within
+        the TTL cap (fence or stale-TTL — an entry that never settles is
+        the F7 pending-drain gap);
+      * once reporting resumes, the new generation serves fresh traffic.
+
+    In-flight requests fired BEFORE the gap are the fence payload: their
+    engine-side execution completes but the master's status channel is
+    dead, so their ledger release must come from the retire fence (or the
+    stale-TTL), never from a stale post-recovery resurrection.
+
+    FINDING if it fails: no retire on a long gap, or an unfenced ledger
+    that neither the retire nor the TTL ever clears.
+    """
+    env, ops = _recovery_env(ctx)
+    base = rid_base(ctx, "engine_fault")
+    names = ["prefill-0", "prefill-1"]
+    try:
+        _cleanup_dynamic(ops, env)
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+
+        ip = _engine_ip_port(ops, "prefill-0")
+        log_offset = _master_log_offset(env)
+        created_before = _created_generation_count(env, ip, log_offset)
+
+        # Fence payload: slow requests in flight on the engines when the
+        # status channel dies.
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=2000.0)
+        time.sleep(1.5)
+        fired = _fire_inflight(ops, base, 8, input_len=512, output_len=2)
+        time.sleep(0.5)
+
+        # Long gap: 5s of no_respond ≈ 4+ consecutive timed-out status
+        # polls — past the 3-failure retire threshold.
+        inject_type(ops, "prefill-0", "status_no_respond", enabled=True)
+        retired = wait_for(
+            lambda: _retire_count(env, ip, log_offset) > 0, E5_GAP_S + 10.0, 0.2
+        )
+        # Hold the gap a little past the retire so the retire/re-create
+        # cycle is observable, then resume reporting.
+        time.sleep(1.0)
+        inject_type(ops, "prefill-0", "status_no_respond", enabled=False)
+
+        alive_back = _wait_master_alive(
+            ops, "PREFILL", env.spec.n_prefill, RECOVERY_EVICT_S
+        )
+        time.sleep(RECOVERY_SETTLE_S)
+        created_after = _created_generation_count(env, ip, log_offset)
+        generation_bumped = created_after > created_before
+
+        # Consume the fence payload to terminal states.
+        outcomes = _consume_fired(ops, fired, wait_s=5.0)
+
+        # Fenced ledger/inflight must settle within the TTL cap.
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), TTL_DRAIN_TIMEOUT_S
+        )
+
+        # New generation serves fresh traffic.
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            retired and alive_back and generation_bumped and inflight_ok and recovery_ok
+        )
+        return passed, (
+            f"ip={ip}, created_generations={created_before}->{created_after}, "
+            f"retired={retired}, alive_restored={alive_back}, "
+            f"fired={len(fired)}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            inject_type(ops, "prefill-0", "status_no_respond", enabled=False)
+        except Exception:
+            pass
+        _ensure_started(ops, names)
+        for n in names:
+            try:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+            except Exception:
+                pass
+
+
+@case(
+    "engine_fault_recovery_kv_usage_reset",
+    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    source="E6: KV usage must restart from zero after a full restart",
+)
+def recovery_kv_usage_reset(ctx: CaseContext):
+    """E6 — expected behaviour: when an engine restarts and its KV memory
+    is lost, its self-reported KV usage must restart from ZERO — the
+    master's capacity view of the new generation must be rebuilt from the
+    fresh self-report, never resumed from the old generation's reading:
+
+      * a pre-outage injected KV occupancy must be gone from the engine's
+        self-report after the restart (kv_tokens_used == 0 with an empty
+        LRU — a resumed old reading is a restart-fidelity defect);
+      * the recovered engine must keep receiving traffic (the master does
+        not blacklist it behind the stale occupancy);
+      * the generation actually turned over (fresh full-resync signal).
+
+    FINDING if it fails: KV capacity not reset across a restart — the old
+    generation's occupancy leaks into the new one (master-side), or the
+    mock's restart does not model memory loss (mock-side fidelity).
+    """
+    env, ops = _recovery_env(ctx)
+    base = rid_base(ctx, "engine_fault")
+    try:
+        _cleanup_dynamic(ops, env)
+        AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+
+        name = "prefill-0"
+        ip = _engine_ip_port(ops, name)
+
+        # Fresh LRU baseline: wipe whatever earlier cases left on this
+        # engine so kv_tokens_used reads exactly the injected pressure.
+        _recovery_cache_evict(ops, name, sorted(_recovery_cache_keys(ops, name)))
+        time.sleep(RECOVERY_KV_SYNC_S)
+
+        used_before = int(
+            ops.snapshot_by_name().get(name, {}).get("kv_tokens_used", -1)
+        )
+        if used_before != 0:
+            return False, (
+                f"baseline not clean after evict (kv_tokens_used={used_before})"
+            )
+
+        # Inject a large occupancy (engine self-report channel).
+        pressure = 4_000_000
+        ops.set_kv_pressure(name, pressure)
+        pressurized = wait_for(
+            lambda: int(ops.snapshot_by_name().get(name, {}).get("kv_tokens_used", -1))
+            >= pressure,
+            8.0,
+            0.5,
+        )
+        if not pressurized:
+            return False, "set_kv_pressure never surfaced in /snapshot"
+
+        log_offset = _master_log_offset(env)
+        created_before = _created_generation_count(env, ip, log_offset)
+
+        # Full-restart outage: stop → retire → start (memory lost).
+        ops.stop_engine(name)
+        retired = wait_for(
+            lambda: _retire_count(env, ip, log_offset) > 0, RECOVERY_EVICT_S, 0.2
+        )
+        ops.start_engine(name)
+        alive_back = _wait_master_alive(
+            ops, "PREFILL", env.spec.n_prefill, RECOVERY_EVICT_S
+        )
+        time.sleep(RECOVERY_SETTLE_S)
+        created_after = _created_generation_count(env, ip, log_offset)
+        generation_bumped = created_after > created_before
+
+        # The engine's self-report must restart from zero (memory lost).
+        used_after = int(ops.snapshot_by_name().get(name, {}).get("kv_tokens_used", -1))
+        reset_ok = used_after == 0
+
+        # The master must not keep the engine blacklisted behind the stale
+        # occupancy: fresh traffic still lands on it.
+        pumps_ok = _pump_until_accepted(ops, name, base, 15.0)
+
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            retired
+            and alive_back
+            and generation_bumped
+            and reset_ok
+            and pumps_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"ip={ip}, created_generations={created_before}->{created_after}, "
+            f"retired={retired}, alive_restored={alive_back}, "
+            f"kv_tokens_used={pressure}(injected)->{used_after} "
+            f"(reset_ok={reset_ok}, need 0), "
+            f"post_recovery_traffic={pumps_ok}, recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        _ensure_started(ops, ["prefill-0", "prefill-1"])
+        try:
+            ops.set_kv_pressure("prefill-0", 0)
+        except Exception:
+            pass
