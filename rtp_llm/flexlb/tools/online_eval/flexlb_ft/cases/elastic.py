@@ -26,8 +26,10 @@ import time
 from typing import Optional
 
 from ..context import CaseContext, CaseDef, rid_base
+from ..grade import GradeReport
 from ..harness import (
     AssertUtils,
+    EnvSpec,
     _accepted,
     _BackgroundFlow,
     _cleanup_dynamic,
@@ -40,6 +42,8 @@ from ..harness import (
     _run_batch,
     _wait_master_alive,
     _wait_master_topology,
+    fault_env_config,
+    fault_env_perf,
     http_get_status,
     wait_for,
 )
@@ -612,5 +616,384 @@ def elastic_concurrent_ops(ctx: CaseContext):
     finally:
         try:
             _cleanup_dynamic(ops, env)
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# Scale-in pending-drain protection (user-identified coverage gap, 2026-09)
+# ===========================================================================
+#
+# The elastic family above only removes engines whose requests are all
+# DISPATCHED (BackgroundFlow requests are short and in flight).  The gap:
+# what happens to requests the master has already QUEUED for the victim's
+# WorkerBatcher but never EnqueueBatch'd (its inflight-batch leases are
+# full) when the scale-in event lands?  They must not sit silently until
+# queueTimeout (Java default 1h) — that is a silent hour-long loss.
+
+# Contract deadline for a stranded request's VISIBLE terminal state after
+# remove_engine: stale-inflight TTL (30s) + margin.  The OTHER caliber in
+# the task brief (short queueTimeout + margin) is deliberately NOT used:
+# queueTimeoutMs stays at its 1h Java default so a master that parks the
+# stranded set until queueTimeout FAILS this case as a finding instead of
+# having the wait shortened into compliance.
+PENDING_DRAIN_TERMINAL_S = 40.0
+# Master accounting cleanup cap: stale window (statusStaleAfterMs=10s +
+# 3s cleaner period) + generous margin, but far below queueTimeout (1h).
+PENDING_DRAIN_CLEAN_S = 50.0
+# Wave shaping: serial sends at ~30x the 10ms FIXED_WINDOW collection
+# window so every request forms its own batch — a fast burst collapses
+# into one batch, dispatches wholesale behind ONE lease and strands
+# nothing on the master side.
+PENDING_DRAIN_WAVE_INTERVAL_S = 0.3
+PENDING_DRAIN_WAVE_MAX = 14
+# Fail-fast floors for the scenario construction (the case is meaningless
+# unless the stranded set is proven non-empty before the removal).
+PENDING_DRAIN_VICTIM_MIN = 3
+PENDING_DRAIN_VICTIM_TARGET = 4
+# Slow prefill: 8s batches hold both inflight-batch leases for the whole
+# wave + removal window (first completion at t+8s; the wave finishes at
+# ~t+5s).
+PENDING_DRAIN_SLOW_MS = 8000.0
+# Shape classification thresholds (observation-only, no hard band):
+#   fast_fail  — terminal within ~the engine-death window (streams cut by
+#                shutdownNow almost immediately after the remove call)
+#   stale_window_fail — terminal in the 10s statusStale + 3s cleaner +
+#                margin band (the expected fail-closed BATCH_DISPATCH_FAILED
+#                shape from WorkerBatcher.stopAndDrain)
+#   slow_fail  — terminal only near/after the 30s stale-inflight TTL
+#                (worst acceptable shape; finding candidate)
+PENDING_DRAIN_FAST_FAIL_S = 5.0
+PENDING_DRAIN_STALE_WINDOW_S = 16.0
+
+
+def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
+    """Dedicated env for the pending-drain case: 2P+2D, dynamic file
+    discovery, legacy fault axes with maxInflightBatchesPerPrefillWorker=2.
+
+    Two reasons the case does NOT reuse elastic_spec: (a) 2 inflight
+    batches per worker is the production-aligned lease cap, giving exactly
+    two dispatched batches before queue residency; (b) the fingerprint
+    differs from every other spec (elastic_spec=4, quota_spec=1), so the
+    INITIAL-engine victim (prefill-0, permanently removed — a removed
+    initial engine never comes back on its port/name) never poisons a
+    shared env: this spec owns a private one.  queueTimeoutMs is
+    intentionally left at the Java default (1h) — see
+    PENDING_DRAIN_TERMINAL_S."""
+    return EnvSpec(
+        label=f"fault_pending_drain_{ctx.profile}",
+        n_prefill=2,
+        n_decode=2,
+        perf=fault_env_perf(),
+        master_profile=ctx.profile,
+        discovery="discovery_file",
+        master_env={"FLEXLB_CONFIG": fault_env_config(max_inflight_batches=2)},
+    )
+
+
+@case(
+    "elastic_remove_pending_drain",
+    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    source="user-identified gap: scale-in protection for requests queued-but-undispatched on the removed engine",
+)
+def elastic_remove_pending_drain(ctx: CaseContext):
+    """Scale-in must not strand requests already QUEUED at the master for
+    the removed engine (user-identified coverage gap, 2026-09).
+
+    Scenario: victim = prefill-0 (initial engine) on a private 2P+2D env,
+    removed through the production scale-in chain (/remove_engine ->
+    discovery-file rewrite -> master FileServiceDiscovery loss).  Both
+    prefills run at 8s so the victim's two inflight-batch leases stay
+    occupied while a serial wave (one request per 300ms — each its own
+    FIXED_WINDOW batch) keeps landing requests on it: after the first two
+    single-request batches dispatch, every further victim-routed request
+    sits in the master-side WorkerBatcher queue — accepted by Schedule,
+    never EnqueueBatch'd.  A pre-assertion proves the stranded set is
+    non-empty (victim-routed > engine-side waiting+running) BEFORE the
+    removal fires.
+
+    Behaviour: remove_engine(victim) while both batch leases are occupied
+    and the stranded requests are parked in the master queue.
+
+    Expected (CONTRACT — the behaviour the system SHOULD have, not
+    necessarily what it has today):
+      1. (invariant P6) every victim-routed request reaches a VISIBLE
+         terminal state — completed, or an explicit error on its stream —
+         within stale-TTL 30s + margin, i.e. PENDING_DRAIN_TERMINAL_S = 40s
+         after the removal.  Deadline caliber: the stale-TTL scale (see
+         PENDING_DRAIN_TERMINAL_S for why queueTimeout is left at 1h).
+      2. (observation, no hard band) WHICH shape the terminal takes:
+         completed elsewhere / re-routed (best), fast explicit failure
+         (acceptable), failure only at the stale/TTL window (worst —
+         finding candidate).  Reported as a per-request type + latency
+         distribution plus the master accounting-cleanup latency.
+      3. Master accounting returns to baseline (inflight_clean within
+         PENDING_DRAIN_CLEAN_S) and the survivor keeps serving (recovery
+         batch >= 95%).
+      4. Topology convergence: victim gone from the mock services map and
+         the discovery file, master prefill alive count drops to 1.
+
+    Prediction (current master, from the code walk): remove_engine stops
+    the engine immediately (setStopped + drainAndShutdown + server
+    shutdownNow), so the parked FetchResponse streams break within ~1s
+    with a transport error — a fast explicit failure.  The master-side
+    cleanup is NOT immediate: the dead engine stops reporting
+    WorkerStatus, and after statusStaleAfterMs (10s in this config)
+    EngineSyncRunner / ExpirationCleaner retire the generation,
+    PrefillEndpoint.closeEndpoint runs WorkerBatcher.stopAndDrain which
+    fail-closes every queued item to BATCH_DISPATCH_FAILED ("Worker
+    scheduling queue rejected request").  No re-routing exists on that
+    path.  Expected observed shape: client-visible terminal ~0-2s (engine
+    death), master accounting clean ~10-15s — the case passes in the
+    fast-fail shape.  If the retirement chain fails to drain the queue,
+    the stranded items wait out queueTimeout (1h) -> inflight_clean(50s)
+    FAILS -> finding.
+    """
+    env = ctx.env_manager.ensure(_pending_drain_spec(ctx))
+    ops = ctx.engine_ops(env)
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "elastic")
+    victim = "prefill-0"
+    survivor = "prefill-1"
+    # (rid, response, stream handle, routed engine name)
+    fired: list[tuple[int, object, object, str]] = []
+    try:
+        snap = ops.snapshot_by_name()
+        if victim not in snap or survivor not in snap:
+            # The spec owns a private env, but a same-process rerun would
+            # reuse it with prefill-0 already gone — fail fast and say why.
+            return False, (
+                f"{victim}/{survivor} missing from the private env (one-shot "
+                f"victim: a rerun needs a fresh process); "
+                f"engines={sorted(snap)}"
+            )
+        _cleanup_dynamic(ops, env)  # no dynamic leftovers in a private env
+        addr_map = ops.addr_to_name()
+        victim_http_port = int(snap[victim]["grpc_addr"].rsplit(":", 1)[1]) - 1
+
+        # -- slow BOTH prefills: symmetric 8s ledgers keep ESTIMATED_TTFT
+        #    splitting the wave across both engines (a slow-only victim is
+        #    priced out and receives no traffic at all) while every 8s
+        #    batch holds a lease for the whole wave + removal window.
+        for name in (victim, survivor):
+            ops.set_perf(name, prefill_fixed_ms=PENDING_DRAIN_SLOW_MS)
+        time.sleep(1.5)  # master perf sync
+
+        # -- serial wave: each request its own FIXED_WINDOW batch; the
+        #    victim's first two batches take both leases, everything routed
+        #    there afterwards parks in the master-side WorkerBatcher queue.
+        wave = 0
+        victim_routed = 0
+        schedule_rejects = 0
+        while (
+            victim_routed < PENDING_DRAIN_VICTIM_TARGET
+            and wave < PENDING_DRAIN_WAVE_MAX
+        ):
+            wave += 1
+            rid = ops.next_request_id(base)
+            try:
+                resp = ops.schedule(
+                    rid,
+                    input_len=1024,
+                    output_len=2,
+                    block_keys=[rid * 100 + j for j in range(3)],
+                )
+            except Exception:
+                schedule_rejects += 1
+                continue
+            if resp.code != 200 or not resp.success:
+                schedule_rejects += 1
+                continue
+            route = addr_map.get(ops.role_addr(resp, "PREFILL"), "")
+            handle = ops.start_stream(resp, rid)  # FetchResponse parked
+            fired.append((rid, resp, handle, route))
+            if route == victim:
+                victim_routed += 1
+            time.sleep(PENDING_DRAIN_WAVE_INTERVAL_S)
+
+        # -- PRE-ASSERTION: the stranded set is non-empty.  Requests the
+        #    master accepted for the victim but the ENGINE never received
+        #    (no EnqueueBatch) are exactly the master-side queue residents
+        #    under test.
+        vsnap = ops.snapshot_by_name().get(victim, {})
+        engine_inflight = vsnap.get("waiting", 0) + vsnap.get("running", 0)
+        stranded = victim_routed - engine_inflight
+        if victim_routed < PENDING_DRAIN_VICTIM_MIN or stranded < 1:
+            return False, (
+                f"scenario construction failed: victim_routed={victim_routed} "
+                f"(need >={PENDING_DRAIN_VICTIM_MIN}), engine waiting+running="
+                f"{engine_inflight}, stranded={stranded} (need >=1), "
+                f"wave={wave}, schedule_rejects={schedule_rejects}"
+            )
+
+        # -- THE SCALE-IN EVENT (production chain: /remove_engine ->
+        #    discovery rewrite; the engine dies, the master learns via
+        #    the file, the stranded requests keep waiting).
+        t_remove = time.monotonic()
+        status, rm_body = ops.remove_engine(engine_name=victim)
+        if status != 200:
+            return False, f"remove_engine failed: {status} {rm_body}"
+        rm_body = rm_body or {}
+        waiting_at_removal = rm_body.get("waiting_at_removal")
+        running_at_removal = rm_body.get("running_at_removal")
+
+        # -- terminal-state collection for every fired request.  Latency is
+        #    the stream's own terminated_s timestamp minus t_remove, so the
+        #    serial collection order cannot distort it.
+        outcomes = []  # (rid, route, kind, latency_s, err)
+        for rid, resp, handle, route in fired:
+            ended = handle.wait_end(PENDING_DRAIN_TERMINAL_S + 5.0)
+            snap_e = handle.snap
+            latency = (
+                snap_e.terminated_s - t_remove
+                if snap_e.terminated_s is not None
+                else time.monotonic() - t_remove
+            )
+            if snap_e.completed and not snap_e.error:
+                kind, err = "completed", None
+            elif ended and snap_e.error:
+                kind, err = "error", str(snap_e.error)[:80]
+            elif ended:
+                # Stream ended with neither completion nor error — an empty
+                # close is a SILENT loss, not a visible terminal state.
+                kind, err = "empty", "stream closed without terminal frame"
+            else:
+                kind, err = "hang", "no terminal state"
+            outcomes.append((rid, route, kind, latency, err))
+
+        victim_out = [o for o in outcomes if o[1] == victim]
+        survivor_out = [o for o in outcomes if o[1] != victim]
+
+        # -- shape classification (observation, no hard band).
+        def shape_of(kind: str, latency: float) -> str:
+            if kind == "completed":
+                return "completed"
+            if kind == "error":
+                if latency <= PENDING_DRAIN_FAST_FAIL_S:
+                    return "fast_fail"
+                if latency <= PENDING_DRAIN_STALE_WINDOW_S:
+                    return "stale_window_fail"
+                return "slow_fail"
+            return "no_terminal"
+
+        shapes = [shape_of(k, lat) for _, _, k, lat, _ in victim_out]
+        shape_counts = {s: shapes.count(s) for s in sorted(set(shapes))}
+        latencies = sorted(lat for _, _, _, lat, _ in victim_out)
+        lat_med = latencies[len(latencies) // 2] if latencies else float("nan")
+        lat_max = latencies[-1] if latencies else float("nan")
+
+        # -- master accounting cleanup latency (observation + cap).
+        t_clean = time.monotonic()
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), PENDING_DRAIN_CLEAN_S
+        )
+        clean_latency = time.monotonic() - t_clean
+
+        # -- survivor keeps serving: restore fast perf, then a 20-request
+        #    recovery batch on the remaining prefill (>= 95%).
+        try:
+            ops.set_perf(survivor, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+        ok_n, _err_n, _ = _run_batch(ops, base, 20)
+        recovery_rate = ok_n / 20.0
+
+        # -- topology convergence (same assertions as elastic_remove_flow).
+        gone_from_snapshot = victim not in ops.snapshot_by_name()
+        gone_from_file = wait_for(
+            lambda: not _discovery_has_http_port(env, victim_http_port),
+            REMOVE_CONVERGENCE_S,
+            0.1,
+        )
+        alive_1 = _wait_master_alive(ops, "PREFILL", 1, MASTER_EVICT_S)
+
+        # -- CONTRACT ASSERTIONS -------------------------------------------
+        # P6 #1: every victim-routed request reached a VISIBLE terminal
+        # state (completed / explicit error — never a hang, never an empty
+        # close) within the stale-TTL+margin deadline.  Anything else is a
+        # completeness violation at every grade.
+        violations = [
+            (rid, kind, round(lat, 1), err)
+            for rid, _r, kind, lat, err in victim_out
+            if kind not in ("completed", "error") or lat > PENDING_DRAIN_TERMINAL_S
+        ]
+        report.invariant(
+            "P6",
+            not violations,
+            context="pending_drain",
+            detail=f"violations={violations[:3]}",
+        )
+        # P6 #2: no accounting leak — the master's inflight/ledger entries
+        # for the stranded set return to baseline well before queueTimeout.
+        report.invariant(
+            "P6",
+            inflight_ok,
+            context="master_accounting",
+            detail=(
+                f"clean={clean_latency:.1f}s cap={PENDING_DRAIN_CLEAN_S:.0f}s "
+                f"{inflight_detail[:100]}"
+            ),
+        )
+        # P2: the survivor is not starved — it keeps serving fresh traffic
+        # after the scale-in.
+        report.invariant(
+            "P2",
+            recovery_rate >= 0.95,
+            context="survivor_service",
+            detail=f"recovery {ok_n}/20",
+        )
+        # Topology convergence is the elastic family's plain boolean
+        # contract (same assertions as elastic_remove_flow), folded into
+        # the case verdict rather than a graded property.
+        topo_ok = gone_from_snapshot and gone_from_file and alive_1
+
+        survivor_done = sum(1 for o in survivor_out if o[2] == "completed")
+        return (
+            report.passed and topo_ok,
+            f"victim={victim}(stranded={stranded}, routed={victim_routed}, "
+            f"wave={wave}, rejects={schedule_rejects}), "
+            f"at_removal=(running={running_at_removal}, "
+            f"waiting={waiting_at_removal}), "
+            f"shapes={json.dumps(shape_counts)}, "
+            f"terminal_latency=(med={lat_med:.1f}s, max={lat_max:.1f}s, "
+            f"cap={PENDING_DRAIN_TERMINAL_S:.0f}s), "
+            f"survivor_fired_completed={survivor_done}/{len(survivor_out)}, "
+            f"master_cleanup={clean_latency:.1f}s("
+            f"ok={inflight_ok}), "
+            f"recovery={ok_n}/20({recovery_rate:.0%}), "
+            f"topology=(snap={gone_from_snapshot}, "
+            f"file={gone_from_file}, alive1={alive_1}), "
+            f"grades: {report.summary()}",
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        # Restore perf (survivor; the victim is gone and set_perf on a
+        # removed engine harmlessly 404s), consume every fired request to
+        # a terminal state (wait_end + cancel fallback — a parked
+        # FetchResponse whose stream never ends would leak master-side
+        # inflight/ledger entries into later cases), then the usual
+        # dynamic-engine hygiene.
+        try:
+            ops.set_perf(survivor, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+        for rid, resp, handle, _route in fired:
+            try:
+                if not handle.snap.terminated:
+                    handle.wait_end(20.0)
+                if not handle.snap.completed and not handle.snap.error:
+                    ops.cancel(rid, resp)
+            except Exception:
+                try:
+                    ops.cancel(rid, resp)
+                except Exception:
+                    pass
+        try:
+            _cleanup_dynamic(ops, env)
+        except Exception:
+            pass
+        try:
+            AssertUtils.inflight_clean(_master_http(ops), 30.0)
         except Exception:
             pass
