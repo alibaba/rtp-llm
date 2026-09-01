@@ -1,6 +1,8 @@
 from typing import Any, Dict, Mapping, Optional
 
 QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+INFERENCE_SESSION_ID_HEADER = "x-ds-inference-session-id"
+INFERENCE_SESSION_STATE_HEADER = "x-ds-inference-session-state"
 DEFAULT_QOS_PRIORITY = 50
 MIN_QOS_PRIORITY = 1
 MAX_QOS_PRIORITY = 100
@@ -18,6 +20,8 @@ REQUEST_HEADER_NAMES = (
     "eagleeye-traceid",
     "x-b3-traceid",
     QOS_PRIORITY_HEADER,
+    INFERENCE_SESSION_ID_HEADER,
+    INFERENCE_SESSION_STATE_HEADER,
 )
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",

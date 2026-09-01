@@ -19,15 +19,23 @@ from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_CLIENT_CANCELLED,
     CANCEL_REASON_DEADLINE_EXCEEDED,
+    ESTABLISHED,
+    NEW,
     FlexlbCancelRequestPB,
     FlexlbScheduleRequestPB,
+    SessionRoutingHintPB,
 )
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
     FlexlbServiceStub,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
 from rtp_llm.server.host_service import HostService
-from rtp_llm.server.request_headers import resolve_qos_priority
+from rtp_llm.server.request_headers import (
+    INFERENCE_SESSION_ID_HEADER,
+    INFERENCE_SESSION_STATE_HEADER,
+    extract_request_headers,
+    resolve_qos_priority,
+)
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -231,7 +239,7 @@ class MasterClient:
                     stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
                 )
             raise
-        except Exception as e:
+        except Exception:
             elapsed = time.time() - start
             route_logger.exception(
                 "Unexpected gRPC error, addr=%s, request_id=%s, elapsed=%.3fs",
@@ -303,6 +311,9 @@ class MasterClient:
             cache_key_block_size=cache_key_block_size,
             priority=priority,
         )
+        session_hint = self._extract_session_routing_hint(input)
+        if session_hint is not None:
+            request_pb.session_routing_hint.CopyFrom(session_hint)
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()
 
@@ -378,4 +389,22 @@ class MasterClient:
         return resolve_qos_priority(
             getattr(input, "headers", None),
             getattr(input, "generate_config", None),
+        )
+
+    @staticmethod
+    def _extract_session_routing_hint(
+        input: GenerateInput,
+    ) -> Optional[SessionRoutingHintPB]:
+        headers = extract_request_headers(getattr(input, "headers", None))
+        session_id = headers.get(INFERENCE_SESSION_ID_HEADER, "")
+        state = {
+            "new": NEW,
+            "established": ESTABLISHED,
+        }.get(headers.get(INFERENCE_SESSION_STATE_HEADER, "").lower())
+        if not session_id or len(session_id) > 256 or state is None:
+            return None
+        return SessionRoutingHintPB(
+            schema_version=1,
+            session_id=session_id,
+            state=state,
         )
