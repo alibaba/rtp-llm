@@ -61,7 +61,7 @@ public class Request {
     private String apiKey;
 
     @JsonProperty("max_new_tokens")
-    private int maxNewTokens = 1;
+    private int maxNewTokens = 0;
 
     @JsonProperty("num_beams")
     private int numBeams = 1;
