@@ -589,6 +589,7 @@ class FlexlbServiceImplTest {
                 .thenAnswer(invocation -> {
                     BalanceContext context = invocation.getArgument(0);
                     context.setConfig(configService.loadBalanceConfig());
+                    context.getRequest().setSessionPlacementEpoch(1L);
                     return CompletableFuture.completedFuture(response);
                 });
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
@@ -605,7 +606,7 @@ class FlexlbServiceImplTest {
         service.schedule(request, mock(StreamObserver.class));
 
         verify(sessionPlacementStore).record(
-                "kimi-k3", "isess_v1_example", "10.0.0.2:8080", 100_003L);
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080", 100_003L, 1L);
     }
 
     @Test

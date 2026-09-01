@@ -46,7 +46,7 @@ class SessionPlacementStoreTest {
         SessionPlacementStore store = new SessionPlacementStore();
         store.record("model", "session-1", "10.0.0.1:9000", 101L);
 
-        store.invalidate("model", "session-1");
+        store.reset("model", "session-1");
 
         assertTrue(store.find("model", "session-1", 1_000L).isEmpty());
     }

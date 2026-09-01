@@ -572,7 +572,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         request.getModel(),
                         request.getInferenceSessionId(),
                         status.getServerIp() + ":" + status.getHttpPort(),
-                        request.getRequestId()));
+                        request.getRequestId(),
+                        request.getSessionPlacementEpoch()));
     }
 
     /** Write one PV record on the node that made the scheduling decision. */

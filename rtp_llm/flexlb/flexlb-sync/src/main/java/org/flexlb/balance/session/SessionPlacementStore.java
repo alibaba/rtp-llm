@@ -12,7 +12,7 @@ public final class SessionPlacementStore {
     private static final long DEFAULT_MAXIMUM_SIZE = 1_000_000L;
     private static final int MAX_SESSION_ID_LENGTH = 256;
 
-    private final Cache<Key, Placement> placements;
+    private final Cache<Key, State> placements;
     private final LongSupplier clock;
 
     public SessionPlacementStore() {
@@ -29,29 +29,55 @@ public final class SessionPlacementStore {
             return Optional.empty();
         }
         Key key = new Key(model, sessionId);
-        Placement placement = placements.getIfPresent(key);
-        if (placement == null) {
+        State state = placements.getIfPresent(key);
+        if (state == null || state.placement() == null) {
             return Optional.empty();
         }
+        Placement placement = state.placement();
         if (clock.getAsLong() - placement.storedAtMs() > ttlMs) {
-            placements.asMap().remove(key, placement);
             return Optional.empty();
         }
         return Optional.of(placement);
     }
 
     public void record(String model, String sessionId, String ipPort, long requestId) {
+        record(model, sessionId, ipPort, requestId, currentEpoch(model, sessionId));
+    }
+
+    public void record(String model, String sessionId, String ipPort,
+                       long requestId, long expectedEpoch) {
         if (!valid(sessionId) || ipPort == null || ipPort.isBlank()) {
             return;
         }
-        placements.put(new Key(model, sessionId),
-                new Placement(ipPort, requestId, clock.getAsLong()));
+        Key key = new Key(model, sessionId);
+        Placement placement = new Placement(ipPort, requestId, clock.getAsLong());
+        placements.asMap().compute(key, (ignored, state) -> {
+            if (state == null) {
+                return expectedEpoch == 0L ? new State(0L, placement) : null;
+            }
+            if (state.epoch() != expectedEpoch) {
+                return state;
+            }
+            return new State(state.epoch(), placement);
+        });
     }
 
-    public void invalidate(String model, String sessionId) {
-        if (valid(sessionId)) {
-            placements.invalidate(new Key(model, sessionId));
+    public long currentEpoch(String model, String sessionId) {
+        if (!valid(sessionId)) {
+            return -1L;
         }
+        State state = placements.getIfPresent(new Key(model, sessionId));
+        return state == null ? 0L : state.epoch();
+    }
+
+    public long reset(String model, String sessionId) {
+        if (!valid(sessionId)) {
+            return -1L;
+        }
+        State state = placements.asMap().compute(new Key(model, sessionId),
+                (ignored, current) -> new State(
+                        current == null ? 1L : current.epoch() + 1L, null));
+        return state.epoch();
     }
 
     long estimatedSize() {
@@ -71,5 +97,8 @@ public final class SessionPlacementStore {
     }
 
     public record Placement(String ipPort, long requestId, long storedAtMs) {
+    }
+
+    private record State(long epoch, Placement placement) {
     }
 }

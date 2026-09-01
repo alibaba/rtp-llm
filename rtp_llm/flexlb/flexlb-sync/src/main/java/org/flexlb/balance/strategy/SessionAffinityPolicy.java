@@ -19,18 +19,26 @@ final class SessionAffinityPolicy {
                              IntToLongFunction score,
                              IntToLongFunction cacheHit,
                              long minScore) {
-        if (config == null || request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
                 || request.getInferenceSessionId() == null
                 || request.getInferenceSessionId().isBlank()) {
             return Decision.none(Reason.DISABLED);
         }
         String model = request.getModel();
         String sessionId = request.getInferenceSessionId();
+        synchronized (request) {
+            if (request.getSessionPlacementEpoch() < 0) {
+                request.setSessionPlacementEpoch(
+                        request.getInferenceSessionState() == Request.SessionState.NEW
+                                ? store.reset(model, sessionId)
+                                : store.currentEpoch(model, sessionId));
+            }
+        }
         if (request.getInferenceSessionState() == Request.SessionState.NEW) {
-            store.invalidate(model, sessionId);
             return Decision.none(Reason.NEW_SESSION);
         }
-        if (request.getInferenceSessionState() != Request.SessionState.ESTABLISHED) {
+        if (config == null
+                || request.getInferenceSessionState() != Request.SessionState.ESTABLISHED) {
             return Decision.none(Reason.DISABLED);
         }
         for (int i = 0; i < candidateCount; i++) {
@@ -46,7 +54,7 @@ final class SessionAffinityPolicy {
         for (int i = 0; i < candidateCount; i++) {
             if (placement.get().ipPort().equals(endpoint.apply(i))) {
                 return score.applyAsLong(i) <= cutoff
-                        ? new Decision(i, Reason.SESSION_AFFINITY, cutoff)
+                        ? new Decision(i, Reason.SESSION_AFFINITY)
                         : Decision.none(Reason.OVER_CAP);
             }
         }
@@ -67,9 +75,9 @@ final class SessionAffinityPolicy {
         SESSION_AFFINITY
     }
 
-    record Decision(int preferredIndex, Reason reason, long scoreCutoffMs) {
+    record Decision(int preferredIndex, Reason reason) {
         static Decision none(Reason reason) {
-            return new Decision(-1, reason, 0L);
+            return new Decision(-1, reason);
         }
 
         boolean hasPreference() {
