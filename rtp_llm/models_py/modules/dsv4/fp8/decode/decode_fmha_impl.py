@@ -63,13 +63,13 @@ class DSv4DecodeFmhaImplConfigFP8:
     # ``(entries_per_block, tokens_per_block, max_blocks_per_req)``.
     paged_pool_specs: Dict[int, Tuple[int, int, int]] = field(default_factory=dict)
 
-    # Snapshot of ``kv_cache.group_region_names`` (framework-owned group
-    # ordering, one attn_type per entry). Position = group id. ``prepare``
-    # iterates this to index ``attn_inputs.kv_cache_kernel_block_id_device_by_group``
-    # without needing a live ``kv_cache`` (the CUDA-graph replay path
-    # doesn't hand one in). Static for the allocator's lifetime, so
-    # snapshot-at-construct is safe.
-    group_region_names: List[int] = field(default_factory=list)
+    # Snapshot of typed region -> process-wide physical group id. CUDA-graph
+    # replay receives the global
+    # ``attn_inputs.kv_cache_kernel_block_id_device_by_group`` list but no
+    # live ``kv_cache``, so the target/draft-specific mapping must be
+    # resolved before constructing the impl. Static for the allocator's
+    # lifetime, so snapshot-at-construct is safe.
+    paged_table_group_ids: Dict[int, int] = field(default_factory=dict)
 
 
 class DSv4DecodeFmhaImplFP8:
@@ -117,7 +117,10 @@ class DSv4DecodeFmhaImplFP8:
         self,
         attn_inputs: Any,
     ) -> Optional[Dict[int, torch.Tensor]]:
-        if not self._paged_entries_per_block or not self.config.group_region_names:
+        if (
+            not self._paged_entries_per_block
+            or not self.config.paged_table_group_ids
+        ):
             return None
         by_group = getattr(
             attn_inputs,
@@ -127,14 +130,22 @@ class DSv4DecodeFmhaImplFP8:
         if by_group is None or len(by_group) == 0:
             return None
         paged_block_tables: Dict[int, torch.Tensor] = {}
-        for group_id, attn_type in enumerate(self.config.group_region_names):
-            if group_id >= len(by_group):
-                continue
+        for attn_type, table_group_id in self.config.paged_table_group_ids.items():
+            if table_group_id < 0 or table_group_id >= len(by_group):
+                raise RuntimeError(
+                    "DSV4 cache region %d maps to physical group %d, but only "
+                    "%d block-table groups are available"
+                    % (int(attn_type), int(table_group_id), len(by_group))
+                )
             if attn_type not in self.config.paged_pool_specs:
                 continue
-            group_block_table = by_group[group_id]
+            group_block_table = by_group[table_group_id]
             if group_block_table is None or group_block_table.numel() == 0:
-                continue
+                raise RuntimeError(
+                    "DSV4 cache region %d maps to physical group %d, but its "
+                    "block table is empty"
+                    % (int(attn_type), int(table_group_id))
+                )
             paged_block_tables[attn_type] = group_block_table
         return paged_block_tables or None
 

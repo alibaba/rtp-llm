@@ -12,7 +12,10 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import (
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     _sparse_prefill_fast_path_limit,
 )
-from rtp_llm.models_py.modules.hybrid.indexer import Indexer
+from rtp_llm.models_py.modules.hybrid.indexer import (
+    Indexer,
+    bind_indexer_block_table_group_ids,
+)
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     IndexerCompressorCacheLayout,
     compress_indexer_projection_reference,
@@ -134,6 +137,86 @@ class Glm53IndexerGroupingTest(unittest.TestCase):
 
 
 class Glm53IndexerCacheLayoutTest(unittest.TestCase):
+    def test_group_ids_are_resolved_once_shared_and_reused_by_binds(self) -> None:
+        indexers = [object.__new__(Indexer), object.__new__(Indexer)]
+        for indexer in indexers:
+            indexer.compress_ratio = 4
+            indexer._block_table_group_ids = None
+
+        layers = [
+            SimpleNamespace(self_attn=SimpleNamespace(indexer=indexer))
+            for indexer in indexers
+        ]
+        get_layer_caches = Mock(
+            return_value=[
+                SimpleNamespace(
+                    region_name=KVCacheRegionName.INDEXER_KV, physical_group_id=5
+                ),
+                SimpleNamespace(
+                    region_name=KVCacheRegionName.INDEXER_STATE, physical_group_id=6
+                ),
+            ]
+        )
+        indexers[0].layer_idx = 2
+        indexers[0].index_head_dim = 128
+        indexers[0].compressed_indexer = Mock()
+        kv_base = torch.empty((2, 32 * 132), dtype=torch.uint8)
+        state_base = torch.empty((2, 4, 256), dtype=torch.float32)
+
+        def get_raw_pool_tensor(_layer_id, region):
+            if int(region) == int(KVCacheRegionName.INDEXER_KV):
+                return kv_base
+            if int(region) == int(KVCacheRegionName.INDEXER_STATE):
+                return state_base
+            raise AssertionError(f"unexpected region: {region}")
+
+        kv_cache = SimpleNamespace(
+            group_region_names=[
+                0,
+                int(KVCacheRegionName.INDEXER_KV),
+                int(KVCacheRegionName.INDEXER_STATE),
+            ],
+            seq_size_per_block=128,
+            kernel_seq_size_per_block=128,
+            layer_region_to_group_id=[[0]],
+            get_layer_caches=get_layer_caches,
+            get_raw_pool_tensor=get_raw_pool_tensor,
+        )
+        by_group = [
+            torch.full((2, 1), group_id, dtype=torch.int32)
+            for group_id in range(7)
+        ]
+        attention_inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device_by_group=by_group
+        )
+
+        bind_indexer_block_table_group_ids(layers, kv_cache)
+        get_layer_caches.assert_called_once_with(0)
+        get_layer_caches.reset_mock()
+        for _ in range(2):
+            kv_block_table, entries_per_block = Indexer._bind_compressed_pools(
+                indexers[0], kv_cache, attention_inputs
+            )
+            self.assertIs(kv_block_table, by_group[5])
+            self.assertEqual(entries_per_block, 32)
+
+        get_layer_caches.assert_not_called()
+        self.assertEqual(
+            indexers[0]._block_table_group_ids,
+            {
+                int(KVCacheRegionName.INDEXER_KV): 5,
+                int(KVCacheRegionName.INDEXER_STATE): 6,
+            },
+        )
+        self.assertIs(
+            indexers[0]._block_table_group_ids,
+            indexers[1]._block_table_group_ids,
+        )
+        self.assertEqual(indexers[0].compressed_indexer.set_pool_context.call_count, 2)
+        for call in indexers[0].compressed_indexer.set_pool_context.call_args_list:
+            self.assertIs(call.args[1], by_group[5])
+            self.assertIs(call.args[4], by_group[6])
+
     def test_fp8_pool_view_preserves_block_boundaries(self) -> None:
         base = torch.empty((2, 32 * 132), dtype=torch.uint8)
         view, entries = fp8_pool_view(base, 132)

@@ -63,6 +63,7 @@ from rtp_llm.ops.compute_ops import (
     KVCache,
     LayerKVCache,
     PyAttentionInputs,
+    PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
 )
@@ -915,6 +916,16 @@ class KimiLinearModel(GptModelBase):
                 weights.get_global_weight(W.final_ln_gamma),
                 eps=model_config.layernorm_eps,
             )
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        if not super().initialize(init_resource):
+            return False
+        from rtp_llm.models_py.modules.hybrid.indexer import (
+            bind_indexer_block_table_group_ids,
+        )
+
+        bind_indexer_block_table_group_ids(self.layers, self.kv_cache)
+        return True
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids

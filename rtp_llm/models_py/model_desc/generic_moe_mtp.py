@@ -27,7 +27,11 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 )
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 _MTP_INDEXER_ROLE_NORMAL = 0
@@ -143,6 +147,16 @@ class GenericMoeMTPModel(GptModelBase):
             dtype=torch.int32,
             device=buffer_device,
         )
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        if not super().initialize(init_resource):
+            return False
+        from rtp_llm.models_py.modules.hybrid.indexer import (
+            bind_indexer_block_table_group_ids,
+        )
+
+        bind_indexer_block_table_group_ids(self.layers, self.kv_cache)
+        return True
 
     def clone_for_cuda_graph(self) -> "GenericMoeMTPModel":
         clone = object.__new__(type(self))

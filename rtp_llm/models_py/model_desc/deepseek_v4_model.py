@@ -46,6 +46,9 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     build_paged_pool_specs,
     forward_decode,
 )
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    resolve_block_table_group_ids,
+)
 from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
     chunked_moe_enabled,
     cp_padded_tokens_per_rank_bound,
@@ -430,6 +433,9 @@ class DeepSeekV4Model(GptModelBase):
         # ``mw.weights[layer_id][W.v4_*]``.
         self.v4: Optional[V4Transformer] = None
 
+        self._paged_pool_specs: Dict[int, Tuple[int, int, int]] = {}
+        self._paged_table_group_ids: Dict[int, int] = {}
+
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
 
@@ -571,10 +577,44 @@ class DeepSeekV4Model(GptModelBase):
                 mtp_last_hidden_capacity,
             )
 
+    def _cache_paged_decode_layout(self) -> None:
+        if self.v4 is None:
+            self._paged_pool_specs = {}
+            self._paged_table_group_ids = {}
+            return
+
+        if self.kv_cache is None:
+            raise RuntimeError(
+                "DSV4 prepare_decode_metadata: self.kv_cache is None; "
+                "C++ KVCacheManager must propagate KVCache before forward."
+            )
+
+        paged_pool_specs = build_paged_pool_specs(
+            self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
+        )
+        table_group_ids = resolve_block_table_group_ids(self.kv_cache)
+        paged_table_group_ids = {
+            int(attn_type): int(table_group_ids[int(attn_type)])
+            for attn_type in paged_pool_specs
+            if int(attn_type) in table_group_ids
+        }
+        missing_table_groups = sorted(
+            set(int(attn_type) for attn_type in paged_pool_specs)
+            - set(paged_table_group_ids)
+        )
+        if missing_table_groups:
+            raise RuntimeError(
+                "DSV4 paged pools have no physical block-table groups: %r"
+                % missing_table_groups
+            )
+        self._paged_pool_specs = paged_pool_specs
+        self._paged_table_group_ids = paged_table_group_ids
+
     def _initialize_impl(self, init_resource: PyModelInitResources) -> bool:
         # Called by the engine after construction and before forward.
         super().initialize(init_resource)
         if self._materialized:
+            self._cache_paged_decode_layout()
             return True
 
         device = (
@@ -949,6 +989,8 @@ class DeepSeekV4Model(GptModelBase):
             self._shared_runtime_buffers.mtp_hidden_enabled,
         )
 
+        self._cache_paged_decode_layout()
+
         self._materialized = True
 
         return True
@@ -1058,23 +1100,8 @@ class DeepSeekV4Model(GptModelBase):
         q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
         device = self.v4.embed.weight.device
 
-        paged_pool_specs = build_paged_pool_specs(
-            self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
-        )
-        # Snapshot framework's group ordering — CUDA-graph replay path
-        # inside the impl's ``prepare`` has no live kv_cache, so carry
-        # the list in the config. Position IS the group id.
-        group_region_names_snapshot = (
-            [int(t) for t in (self.kv_cache.group_region_names or [])]
-            if self.kv_cache is not None
-            else []
-        )
-
-        if self.kv_cache is None:
-            raise RuntimeError(
-                "DSV4 prepare_decode_metadata: self.kv_cache is None; "
-                "C++ KVCacheManager must propagate KVCache before forward."
-            )
+        paged_pool_specs = self._paged_pool_specs
+        paged_table_group_ids = self._paged_table_group_ids
         cfg_kwargs = dict(
             max_batch_size=batch_size,
             q_len=q_len,
@@ -1086,7 +1113,7 @@ class DeepSeekV4Model(GptModelBase):
             ],
             index_topk=int(self._v4_args.index_topk),
             paged_pool_specs=paged_pool_specs,
-            group_region_names=group_region_names_snapshot,
+            paged_table_group_ids=paged_table_group_ids,
         )
         cfg = _DecodeFmhaImplConfig(**cfg_kwargs)
         impl = _DecodeFmhaImpl(
@@ -1196,6 +1223,8 @@ class DeepSeekV4Model(GptModelBase):
                 self.kv_cache,
                 self._v4_args,
                 inputs,
+                self._paged_pool_specs,
+                self._paged_table_group_ids,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )
@@ -1213,6 +1242,8 @@ class DeepSeekV4Model(GptModelBase):
                 self.kv_cache,
                 self._v4_args,
                 inputs,
+                self._paged_pool_specs,
+                self._paged_table_group_ids,
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )

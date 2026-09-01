@@ -4,6 +4,12 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_kv_cache_group_mapping",
+    srcs = ["test_kv_cache_group_mapping.py"],
+    deps = _DSV4_TEST_DEPS,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,
