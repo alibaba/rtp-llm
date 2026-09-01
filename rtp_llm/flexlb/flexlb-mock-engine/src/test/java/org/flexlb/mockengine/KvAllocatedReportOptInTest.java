@@ -73,7 +73,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void defaultOffKeepsQueuedTasksReportedAsRunning() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, 3, false);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, false);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         // 1 running + 2 queued behind the concurrency gate.
@@ -108,7 +108,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInReportsQueuedAsKvAllocatedAndFlipsBackWhenRunning() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, 3, true);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         for (long rid = 1; rid <= 3; rid++) {
@@ -144,7 +144,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInCancelOfQueuedRequestReportsKvAllocatedPhase() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, 3, true);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
