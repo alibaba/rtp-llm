@@ -624,10 +624,10 @@ def register_pp_process_group(
 ) -> None:
     """Register all PP communication callbacks in one call.
 
-    - isend/irecv bind the passed group (used by the PP transport). torch
-      isend/irecv take GROUP-LOCAL ranks as peer; groups are built from
-      ascending world ranks, so the global->local mapping is the member
-      array index.
+    - isend/irecv bind the passed group (used by the PP transport). The
+      functional torch isend/irecv take GLOBAL ranks as peer (they are
+      canonicalized against the group's global membership), so the peers
+      arriving from C++ (already global world ranks) are passed through.
     - The snapshot exchange is always fixed to the PP lane group:
       the all_gather must span every stage of the same lane.
     """
@@ -638,19 +638,18 @@ def register_pp_process_group(
 
     group_ranks = torch.distributed.get_process_group_ranks(process_group)
 
-    def _to_local_peer(global_peer: int) -> int:
-        try:
-            return group_ranks.index(global_peer)
-        except ValueError:
+    def _check_peer(global_peer: int) -> int:
+        if global_peer not in group_ranks:
             raise RuntimeError(
                 f"global peer {global_peer} is not a member of the PP "
                 f"transport group {group_ranks}"
             )
+        return global_peer
 
     def cpp_isend(tensor: torch.Tensor, global_peer: int):
         work = torch.distributed.isend(
             tensor,
-            dst=_to_local_peer(global_peer),
+            dst=_check_peer(global_peer),
             group=process_group,
         )
         if work is None:
@@ -660,7 +659,7 @@ def register_pp_process_group(
     def cpp_irecv(tensor: torch.Tensor, global_peer: int):
         work = torch.distributed.irecv(
             tensor,
-            src=_to_local_peer(global_peer),
+            src=_check_peer(global_peer),
             group=process_group,
         )
         if work is None:

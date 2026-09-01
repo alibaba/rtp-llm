@@ -201,6 +201,12 @@ class LoadConfig(BaseModel):
             for _ in range(layer_num):
                 layer_phy2log: List[int] = []
                 for ep_rank in range(ep_size):
+                    # rank_per_node floors to 0 when ep spans fewer ranks than
+                    # nodes (e.g. ep_size=1 under multi-node PP); the expert
+                    # node mapping is undefined there, and with no experts the
+                    # mapping is vacuous anyway.
+                    if rank_per_node == 0:
+                        break
                     node_id = ep_rank // rank_per_node
                     layer_phy2log.extend(
                         range(

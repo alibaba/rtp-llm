@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <unordered_map>
 #include <utility>
 
 #include <ATen/Generator.h>
@@ -274,10 +275,83 @@ void PPExecutor::waitAll(PPTickets& tickets) {
 }
 
 absl::Status PPExecutor::processSampleResult(InflightBatch& batch) {
-    // TODO: Synchronously receive the serialized sample-result metadata and payload here, then deserialize the
-    // result and apply it to batch.streams. The payload receive cannot be posted before its metadata is received.
-    (void)batch;
-    return absl::UnimplementedError("PP sample result receive and stream update are not implemented");
+    // The last stage serializes the whole sample result into one byte buffer,
+    // so a single object receive carries it — no separate payload phase like
+    // the activation transfer.
+    const auto result = pp_serialization::deserializeSampleResult(receiveObject());
+
+    const auto batch_size = static_cast<int64_t>(result.request_ids.numel());
+    RTP_LLM_CHECK_WITH_INFO(result.request_ids.dim() == 1 && result.new_token_ids.dim() == 2
+                                && result.new_token_ids.size(0) == batch_size && result.sample_success.dim() == 1
+                                && result.sample_success.numel() == batch_size,
+                            "PP sample result has malformed tensors");
+    RTP_LLM_CHECK_WITH_INFO(batch_size == static_cast<int64_t>(batch.streams.size()),
+                            "PP sample result batch size %ld does not match the in-flight batch size %zu",
+                            batch_size,
+                            batch.streams.size());
+
+    std::unordered_map<int64_t, GenerateStreamPtr> streams_by_id;
+    streams_by_id.reserve(batch.streams.size());
+    for (const auto& stream : batch.streams) {
+        streams_by_id.emplace(stream->streamId(), stream);
+    }
+    std::unordered_map<int64_t, ErrorInfo> errors_by_id;
+    for (const auto& err : result.errors) {
+        errors_by_id.emplace(err.request_id, ErrorInfo(static_cast<ErrorCode>(err.error_code), err.message));
+    }
+
+    const auto* request_ids  = result.request_ids.data_ptr<int64_t>();
+    const auto* success      = result.sample_success.data_ptr<bool>();
+    const bool  has_cum_prob = result.cum_log_probs.defined() && result.cum_log_probs.numel() == batch_size;
+
+    for (int64_t index = 0; index < batch_size; ++index) {
+        const auto stream_it = streams_by_id.find(request_ids[index]);
+        if (stream_it == streams_by_id.end()) {
+            // The stream was cancelled while in flight; drop its result but
+            // keep the batch bookkeeping consistent.
+            RTP_LLM_LOG_WARNING("PP sample result for unknown request_id=%ld, dropping", request_ids[index]);
+            continue;
+        }
+        const auto& stream = stream_it->second;
+
+        std::optional<ErrorInfo> error_info;
+        if (const auto error_it = errors_by_id.find(request_ids[index]); error_it != errors_by_id.end()) {
+            error_info = error_it->second;
+        } else if (!success[index]) {
+            error_info = ErrorInfo(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+        }
+
+        if (!error_info.has_value()) {
+            torch::Tensor cum_log_prob;
+            if (has_cum_prob) {
+                cum_log_prob = result.cum_log_probs.narrow(0, index, 1);
+            }
+            // Single-sequence path only (beam / multi-sequence are gated at
+            // plan build): commit the one new token; EOS and finish detection
+            // happen inside stream->update.
+            StreamUpdateInfo update_info{result.new_token_ids.narrow(0, index, 1),
+                                         1,
+                                         /*hidden_states=*/torch::Tensor{},
+                                         /*logits=*/torch::Tensor{},
+                                         /*softmax_probs=*/torch::Tensor{},
+                                         cum_log_prob,
+                                         /*all_probs=*/torch::Tensor{},
+                                         /*loss=*/torch::Tensor{},
+                                         /*src_batch_indices=*/torch::Tensor{},
+                                         /*all_hidden_states=*/torch::Tensor{},
+                                         /*update_remote_generate=*/true,
+                                         /*force_update_info=*/false,
+                                         /*prompt_logits=*/std::nullopt,
+                                         /*error_info=*/std::nullopt};
+            stream->update(update_info);
+        } else {
+            stream->reportError(error_info->code(), error_info->ToString());
+        }
+        // Release the in-flight mark either way so the scheduler can pick the
+        // stream up again (finished/error streams get released there).
+        stream->clearPPInflight();
+    }
+    return absl::OkStatus();
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
