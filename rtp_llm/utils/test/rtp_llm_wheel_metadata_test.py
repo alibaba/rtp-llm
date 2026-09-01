@@ -23,9 +23,6 @@ PLATFORM_DIRECT_URL_PACKAGES: Dict[str, FrozenSet[str]] = {
             "fastsafetensors",
         }
     ),
-    "cuda12_arm": frozenset(
-        {"torch", "torchvision", "fast-hadamard-transform", "flash-mla"}
-    ),
     "cuda13_arm": frozenset(
         {
             "torch",
