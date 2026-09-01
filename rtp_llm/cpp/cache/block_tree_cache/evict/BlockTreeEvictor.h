@@ -103,6 +103,8 @@ private:
     void   collectFullPrune(const TransferDescriptor&                  eviction_desc,
                             EvictionTask&                              task,
                             std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
+    void   normalizeFullPruneRoot(EvictionTask&                              task,
+                                  std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
     bool   allocateTargets(EvictionTask& task);
     void   activateTaskLocked(const EvictionTask&                              task,
                               const std::vector<std::pair<TreeNode*, size_t>>& detached_resources);

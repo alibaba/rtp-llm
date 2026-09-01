@@ -25,7 +25,6 @@ enum class FullViolationType : uint8_t {
 
 enum class InvalidResourceReason : uint8_t {
     NONE,
-    MULTI_TIER,
     PARTIAL_DEVICE,
     IDLE_DETACHED,
     BUSY_EMPTY,
@@ -40,7 +39,7 @@ struct NodeBrief {
     CacheKeyType          cache_key{0};
     Tier                  tier{Tier::NONE};  // getTopTier(); Tier::NONE renders as EMPTY
     GroupSetTransferState transfer_state{GroupSetTransferState::IDLE};
-    // Bit i set means hasTier(Tier(i)); only used by the multi-tier invalid_resource report.
+    // Bit i set means hasTier(Tier(i)); included in invalid-resource diagnostics.
     uint8_t tier_mask{0};
 };
 

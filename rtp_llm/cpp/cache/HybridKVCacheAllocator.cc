@@ -63,12 +63,13 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 std::shared_ptr<LoadAsyncContext> HybridKVCacheAllocator::prepareKVCache(const CacheKeysType&  cache_keys,
                                                                          BatchKVCacheResource& kv_resource,
                                                                          const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                                                         PreparedKVCache& prepared) {
+                                                                         const BlockTreeMatchPolicy& match_policy,
+                                                                         PreparedKVCache&            prepared) {
     if (!block_tree_cache_ || cache_keys.empty()) {
         return nullptr;
     }
     const int                         cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys);
+    BlockTreeMatchResult              match_result = block_tree_cache_->match(cache_keys, match_policy);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
@@ -136,11 +137,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     if (malloc_info.enable_cache_lookup) {
         CacheKeysType match_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
-        const int64_t begin_us = currentTimeUs();
-        load_context           = prepareKVCache(match_keys, *kv_resource, cp_mapper, prepared);
-        match_end_time_us      = currentTimeUs();
-        match_cost_time_us     = match_end_time_us - begin_us;
-        load_attempted         = load_context != nullptr;
+        const int64_t              begin_us = currentTimeUs();
+        const BlockTreeMatchPolicy match_policy{malloc_info.enable_device_cache,
+                                                malloc_info.enable_host_cache,
+                                                malloc_info.enable_disk_cache,
+                                                malloc_info.enable_remote_cache};
+        load_context       = prepareKVCache(match_keys, *kv_resource, cp_mapper, match_policy, prepared);
+        match_end_time_us  = currentTimeUs();
+        match_cost_time_us = match_end_time_us - begin_us;
+        load_attempted     = load_context != nullptr;
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
 
