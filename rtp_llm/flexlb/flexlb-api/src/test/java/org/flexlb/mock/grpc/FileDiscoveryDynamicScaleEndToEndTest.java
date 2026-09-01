@@ -333,7 +333,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
             if (candidates.isEmpty()) {
                 Response empty = new Response();
                 empty.setSuccess(false);
-                return new QueueRoutingResult.Rejected(empty);
+                return QueueRoutingResult.rejected(empty);
             }
             Collections.sort(candidates);
             String chosen = candidates.get(routerCounter.getAndIncrement() % candidates.size());
