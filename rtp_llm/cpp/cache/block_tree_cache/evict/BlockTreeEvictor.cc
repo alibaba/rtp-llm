@@ -491,8 +491,19 @@ void BlockTreeEvictor::normalizeFullPruneRoot(EvictionTask&                     
         return;
     }
 
-    TreeNode* const closure_root        = task.full_prune_nodes_bottom_up.back();
-    const auto      triggers_full_prune = [this, closure_root](const TransferDescriptor& desc) {
+    TreeNode* const   closure_root = task.full_prune_nodes_bottom_up.back();
+    std::vector<bool> selected_root_groups(tree_->groupSets().size(), false);
+    const auto record_selected_root_group = [closure_root, &selected_root_groups](const TransferDescriptor& desc) {
+        if (desc.node == closure_root) {
+            selected_root_groups[desc.group_set_id] = true;
+        }
+    };
+    record_selected_root_group(task.primary_desc);
+    for (const TransferDescriptor& desc : task.cascade_descs) {
+        record_selected_root_group(desc);
+    }
+
+    const auto triggers_full_prune = [this, closure_root](const TransferDescriptor& desc) {
         return desc.node == closure_root && desc.target_tier == Tier::NONE
                && tree_->groupSets()[desc.group_set_id]->groupType() == CacheGroupType::FULL
                && desc.node->group_set_resources[desc.group_set_id].servingTierCount() == 1;
@@ -510,29 +521,28 @@ void BlockTreeEvictor::normalizeFullPruneRoot(EvictionTask&                     
     }
     const size_t trigger_group_set_id = task.primary_desc.group_set_id;
 
-    // Once one FULL group disappears, every other resource at the closure root
-    // is unreachable too. Root cascades only release their top tier, so replace
-    // them with the same all-tier descriptors used for descendants.
+    // Root cascades only describe the selected source tier. Once a FULL prune
+    // invalidates their closure, replace those selected root cascades with the
+    // same all-tier descriptors used for descendants. Preserve unrelated root
+    // resources that were not part of the cascade: they can become valid leaves
+    // after the descendant closure is removed.
     task.cascade_descs.erase(
         std::remove_if(task.cascade_descs.begin(),
                        task.cascade_descs.end(),
                        [closure_root](const TransferDescriptor& desc) { return desc.node == closure_root; }),
         task.cascade_descs.end());
 
-    const auto append_detached_once = [&detached_resources](TreeNode* node, size_t group_set_id) {
-        const auto entry = std::make_pair(node, group_set_id);
-        if (std::find(detached_resources.begin(), detached_resources.end(), entry) == detached_resources.end()) {
-            detached_resources.push_back(entry);
-        }
-    };
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         const size_t group_set_id = group_set->groupSetId();
-        if (group_set_id == trigger_group_set_id) {
+        if (group_set_id == trigger_group_set_id || !selected_root_groups[group_set_id]) {
             continue;
         }
         const GroupSetResource& resource = closure_root->group_set_resources[group_set_id];
         if (resource.transfer_state != GroupSetTransferState::IDLE) {
-            append_detached_once(closure_root, group_set_id);
+            const auto entry = std::make_pair(closure_root, group_set_id);
+            if (std::find(detached_resources.begin(), detached_resources.end(), entry) == detached_resources.end()) {
+                detached_resources.push_back(entry);
+            }
         } else if (!resource.is_empty()) {
             task.dependent_prune_descs.emplace_back(closure_root,
                                                     group_set_id,
