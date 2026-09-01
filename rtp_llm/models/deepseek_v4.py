@@ -82,12 +82,9 @@ def _is_prefill_role(role_type: object) -> bool:
 def _dsv4_fixed_pool_use_host_memory() -> bool:
     """Read ``--dsv4_fixed_pool_use_memory`` / ``DSV4_FIXED_POOL_USE_MEMORY``.
 
-    ``_post_build_model_config`` only receives ``model_config``, and
-    ``KVCacheConfig`` is not reachable from it, so the env channel that backs
-    the flag (``env_name="DSV4_FIXED_POOL_USE_MEMORY"`` in
-    ``rtp_llm/server/server_args/kv_cache_group_args.py``) is read directly.
-    A CLI-only ``--dsv4_fixed_pool_use_memory`` is therefore not observed here;
-    plumbing ``kv_cache_config`` into the hook would close that gap.
+    ``_post_build_model_config`` only receives ``model_config``, so
+    ``setup_default_args`` publishes the final bound ``KVCacheConfig`` value
+    (after CLI-over-env precedence) through this compatibility bridge.
     """
     raw = os.environ.get("DSV4_FIXED_POOL_USE_MEMORY")
     if raw is None:
@@ -969,12 +966,16 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
         }
         original_layer_count = len(info.layer_weights)
         info.layer_weights = [
-            [weight for weight in layer if weight.name in layer_names]
-            if isinstance(layer, list)
-            else layer
+            (
+                [weight for weight in layer if weight.name in layer_names]
+                if isinstance(layer, list)
+                else layer
+            )
             for layer in info.layer_weights
         ]
-        info.weights = [weight for weight in info.weights if weight.name in global_names]
+        info.weights = [
+            weight for weight in info.weights if weight.name in global_names
+        ]
         logging.info(
             "[DeepSeekV4DSparkWeight] prefill commit-only weight descriptors: %d layers, "
             "per-layer tags=%s, global tags=%s",

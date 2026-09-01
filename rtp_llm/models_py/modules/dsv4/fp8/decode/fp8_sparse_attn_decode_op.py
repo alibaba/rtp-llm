@@ -41,15 +41,28 @@ try:
 except (ImportError, AttributeError, ValueError) as e:
     logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
 
-_SM120_SPARSE_MLA_AVAILABLE = False
 _sm120_sparse_mla = None
-try:
-    from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+_sm120_sparse_mla_load_attempted = False
 
-    _sm120_sparse_mla = trtllm_batch_decode_sparse_mla_dsv4
-    _SM120_SPARSE_MLA_AVAILABLE = True
-except (ImportError, AttributeError) as e:
-    logging.info("[dsv4-fp8] SM120 FlashInfer sparse MLA unavailable (%s)", e)
+
+def _load_sm120_sparse_mla():
+    """Load the SM120-only FlashInfer entry point on first SM120 use.
+
+    Importing this module is part of ordinary DeepSeek-V4 startup on every
+    backend.  A missing/incompatible optional FlashInfer wheel must therefore
+    not prevent a FlashMLA model from loading.
+    """
+    global _sm120_sparse_mla, _sm120_sparse_mla_load_attempted
+    if _sm120_sparse_mla_load_attempted:
+        return _sm120_sparse_mla
+    _sm120_sparse_mla_load_attempted = True
+    try:
+        from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+
+        _sm120_sparse_mla = trtllm_batch_decode_sparse_mla_dsv4
+    except (ImportError, AttributeError, OSError, RuntimeError) as error:
+        logging.info("[dsv4-fp8] SM120 FlashInfer sparse MLA unavailable (%s)", error)
+    return _sm120_sparse_mla
 
 
 class SparseAttnV4DecodeFp8Op:
@@ -90,7 +103,7 @@ class SparseAttnV4DecodeFp8Op:
         self._attn_sink_source_version = -1
 
         if torch.cuda.is_available() and is_sm120():
-            if not _SM120_SPARSE_MLA_AVAILABLE:
+            if _load_sm120_sparse_mla() is None:
                 raise RuntimeError(
                     "SM120 FP8 sparse decode requires FlashInfer "
                     "trtllm_batch_decode_sparse_mla_dsv4; install the CUDA 13 "
@@ -189,7 +202,6 @@ class SparseAttnV4DecodeFp8Op:
             SM120_EXTRA_TOPK_WIDTHS,
             SM120_SWA_TOPK_WIDTHS,
             canonical_topk,
-            pack_logical_workspace,
             run,
             warmup,
         )
@@ -217,19 +229,16 @@ class SparseAttnV4DecodeFp8Op:
         # touched during eager warmup; workspace() raises if a new allocation
         # is attempted while capture is active.
         warmup(q.device)
-        swa_decode_cache, swa_indices = pack_logical_workspace(
-            kv_cache, swa_indices, page_size=64, namespace="swa"
+        # FlashInfer's SM120 ABI consumes paged slot IDs and derives page size
+        # plus block stride from the original cache tensor.  Passing the cache
+        # directly avoids copying every static top-k slot into two persistent
+        # [B * width, 584] buffers (over 600 MiB at B=64, width=8192).
+        swa_decode_cache = kv_cache
+        extra_decode_cache = (
+            extra_k_cache
+            if extra_k_cache is not None and extra_indices is not None
+            else None
         )
-        if extra_k_cache is not None and extra_indices is not None:
-            extra_page_size = 2 if int(extra_k_cache.shape[1]) <= 2 else 64
-            extra_decode_cache, extra_indices = pack_logical_workspace(
-                extra_k_cache,
-                extra_indices,
-                page_size=extra_page_size,
-                namespace="extra",
-            )
-        else:
-            extra_decode_cache = None
         flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
         flat_out = torch.empty_like(flat_q)
         run(

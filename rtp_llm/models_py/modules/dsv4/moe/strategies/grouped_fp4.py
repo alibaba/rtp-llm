@@ -571,6 +571,11 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         kernel_input, input_sf = mxfp8_quantize(
             x.contiguous(), is_sf_swizzled_layout=True
         )
+        # FlashInfer's MXFP8×MXFP4 CUTLASS ABI consumes the raw packed output
+        # of mxfp4_quantize.  Only the block-32 UE8M0 scale tensors use
+        # block_scale_interleave (prepared in setup_weights).  The separate
+        # TRT-LLM NVFP4 weight shuffle is a block-16 format and must not be
+        # applied to these DSv4 MXFP4 weights.
         cutlass_fused_moe(
             input=kernel_input,
             token_selected_experts=indices.to(torch.int32).contiguous(),

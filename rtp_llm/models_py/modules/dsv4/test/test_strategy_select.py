@@ -380,6 +380,19 @@ class StrategySelectTest(unittest.TestCase):
         ):
             self.assertFalse(Sm120FusedMoeStrategy.can_handle(_cfg(ep_size=4)))
 
+    def test_deepep_probe_rejects_sm12x_without_mocking_strategy_result(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.deepep.is_sm12x",
+            return_value=True,
+        ):
+            self.assertFalse(DeepEPStrategy.can_handle(_cfg(ep_size=4)))
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.deepep.is_sm12x",
+            return_value=False,
+        ):
+            self.assertTrue(DeepEPStrategy.can_handle(_cfg(ep_size=4)))
+
     # --- forced override ---------------------------------------------------
 
     def test_forced_known_and_capable_returns_it(self):

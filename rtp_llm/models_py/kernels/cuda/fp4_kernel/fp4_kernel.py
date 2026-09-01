@@ -3,17 +3,18 @@ from typing import Optional, Tuple
 
 import torch
 
-from rtp_llm.models_py.utils.arch import is_cuda, get_sm
+from rtp_llm.models_py.utils.arch import is_cuda, is_sm10x
 
-if is_cuda() and get_sm()[0] >= 10:
-    from rtp_llm.ops.compute_ops import (
-        cutlass_scaled_fp4_mm,
-        scaled_fp4_quant,
-    )
+cutlass_scaled_fp4_mm = None
+scaled_fp4_quant = None
+
+if is_cuda() and torch.cuda.is_available() and is_sm10x():
+    from rtp_llm.ops.compute_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 else:
     logging.info("skip import fp4 kernel from rtp_llm_ops for non cuda platform")
 
 logger = logging.getLogger(__name__)
+
 
 def cutlass_scaled_fp4_mm_wrapper(
     a: torch.Tensor,
@@ -23,13 +24,14 @@ def cutlass_scaled_fp4_mm_wrapper(
     alpha: torch.Tensor,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
+    if cutlass_scaled_fp4_mm is None:
+        raise RuntimeError("legacy CUTLASS FP4 GEMM is available only on SM10x")
     assert a.ndim == 2 and b.ndim == 2
     m, n = a.shape[0], b.shape[0]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-    cutlass_scaled_fp4_mm(
-        out, a, b, block_scale_a, block_scale_b, alpha
-    )
+    cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
     return out
+
 
 def scaled_fp4_quant_wrapper(
     input: torch.Tensor, input_global_scale: torch.Tensor
@@ -52,6 +54,8 @@ def scaled_fp4_quant_wrapper(
             two values are packed into a uint8 and float8_e4m3 scaling factors
             in a sizzled layout.
     """
+    if scaled_fp4_quant is None:
+        raise RuntimeError("legacy scaled FP4 quantization is available only on SM10x")
     assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
     other_dims = 1 if input.ndim == 1 else -1
     input = input.reshape(other_dims, input.shape[-1])
@@ -83,8 +87,6 @@ def scaled_fp4_quant_wrapper(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
 
-    scaled_fp4_quant(
-        output, input, output_scale, input_global_scale
-    )
+    scaled_fp4_quant(output, input, output_scale, input_global_scale)
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale

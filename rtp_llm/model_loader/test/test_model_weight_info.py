@@ -17,6 +17,7 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.tensor_source import TensorCollector
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
+from rtp_llm.ops import RoleType
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -587,6 +588,7 @@ def make_minimal_configs(
         ),
         tp_size=1,
         tp_rank=0,
+        role_type=RoleType.PDFUSION,
     )
     hw_kernel_config = SimpleNamespace(use_swizzleA=False)
     return model_config, parallelism_config, hw_kernel_config

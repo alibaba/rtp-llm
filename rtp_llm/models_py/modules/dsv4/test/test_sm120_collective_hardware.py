@@ -25,44 +25,70 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _dense_constant_fp4_reference(
+def _unpack_e2m1(packed: torch.Tensor) -> torch.Tensor:
+    """Decode raw MXFP4 bytes without using a FlashInfer MoE/GEMM path."""
+    codes = packed.view(torch.uint8)
+    low = torch.bitwise_and(codes, 0x0F)
+    high = torch.bitwise_right_shift(codes, 4)
+    codes = torch.stack((low, high), dim=-1).reshape(*packed.shape[:-1], -1)
+    values = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.float32,
+        device=packed.device,
+    )
+    return values.index_select(0, codes.long().reshape(-1)).view(codes.shape)
+
+
+def _dense_fp4_reference(
     x: torch.Tensor,
-    weights: torch.Tensor,
+    router_weights: torch.Tensor,
     indices: torch.Tensor,
     *,
-    inter_dim: int,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w3: torch.Tensor,
     swiglu_limit: float,
 ) -> torch.Tensor:
-    """Independent dense oracle for the constant packed weights below.
-
-    Packed byte ``0x11 * (expert + 1)`` repeats one positive E2M1 value
-    across the full matrix: expert 0..3 therefore has dense weight
-    0.5, 1.0, 1.5, or 2.0.  Computing the two linear layers and routing on
-    CPU avoids using the distributed strategy, ep_gather, or FlashInfer as
-    the oracle.  MXFP8 activation quantization is allowed its normal small
-    error budget by the caller.
-    """
+    """Independent dense oracle for non-uniform raw MXFP4 weights."""
     x_cpu = x.float().cpu()
-    weights_cpu = weights.float().cpu()
+    weights_cpu = router_weights.float().cpu()
     indices_cpu = indices.long().cpu()
+    w1_cpu = w1.float().cpu()
+    w2_cpu = w2.float().cpu()
+    w3_cpu = w3.float().cpu()
     output = torch.zeros(x.size(0), x.size(1), dtype=torch.float32)
     for token in range(x.size(0)):
-        source_sum = x_cpu[token].sum()
-        routed_value = torch.tensor(0.0)
+        routed_value = torch.zeros(x.size(1), dtype=torch.float32)
         for route in range(indices.size(1)):
             expert = int(indices_cpu[token, route])
             if expert < 0:
                 continue
-            expert_weight = 0.5 * (expert + 1)
-            gate = source_sum * expert_weight
-            up = source_sum * expert_weight
+            gate = F.linear(x_cpu[token], w1_cpu[expert])
+            up = F.linear(x_cpu[token], w3_cpu[expert])
             if swiglu_limit > 0:
                 gate = torch.clamp(gate, max=swiglu_limit)
                 up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
             hidden = (F.silu(gate) * up).to(torch.bfloat16).float()
-            dense_down = hidden * inter_dim * expert_weight
+            dense_down = F.linear(hidden, w2_cpu[expert])
             routed_value += weights_cpu[token, route] * dense_down
-        output[token].fill_(routed_value)
+        output[token].copy_(routed_value)
     return output.to(x.device)
 
 
@@ -88,6 +114,9 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
             local_expert_start=rank * 2,
             local_expert_end=(rank + 1) * 2,
             max_tokens_per_rank=4,
+            moe_tp_size=world_size,
+            cp_size=world_size,
+            cp_enabled=True,
         )
         strategy = Sm120FusedMoeStrategy(cfg)
         if strategy._sm120_grouped is None:
@@ -95,18 +124,20 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
                 "SM120 hardware gate requires the production FlashInfer GroupedFP4 executor"
             )
 
-        def packed_weights(out_dim: int, in_dim: int) -> torch.Tensor:
-            result = torch.empty(
-                (cfg.n_local_experts, out_dim, in_dim // 2),
-                dtype=torch.int8,
-                device=device,
+        def packed_weights(out_dim: int, in_dim: int, salt: int) -> torch.Tensor:
+            # Non-uniform experts, rows and columns make any packed-weight
+            # permutation visible.  Keep codes positive so the independent
+            # E2M1 decoder above remains especially easy to audit.
+            expert = torch.arange(4, device=device).view(4, 1, 1)
+            row = torch.arange(out_dim, device=device).view(1, out_dim, 1)
+            column = torch.arange(in_dim // 2, device=device).view(1, 1, -1)
+            low = (expert + row + 3 * column + salt).remainder(7) + 1
+            high = (2 * expert + 3 * row + column + 2 * salt).remainder(7) + 1
+            return (
+                torch.bitwise_or(low, torch.bitwise_left_shift(high, 4))
+                .to(torch.uint8)
+                .view(torch.int8)
             )
-            for local_id in range(cfg.n_local_experts):
-                # Both nibbles encode a positive E2M1 value. Distinct global
-                # expert constants make a broken global->local mapping visible.
-                global_id = cfg.local_expert_start + local_id
-                result[local_id].fill_(0x11 * (global_id + 1))
-            return result
 
         def scales(out_dim: int, in_dim: int) -> torch.Tensor:
             return torch.ones(
@@ -115,16 +146,33 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
                 device=device,
             )
 
+        full_w1 = packed_weights(cfg.moe_inter_dim, cfg.dim, salt=1)
+        full_w2 = packed_weights(cfg.dim, cfg.moe_inter_dim, salt=3)
+        full_w3 = packed_weights(cfg.moe_inter_dim, cfg.dim, salt=5)
+        dense_w1 = _unpack_e2m1(full_w1)
+        dense_w2 = _unpack_e2m1(full_w2)
+        dense_w3 = _unpack_e2m1(full_w3)
+        local_slice = slice(cfg.local_expert_start, cfg.local_expert_end)
         strategy.setup_weights(
             {
-                W.v4_routed_w1_w: packed_weights(cfg.moe_inter_dim, cfg.dim),
+                W.v4_routed_w1_w: full_w1[local_slice].contiguous(),
                 W.v4_routed_w1_s: scales(cfg.moe_inter_dim, cfg.dim),
-                W.v4_routed_w2_w: packed_weights(cfg.dim, cfg.moe_inter_dim),
+                W.v4_routed_w2_w: full_w2[local_slice].contiguous(),
                 W.v4_routed_w2_s: scales(cfg.dim, cfg.moe_inter_dim),
-                W.v4_routed_w3_w: packed_weights(cfg.moe_inter_dim, cfg.dim),
+                W.v4_routed_w3_w: full_w3[local_slice].contiguous(),
                 W.v4_routed_w3_s: scales(cfg.moe_inter_dim, cfg.dim),
             }
         )
+
+        def make_x(tokens: int, phase: int) -> torch.Tensor:
+            rows = torch.arange(tokens, device=device).view(-1, 1)
+            columns = torch.arange(cfg.dim, device=device).view(1, -1)
+            return (
+                ((3 * columns + 5 * rows + 7 * rank + phase).remainder(23) - 11)
+                .to(torch.float32)
+                .div_(256.0)
+                .to(torch.bfloat16)
+            )
 
         def assert_collective_matches_dense(
             x: torch.Tensor,
@@ -134,11 +182,13 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
             label: str,
         ) -> torch.Tensor:
             actual = strategy._forward_collective(x, weights, indices)
-            reference = _dense_constant_fp4_reference(
+            reference = _dense_fp4_reference(
                 x,
                 weights,
                 indices,
-                inter_dim=cfg.moe_inter_dim,
+                w1=dense_w1,
+                w2=dense_w2,
+                w3=dense_w3,
                 swiglu_limit=cfg.swiglu_limit,
             )
             torch.testing.assert_close(
@@ -153,17 +203,7 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
         # Dynamic eager collectives must agree when ranks contribute different
         # token counts.  This exercises the count exchange and local slicing.
         uneven_tokens = 3 if rank == 0 else 1
-        uneven_x = torch.stack(
-            [
-                torch.full(
-                    (cfg.dim,),
-                    (rank + token + 1) / 128.0,
-                    dtype=torch.bfloat16,
-                    device=device,
-                )
-                for token in range(uneven_tokens)
-            ]
-        )
+        uneven_x = make_x(uneven_tokens, phase=1)
         uneven_indices = torch.tensor(
             [
                 [(rank + token) % 4, (rank + token + 2) % 4]
@@ -212,12 +252,7 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
             )
         dist.barrier()
 
-        x = torch.full(
-            (2, cfg.dim),
-            (rank + 1.0) / 128.0,
-            dtype=torch.bfloat16,
-            device=device,
-        )
+        x = make_x(2, phase=2)
         weights = torch.full((2, 2), 0.5, dtype=torch.float32, device=device)
         indices = torch.tensor([[0, 2], [1, 3]], dtype=torch.int64, device=device)
 
@@ -226,11 +261,27 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
             raise AssertionError("real SM120 grouped expert output is invalid")
         dist.barrier()
 
+        # Exercise the public Pure-CP path once before capture.  Capture uses
+        # the public entry point too, which deliberately chooses its graph-safe
+        # collective implementation while the stream is capturing.
+        public_cp = strategy(x, weights, indices)
+        public_cp_reference = _dense_fp4_reference(
+            x,
+            weights,
+            indices,
+            w1=dense_w1,
+            w2=dense_w2,
+            w3=dense_w3,
+            swiglu_limit=cfg.swiglu_limit,
+        )
+        torch.testing.assert_close(public_cp, public_cp_reference, rtol=8e-2, atol=5e-1)
+        dist.barrier()
+
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            graph_output = strategy._forward_collective(x, weights, indices)
+            graph_output = strategy(x, weights, indices)
         dist.barrier()
-        x.fill_((rank + 2.0) / 128.0)
+        x.copy_(make_x(2, phase=13))
         # Change the per-expert histogram: experts 1 and 2 now receive zero
         # tokens, while every rank must still map global ids to its local slice.
         indices.copy_(torch.tensor([[3, 0], [0, 3]], device=device))
@@ -238,11 +289,13 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
         graph.replay()
         torch.cuda.synchronize(device)
         replay = graph_output.clone()
-        replay_reference = _dense_constant_fp4_reference(
+        replay_reference = _dense_fp4_reference(
             x,
             weights,
             indices,
-            inter_dim=cfg.moe_inter_dim,
+            w1=dense_w1,
+            w2=dense_w2,
+            w3=dense_w3,
             swiglu_limit=cfg.swiglu_limit,
         )
         torch.testing.assert_close(

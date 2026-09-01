@@ -21,8 +21,10 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 def _auto_deepep_supported_on_visible_devices() -> bool:
     """Whether automatic DeepEP selection is valid for this CUDA runtime.
 
-    Consumer Blackwell (SM12x) uses the generic SM120 collective strategy;
-    DeepEP does not ship compatible kernels there.  A user who explicitly
+    Consumer Blackwell SM120 uses the generic SM120 collective strategy;
+    DeepEP does not ship compatible kernels there.  Other SM12x revisions do
+    not have that exact strategy and must retain the normal backend selection.
+    A user who explicitly
     requests DeepEP still reaches the normal fail-fast validation path.
     """
     if not torch.cuda.is_available():
@@ -30,7 +32,7 @@ def _auto_deepep_supported_on_visible_devices() -> bool:
         # hardware validation occurs later when CUDA is initialized.
         return True
     return all(
-        torch.cuda.get_device_capability(device_index)[0] != 12
+        torch.cuda.get_device_capability(device_index) != (12, 0)
         for device_index in range(torch.cuda.device_count())
     )
 
@@ -154,7 +156,7 @@ def auto_configure_deepep(
             moe_config.use_deepep_low_latency = False
             moe_config.use_deepep_internode = False
             logging.info(
-                "Automatic DeepEP selection is disabled on SM12x; using the "
+                "Automatic DeepEP selection is disabled on SM120; using the "
                 "generic SM120 collective strategy"
             )
     else:

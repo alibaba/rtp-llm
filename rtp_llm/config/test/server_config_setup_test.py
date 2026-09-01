@@ -9,6 +9,7 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    _auto_deepep_supported_on_visible_devices,
     _configure_nccl_p2p_disable,
     set_parallelism_config,
     setup_and_configure_server,
@@ -69,6 +70,38 @@ class ServerConfigPortLayoutTest(TestCase):
         config.worker_info_port_num = 8
 
         config.validate_port_layout(dash_sc_enabled=False)
+
+
+class AutoDeepEpArchitectureTest(TestCase):
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
+        side_effect=[(12, 0), (12, 1)],
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.device_count",
+        return_value=2,
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+        return_value=True,
+    )
+    def test_exact_sm120_disables_auto_deepep(self, *_mocks):
+        self.assertFalse(_auto_deepep_supported_on_visible_devices())
+
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
+        return_value=(12, 1),
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.device_count",
+        return_value=2,
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+        return_value=True,
+    )
+    def test_other_sm12x_keeps_normal_auto_selection(self, *_mocks):
+        self.assertTrue(_auto_deepep_supported_on_visible_devices())
 
 
 class NcclP2pSetupTest(TestCase):

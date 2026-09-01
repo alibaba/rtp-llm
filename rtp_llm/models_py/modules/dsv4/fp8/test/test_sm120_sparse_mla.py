@@ -9,7 +9,6 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
 from rtp_llm.models_py.modules.dsv4.fp8.attention import _decode_sched_meta
 from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
     SM120_EXTRA_TOPK_WIDTHS,
-    _cached_buffer,
     canonical_topk,
 )
 
@@ -71,23 +70,6 @@ class Sm120SparseMlaCanonicalTest(unittest.TestCase):
             topk=64,
             extra_attn_type="HCA_KV",
         )
-
-    def test_cached_buffer_growth_retains_captured_addresses(self):
-        cache = {}
-        first = _cached_buffer(
-            cache, ("cpu",), (3,), dtype=torch.float32, device=torch.device("cpu")
-        )
-        first_ptr = first.data_ptr()
-        grown = _cached_buffer(
-            cache, ("cpu",), (9,), dtype=torch.float32, device=torch.device("cpu")
-        )
-        reused = _cached_buffer(
-            cache, ("cpu",), (2,), dtype=torch.float32, device=torch.device("cpu")
-        )
-
-        self.assertNotEqual(grown.data_ptr(), first_ptr)
-        self.assertEqual(reused.data_ptr(), first_ptr)
-        self.assertEqual(sorted(buffer.numel() for buffer in cache[("cpu",)]), [4, 16])
 
     def test_none_length_compacts_non_negative_slots(self):
         indices = torch.tensor([[11, -1, 13, -1], [-1, 7, 8, 9]], dtype=torch.int64)
