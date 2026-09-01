@@ -1,17 +1,23 @@
 package org.flexlb.enums;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import lombok.Getter;
 
 @Getter
 public enum LoadBalanceStrategyEnum {
 
-    RANDOM("Random"),  // Random assignment
+    RANDOM("Random"),
 
-    SHORTEST_TTFT("ShortestTTFT"),  // Shortest Time-To-First-Token
+    COST_BASED_PREFILL("CostBasedPrefill"),
 
-    WEIGHTED_CACHE("WeightedCache"),  // Lowest cache usage strategy
+    COST_BASED_DECODE("CostBasedDecode"),
 
-    ROUND_ROBIN("RoundRobin")  // Cursor-based round-robin (cheap, no load awareness)
+    SHORTEST_TTFT("ShortestTtft"),
+
+    WEIGHTED_CACHE("WeightedCache"),
+
+    ROUND_ROBIN("RoundRobin")
 
     ;
     private final String name;
@@ -20,4 +26,18 @@ public enum LoadBalanceStrategyEnum {
         this.name = name;
     }
 
+    @JsonValue
+    public String getName() {
+        return name;
+    }
+
+    @JsonCreator
+    public static LoadBalanceStrategyEnum fromName(String value) {
+        for (LoadBalanceStrategyEnum e : values()) {
+            if (e.name.equals(value) || e.name().equals(value)) {
+                return e;
+            }
+        }
+        throw new IllegalArgumentException("Unknown strategy: " + value);
+    }
 }

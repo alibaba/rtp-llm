@@ -144,7 +144,9 @@ public class DispatcherInspectionHandler {
         spec.prepareChunkBodies(envelope, chunkBodies);
         boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && !chunks.isEmpty();
         Mono<List<BatchScheduleTarget>> targetsMono = shouldResolveTargets
-                ? batchScheduleClient.requestTargets(chunks.size())
+                // A dry-run only renders BE role_addrs. Never consume the FE cursor for a request
+                // that deliberately sends no chunk to the selected FE.
+                ? batchScheduleClient.requestTargets(chunks.size(), true, false)
                 : Mono.just(List.of());
         return targetsMono.map(targets -> {
             BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);

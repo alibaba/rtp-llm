@@ -9,8 +9,15 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import torch
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ThinkingMode,
+    thinking_mode_from_value,
+)
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
+from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -33,6 +40,8 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -82,12 +91,8 @@ def _get_think_config(generate_env_config):
         Tuple of (think_mode, think_start_tag, think_end_tag)
     """
     think_mode = generate_env_config.think_mode
-    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode(
-        "unicode_escape"
-    )
-    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode(
-        "unicode_escape"
-    )
+    think_start_tag = normalize_think_tag(generate_env_config.think_start_tag)
+    think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
     return think_mode, think_start_tag, think_end_tag
 
 
@@ -252,6 +257,7 @@ class OutputDelta:
     reuse_length: int
     multimodal_lengths: Optional[Dict[int, int]] = None
     extra_outputs: Optional[ChatCompletionExtraOutputs] = None
+    output_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -261,6 +267,10 @@ class ThinkStatus:
     think_buffer: str = ""
     think_tokens: int = 0
     is_streaming: bool = False
+    thinking_mode: ThinkingMode = ThinkingMode.DISABLED
+    begin_think_token_ids: List[int] = field(default_factory=list)
+    decision_token_ids: List[int] = field(default_factory=list)
+    decision_made: bool = True
 
 
 class RenderedInputs:
@@ -287,9 +297,7 @@ class RenderedInputs:
             )
 
         if len(preprocess_configs) == 0:
-            preprocess_configs = [
-                MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
-            ] * len(input_urls)
+            preprocess_configs = [MMPreprocessConfig()] * len(input_urls)
         elif len(preprocess_configs) != len(input_urls):
             raise Exception(
                 f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}"
@@ -313,9 +321,12 @@ class CustomChatRenderer:
         vit_config: Optional[Any] = None,
     ):
         # Get think config from generate_env_config
-        self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
+        think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
+        self.think_mode = think_mode
+        self.default_thinking_mode = thinking_mode_from_value(think_mode)
+        self.generate_env_config = generate_env_config
 
         # Store configs for subclasses
         self.ckpt_path = ckpt_path
@@ -368,6 +379,9 @@ class CustomChatRenderer:
             extra_stop_word_ids_list=extra_stop_word_ids_list,
             extra_stop_words_list=extra_stop_words_list,
         )
+
+    def get_reasoning_format(self) -> ReasoningFormat:
+        return ReasoningFormat.from_generate_env_config(self.generate_env_config)
 
     def add_extra_stop_words(self, extra_stop_words: List[str]):
         self.extra_stop_words.extend(extra_stop_words)
@@ -425,6 +439,18 @@ class CustomChatRenderer:
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
+    def apply_chat_completion_constraints(
+        self, request: ChatCompletionRequest, generate_config: GenerateConfig
+    ) -> None:
+        tool_choice = getattr(request, "tool_choice", None)
+        if tool_choice is None or tool_choice in ("auto", "none"):
+            return
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            f"tool_choice={tool_choice!r} is not supported by "
+            f"{self.__class__.__name__}",
+        )
+
     async def generate_choice(
         self,
         request_id: int,
@@ -433,6 +459,7 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -446,6 +473,7 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    headers=normalize_request_headers(headers),
                 )
             )
         )
@@ -761,6 +789,7 @@ class CustomChatRenderer:
 
         # Build delta output
         if len(status.delta_output_string) > 0:
+            delta_output_ids = status.output_ids[len(status.last_output_ids) :]
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
@@ -768,6 +797,7 @@ class CustomChatRenderer:
                 input_length=output.aux_info.input_len,
                 output_length=output.aux_info.output_len,
                 reuse_length=output.aux_info.reuse_len,
+                output_ids=delta_output_ids,
             )
             status.delta_output_string = ""
             return delta
@@ -793,11 +823,42 @@ class CustomChatRenderer:
     ):
         if isinstance(item.output_str, str):
             processing_index, output_len = 0, len(item.output_str)
+            reasoning_text, content = "", ""
+            if not think_status.decision_made:
+                decision_text = think_status.think_buffer + item.output_str
+                think_status.decision_token_ids.extend(item.output_ids)
+                observed_ids = think_status.decision_token_ids
+                begin_ids = think_status.begin_think_token_ids
+                compared = min(len(observed_ids), len(begin_ids))
+                token_prefix_matches = bool(observed_ids and begin_ids) and (
+                    observed_ids[:compared] == begin_ids[:compared]
+                )
+                if token_prefix_matches and len(observed_ids) >= len(begin_ids):
+                    think_status.decision_made = True
+                    think_status.in_think_mode = True
+                    think_status.enable_think_mode = True
+                elif decision_text.startswith(self.think_start_tag):
+                    # Structural grammar constrains decoded text, not tokenizer
+                    # segmentation. Fall back to text when token boundaries differ.
+                    think_status.decision_made = True
+                    think_status.in_think_mode = True
+                    think_status.enable_think_mode = True
+                elif not token_prefix_matches and not self.think_start_tag.startswith(
+                    decision_text
+                ):
+                    think_status.decision_made = True
+                    think_status.in_think_mode = False
+
+                if not think_status.decision_made:
+                    think_status.think_buffer = decision_text
+                    return DeltaMessage(content="")
+                item.output_str = decision_text
+                think_status.think_buffer = ""
+                output_len = len(item.output_str)
+                think_status.decision_token_ids = []
 
             if output_len == 0:
                 return DeltaMessage(content="")
-
-            reasoning_text, content = "", ""
             update_think_tokens = think_status.in_think_mode
             while processing_index < output_len:
                 if think_status.in_think_mode:
@@ -844,19 +905,52 @@ class CustomChatRenderer:
             )
 
         elif isinstance(item.output_str, DeltaMessage):
-            # 对于已经是 DeltaMessage的情况, 则代表下层已经处理好了tool_calls和reasoning_content
+            message = item.output_str
+            if (
+                think_status.thinking_mode == ThinkingMode.ADAPTIVE
+                and message.reasoning_content is None
+                and message.content
+                and (not think_status.decision_made or think_status.in_think_mode)
+            ):
+                # A tool detector may wrap otherwise unparsed text in a
+                # DeltaMessage. Run that text through the same adaptive state
+                # machine while preserving any parsed tool calls.
+                item.output_str = message.content
+                try:
+                    split_message = self._split_reasoning_text_and_content(
+                        item, think_status
+                    )
+                finally:
+                    item.output_str = message
+                message.content = split_message.content
+                message.reasoning_content = split_message.reasoning_content or None
+            elif (
+                think_status.thinking_mode == ThinkingMode.ADAPTIVE
+                and not think_status.decision_made
+                and message.reasoning_content is not None
+            ):
+                # A specialized parser has already classified this delta.
+                think_status.decision_made = True
+                think_status.enable_think_mode = True
+            elif (
+                think_status.thinking_mode == ThinkingMode.ADAPTIVE
+                and not think_status.decision_made
+                and message.tool_calls
+                and not message.content
+            ):
+                think_status.decision_made = True
+                think_status.in_think_mode = False
+
             if not think_status.is_streaming:
                 think_status.think_tokens = len(
-                    self.tokenizer.tokenize(item.output_str.reasoning_content or "")
+                    self.tokenizer.tokenize(message.reasoning_content or "")
                 )
             else:
-                has_content_or_tool_calls = (
-                    item.output_str.content or item.output_str.tool_calls
-                )
-                has_reasoning = item.output_str.reasoning_content
+                has_content_or_tool_calls = message.content or message.tool_calls
+                has_reasoning = message.reasoning_content
                 if has_reasoning and not has_content_or_tool_calls:
                     think_status.think_tokens = item.output_length
-            return item.output_str
+            return message
 
         else:
             raise Exception(f"undefined output_str type[{type(item.output_str)}]")
@@ -910,6 +1004,11 @@ class CustomChatRenderer:
             extra_outputs=items[-1].extra_outputs,
         )
 
+    def _should_yield_stream_response(
+        self, response: StreamResponseObject, is_final: bool = False
+    ) -> bool:
+        return True
+
     async def _flush_buffer(
         self,
         buffer_list: List[StreamStatus],
@@ -918,12 +1017,19 @@ class CustomChatRenderer:
         think_status_list: List[ThinkStatus],
     ):
         output_items: List[OutputDelta] = []
-        for buffer in buffer_list:
+        for buffer, think_status in zip(buffer_list, think_status_list):
             if buffer.output is None:
                 raise Exception("last output should not be None")
             aux_info = buffer.output.aux_info
+            pending_output = buffer.delta_output_string
+            if not think_status.decision_made:
+                pending_output = think_status.think_buffer + pending_output
+                think_status.decision_made = True
+                think_status.in_think_mode = False
+                think_status.think_buffer = ""
+                think_status.decision_token_ids = []
             trunc_string = truncate_response_with_stop_words(
-                buffer.delta_output_string, stop_words_str, is_streaming
+                pending_output, stop_words_str, is_streaming
             )
             output_items.append(
                 OutputDelta(
@@ -1008,8 +1114,13 @@ class CustomChatRenderer:
     ) -> List[StreamStatus]:
         return [StreamStatus(request) for _ in range(n)]
 
+    def resolve_thinking_mode(self, request: ChatCompletionRequest) -> ThinkingMode:
+        return request.resolve_thinking_mode(self.default_thinking_mode)
+
     def in_think_mode(self, request: ChatCompletionRequest):
-        return self.think_mode
+        # Keep renderer-side parsing aligned with the three-state mode already
+        # resolved for GenerateConfig. ADAPTIVE decides from the first token.
+        return self.resolve_thinking_mode(request) == ThinkingMode.ENABLED
 
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理
@@ -1034,50 +1145,81 @@ class CustomChatRenderer:
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
         status_list = await self._create_status_list(nums_output, request)
         index = 0
+        resolved_thinking_mode = generate_config.thinking_mode
+        if resolved_thinking_mode == ThinkingMode.ADAPTIVE:
+            enable_think_mode = False
+            initial_in_think_mode = False
+        else:
+            # Keep fixed enabled/disabled modes on the legacy renderer hooks.
+            # Some reasoning renderers parse thinking before this base class.
+            enable_think_mode = bool(self.in_think_mode(request))
+            initial_in_think_mode = bool(self.should_process_think(request))
         think_status_list = [
             ThinkStatus(
-                enable_think_mode=bool(self.in_think_mode(request)),
-                in_think_mode=bool(self.should_process_think(request)),
+                enable_think_mode=enable_think_mode,
+                in_think_mode=initial_in_think_mode,
                 think_buffer="",
                 think_tokens=0,
                 is_streaming=generate_config.is_streaming,
+                thinking_mode=resolved_thinking_mode,
+                begin_think_token_ids=list(generate_config.begin_think_token_ids),
+                decision_made=resolved_thinking_mode != ThinkingMode.ADAPTIVE,
             )
             for _ in range(nums_output)
         ]
-        async for outputs in output_generator:
-            if index == 0:
-                yield await self._generate_first(nums_output)
-            index += 1
-            if len(outputs.generate_outputs) != nums_output:
-                raise Exception(
-                    f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
-                )
-            delta_list: List[OutputDelta] = []
-            for status, output in zip(status_list, outputs.generate_outputs):
-                delta = await self._update_single_status(
-                    status,
-                    output,
-                    generate_config.max_new_tokens,
-                    generate_config.stop_words_str,
-                    stop_word_slice_list,
-                    generate_config.is_streaming,
-                )
-                if delta.extra_outputs is None:
-                    delta.extra_outputs = await self._generate_extra_outputs(
-                        output, generate_config
+        try:
+            async for outputs in output_generator:
+                if index == 0:
+                    yield await self._generate_first(nums_output)
+                index += 1
+                if len(outputs.generate_outputs) != nums_output:
+                    raise Exception(
+                        f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
                     )
-                delta_list.append(delta)
-            yield await self._generate_stream_response(delta_list, think_status_list)
-            if self._check_all_finished(status_list):
-                break
+                delta_list: List[OutputDelta] = []
+                for status, output in zip(status_list, outputs.generate_outputs):
+                    delta = await self._update_single_status(
+                        status,
+                        output,
+                        generate_config.max_new_tokens,
+                        generate_config.stop_words_str,
+                        stop_word_slice_list,
+                        generate_config.is_streaming,
+                    )
+                    if delta.extra_outputs is None:
+                        delta.extra_outputs = await self._generate_extra_outputs(
+                            output, generate_config
+                        )
+                    delta_list.append(delta)
+                stream_response = await self._generate_stream_response(
+                    delta_list, think_status_list
+                )
+                if self._should_yield_stream_response(stream_response):
+                    yield stream_response
+                if self._check_all_finished(status_list):
+                    trace_state = CURRENT_TRACE_STATE.get()
+                    if trace_state is not None:
+                        trace_state.mark_renderer_completed()
+                    break
+        finally:
+            # `async for ... break` does not synchronously close an async
+            # generator. Close the owned backend stream before the renderer
+            # emits its final chunks so RPC spans cannot outlive the request.
+            await output_generator.aclose()
         if index != 0:
-            yield await self._flush_buffer(
+            flush_response = await self._flush_buffer(
                 status_list,
                 generate_config.stop_words_str,
                 generate_config.is_streaming,
                 think_status_list,
             )
-            yield await self._generate_final(status_list, request, think_status_list)
+            if self._should_yield_stream_response(flush_response):
+                yield flush_response
+            final_response = await self._generate_final(
+                status_list, request, think_status_list
+            )
+            if self._should_yield_stream_response(final_response, is_final=True):
+                yield final_response
 
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(

@@ -1,6 +1,8 @@
 package org.flexlb.config;
 
 import lombok.Getter;
+import org.apache.commons.lang3.StringUtils;
+import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.util.IdUtils;
@@ -9,6 +11,7 @@ import org.springframework.stereotype.Component;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -71,6 +74,22 @@ public class ModelMetaConfig {
     public ServiceRoute getServiceRoute(String serviceId) {
         return modelServiceRoute.get(serviceId);
 
+    }
+
+    /**
+     * Unique service-discovery addresses referenced by the registered route table. This is a
+     * diagnostics view, sorted so error messages and tests remain deterministic.
+     */
+    public List<String> getConfiguredDiscoveryAddresses() {
+        Set<String> addresses = new TreeSet<>();
+        for (ServiceRoute serviceRoute : modelServiceRoute.values()) {
+            for (Endpoint endpoint : serviceRoute.getAllEndpoints()) {
+                if (endpoint != null && StringUtils.isNotBlank(endpoint.getAddress())) {
+                    addresses.add(endpoint.getAddress());
+                }
+            }
+        }
+        return List.copyOf(addresses);
     }
 
     /**

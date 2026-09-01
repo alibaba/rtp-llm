@@ -74,36 +74,46 @@ public class DispatchConfig {
     private String probePath = "/frontend_health";
 
     /**
+     * Source of each chunk's FE assignment. {@code master} (default) uses the elected master's
+     * single cursor for even, attributable fleet-wide distribution. {@code local} is the explicit
+     * availability escape hatch: it bypasses master FE assignment and uses this dispatcher's own
+     * health-filtered {@link FePool}. Set {@code DISPATCH_FE_ALLOCATION=local} during a master
+     * outage or on a multi-role deployment whose master cannot serve {@code /batch_schedule};
+     * restore {@code master} after the incident to regain the global cursor.
+     *
+     * <p>This is a string at the external-config boundary so the shared env-reflection helper does
+     * not need to change enum parsing semantics. {@link DispatcherConfiguration} validates and
+     * normalizes it once at startup through {@link FeAllocationMode#parse(String)}.
+     */
+    private String feAllocation = FeAllocationMode.MASTER.configValue();
+
+    /**
      * BE pre-assignment toggle. When {@code true}, the dispatcher resolves N BE targets via
      * master's {@code /rtp_llm/batch_schedule} before fanout and appends each target into
      * the chunk's {@code generate_config.role_addrs} (matching Python
      * {@code rtp_llm.config.generate_config.RoleAddr}: {@code {role, ip, http_port, grpc_port}})
      * so the receiving FE skips its own master round-trip.
      *
-     * <p>Defaults to {@code true} because the stamping target —
-     * {@code generate_config.role_addrs} — is a field FE has supported in production for a
-     * long time (see {@code rtp_llm.server.backend_rpc_server_visitor.route_ips}: when
-     * {@code role_addrs} is non-empty the FE skips master entirely; the same mechanism powers
-     * PD-disagg's prefill→decode handoff).
+     * <p>Defaults to {@code false}: this optimization crosses an HTTP/JSON version boundary, and
+     * mixed-version FE fleets must keep serving correctly on first rollout. Enable it explicitly
+     * only after every FE build satisfies the version precondition below.
      *
-     * <p><strong>FE version precondition:</strong> the FE build must include
+     * <p><strong>FE version precondition when enabled:</strong> the FE build must include
      * {@code RoleAddr.validate_role} (the {@code @field_validator("role", mode="before")} in
      * {@code rtp_llm/config/generate_config.py}, on main since commit {@code 53dc319bd}).
      * Older FE builds leave {@code role_addrs} as {@code list[dict]} and fail every stamped
      * request with HTTP 500 at {@code model_rpc_client}'s {@code addr.role} access — the
      * dispatcher is the first caller to deliver {@code role_addrs} via the HTTP body, so the
-     * latent FE bug only fires with this toggle on. Against an FE fleet of unknown vintage,
-     * set {@code DISPATCH_PRE_ASSIGN_BE=false} first and flip it on after verifying.
+     * latent FE bug only fires with this toggle on.
      *
-     * <p>Operators can flip {@code DISPATCH_PRE_ASSIGN_BE=false} (or set
+     * <p>Operators can keep/flip {@code DISPATCH_PRE_ASSIGN_BE=false} (or set
      * {@code preAssignBe: false} in {@code DISPATCH_CONFIG}) to opt out for diagnostics or
      * staged rollback.
      *
-     * <p>If the dispatcher's call to {@code /batch_schedule} fails, the WARN is emitted once
-     * and the request degrades silently to the no-stamp path — never block traffic on a
-     * routing optimization.
+     * <p>Disabling this flag does not disable master FE allocation. It changes a master request to
+     * FE-only, so no unused BE target is selected and no BE round-robin cursor is advanced.
      */
-    private boolean preAssignBe = true;
+    private boolean preAssignBe = false;
 
     /**
      * Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading.

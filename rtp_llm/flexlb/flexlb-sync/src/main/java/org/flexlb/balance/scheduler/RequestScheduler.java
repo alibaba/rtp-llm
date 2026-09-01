@@ -91,7 +91,7 @@ public class RequestScheduler {
 
                 try {
                     // Step 2: Take request from queue
-                    BalanceContext ctx = queueManager.takeRequest(true, 500);
+                    BalanceContext ctx = queueManager.takeRequest(500);
                     if (ctx == null) {
                         continue; // permit released in finally
                     }

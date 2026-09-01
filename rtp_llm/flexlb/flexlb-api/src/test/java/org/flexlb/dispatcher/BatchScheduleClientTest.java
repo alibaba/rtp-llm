@@ -13,6 +13,9 @@ import reactor.test.StepVerifier;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -43,6 +46,31 @@ class BatchScheduleClientTest {
         verify(coordinator).schedule(captor.capture());
         assertEquals(2, captor.getValue().getBatchCount(),
                 "client must forward chunkCount as batchCount on the BatchScheduleRequest");
+        assertTrue(captor.getValue().isAssignBe());
+        assertTrue(captor.getValue().isAssignFe());
+    }
+
+    @Test
+    void explicitAllocationDimensionsReachCoordinatorAndGateMasterFeStamp() {
+        BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
+        BatchScheduleTarget target = new BatchScheduleTarget("10.0.0.1", 23840, 23841);
+        when(coordinator.schedule(any()))
+                .thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target))));
+        FePool pool = mock(FePool.class);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);
+
+        StepVerifier.create(client.requestTargets(1, true, false))
+                .assertNext(returned -> assertNull(returned.get(0).getFeUrl(),
+                        "assign_fe=false must not consume or stamp the master FE cursor"))
+                .verifyComplete();
+
+        ArgumentCaptor<BatchScheduleRequest> captor =
+                ArgumentCaptor.forClass(BatchScheduleRequest.class);
+        verify(coordinator).schedule(captor.capture());
+        assertTrue(captor.getValue().isAssignBe());
+        assertFalse(captor.getValue().isAssignFe());
+        verifyNoInteractions(pool);
     }
 
     @Test

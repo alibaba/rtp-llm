@@ -2,9 +2,11 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
+from rtp_llm.config.response_format import ResponseFormat, parse_response_format
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -62,7 +64,9 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
     crop_positions: Optional[str] = None
-    mm_timeout_ms: int = 30000
+    # Unset values inherit MM_TIMEOUT_MS (120s by default). Set MM_TIMEOUT_MS=30000
+    # to preserve the legacy 30s timeout for requests that omit this field.
+    mm_timeout_ms: int = -1
 
 
 class IgraphInfo(BaseModel):
@@ -152,19 +156,6 @@ def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional
     return name
 
 
-class ResponseFormatJSONSchema(BaseModel):
-    name: Optional[str] = None
-    schema: Optional[Dict[str, Any]] = None
-    strict: Optional[bool] = None
-
-
-class ResponseFormat(BaseModel):
-    type: Literal["text", "json_schema", "json_object", "regex", "ebnf"]
-    json_schema: Optional[ResponseFormatJSONSchema] = None
-    pattern: Optional[str] = None
-    grammar: Optional[str] = None
-
-
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -187,7 +178,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
-    response_format: Optional[Union[ResponseFormat, str, Dict[str, Any]]] = None
+    response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
 
     # ---- These functions are not implemented yet.
@@ -210,6 +201,27 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_nested_structured_output_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        extra_configs = data.get("extra_configs")
+        if isinstance(extra_configs, dict):
+            forbidden = ("response_format", "json_format", *GRAMMAR_FIELD_NAMES)
+            present = [name for name in forbidden if name in extra_configs]
+            if present:
+                raise ValueError(
+                    "structured output must use top-level response_format; "
+                    f"extra_configs contains: {', '.join(present)}"
+                )
+        return data
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _parse_response_format(cls, value):
+        return parse_response_format(value)
 
     @model_validator(mode="after")
     def _check_tool_choice(self) -> "ChatCompletionRequest":
@@ -248,6 +260,18 @@ class ChatCompletionRequest(BaseModel):
             and chat_template_kwargs.get("enable_thinking") is True
         )
 
+    def get_enable_thinking(self, default: Optional[bool] = None) -> Optional[bool]:
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if (
+            chat_template_kwargs is None
+            or "enable_thinking" not in chat_template_kwargs
+        ):
+            return default
+        enable_thinking = chat_template_kwargs["enable_thinking"]
+        if enable_thinking is True or enable_thinking is False:
+            return enable_thinking
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
+
     def disable_thinking(self):
         if self.thinking_budget == 0:
             return True
@@ -265,6 +289,46 @@ class ChatCompletionRequest(BaseModel):
         ):
             return True
         return False
+
+    def get_explicit_thinking_mode(self) -> Optional[ThinkingMode]:
+        chat_template_kwargs = self.get_chat_template_kwargs() or {}
+        requested_mode: Optional[ThinkingMode] = None
+        if "thinking_mode" in chat_template_kwargs:
+            raw_mode = chat_template_kwargs["thinking_mode"]
+            request_modes = {
+                "disabled": ThinkingMode.DISABLED,
+                "adaptive": ThinkingMode.ADAPTIVE,
+                "enabled": ThinkingMode.ENABLED,
+            }
+            if not isinstance(raw_mode, str) or raw_mode not in request_modes:
+                raise ValueError(
+                    "chat_template_kwargs.thinking_mode must be one of: "
+                    "disabled, adaptive, enabled"
+                )
+            requested_mode = request_modes[raw_mode]
+
+        if self.disable_thinking():
+            return ThinkingMode.DISABLED
+        if self.enable_thinking is True:
+            return ThinkingMode.ENABLED
+
+        if (
+            self.extra_configs is not None
+            and "thinking_mode" in self.extra_configs.model_fields_set
+            and self.extra_configs.thinking_mode != ThinkingMode.UNSPECIFIED
+        ):
+            return self.extra_configs.thinking_mode
+
+        if requested_mode is not None:
+            return requested_mode
+        if chat_template_kwargs.get("enable_thinking") is True:
+            return ThinkingMode.ENABLED
+        return None
+
+    def resolve_thinking_mode(
+        self, default_mode: ThinkingMode = ThinkingMode.DISABLED
+    ) -> ThinkingMode:
+        return self.get_explicit_thinking_mode() or default_mode
 
 
 class BatchChatCompletionRequest(BaseModel):

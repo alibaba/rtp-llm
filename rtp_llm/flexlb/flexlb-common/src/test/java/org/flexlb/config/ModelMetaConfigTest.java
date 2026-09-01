@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -81,6 +82,25 @@ class ModelMetaConfigTest {
 
         assertTrue(roles.contains(RoleType.PREFILL), "configured PREFILL must be reported: " + roles);
         assertTrue(roles.contains(RoleType.DECODE), "configured DECODE must be reported: " + roles);
+    }
+
+    @Test
+    void getConfiguredDiscoveryAddresses_returns_sorted_unique_nonBlankAddresses() {
+        Endpoint prefill = new Endpoint();
+        prefill.setAddress("z-discovery");
+        Endpoint decode = new Endpoint();
+        decode.setAddress("a-discovery");
+        GroupRoleEndPoint group = new GroupRoleEndPoint();
+        group.setGroup("g1");
+        group.setPrefillEndpoint(prefill);
+        group.setDecodeEndpoint(decode);
+        ServiceRoute route = new ServiceRoute();
+        route.setServiceId(TEST_SERVICE_ID);
+        route.setRoleEndpoints(List.of(group));
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, route);
+
+        assertEquals(List.of("a-discovery", "z-discovery"),
+                new ModelMetaConfig().getConfiguredDiscoveryAddresses());
     }
 
     @Test

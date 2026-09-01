@@ -28,6 +28,7 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
+from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
 from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
@@ -75,6 +76,26 @@ class _Qwen35DefaultTemplateTokenizer:
 
     def _raise_exception(self, message):
         raise ValueError(message)
+
+
+class _ThinkingDefaultTemplateTokenizer:
+    path = ""
+    chat_template = """\
+{% if enable_thinking is undefined %}template-default\
+{% elif enable_thinking %}enabled\
+{% else %}disabled\
+{% endif %}"""
+    special_tokens_map = {}
+    additional_special_tokens = []
+
+    def encode(self, prompt, **kwargs):
+        return list(range(len(prompt)))
+
+    def decode(self, token_ids):
+        return ""
+
+    def convert_tokens_to_ids(self, token):
+        return []
 
 
 class BaseRendererTestMixin(ABC):
@@ -337,6 +358,9 @@ class TemplateTest(TestCase):
     def test_qwen35_moe_mtp_uses_qwen35_renderer(self):
         assert _renderer_factory["qwen35_moe_mtp"] is Qwen35Renderer
 
+    def test_qwen35_dense_mtp_uses_qwen35_renderer(self):
+        assert _renderer_factory["qwen35_dense_mtp"] is Qwen35Renderer
+
     def test_qwen35_passes_chat_template_kwargs_to_template(self):
         tokenizer = _Qwen35DefaultTemplateTokenizer()
         renderer = Qwen35Renderer(
@@ -361,6 +385,43 @@ class TemplateTest(TestCase):
             "<|im_start|>user\nhello<|im_end|>\n"
             "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         )
+
+    def test_basic_renderer_preserves_template_thinking_default(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = "enabled"
+        renderer = BasicRenderer(
+            _ThinkingDefaultTemplateTokenizer(),
+            RendererParams(
+                model_type="basic",
+                max_seq_len=1024,
+                eos_token_id=0,
+                stop_word_ids_list=[],
+            ),
+            generate_env_config,
+            RenderConfig(),
+        )
+        messages = [ChatMessage(role=RoleEnum.user, content="hello")]
+
+        default_prompt = renderer.render_chat(
+            ChatCompletionRequest(messages=messages)
+        ).rendered_prompt
+        disabled_prompt = renderer.render_chat(
+            ChatCompletionRequest(messages=messages, enable_thinking=False)
+        ).rendered_prompt
+        enabled_prompt = renderer.render_chat(
+            ChatCompletionRequest(messages=messages, enable_thinking=True)
+        ).rendered_prompt
+        kwargs_disabled_prompt = renderer.render_chat(
+            ChatCompletionRequest(
+                messages=messages,
+                chat_template_kwargs={"enable_thinking": False},
+            )
+        ).rendered_prompt
+
+        self.assertEqual(default_prompt, "template-default")
+        self.assertEqual(disabled_prompt, "template-default")
+        self.assertEqual(enabled_prompt, "template-default")
+        self.assertEqual(kwargs_disabled_prompt, "disabled")
 
     def test_qwen_agent(self):
         tokenizer = QWenTokenizer(

@@ -10,12 +10,12 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
+    "CacheStoreWriter",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
     "PyAttentionInputs",
     "PyCacheStoreInputs",
-    "PyCaptureMetaData",
     "PyContextParallelParams",
     "PyEmbeddingInputs",
     "PyModelInitResources",
@@ -30,6 +30,10 @@ __all__: list[str] = [
     "get_scalar_type",
     "get_typemeta",
     "init_exec_ctx",
+    "register_comm_ops",
+    "clear_comm_ops",
+    "init_cpu_tp_broadcaster",
+    "destroy_cpu_tp_broadcaster",
     "rtp_llm_ops",
 ]
 class BertEmbeddingInputs:
@@ -210,9 +214,19 @@ class ParamsBase:
         Fill parameters for CUDA graph execution
         """
 
+class CacheStoreWriter:
+    def write(
+        self,
+        cache_store_inputs: PyCacheStoreInputs,
+        kv_cache: LayerKVCache,
+    ) -> None: ...
+
 class PyAttentionInputs:
     def __init__(self) -> None: ...
-    cache_store_inputs: PyCacheStoreInputs | None
+    @property
+    def cache_store_inputs(self) -> PyCacheStoreInputs | None: ...
+    @property
+    def cache_store_writer(self) -> CacheStoreWriter | None: ...
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int
@@ -246,9 +260,6 @@ class PyAttentionInputs:
     def __copy__(self) -> PyAttentionInputs: ...
 
 class PyCacheStoreInputs:
-    def __init__(self) -> None: ...
-
-class PyCaptureMetaData:
     def __init__(self) -> None: ...
 
 class PyContextParallelParams:
@@ -391,13 +402,13 @@ class PyMultimodalInputs:
     def __init__(self) -> None: ...
     def __repr__(self) -> str: ...
     @property
-    def mm_deepstack_embeds(self) -> list[torch.Tensor]:
+    def mm_extra_input(self) -> list[torch.Tensor]:
         """
-        Multimodal deepstack embeds tensor
+        Multimodal model-specific extra input tensor
         """
 
-    @mm_deepstack_embeds.setter
-    def mm_deepstack_embeds(self, arg0: list[torch.Tensor]) -> None: ...
+    @mm_extra_input.setter
+    def mm_extra_input(self, arg0: list[torch.Tensor]) -> None: ...
     @property
     def mm_features_locs(self) -> torch.Tensor:
         """
@@ -444,6 +455,15 @@ def init_exec_ctx(
     mla_ops_type: int,
 ) -> None: ...
 
-def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None: ...
+def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None:
+    """
+    Register Python callbacks for C++ communication ops.
+    """
 
-def clear_comm_ops() -> None: ...
+def clear_comm_ops() -> None:
+    """
+    Clear registered Python communication callbacks.
+    """
+
+def init_cpu_tp_broadcaster(tp_rank: int, tp_size: int, base_path: str) -> None: ...
+def destroy_cpu_tp_broadcaster() -> None: ...

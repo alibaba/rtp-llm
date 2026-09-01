@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
 #include <unordered_set>
+#include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -16,6 +18,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 #include "autil/LockFreeThreadPool.h"
 
 using namespace std;
@@ -31,16 +34,89 @@ const int EXTRA_TIMEOUT_MS        = 100;
 const int RDMA_CONNECT_RETRY_TIME = 3;
 
 #define GRPC_RET_IF_ERROR(decode_context, stat, code, msg)                                                             \
-    if (!(stat)) {                                                                                                     \
-        decode_context.error_status = grpc::Status(code, msg);                                                         \
-        return;                                                                                                        \
-    }
+    do {                                                                                                               \
+        if (!(stat)) {                                                                                                 \
+            const auto        grpc_error_code    = (code);                                                             \
+            const std::string grpc_error_message = (msg);                                                              \
+            decode_context.error_status          = grpc::Status(grpc_error_code, grpc_error_message);                  \
+            const std::string request_identity   = decode_context.request_key == "0" ?                                 \
+                                                       (decode_context.server_context != nullptr ?                     \
+                                                            "pending peer " + decode_context.server_context->peer() :  \
+                                                            "pending") :                                               \
+                                                       decode_context.request_key;                                     \
+            RTP_LLM_LOG_WARNING("request [%s] RPC stage failed, grpc status code [%d], message [%s]",                  \
+                                request_identity.c_str(),                                                              \
+                                static_cast<int>(grpc_error_code),                                                     \
+                                grpc_error_message.c_str());                                                           \
+            return;                                                                                                    \
+        }                                                                                                              \
+    } while (false)
 
 string makeRequestKey(const string& client_id, size_t request_id) {
     return client_id + "_request_id_" + std::to_string(request_id);
 }
 
 namespace rtp_llm {
+
+namespace {
+
+// gRPC delivers propose probs/hidden as pageable CPU tensors. Pinning them
+// before the H2D copy lets cudaMemcpyAsync run on the DMA engine instead of
+// falling back to a staged synchronous copy on the handler thread. Pinning is
+// best-effort: on failure keep the pageable tensor rather than failing the
+// request.
+torch::Tensor pinGrpcTensor(torch::Tensor tensor) {
+    if (!tensor.defined() || tensor.is_cuda() || tensor.is_pinned() || tensor.numel() == 0) {
+        return tensor;
+    }
+    try {
+        return tensor.pin_memory();
+    } catch (const c10::Error& e) {
+        RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
+        return tensor;
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("[decode-grpc] pin_memory failed, fallback to pageable CPU tensor: %s", e.what());
+        return tensor;
+    }
+}
+
+}  // namespace
+
+grpc::Status DecodeRpcServer::generateRequestReadFailureStatus(bool cancelled) {
+    if (cancelled) {
+        return grpc::Status(grpc::StatusCode::CANCELLED, "request is cancelled");
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, "poll generate request failed");
+}
+
+const char* DecodeRpcServer::phaseErrorType(bool                         request_ok,
+                                            DecodeStatInfo::ExecuteStage stage,
+                                            const ErrorInfo&             error_info,
+                                            const grpc::Status&          error_status) {
+    if (request_ok) {
+        return nullptr;
+    }
+    // Cancellation is a request outcome even when the stage has not yet copied
+    // the transport status into error_status (loadCacheFromPrefill synthesizes
+    // its child span before the final GRPC_RET_IF_ERROR below).
+    if (error_info.hasError() && error_info.code() == ErrorCode::CANCELLED) {
+        return "Cancelled";
+    }
+    // A failure while waiting for KV cache from Prefill is an upstream dependency
+    // problem rather than a fault of this node, so the wait span must say so. The
+    // gRPC status cannot carry that distinction: transErrorCodeToGrpc maps the
+    // cache timeouts onto DEADLINE_EXCEEDED, indistinguishable from a request
+    // deadline elsewhere. Client cancellation also surfaces in this stage and
+    // keeps its own classification.
+    if (stage == DecodeStatInfo::loadCacheFromPrefill && error_info.hasError()
+        && error_info.code() != ErrorCode::CANCELLED) {
+        return "DependencyFailure";
+    }
+    if (!error_status.ok()) {
+        return telemetry::grpcStatusCodeName(error_status.error_code());
+    }
+    return "Exception";
+}
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
@@ -119,10 +195,17 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     RTP_LLM_PROFILE_FUNCTION();
     decode_context.time_info.updateRequestBegineTime();
     auto& allocate_request = decode_context.allocate_request;
-    GRPC_RET_IF_ERROR(decode_context,
-                      decode_context.rpc_context.grpc_stream->Read(&allocate_request),
-                      grpc::StatusCode::INTERNAL,
-                      "failed to get message");
+    if (!decode_context.rpc_context.grpc_stream->Read(&allocate_request)) {
+        const bool cancelled        = decode_context.isRequestCancelled();
+        decode_context.error_status = generateRequestReadFailureStatus(cancelled);
+        const auto peer = decode_context.server_context != nullptr ? decode_context.server_context->peer() : "unknown";
+        RTP_LLM_LOG_WARNING(
+            "request [pending peer=%s] read allocate request failed, cancelled [%d], grpc status code [%d]",
+            peer.c_str(),
+            cancelled ? 1 : 0,
+            static_cast<int>(decode_context.error_status.error_code()));
+        return;
+    }
     GRPC_RET_IF_ERROR(decode_context,
                       allocate_request.stage() == RemoteStage::ALLOCATE,
                       grpc::StatusCode::INTERNAL,
@@ -151,6 +234,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    decode_context.request_info       = input->request_info;
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
@@ -165,7 +249,12 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
     if (generate_stream->hasError()) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
+        auto   stream_error = generate_stream->statusInfo();
+        string error_msg    = stream_error.ToString();
+        if (error_msg.empty()) {
+            error_msg = "malloc kv cache block failed at decode node";
+        }
+        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
@@ -190,18 +279,46 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     decode_context.time_info.updateLoadBeginTime();
     auto error_info = loadCacheForAllRank(decode_context);
     decode_context.time_info.updateLoadEndTime();
+    const auto  error_reason = error_info.ok() ? std::string() : ErrorCodeToString(error_info.code());
+    const auto* error_type =
+        error_info.ok() ? nullptr :
+                          phaseErrorType(
+                              /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, grpc::Status::OK);
     if (!error_info.ok()) {
+        decode_context.error_info = error_info;
         RTP_LLM_LOG_WARNING("request [%s] load kv cache failed, error code [%s], cost time [%ld] ms",
                             decode_context.request_key.c_str(),
                             error_info.ToString().c_str(),
                             decode_context.time_info.loadCacheTimeMs());
+    }
+    // load_cache child span [load_begin, load_end): decode's KV-arrival wait
+    // window, parallel to the prefill computation (see synthesizeKvLoadSpan).
+    // Synthesized on failure too — CACHE_STORE_LOAD_BUFFER_TIMEOUT lives here
+    // and must show up on the waterfall instead of an unnamed gap.
+    if (decode_context.trace_span_guard && decode_context.trace_span_guard->valid()) {
+        telemetry::synthesizeKvLoadSpan(decode_context.trace_span_guard->sharedSpan(),
+                                        decode_context.time_info.load_begin_time_us,
+                                        decode_context.time_info.load_end_time_us,
+                                        decode_context.request_id,
+                                        error_info.ok(),
+                                        error_type,
+                                        static_cast<int64_t>(error_info.code()),
+                                        error_reason.c_str());
     }
 
     GenerateOutputsPB load_response;
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
-    GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
+    if (!error_info.ok()) {
+        // loadCacheFromPrefill is not retried (not wrapped by EXECUTE_WITH_RETRY), so this is a final
+        // failure point: report to FlexLB immediately.
+        reportEarlyFinishTask(decode_context,
+                              static_cast<int64_t>(error_info.code()),
+                              "decode load cache from prefill failed: " + error_info.ToString());
+        decode_context.error_status = grpc::Status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+        return;
+    }
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
 
@@ -211,10 +328,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto&             grpc_stream     = decode_context.rpc_context.grpc_stream;
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
-    GRPC_RET_IF_ERROR(decode_context,
-                      grpc_stream->Read(&generate_request),
-                      grpc::StatusCode::INTERNAL,
-                      "poll generate request failed");
+    if (!grpc_stream->Read(&generate_request)) {
+        const bool cancelled        = decode_context.isRequestCancelled();
+        decode_context.error_status = generateRequestReadFailureStatus(cancelled);
+        RTP_LLM_LOG_WARNING("request [%s] read generate request failed, cancelled [%d], grpc status code [%d]",
+                            decode_context.request_key.c_str(),
+                            cancelled ? 1 : 0,
+                            static_cast<int>(decode_context.error_status.error_code()));
+        return;
+    }
     GRPC_RET_IF_ERROR(decode_context,
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
@@ -244,32 +366,90 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
+    if (!propose_maga_init_params_) {
+        generate_stream->markGrpcNormalDeviceStatePending();
+    }
     if (propose_maga_init_params_) {
-        generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-        generate_stream->setSpEditRun(false);
-        generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
-        generate_stream->setContainProposeToken(true);
+        // gRPC handler threads default to CUDA device 0; pin allocations below
+        // to this worker's device so local_rank>0 workers don't place the MTP
+        // device-state tensors on the wrong GPU.
+        c10::DeviceGuard device_guard(torch::Device(
+            torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
+        const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
+        RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
+        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
+            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
+                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
+                                    propose_step,
+                                    maga_init_params_.sp_config.gen_num_per_cycle);
+        }
+
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        generate_stream->setProposeToken(propose_tokens);
+        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
+        // the decode round head produces the first one. Traditional MTP/Eagle
+        // retain their target+draft handoff contract.
+        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
+                                propose_tokens.size(),
+                                static_cast<int>(engine_->isDSpark()));
+        generate_stream->initSpeculativeHandoffPositions();
+        if (!propose_tokens.empty()) {
+            generate_stream->setContainProposeToken(true);
+            generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)propose_tokens.size()}, torch::kInt32);
-        memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
+            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->propose_step = propose_step;
+            sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            memcpy(
+                sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
-        auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());
+            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-        auto& tensors_holder = sp_output_buffer->tensors_holder;
-        tensors_holder.emplace_back(std::move(propose_probs_t));
-        tensors_holder.emplace_back(std::move(propose_hidden_t));
+            const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+            sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
 
-        generate_stream->setSPOutputBuffer(sp_output_buffer);
+            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
+            auto accept_len                      = torch::ones({1}, cuda_i32);
+            auto accept_tokens                   = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+            accept_tokens[0][0]                  = sp_output_buffer->tokens[0][0];
+            sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
+
+            auto next_seq_len = torch::ones({1}, cuda_i32);
+            next_seq_len[0]   = generate_stream->seqLength();
+
+            generate_stream->setSPOutputBuffer(sp_output_buffer);
+            // The per-step refresher (MtpExecutor's device-state publish) is gated
+            // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
+            // this static snapshot without those pipelines active would leave a
+            // stale next_real_seq_len that overrides incrKVBlock forever (same
+            // failure mode as the normal-decode grpc device state).
+            auto env_on = [](const char* name) {
+                const char* value = std::getenv(name);
+                return value != nullptr && std::string(value) == "1";
+            };
+            if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
+                generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+                    .epoch                  = 0,
+                    .accept_len_gpu         = std::move(accept_len),
+                    .accept_tokens_gpu      = std::move(accept_tokens),
+                    .next_seq_len_gpu       = std::move(next_seq_len),
+                    .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+                    .last_hidden_states_gpu = sp_output_buffer->hidden_states,
+                    .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                    .last_real_seq_len      = generate_stream->seqLength(),
+                    .next_real_seq_len      = generate_stream->seqLength(),
+                });
+            }
+        }
     }
 
     generate_stream->resetBeginTime(currentTimeUs());
     RTP_LLM_LOG_DEBUG(
-        "decode init stream[%d]: %s", generate_stream->streamId(), generate_stream->debugString().c_str());
+        "decode init stream[%s]: %s", generate_stream->streamLogTag().c_str(), generate_stream->debugString().c_str());
     engine_->enqueue(generate_stream);
     RTP_LLM_LOG_DEBUG("request [%s] enqueue success", decode_context.request_key.c_str());
     decode_context.error_status =
@@ -323,6 +503,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
             }
         }
     }
+    request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
@@ -385,6 +566,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             }
         }
     }
+    request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
@@ -407,10 +589,17 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
     auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
     auto request_timeout_ms    = decode_context.request_timeout_ms;
-    min_timeout_ms             = request_timeout_ms > 0 ? std::min(request_timeout_ms, min_timeout_ms) : min_timeout_ms;
+    // load_cache_timeout_ms is the KV-cache loading deadline and always applies;
+    // max_rpc_timeout_ms / request_timeout_ms only participate in min when > 0
+    // (<= 0 means unlimited for that knob).
+    int64_t min_timeout_ms = load_cache_timeout_ms;
+    if (max_rpc_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
+    }
+    if (request_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
+    }
 
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
@@ -474,7 +663,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
             string error_msg = "get grpc connection for rank:" + std::to_string(i) + ", addr:" + worker + " failed";
             return ErrorInfo(ErrorCode::GET_CONNECTION_FAILED, error_msg);
         }
-        all_context.push_back(WorkerRpcContext());
         auto& rpc_context = all_context[i];
         rpc_context.stub  = connect_status.value().stub;
         BroadcastLoadRequestPB load_request;
@@ -1187,6 +1375,29 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
     return grpc::Status::OK;
 }
 
+// Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
+// inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
+// running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
+// no duplicate report is produced. NOTE: never call this from functions driven by EXECUTE_WITH_RETRY
+// (e.g. allocateResource), only from final failure points after retries are exhausted.
+void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context,
+                                            int64_t                error_code,
+                                            const std::string&     error_message) {
+    if (decode_context.request_id == 0 || decode_context.early_finish_reported) {
+        return;
+    }
+    decode_context.early_finish_reported = true;
+    auto& stream                         = decode_context.getStream();
+    meta_->finishTask(decode_context.request_id,
+                      stream ? stream->inputLength() : 0,
+                      /*prefix_length=*/0,
+                      error_code,
+                      error_message);
+    RTP_LLM_LOG_DEBUG("request [%s] reported early finished task to master, error_code [%ld]",
+                      decode_context.request_key.c_str(),
+                      error_code);
+}
+
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
     c10::InferenceMode inference_guard(true);
@@ -1197,22 +1408,76 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     decode_context.onflight_requests = onflight_requests_;
     decode_context.loading_cache_requests = loading_cache_requests_;
 
+    // Decode SERVER span: wrapping the handler covers the whole decode
+    // lifecycle of this request; RemoteLoad fan-out stays span-free
+    // (aggregate attribute strategy). RAII guard covers all exit paths.
+    if (telemetry::TelemetryRuntime::isActive()) {
+        auto span = telemetry::startRpcServerSpan(
+            "rtp_llm.decode_remote_generate", server_context, true, "RpcService/RemoteGenerate");
+        decode_context.trace_span_guard =
+            std::make_unique<telemetry::GrpcStatusSpanGuard>(span, &decode_context.error_status);
+    }
+    telemetry::PhaseSpanSynthesisScope phase_span_scope([&decode_context](bool exception_unwinding) {
+        if (!decode_context.trace_span_guard || !decode_context.trace_span_guard->valid()) {
+            return;
+        }
+        auto& stream = decode_context.getStream();
+        if (!stream) {
+            return;
+        }
+        const auto             time_info  = stream->getTimeInfo();
+        const bool             request_ok = decode_context.error_status.ok() && !exception_unwinding;
+        telemetry::PhaseTiming phase_timing;
+        phase_timing.begin_time_us           = time_info.begin_time_us;
+        phase_timing.running_started         = time_info.running_started;
+        phase_timing.running_started_time_us = time_info.running_started_time_us;
+        phase_timing.first_token_committed   = time_info.first_token_committed;
+        phase_timing.first_token_time_us     = time_info.first_token_time_us;
+        phase_timing.generation_done         = time_info.generation_done;
+        phase_timing.generation_done_time_us = time_info.generation_done_time_us;
+        phase_timing.synthesis_end_time_us   = currentTimeUs();
+        phase_timing.request_id              = decode_context.request_id;
+        phase_timing.error_type              = DecodeRpcServer::phaseErrorType(
+            request_ok, decode_context.stat_info.stage, decode_context.error_info, decode_context.error_status);
+        telemetry::synthesizePhaseSpans(
+            decode_context.trace_span_guard->sharedSpan(), phase_timing, telemetry::PhaseRole::Decode, request_ok);
+        if (request_ok && time_info.generation_done) {
+            telemetry::setUsageTokenAttributes(
+                *decode_context.trace_span_guard, (int64_t)stream->inputLength(), (int64_t)stream->outputTokenLen());
+        }
+    });
+
     auto max_retry_times      = maga_init_params_.pd_sep_config.decode_retry_times;
     auto max_retry_timeout_ms = maga_init_params_.pd_sep_config.decode_retry_timeout_ms;
     int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
 
     try {
         EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+        if (decode_context.trace_span_guard) {
+            // request_id becomes known only after the first ALLOCATE message;
+            // `request_id` (string) is the Bailian Unitrace index key
+            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRequestId,
+                                                          std::to_string(decode_context.request_id));
+            decode_context.trace_span_guard->setAttribute(telemetry::kAttrRtpLlmRequestId, decode_context.request_id);
+        }
         EXECUTE_WITH_RETRY(
             allocateResourceFunc, decode_context, max_retry_times, max_retry_timeout_ms, retry_interval_ms);
         if (decode_context.hasError()) {
-            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %d times, cost time ms [%ld], "
+            RTP_LLM_LOG_WARNING("request [%s] allocate resource failed after retry %ld times, cost time ms [%ld], "
                                 "max retry time [%ld], max retry timeout ms [%ld]",
                                 decode_context.request_key.c_str(),
                                 decode_context.retry_times,
                                 decode_context.retry_cost_time_ms,
                                 max_retry_times + 1,
                                 max_retry_timeout_ms);
+            // Retries are exhausted: this is the final failure point, report it to FlexLB so the
+            // scheduler releases its inflight entry without waiting for TTL eviction.
+            auto& stream     = decode_context.getStream();
+            auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
+                                                                                  ErrorCode::MALLOC_FAILED);
+            reportEarlyFinishTask(decode_context,
+                                  error_code,
+                                  "decode allocate resource failed: " + decode_context.error_status.error_message());
             return decode_context.error_status;
         }
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
@@ -1220,11 +1485,15 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
         decode_context.stat_info.nextStage();
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
-        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION), error_msg);
         return decode_context.error_status;
     } catch (...) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch unknown exception";
-        decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        decode_context.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg);
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key, decode_context.error_info);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION), error_msg);
         return decode_context.error_status;
     }
 

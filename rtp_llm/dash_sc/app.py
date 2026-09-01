@@ -17,8 +17,13 @@ import time
 import traceback
 from typing import TYPE_CHECKING, List, Optional
 
+from rtp_llm.config.grammar_tokenizer_info import (
+    build_model_grammar_tokenizer_info_json,
+)
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -35,7 +40,9 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
 
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig
@@ -50,9 +57,26 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
+_BIND_BARRIER_TIMEOUT_S = 600.0
 _PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 _DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+def _init_trace_telemetry() -> None:
+    try:
+        # Every DashScApp process is an external server owner. Unlike the
+        # multi-rank engine, it must initialize its own process-level provider.
+        init_telemetry("dash_sc", 0)
+    except Exception as e:
+        logging.warning("[DashScApp] telemetry init failed: %s", e)
+
+
+def _shutdown_trace_telemetry() -> None:
+    try:
+        shutdown_telemetry()
+    except Exception as e:
+        logging.warning("[DashScApp] telemetry shutdown failed: %s", e)
 
 
 def _pre_stop_drain_seconds() -> float:
@@ -84,6 +108,38 @@ def _is_proxy_mode_enabled() -> bool:
     return os.environ.get(_PROXY_MODE_ENV_KEY, "").strip() == "1" or bool(
         os.environ.get(_FORWARD_ENV_KEY, "").strip()
     )
+
+
+def _wait_for_bind_barrier(bind_barrier, rank_id: int, server_id: int) -> None:
+    if bind_barrier is None:
+        return
+    logging.info(
+        "[DashScApp] waiting at gRPC bind barrier rank_id=%s server_id=%s",
+        rank_id,
+        server_id,
+    )
+    try:
+        arrival_index = bind_barrier.wait(timeout=_BIND_BARRIER_TIMEOUT_S)
+    except threading.BrokenBarrierError as e:
+        raise RuntimeError(
+            f"DashSc gRPC bind barrier failed for rank {rank_id} server {server_id}"
+        ) from e
+    logging.info(
+        "[DashScApp] gRPC bind barrier released rank_id=%s server_id=%s "
+        "arrival_index=%s",
+        rank_id,
+        server_id,
+        arrival_index,
+    )
+
+
+def _abort_bind_barrier(bind_barrier) -> None:
+    if bind_barrier is None:
+        return
+    try:
+        bind_barrier.abort()
+    except Exception as e:
+        logging.warning("[DashScApp] failed to abort gRPC bind barrier: %s", e)
 
 
 class DashScShutdownManager:
@@ -206,13 +262,12 @@ def _derive_echo_prefix_ids(
 ) -> List[int]:
     """Encode ``generate_env_config.think_start_tag`` once to produce the prefill token ids.
 
-    Disabled (returns ``[]``) when ``THINK_MODE`` env is off or ``think_start_tag`` is empty;
-    stays aligned with the engine's thinking switch so dash_sc and the engine turn on/off
-    together. Fail-open: any error returns ``[]`` and logs a warning.
+    DashSC resolves an omitted request mode to adaptive independently of
+    ``THINK_MODE``, so the startup metadata must not be gated by that OpenAI
+    default. An empty ``think_start_tag`` disables the prefix. Fail-open
+    tokenizer errors return ``[]`` and log a warning.
     """
-    if not bool(generate_env_config.think_mode):
-        return []
-    tag = generate_env_config.think_start_tag or ""
+    tag = normalize_think_tag(generate_env_config.think_start_tag or "")
     if not tag:
         return []
     try:
@@ -368,9 +423,11 @@ class DashScApp:
          hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
          request path never leaves this loop.
       4. Construct the proxy servicer on that loop when in proxy mode.
-      5. Call ``self._grpc_server.start_on_loop`` (schedules start on the
+      5. Wait for every DashSc worker to finish initialization at the shared
+         bind barrier.
+      6. Call ``self._grpc_server.start_on_loop`` (schedules start on the
          loop and blocks the main thread until bind succeeds or raises).
-      6. Notify the parent via the pipe, then block the main thread waiting on
+      7. Notify the parent via the pipe, then block the main thread waiting on
          SIGTERM/SIGINT.
     """
 
@@ -515,8 +572,9 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] servicer cleanup failed: %s", e, exc_info=True)
 
-    def start(self, ready_pipe_writer=None) -> None:
+    def start(self, ready_pipe_writer=None, bind_barrier=None) -> None:
         servicer: DashScAppServicer | None = None
+        _init_trace_telemetry()
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
@@ -571,6 +629,29 @@ class DashScApp:
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
                 )
+                # Admission-time grammar validation only makes sense on an LM task
+                # (xgrammar is the only grammar engine; the removed backend selector
+                # is gone).  Other task types leave the validator off and the engine
+                # keeps its old mid-stream rejection behaviour.
+                grammar_config = self.py_env_configs.grammar_config
+                grammar_validator = None
+                if model_config.task_type == TaskType.LANGUAGE_MODEL:
+                    try:
+                        grammar_validator = GrammarValidator(
+                            build_model_grammar_tokenizer_info_json(
+                                base_tok, model_config
+                            ),
+                            grammar_config,
+                            self.py_env_configs.grammar_admission_config,
+                        )
+                    except Exception as e:
+                        # xgrammar (a soft dependency) may be uninstalled or its
+                        # bindings unloadable; admission validation stays off and
+                        # the engine keeps its mid-stream rejection behaviour.
+                        logging.warning(
+                            "[DashScApp] grammar admission validator disabled: %s", e
+                        )
+                        grammar_validator = None
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -583,6 +664,7 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
+                    grammar_validator=grammar_validator,
                 )
 
             loop = self._start_enqueue_loop()
@@ -606,6 +688,11 @@ class DashScApp:
             # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
 
+            _wait_for_bind_barrier(
+                bind_barrier,
+                self.server_config.rank_id,
+                self.server_config.frontend_server_id,
+            )
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,
@@ -625,6 +712,7 @@ class DashScApp:
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
+            _abort_bind_barrier(bind_barrier)
             error_trace = traceback.format_exc()
             logging.error("[DashScApp] start failed: %s\n%s", e, error_trace)
             if ready_pipe_writer is not None:
@@ -645,6 +733,7 @@ class DashScApp:
             if servicer is not None:
                 self._close_servicer_on_loop(servicer)
             self._stop_enqueue_loop()
+            _shutdown_trace_telemetry()
             raise
 
         if ready_pipe_writer is not None:
@@ -668,7 +757,10 @@ class DashScApp:
         try:
             self._shutdown_event.wait()
         finally:
-            self.stop()
+            try:
+                self.stop()
+            finally:
+                _shutdown_trace_telemetry()
 
     def stop(self) -> None:
         self._shutdown_manager.start_unavailable("grpc stop")

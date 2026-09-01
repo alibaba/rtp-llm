@@ -29,6 +29,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -747,9 +749,10 @@ class DispatcherE2ETest {
         FeClient feClient = new FeClient(WebClient.builder(), feConnectionProvider, cfg);
         org.flexlb.dispatcher.FanoutService fanout =
                 new org.flexlb.dispatcher.FanoutService(feClient, DispatcherTestSupport.noopMetrics());
-        BatchScheduleClient batchScheduleClient = new BatchScheduleClient(null, null) {
-            @Override
-            public reactor.core.publisher.Mono<List<org.flexlb.dao.loadbalance.BatchScheduleTarget>> requestTargets(int count) {
+        BatchScheduleClient batchScheduleClient = mock(BatchScheduleClient.class);
+        when(batchScheduleClient.requestTargets(anyInt(), anyBoolean(), anyBoolean()))
+                .thenAnswer(invocation -> {
+                int count = invocation.getArgument(0);
                 if (masterReturnsNoTargets) {
                     // The master resolved no FE for this batch (empty targets — e.g. it has no FE
                     // view, or a slave could not reach it). Every chunk then gets a null fe_url; the
@@ -770,8 +773,7 @@ class DispatcherE2ETest {
                     out.add(t);
                 }
                 return reactor.core.publisher.Mono.just(out);
-            }
-        };
+            });
         PassthroughClient passthrough =
                 new PassthroughClient(WebClient.create(), pool, DispatcherTestSupport.noopMetrics(), cfg);
         org.flexlb.dispatcher.BatchHandler batchHandler =

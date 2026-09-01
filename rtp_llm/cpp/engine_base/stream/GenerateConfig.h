@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -26,6 +27,20 @@ enum class ReturnAllProbsMode {
     ORIGINAL = 2
 };
 
+enum class ThinkingMode {
+    UNSPECIFIED = 0,
+    DISABLED    = 1,
+    ADAPTIVE    = 2,
+    ENABLED     = 3,
+};
+
+inline ThinkingMode normalizeThinkingMode(int value) {
+    if (value < static_cast<int>(ThinkingMode::UNSPECIFIED) || value > static_cast<int>(ThinkingMode::ENABLED)) {
+        return ThinkingMode::UNSPECIFIED;
+    }
+    return static_cast<ThinkingMode>(value);
+}
+
 class GenerateConfig: public autil::legacy::Jsonizable {
 public:
     int global_request_id  = -1;
@@ -52,9 +67,10 @@ public:
     std::optional<std::string> regex;
     std::optional<std::string> ebnf;
     std::optional<std::string> structural_tag;
-    std::optional<std::string> response_format;
-    std::string                adapter_name = "";
-    std::vector<std::string>   adapter_names;
+    // Legacy raw-request compatibility only. Matcher behavior is controlled by GrammarConfig.
+    bool                     grammar_terminate_without_stop_token = false;
+    std::string              adapter_name                         = "";
+    std::vector<std::string> adapter_names;
 
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;
@@ -92,6 +108,7 @@ public:
     bool pd_separation         = false;
 
     bool               in_think_mode       = false;
+    ThinkingMode       thinking_mode       = ThinkingMode::UNSPECIFIED;
     int                max_thinking_tokens = 0;
     std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
@@ -104,8 +121,7 @@ public:
     bool               enable_memory_cache = true;
     bool               enable_remote_cache = true;
     std::string        trace_id;
-    bool               force_batch = false;  // If true, streams with same batch_group_id must be scheduled together
-    std::optional<int> batch_group_timeout;
+    std::optional<int> group_timeout;
     std::string        unique_key;
 
     // 生成式推荐：组合 token 粒度去重与曝光过滤
@@ -123,8 +139,12 @@ public:
     // 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     int cross_seq_diverge_start_combo = 0;
 
-    bool top1() {
+    bool top1() const {
         return top_k == 1;
+    }
+
+    bool stochastic() const {
+        return do_sample && !top1();
     }
 
     std::vector<RoleAddr> role_addrs;
@@ -141,6 +161,11 @@ public:
         return maxNumBeams() > 1;
     }
 
+    bool hasStructuredOutputRequest() const noexcept {
+        // response_format envelope is projected to typed fields by Python ResponseFormatBuilder.
+        return json_schema.has_value() || regex.has_value() || ebnf.has_value() || structural_tag.has_value();
+    }
+
     void addSpecialTokens(const rtp_llm::SpecialTokens& special_tokens) {
         for (const auto& vec : special_tokens.stop_words_id_list) {
             std::vector<int> tmpVec;
@@ -154,6 +179,9 @@ public:
     }
 
     std::string debugString() const {
+        auto summarize_optional_string = [](const std::optional<std::string>& field) {
+            return field.has_value() ? "len=" + std::to_string(field->size()) : std::string("<unset>");
+        };
         std::stringstream debug_string;
         debug_string << "GenerateConfig {"
                      << "max_new_tokens:" << max_new_tokens << ", min_new_tokens:" << min_new_tokens
@@ -169,22 +197,20 @@ public:
                      << ", top_p:" << top_p << ", force_disable_sp_run: " << force_disable_sp_run
                      << ", force_sp_accept: " << force_sp_accept
                      << ", return_all_probs: " << static_cast<int>(return_all_probs)
+                     << ", json_schema: " << summarize_optional_string(json_schema)
+                     << ", regex: " << summarize_optional_string(regex) << ", ebnf: " << summarize_optional_string(ebnf)
+                     << ", structural_tag: " << summarize_optional_string(structural_tag)
                      << ", stop_words_list:" << vectorsToString(stop_words_list)
-                     << ", json_schema: " << (json_schema.has_value() ? std::to_string(json_schema->size()) : "none")
-                     << ", regex: " << (regex.has_value() ? std::to_string(regex->size()) : "none")
-                     << ", ebnf: " << (ebnf.has_value() ? std::to_string(ebnf->size()) : "none")
-                     << ", structural_tag: "
-                     << (structural_tag.has_value() ? std::to_string(structural_tag->size()) : "none")
-                     << ", response_format: "
-                     << (response_format.has_value() ? std::to_string(response_format->size()) : "none")
+                     << ", grammar_terminate_without_stop_token: " << grammar_terminate_without_stop_token
                      << ", can_use_pd_separation: " << can_use_pd_separation << ", pd_separation: " << pd_separation
-                     << ", in_think_mode: " << in_think_mode << ", max_thinking_tokens: " << max_thinking_tokens
+                     << ", in_think_mode: " << in_think_mode << ", thinking_mode: " << static_cast<int>(thinking_mode)
+                     << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", force_batch: " << force_batch
+                     << ", enable_remote_cache: " << enable_remote_cache
                      << ", unique_key: " << unique_key << ", combo_token_size: " << combo_token_size
                      << ", banned_combo_token_ids_size: " << banned_combo_token_ids.size()
                      << ", enable_cross_sequence_ban: " << enable_cross_sequence_ban
@@ -227,7 +253,7 @@ public:
         JSONIZE_OPTIONAL(regex);
         JSONIZE_OPTIONAL(ebnf);
         JSONIZE_OPTIONAL(structural_tag);
-        JSONIZE_OPTIONAL(response_format);
+        JSONIZE(grammar_terminate_without_stop_token);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);
@@ -293,6 +319,9 @@ public:
         JSONIZE(sp_advice_prompt);
         JSONIZE(sp_advice_prompt_token_ids);
         JSONIZE(in_think_mode);
+        int thinking_mode_int = static_cast<int>(thinking_mode);
+        json.Jsonize("thinking_mode", thinking_mode_int, thinking_mode_int);
+        thinking_mode = normalizeThinkingMode(thinking_mode_int);
         JSONIZE(max_thinking_tokens);
         JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
@@ -303,9 +332,8 @@ public:
         JSONIZE(enable_device_cache);
         JSONIZE(enable_memory_cache);
         JSONIZE(enable_remote_cache);
-        JSONIZE(force_batch);
         JSONIZE(aux_info);
-        JSONIZE_OPTIONAL(batch_group_timeout);
+        JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
         JSONIZE(combo_token_size);
         JSONIZE(banned_combo_token_ids);

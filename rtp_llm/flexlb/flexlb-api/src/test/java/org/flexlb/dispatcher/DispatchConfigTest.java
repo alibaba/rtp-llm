@@ -33,6 +33,9 @@ class DispatchConfigTest {
         assertEquals(30_000, c.getBatchTimeoutMs(),
                 "non-streaming generation endpoints return headers only after the full "
                         + "generation completes — 5s killed legitimate large chunks");
+        assertEquals("master", c.getFeAllocation());
+        assertFalse(c.isPreAssignBe(),
+                "first rollout must be safe for mixed-version FE fleets");
     }
 
     @Test
@@ -170,29 +173,46 @@ class DispatchConfigTest {
     }
 
     @Test
-    void preAssignBeDefaultsTrue() {
+    void preAssignBeDefaultsFalseForRollingUpgradeSafety() {
         DispatchConfig c = load("{\"fePoolServiceId\":\"x\"}");
-        assertTrue(c.isPreAssignBe(),
-                "preAssignBe defaults to true: stamping uses generate_config.role_addrs which "
-                        + "FE already supports natively (backend_rpc_server_visitor.route_ips), "
-                        + "so there's no FE-side prerequisite to gate this on");
-    }
-
-    @Test
-    void preAssignBeJsonExplicitFalseDisables() {
-        DispatchConfig c = load("{\"fePoolServiceId\":\"x\",\"preAssignBe\":false}");
         assertFalse(c.isPreAssignBe(),
-                "operator opt-out via JSON must be honored — explicit false beats default true");
+                "older FEs cannot deserialize HTTP role_addrs; operators opt in after convergence");
     }
 
     @Test
-    void envOverridesPreAssignBeOff() {
+    void preAssignBeJsonExplicitTrueEnables() {
+        DispatchConfig c = load("{\"fePoolServiceId\":\"x\",\"preAssignBe\":true}");
+        assertTrue(c.isPreAssignBe(),
+                "operator opt-in via JSON must be honored after FE versions converge");
+    }
+
+    @Test
+    void envOverridesPreAssignBeOn() {
         Map<String, String> env = mutableEnv(
                 "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\"}",
-                "DISPATCH_PRE_ASSIGN_BE", "false");
+                "DISPATCH_PRE_ASSIGN_BE", "true");
         DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
-        assertFalse(c.isPreAssignBe(),
-                "DISPATCH_PRE_ASSIGN_BE=false must turn the optimization off without code change");
+        assertTrue(c.isPreAssignBe(),
+                "DISPATCH_PRE_ASSIGN_BE=true must opt into the optimization without code change");
+    }
+
+    @Test
+    void feAllocationCanSwitchToLocalViaJsonOrEnv() {
+        assertEquals("local", load("{\"fePoolServiceId\":\"x\",\"feAllocation\":\"LOCAL\"}")
+                .getFeAllocation(), "validation normalizes JSON values");
+
+        Map<String, String> env = mutableEnv(
+                "DISPATCH_CONFIG", "{\"fePoolServiceId\":\"x\",\"feAllocation\":\"master\"}",
+                "DISPATCH_FE_ALLOCATION", "local");
+        assertEquals("local", DispatcherConfiguration.loadAndValidate(env).getFeAllocation(),
+                "the incident escape hatch must be selectable through a per-field env override");
+    }
+
+    @Test
+    void invalidFeAllocationFailsAtBoot() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"feAllocation\":\"nearest\"}"));
+        assertTrue(error.getMessage().contains("master, local"));
     }
 
     @Test

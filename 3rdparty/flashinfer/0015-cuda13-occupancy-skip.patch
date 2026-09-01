@@ -1,0 +1,60 @@
+--- include/flashinfer/attention/scheduler.cuh
++++ include/flashinfer/attention/scheduler.cuh
+@@ -162,16 +162,18 @@
+         2 * NUM_STAGES_SMEM * tile_size_per_bdx * bdy * bdz * HEAD_DIM * sizeof(DTypeKV) +
+         std::max(tile_size_per_bdx * num_threads * sizeof(DTypeKV*), 2 * bdy * bdz * sizeof(float));
+ 
+-    auto kernel =
+-        BatchDecodeWithPagedKVCacheKernel<POS_ENCODING_MODE, NUM_STAGES_SMEM, tile_size_per_bdx,
+-                                          vec_size, bdx, bdy, bdz, AttentionVariant, Params>;
+-    int num_blocks_per_sm = 0;
++    (void)num_threads;
++    (void)smem_size;
++    // CUDA 13 nvcc emits __global__ template instantiations with local/internal
++    // linkage (Itanium L-prefix mangling), so taking the kernel's address from
++    // another TU (e.g. batch_decode.cu vs batch_paged_decode_*.cu) fails to
++    // resolve at link time. Skip cudaOccupancy and use a conservative heuristic;
++    // only affects the split_kv decision, not correctness.
++    int num_blocks_per_sm = 2;
+     int num_sm = 0;
+     int dev_id = 0;
+     FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+     FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
+-    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+-                                                                       num_threads, smem_size));
+     max_grid_size = num_blocks_per_sm * num_sm;
+     if (batch_size * gdy >= max_grid_size) {
+       split_kv = false;
+@@ -228,16 +230,14 @@
+         NUM_STAGES_SMEM * bdy * bdz * (HEAD_DIM_CKV + HEAD_DIM_KPE) * sizeof(DTypeKV) +
+         std::max(num_threads * sizeof(size_t) * 2, 2 * bdy * bdz * sizeof(float));
+ 
+-    auto kernel =
+-        BatchDecodeWithPagedKVCacheKernelMLA<NUM_STAGES_SMEM, vec_size_ckv, vec_size_kpe, bdx, bdy,
+-                                             bdz, tile_size_qo_heads, AttentionVariant, Params>;
+-    int num_blocks_per_sm = 0;
++    (void)num_threads;
++    (void)smem_size;
++    // See note above: CUDA 13 local-linkage kernels cannot be referenced cross-TU.
++    int num_blocks_per_sm = 2;
+     int num_sm = 0;
+     int dev_id = 0;
+     FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+     FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
+-    FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+-                                                                       num_threads, smem_size));
+     max_grid_size = num_blocks_per_sm * num_sm;
+     if (batch_size * gdy >= max_grid_size) {
+       split_kv = false;
+@@ -284,8 +284,9 @@
+           num_qo_heads);
+   gdy_ = gdy;
+   const uint32_t num_threads = k_warps * 32;
+-  auto kernel =
+-      BatchDecodeWithPagedKVCacheKernelMlaCuteSM80<HEAD_DIM_CKV, HEAD_DIM_KPE, QO_TILE_LEN, Params>;
++  (void)num_threads;
++  (void)smem_size;
++  // CUDA 13: avoid cross-TU kernel address access (see WorkEstimation above).
+   int num_blocks_per_sm;
+   int num_sm = 0;
+   int dev_id = 0;

@@ -46,7 +46,6 @@ py_test (
     name = "mla_perf_test",
     srcs = ["mla_perf_test.py", "mla_attention_ref.py"],
     deps = py_test_deps + [
-        "//rtp_llm:testlib",
     ],
     tags = ["open_skip", "H20", "manual"],
     exec_properties = {'gpu':'H20'},

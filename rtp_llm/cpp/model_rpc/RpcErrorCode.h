@@ -12,7 +12,21 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::CANCELLED, grpc::StatusCode::CANCELLED},
         {ErrorCode::MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::DECODE_MALLOC_FAILED, grpc::StatusCode::RESOURCE_EXHAUSTED},
+        // AutoTPM Cancel: victim terminal maps to
+        // RESOURCE_EXHAUSTED (HTTP 429 upstream); exact 8429 travels in
+        // ErrorDetailsPB trailing metadata.
+        {ErrorCode::PRIORITY_PREEMPTED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::CONNECT_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::DEADLINE_EXCEEDED, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::WAIT_TO_RUN_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::KEEP_ALIVE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::LOAD_CACHE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::CACHE_STORE_CALL_PREFILL_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TRANSFER_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
+        {ErrorCode::P2P_CONNECTOR_WORKER_READ_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
     };

@@ -177,6 +177,117 @@ void setGroupStridesForConfig(CacheConfig&               config,
     config.setGroupBlockLayout(block_nums, kv_block_stride_bytes, kv_scale_stride_bytes);
 }
 
+ModelConfig makeDsv4ProModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                                                = 61;
+    mc.hidden_size                                               = 7168;
+    mc.attn_config.head_num                                      = 128;
+    mc.attn_config.kv_head_num                                   = 1;
+    mc.attn_config.size_per_head                                 = 512;
+    mc.attn_config.rope_head_dim                                 = 64;
+    mc.attn_config.indexer_head_dim                              = 128;
+    mc.attn_config.indexer_head_num                              = 64;
+    mc.attn_config.indexer_topk                                  = 1024;
+    mc.attn_config.tokens_per_block                              = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    std::vector<int> ratios                                      = {128, 128};
+    for (int i = 2; i < 61; ++i) {
+        ratios.push_back((i % 2 == 0) ? 4 : 128);
+    }
+    setDsv4KvCacheSpecs(mc, ratios);
+    return mc;
+}
+
+ModelConfig makeDsv4FlashModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                                                = 43;
+    mc.hidden_size                                               = 4096;
+    mc.attn_config.head_num                                      = 64;
+    mc.attn_config.kv_head_num                                   = 1;
+    mc.attn_config.size_per_head                                 = 512;
+    mc.attn_config.rope_head_dim                                 = 64;
+    mc.attn_config.indexer_head_dim                              = 128;
+    mc.attn_config.indexer_head_num                              = 64;
+    mc.attn_config.indexer_topk                                  = 512;
+    mc.attn_config.tokens_per_block                              = 128;
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    std::vector<int> ratios                                      = {0, 0};
+    for (int i = 2; i < 43; ++i) {
+        ratios.push_back((i % 2 == 0) ? 4 : 128);
+    }
+    setDsv4KvCacheSpecs(mc, ratios);
+    return mc;
+}
+
+CacheConfig makeRealDsv4TypedMemoryCopyConfig(bool use_flash) {
+    auto              mc = use_flash ? makeDsv4FlashModelConfig() : makeDsv4ProModelConfig();
+    ParallelismConfig pc;
+    KVCacheConfig     kv_config;
+    kv_config.seq_size_per_block        = 128;
+    kv_config.kernel_seq_size_per_block = 128;
+    kv_config.dsv4_fixed_pool_blocks    = 512;
+    auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
+    config.block_num                    = 512;
+    return config;
+}
+
+CacheConfig makeTinyTypedHybridPoolConfig() {
+    CacheConfig config;
+    config.dtype                       = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num                   = 2;
+    config.layer_all_num               = 2;
+    config.block_num                   = 16;
+    config.seq_size_per_block          = 4;
+    config.kernel_seq_size_per_block   = 4;
+    config.use_independent_block_pools = true;
+
+    config.fromGroupedSpecs({makeMhaSpec("csa_kv", config.seq_size_per_block, config.dtype, 1, 4),
+                             makeMhaSpec("swa_kv", config.seq_size_per_block, config.dtype, 1, 8)},
+                            /*layers_by_group=*/{{0, 1}, {0, 1}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                            {"csa_kv", "swa_kv"});
+    config.setGroupBlockLayout({config.block_num, config.block_num}, {16, 32}, {0, 0});
+    return config;
+}
+
+CacheConfig makeKvOnlyTypedOpaqueConfig() {
+    CacheConfig config;
+    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                   = 2;
+    config.layer_all_num               = 2;
+    config.block_num                   = 16;
+    config.seq_size_per_block          = 256;
+    config.kernel_seq_size_per_block   = 256;
+    config.use_independent_block_pools = true;
+    config.use_typed_cache_regions     = true;
+    config.use_opaque_kv_cache_store   = true;
+
+    const auto seq_size = static_cast<uint32_t>(config.seq_size_per_block);
+    config.fromGroupedSpecs({makeResolvedOpaqueSpec(/*state_cache=*/false, "csa_kv", config.dtype, 64, seq_size),
+                             makeResolvedOpaqueSpec(/*state_cache=*/false, "indexer_kv", config.dtype, 32, seq_size)},
+                            /*layers_by_group=*/{{0, 1}, {0, 1}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                            {"csa_kv", "indexer_kv"});
+    config.setGroupBlockLayout({config.block_num, config.block_num}, {64, 32}, {0, 0});
+    return config;
+}
+
+char copyTag(size_t index) {
+    return static_cast<char>(33 + (index % 90));
+}
+
+size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) {
+    size_t total = 0;
+    for (const auto& b : infos) {
+        if (b.addr && b.size_bytes > 0) {
+            total += b.size_bytes;
+        }
+    }
+    return total;
+}
+
 void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) {
     ASSERT_NE(b.addr, nullptr);
     ASSERT_LE(byte_offset + byte_len, b.size_bytes);
@@ -390,6 +501,200 @@ private:
 };
 
 }  // namespace
+
+TEST(KVCacheBatchedMemoryCopyTest, StagedCopyEligibilityRequiresDsv4TypedLayout) {
+    KVCacheConfig            kv_config;
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+
+    // A typed multi-tag layout backed by plain MHA specs is typed but not staged-copy eligible.
+    auto non_dsv4_config    = makeTinyTypedHybridPoolConfig();
+    auto non_dsv4_connector = std::make_shared<KVCacheMemoryConnector>(
+        non_dsv4_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    const auto non_dsv4_slots = non_dsv4_connector->layerTagSlots();
+    ASSERT_TRUE(non_dsv4_connector->hasTypedLayerTagSlots(non_dsv4_slots));
+    EXPECT_FALSE(non_dsv4_connector->supportsTypedPrefixCacheLayout(non_dsv4_slots));
+
+    // The typed opaque layout is only eligible when all typed-cache feature flags are enabled.
+    auto no_typed_regions_config                    = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    no_typed_regions_config.use_typed_cache_regions = false;
+    auto no_typed_regions_connector                 = std::make_shared<KVCacheMemoryConnector>(
+        no_typed_regions_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_FALSE(
+        no_typed_regions_connector->supportsTypedPrefixCacheLayout(no_typed_regions_connector->layerTagSlots()));
+
+    auto no_opaque_store_config                      = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    no_opaque_store_config.use_opaque_kv_cache_store = false;
+    auto no_opaque_store_connector                   = std::make_shared<KVCacheMemoryConnector>(
+        no_opaque_store_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_FALSE(no_opaque_store_connector->supportsTypedPrefixCacheLayout(no_opaque_store_connector->layerTagSlots()));
+
+    // A kv-only opaque schema without any opaque-state group does not match the DSv4 typed layout.
+    auto kv_only_config    = makeKvOnlyTypedOpaqueConfig();
+    auto kv_only_connector = std::make_shared<KVCacheMemoryConnector>(
+        kv_only_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_FALSE(kv_only_connector->supportsTypedPrefixCacheLayout(kv_only_connector->layerTagSlots()));
+
+    // The compact fixture used by the staged round-trip tests below is eligible.
+    auto compact_config    = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    auto compact_connector = std::make_shared<KVCacheMemoryConnector>(
+        compact_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_TRUE(compact_connector->supportsTypedPrefixCacheLayout(compact_connector->layerTagSlots()));
+
+    // Real DSv4 Flash/Pro configs built by HybridPoolConfigCreator are eligible.
+    auto flash_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    auto flash_connector = std::make_shared<KVCacheMemoryConnector>(
+        flash_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_EQ(flash_config.layer_num, 43u);
+    EXPECT_TRUE(flash_connector->supportsTypedPrefixCacheLayout(flash_connector->layerTagSlots()));
+
+    auto pro_config    = makeRealDsv4TypedMemoryCopyConfig(/*use_flash=*/false);
+    auto pro_connector = std::make_shared<KVCacheMemoryConnector>(
+        pro_config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    EXPECT_EQ(pro_config.layer_num, 61u);
+    EXPECT_TRUE(pro_connector->supportsTypedPrefixCacheLayout(pro_connector->layerTagSlots()));
+}
+
+void runDsv4TypedStagedCopyRoundTrip(const std::set<std::string>& host_tags) {
+    const auto set_device_rc = cudaSetDevice(0);
+    ASSERT_EQ(set_device_rc, cudaSuccess) << cudaGetErrorString(set_device_rc);
+
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb            = 64;
+    kv_config.memory_cache_sync_timeout_ms    = 1000;
+    kv_config.enable_prefix_tree_memory_cache = false;
+
+    std::set<int> host_groups;
+    for (const auto& tag : host_tags) {
+        host_groups.insert(config.groupIdForTag(tag));
+    }
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config, /*payload_gap_bytes=*/8, host_groups);
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
+    ASSERT_TRUE(connector->init());
+    auto memory_pool = connector->isDualPool() ? connector->complete_pool_ : connector->block_pool_;
+    ASSERT_NE(memory_pool, nullptr);
+
+    const auto slots = connector->layerTagSlots();
+    ASSERT_TRUE(connector->hasTypedLayerTagSlots(slots));
+    ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
+    ASSERT_GT(slots.size(), config.layer_all_num);
+
+    auto mem_blocks = memory_pool->malloc(2);
+    ASSERT_EQ(mem_blocks.size(), 2u);
+    const std::vector<BlockIdxType> request_mem_blocks{static_cast<BlockIdxType>(mem_blocks[1]),
+                                                       static_cast<BlockIdxType>(mem_blocks[0])};
+
+    MemoryOperationRequestPB               req;
+    std::vector<std::vector<BlockIdxType>> gpu_block_sets(request_mem_blocks.size(),
+                                                          std::vector<BlockIdxType>(slots.size(), NULL_BLOCK_IDX));
+    BlockIdxType                           next_gpu_block = 1;
+    for (auto& gpu_blocks : gpu_block_sets) {
+        for (auto& gpu_block : gpu_blocks) {
+            gpu_block = next_gpu_block++;
+        }
+    }
+    ASSERT_LT(next_gpu_block, static_cast<BlockIdxType>(config.block_num));
+    ASSERT_EQ(gpu_block_sets.size(), request_mem_blocks.size());
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        auto* item = req.add_copy_items();
+        item->set_mem_block(request_mem_blocks[block_idx]);
+        item->set_backing_type(MemoryOperationRequestPB::MEMORY);
+        item->set_cache_block_kind(MemoryOperationRequestPB::COMPLETE_KV);
+        item->set_is_complete(true);
+        ASSERT_EQ(gpu_block_sets[block_idx].size(), slots.size());
+        addTaggedGpuBlocks(*item, slots, gpu_block_sets[block_idx]);
+    }
+
+    KVCacheMemoryConnector::NormalizedCopyItems items;
+    items.reserve(static_cast<size_t>(req.copy_items_size()));
+    for (const auto& wire_item : req.copy_items()) {
+        items.push_back(KVCacheMemoryConnector::normalizeCopyItem(wire_item, slots));
+    }
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        ASSERT_EQ(mem_bufs.size(), 1u);
+        const auto& mem_buffer = mem_bufs[0];
+        ASSERT_NE(mem_buffer.addr, nullptr);
+        setBlockBytes(mem_buffer, /*byte_offset=*/0, mem_buffer.size_bytes, '#');
+
+        size_t byte_off = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const char  tag  = copyTag(block_idx * slots.size() + i);
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+            ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
+            ASSERT_LE(sumBlockInfosBytes(gpu_bufs), slot.stride_bytes);
+            setBlockInfosContent(gpu_bufs, tag);
+            setBlockBytes(mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), 0);
+            byte_off += slot.stride_bytes;
+        }
+    }
+
+    ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(items, KVCacheMemoryConnector::CopyDirection::D2H, slots));
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        ASSERT_EQ(mem_bufs.size(), 1u);
+        const auto& mem_buffer = mem_bufs[0];
+
+        size_t byte_off = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+            verifyBlockBytesEq(
+                mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), copyTag(block_idx * slots.size() + i));
+            if (slot.stride_bytes > sumBlockInfosBytes(gpu_bufs)) {
+                verifyBlockBytesEq(mem_buffer,
+                                   byte_off + sumBlockInfosBytes(gpu_bufs),
+                                   slot.stride_bytes - sumBlockInfosBytes(gpu_bufs),
+                                   '#');
+            }
+            byte_off += slot.stride_bytes;
+        }
+    }
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        const auto mem_bufs = memory_pool->convertIndexToBuffer(0, request_mem_blocks[block_idx]);
+        ASSERT_EQ(mem_bufs.size(), 1u);
+        const auto& mem_buffer = mem_bufs[0];
+
+        size_t byte_off = 0;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const char  tag  = copyTag(1000 + block_idx * slots.size() + i);
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+            setBlockInfosContent(gpu_bufs, 0);
+            setBlockBytes(mem_buffer, byte_off, sumBlockInfosBytes(gpu_bufs), tag);
+            byte_off += slot.stride_bytes;
+        }
+    }
+
+    ASSERT_TRUE(connector->tryCopyCacheWithStagedMemoryCopy(items, KVCacheMemoryConnector::CopyDirection::H2D, slots));
+
+    for (size_t block_idx = 0; block_idx < request_mem_blocks.size(); ++block_idx) {
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const auto& slot = slots[i];
+            const auto  gpu_bufs =
+                allocator->convertIndexToBuffer(slot.layer_id, slot.group_id, gpu_block_sets[block_idx][i]);
+            verifyBlockInfosContent(gpu_bufs, copyTag(1000 + block_idx * slots.size() + i));
+        }
+    }
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedLayoutUsesStagedCopyForD2HAndH2D) {
+    runDsv4TypedStagedCopyRoundTrip({});
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, Dsv4TypedStagedCopySupportsHostBackedStateRegions) {
+    runDsv4TypedStagedCopyRoundTrip({"indexer_state", "csa_state", "hca_state"});
+}
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);

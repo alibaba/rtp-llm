@@ -79,7 +79,10 @@ class DispatcherMetricsReporterTest {
         assertEquals("/v1/embeddings", itemsTags.getValue().getTags().get("path"));
         assertEquals(1, itemsTags.getValue().getTags().size());
 
-        verify(monitor).report(eq(DISPATCHER_BATCH_CHUNKS), itemsTags.capture(), eq(5.0));
+        ArgumentCaptor<FlexMetricTags> chunksTags = ArgumentCaptor.forClass(FlexMetricTags.class);
+        verify(monitor).report(eq(DISPATCHER_BATCH_CHUNKS), chunksTags.capture(), eq(5.0));
+        assertEquals("/v1/embeddings", chunksTags.getValue().getTags().get("path"));
+        assertEquals(1, chunksTags.getValue().getTags().size());
     }
 
     @Test
@@ -88,6 +91,8 @@ class DispatcherMetricsReporterTest {
         ArgumentCaptor<FlexMetricTags> okTags = ArgumentCaptor.forClass(FlexMetricTags.class);
         verify(monitor).report(eq(DISPATCHER_PREASSIGN_RT), okTags.capture(), eq(7.0));
         assertEquals("ok", okTags.getValue().getTags().get("result"));
+        assertEquals("true", okTags.getValue().getTags().get("assign_be"));
+        assertEquals("true", okTags.getValue().getTags().get("assign_fe"));
 
         reporter.reportPreassignRt(3L, false);
         ArgumentCaptor<FlexMetricTags> emptyTags = ArgumentCaptor.forClass(FlexMetricTags.class);
@@ -98,7 +103,20 @@ class DispatcherMetricsReporterTest {
     @Test
     void reportFanoutRt_emitsLatency() {
         reporter.reportFanoutRt(123L);
-        verify(monitor).report(eq(DISPATCHER_FANOUT_RT), eq(FlexMetricTags.of()), eq(123.0));
+        verify(monitor).report(eq(DISPATCHER_FANOUT_RT),
+                eq(FlexMetricTags.of("fe_allocation", "master")), eq(123.0));
+    }
+
+    @Test
+    void allocationMetricsExposeFeOnlyAndLocalModes() {
+        reporter.reportPreassignRt(5L, true, false, true);
+        verify(monitor).report(eq(DISPATCHER_PREASSIGN_RT),
+                eq(FlexMetricTags.of("result", "ok", "assign_be", "false", "assign_fe", "true")),
+                eq(5.0));
+
+        reporter.reportFanoutRt(9L, "local");
+        verify(monitor).report(eq(DISPATCHER_FANOUT_RT),
+                eq(FlexMetricTags.of("fe_allocation", "local")), eq(9.0));
     }
 
     @Test

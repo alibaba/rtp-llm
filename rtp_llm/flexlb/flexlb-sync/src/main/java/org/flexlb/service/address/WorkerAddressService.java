@@ -2,6 +2,8 @@ package org.flexlb.service.address;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.tuple.Pair;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
@@ -35,25 +37,27 @@ public class WorkerAddressService {
     private final EngineHealthReporter engineHealthReporter;
     private final ModelMetaConfig modelMetaConfig;
     private final ServiceDiscovery serviceDiscovery;
-    /**
-     * Service discovery request thread pool
-     */
-    public static final ExecutorService serviceDiscoveryExecutor = new ThreadPoolExecutor(
-            10,
-            1000,
-            60L,
-            TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
-            new NamedThreadFactory("service-discovery-executor"),
-            new ThreadPoolExecutor.CallerRunsPolicy()
-    );
 
-    public WorkerAddressService(EngineHealthReporter engineHealthReporter,
-                                ModelMetaConfig modelMetaConfig,
-                                ServiceDiscovery serviceDiscovery) {
+    /** Service-discovery request pool shared by all model/role lookups. */
+    public static ExecutorService serviceDiscoveryExecutor;
 
+    public WorkerAddressService(
+            EngineHealthReporter engineHealthReporter,
+            ModelMetaConfig modelMetaConfig,
+            ServiceDiscovery serviceDiscovery,
+            ConfigService configService) {
         this.engineHealthReporter = engineHealthReporter;
         this.modelMetaConfig = modelMetaConfig;
         this.serviceDiscovery = serviceDiscovery;
+        FlexlbConfig config = configService.loadBalanceConfig();
+        serviceDiscoveryExecutor = new ThreadPoolExecutor(
+                10,
+                config.getServiceDiscoveryMaxSize(),
+                60L,
+                TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(1000),
+                new NamedThreadFactory("service-discovery-executor"),
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     @PreDestroy
@@ -62,78 +66,92 @@ public class WorkerAddressService {
     }
 
     /**
-     * Resolves every worker for a role across all of its discovery groups.
-     *
-     * <p>Failure is intentionally all-or-nothing: {@link #getServiceHosts} throws
-     * {@link ServiceDiscoveryException} on a failed/timed-out lookup, and this method does not
-     * catch it, so a discovery failure on <em>any</em> group aborts the whole role update. The
-     * caller ({@code EngineSyncRunner}) then rides out the gap by freezing the entire role's
-     * membership within its grace window. This is deliberate: a partial update that silently
-     * dropped a group whose discovery merely blipped would reintroduce the exact "outage looks
-     * like an empty fleet" bug the {@link ServiceDiscoveryException} contract exists to prevent.
-     * Per-group degradation would require the same grace treatment applied per group.
+     * Resolve every worker for a role across all discovery groups.
+     * A failure in any group aborts the snapshot so callers can retain the previous complete view.
      */
-    public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
-        ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(IdUtils.getServiceIdByModelName(modelName));
+    public List<WorkerHost> getEngineWorkerList(String modelName, RoleType roleType) {
+        ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(
+                IdUtils.getServiceIdByModelName(modelName));
         if (serviceRoute == null) {
             logger.info("modelName={} service route not found", modelName);
             return new ArrayList<>();
         }
+
         List<WorkerHost> workerHosts = new ArrayList<>();
-        List<Pair<String, Endpoint>> endpoints = serviceRoute.getAllEndpointsWithGroup(modelEndpointType);
-        for (Pair<String, Endpoint> endpointTuple : endpoints) {
+        for (Pair<String, Endpoint> endpointTuple
+                : serviceRoute.getAllEndpointsWithGroup(roleType)) {
             String groupName = endpointTuple.getLeft();
             Endpoint endpoint = endpointTuple.getRight();
             if (endpoint == null) {
-                logger.info("modelName={} endpoint is null, endpointType={}", modelName, modelEndpointType);
+                logger.info("modelName={} endpoint is null, endpointType={}",
+                        modelName, roleType);
                 continue;
             }
-            String address = endpoint.getAddress();
-            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
+            workerHosts.addAll(convertServiceDiscoveryHosts(
+                    getServiceHosts(modelName, endpoint.getAddress()),
+                    endpoint.getProtocol(),
+                    groupName));
         }
         return workerHosts;
     }
 
     /**
-     * Resolves the hosts behind one discovery address. A successful lookup may legitimately
-     * return an empty list (the service has no hosts); a failed or timed-out lookup throws
-     * {@link ServiceDiscoveryException} so callers never mistake an outage for an empty fleet.
+     * Resolve one discovery address. An empty list is a successful empty fleet; timeout or failure
+     * throws so the caller never interprets an outage as authoritative membership removal.
      */
     public List<WorkerHost> getServiceHosts(String modelName, String address) {
-        // Use all machines mounted on the first service discovery address in ServiceRoute
-        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(address));
+        Future<List<WorkerHost>> future =
+                serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(address));
         try {
-            // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return future.get(500, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
+        } catch (TimeoutException error) {
             future.cancel(true);
-            logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null, null);
-            throw new ServiceDiscoveryException(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT,
-                    "service discovery timeout, model=" + modelName + ", address=" + address, e);
-        } catch (Exception e) {
+            logger.error("query service discovery timeout, model={}, address={}",
+                    modelName, address);
+            engineHealthReporter.reportStatusCheckerFail(
+                    modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+            throw new ServiceDiscoveryException(
+                    BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT,
+                    "service discovery timeout, model=" + modelName + ", address=" + address,
+                    error);
+        } catch (InterruptedException error) {
             future.cancel(true);
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
-            Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
-            logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, cause.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null, null);
-            throw new ServiceDiscoveryException(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR,
-                    "service discovery failed, model=" + modelName + ", address=" + address + ", msg=" + cause.getMessage(), cause);
+            Thread.currentThread().interrupt();
+            throw discoveryFailure(modelName, address, error);
+        } catch (ExecutionException error) {
+            future.cancel(true);
+            Throwable cause = error.getCause() == null ? error : error.getCause();
+            throw discoveryFailure(modelName, address, cause);
         }
     }
 
-    public List<WorkerHost> convertServiceDiscoveryHosts(List<WorkerHost> hosts, String protocol, String groupName) {
+    private ServiceDiscoveryException discoveryFailure(
+            String modelName, String address, Throwable cause) {
+        logger.error("query service discovery error, model={}, address={}, msg:{}",
+                modelName, address, cause.getMessage());
+        engineHealthReporter.reportStatusCheckerFail(
+                modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+        return new ServiceDiscoveryException(
+                BalanceStatusEnum.SERVICE_DISCOVERY_ERROR,
+                "service discovery failed, model=" + modelName
+                        + ", address=" + address + ", msg=" + cause.getMessage(),
+                cause);
+    }
+
+    public List<WorkerHost> convertServiceDiscoveryHosts(
+            List<WorkerHost> hosts, String protocol, String groupName) {
         List<WorkerHost> workerHosts = new ArrayList<>();
         for (WorkerHost host : hosts) {
             if (BackendServiceProtocolEnum.GRPC.getName().equals(protocol)) {
-                workerHosts.add(new WorkerHost(host.getIp(), host.getPort() - 1, host.getPort(), host.getPort() + 4, host.getSite(), groupName));
+                workerHosts.add(new WorkerHost(
+                        host.getIp(), host.getPort() - 1, host.getPort(),
+                        host.getPort() + 4, host.getSite(), groupName));
             } else {
-                workerHosts.add(new WorkerHost(host.getIp(), host.getPort(), host.getPort() + 1, host.getPort() + 5, host.getSite(), groupName));
+                workerHosts.add(new WorkerHost(
+                        host.getIp(), host.getPort(), host.getPort() + 1,
+                        host.getPort() + 5, host.getSite(), groupName));
             }
         }
         return workerHosts;
     }
-
 }

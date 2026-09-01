@@ -3,6 +3,7 @@ import copy
 import logging
 import queue
 import threading
+from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
@@ -24,7 +25,10 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+    get_role_names,
+)
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
@@ -63,6 +67,8 @@ class Pipeline(object):
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
@@ -83,6 +89,8 @@ class Pipeline(object):
             vit_separation=vit_separation,
             server_config=server_config,
             master_config=master_config,
+            parallelism_config=parallelism_config,
+            prefill_cp_config=prefill_cp_config,
         )
 
     async def close(self) -> None:
@@ -195,7 +203,7 @@ class Pipeline(object):
                     url,
                     MMUrlType.DEFAULT,
                     torch.empty(0),
-                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+                    MMPreprocessConfig(),
                 )
                 for url in urls
             ]
@@ -524,8 +532,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
-            batch_group_size=kwargs.get("batch_group_size", 1),
-            batch_group_id=kwargs.get("batch_group_id", -1),
+            group_size=kwargs.get("group_size", 1),
+            group_id=kwargs.get("group_id", -1),
             headers=request_headers,
         )
 
@@ -534,17 +542,41 @@ class Pipeline(object):
         stop_word_ids = generate_config.stop_words_list
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
-        stream: AsyncGenerator[GenerateOutputs, None] = (
-            await self.backend_rpc_server_visitor.enqueue(input)
-        )
-
         decoding_states: List[DecodingState] = []
         ouput_tokens_list: List[torch.Tensor] = []
         token_buffers: List[str] = []
         generate_outputs_cache = GenerateOutputs()
 
+        async def backend_stream():
+            try:
+                stream: AsyncGenerator[GenerateOutputs, None] = (
+                    await self.backend_rpc_server_visitor.enqueue(input)
+                )
+                async for generate_outputs in stream:
+                    yield generate_outputs
+            except BaseException as e:
+                aux_info = None
+                if generate_outputs_cache.generate_outputs:
+                    aux_info = generate_outputs_cache.generate_outputs[0].aux_info
+                aux_info_dict = asdict(aux_info) if aux_info is not None else {}
+                aux_info_dict.setdefault("input_len", input.prompt_length)
+                aux_info_dict.setdefault("output_len", 0)
+                aux_info_dict.setdefault("step_output_len", 0)
+                aux_info_dict.setdefault("reuse_len", 0)
+                role_addrs = input.generate_config.role_addrs or []
+                if role_addrs:
+                    aux_info_dict["role_addrs"] = [
+                        role_addr.model_dump(mode="json") for role_addr in role_addrs
+                    ]
+                    roles = get_role_names(role_addrs)
+                    aux_info_dict.setdefault(
+                        "pd_sep", {"PREFILL", "DECODE"}.issubset(roles)
+                    )
+                e.aux_info = aux_info_dict
+                raise
+
         # TODO(xinfei.sxf) add batch and stop test
-        async for generate_outputs in stream:
+        async for generate_outputs in backend_stream():
             if not generate_outputs_cache.generate_outputs:
                 generate_outputs_cache.generate_outputs = (
                     generate_outputs.generate_outputs

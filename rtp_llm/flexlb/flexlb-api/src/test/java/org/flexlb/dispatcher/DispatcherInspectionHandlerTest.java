@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -198,13 +199,14 @@ class DispatcherInspectionHandlerTest {
                 assertTrue(out.get("preAssignEffective").asBoolean(),
                         "requested && supported holds for /batch_infer, so preAssignEffective stays true even when the empty batch resolves no targets");
             });
-            verify(client, never()).requestTargets(anyInt());
+            verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
         }
 
         @Test
         void queryParamTrueOverridesConfigDefaultFalse() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
-            when(client.requestTargets(anyInt())).thenReturn(Mono.just(List.of(target("10.0.0.1"))));
+            when(client.requestTargets(anyInt(), eq(true), eq(false)))
+                    .thenReturn(Mono.just(List.of(target("10.0.0.1"))));
             DispatcherInspectionHandler handler = handlerWith(false, client);
 
             ObjectNode out = invokeDryRun(handler, "true", List.of("a"));
@@ -224,7 +226,7 @@ class DispatcherInspectionHandlerTest {
             assertTrue(out.get("preAssignConfigDefault").asBoolean());
             assertFalse(out.get("preAssignEffective").asBoolean(),
                     "query param false must override config true");
-            verify(client, never()).requestTargets(anyInt());
+            verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
         }
 
         @Test
@@ -232,7 +234,8 @@ class DispatcherInspectionHandlerTest {
             // A diagnostic must not perturb production: resolving BE targets advances master's RR
             // cursor, so an unqualified dry-run never does it — not even when preAssignBe=true.
             BatchScheduleClient client = mock(BatchScheduleClient.class);
-            when(client.requestTargets(anyInt())).thenReturn(Mono.just(List.of(target("10.0.0.1"))));
+            when(client.requestTargets(anyInt(), eq(true), eq(false)))
+                    .thenReturn(Mono.just(List.of(target("10.0.0.1"))));
             DispatcherInspectionHandler handler = handlerWith(true, client);
 
             ObjectNode out = invokeDryRun(handler, null, List.of("a"));
@@ -246,7 +249,7 @@ class DispatcherInspectionHandlerTest {
         @Test
         void preAssignTrueProducesStampedChunks() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
-            when(client.requestTargets(anyInt())).thenReturn(Mono.just(List.of(
+            when(client.requestTargets(anyInt(), eq(true), eq(false))).thenReturn(Mono.just(List.of(
                     target("10.0.0.1"), target("10.0.0.2"))));
             DispatcherInspectionHandler handler = handlerWith(true, client);
 
@@ -276,7 +279,7 @@ class DispatcherInspectionHandlerTest {
                 assertTrue(gc.get("force_batch").asBoolean(),
                         "force_batch still injected — that's independent of preAssign");
             }
-            verify(client, never()).requestTargets(anyInt());
+            verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
         }
 
         @Test
@@ -304,7 +307,7 @@ class DispatcherInspectionHandlerTest {
                 assertTrue(out.get("chunkCount").asInt() > 0,
                         "the embedding batch itself still splits normally");
             });
-            verify(client, never()).requestTargets(anyInt());
+            verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
         }
 
         @Test
@@ -360,7 +363,7 @@ class DispatcherInspectionHandlerTest {
 
             assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, out ->
                     assertEquals("invalid_inspection_request", out.get("error").asText()));
-            verify(client, never()).requestTargets(anyInt());
+            verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
         }
 
         @Test
@@ -427,13 +430,13 @@ class DispatcherInspectionHandlerTest {
                 assertEquals(0, out.get("chunkCount").asInt());
                 assertEquals(1, out.get("totalItems").asInt());
             });
-            verify(client, never()).requestTargets(anyInt());
+            verify(client, never()).requestTargets(anyInt(), eq(true), eq(false));
         }
 
         @Test
         void internalErrorReturns500NotBadRequest() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
-            when(client.requestTargets(anyInt())).thenReturn(
+            when(client.requestTargets(anyInt(), eq(true), eq(false))).thenReturn(
                     Mono.error(new RuntimeException("simulated coordinator failure")));
             DispatcherInspectionHandler handler = handlerWith(true, client);
 

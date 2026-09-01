@@ -10,22 +10,34 @@ import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
+    DASH_ERROR_ABORT,
+    DASH_ERROR_CAPACITY,
+    DASH_ERROR_TIMEOUT,
     DashErrorSpec,
+    DashScInputIdsError,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
+    MultimodalPart,
+    ParsedInputIds,
     SamplingParams,
+    StreamResponseBuilder,
     build_dash_error_response,
-    build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
+    parse_multimodal_parts_from_request,
     parse_request_controls,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
@@ -191,15 +203,18 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertEqual(
-            json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
+            sp.to_generate_config().response_format.model_dump(exclude_none=True),
+            {"type": "json_object"},
         )
 
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["json_format"].bool_param = True
         config = parse_sampling_params(req).to_generate_config()
-        self.assertTrue(config.json_format)
-        config.validate()
-        self.assertEqual(config.json_schema, '{"type":"object"}')
+        self.assertEqual(config.response_format.type, "json_object")
+        config.finalize_response_format()
+        self.assertEqual(
+            config.json_schema, {"anyOf": [{"type": "object"}, {"type": "array"}]}
+        )
 
     def test_build_model_infer_request_carries_response_format(self) -> None:
         req = build_model_infer_request(
@@ -216,7 +231,8 @@ class DashScGrpcRequestTest(TestCase):
 
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertEqual(
-            json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
+            sp.to_generate_config().response_format.model_dump(exclude_none=True),
+            {"type": "json_object"},
         )
 
     def test_build_model_infer_request_carries_structural_tag_response_format(
@@ -250,7 +266,7 @@ class DashScGrpcRequestTest(TestCase):
             {"format": normalized_response_format["format"]},
         )
         self.assertEqual(
-            json.loads(config.structural_tag),
+            config.structural_tag,
             {"format": normalized_response_format["format"]},
         )
 
@@ -311,7 +327,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_guided_json_list_string_sets_response_format_json_schema(
@@ -331,7 +347,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_guided_json_overrides_response_format(self) -> None:
@@ -346,7 +362,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_guided_json_from_nested_dash_parameters(self) -> None:
@@ -360,7 +376,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_response_format_from_nested_dash_parameters(self) -> None:
@@ -410,9 +426,8 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self.assertEqual(json.loads(sp.structural_tag), tag)
-        self.assertEqual(json.loads(config.structural_tag), tag)
+        self.assertEqual(config.structural_tag, tag)
         self.assertIsNone(config.response_format)
-        self.assertFalse(config.json_format)
 
     def test_parse_sampling_normalizes_dashscope_sequence_structural_tag(self) -> None:
         tag = _dashscope_sequence_tool_call_structural_tag()
@@ -425,7 +440,7 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
 
         self.assertEqual(json.loads(sp.structural_tag), normalized)
-        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), normalized)
+        self.assertEqual(sp.to_generate_config().structural_tag, normalized)
 
     def test_parse_sampling_tool_call_structural_tag_unwraps_dashscope_list(
         self,
@@ -556,7 +571,7 @@ class DashScGrpcRequestTest(TestCase):
             tag, ensure_ascii=False
         )
         sp = parse_sampling_params(req)
-        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), tag)
+        self.assertEqual(sp.to_generate_config().structural_tag, tag)
 
     def test_build_model_infer_request_carries_tool_call_structural_tag(self) -> None:
         tag = _tool_call_structural_tag()
@@ -573,7 +588,7 @@ class DashScGrpcRequestTest(TestCase):
         self.assertIn("tool_call_structural_tag", req.parameters)
         sp = parse_sampling_params(req)
         self.assertEqual(json.loads(sp.structural_tag), tag)
-        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), tag)
+        self.assertEqual(sp.to_generate_config().structural_tag, tag)
 
     def test_parse_sampling_max_completion_tokens_parameter_alias_wins(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -671,9 +686,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -690,9 +703,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -705,9 +716,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -741,7 +750,9 @@ class DashScGrpcRequestTest(TestCase):
 
         ids, sp, op = parse_dash_sc_grpc_request(req)
 
-        self.assertEqual(ids, [1, 2])
+        self.assertIsInstance(ids, ParsedInputIds)
+        assert ids is not None
+        self.assertEqual(ids.values, [1, 2])
         self.assertIsNotNone(sp)
         self.assertIsNotNone(op)
         self.assertEqual(sp.max_new_think_tokens, 7)
@@ -788,6 +799,8 @@ class DashScGrpcRequestTest(TestCase):
     def test_parse_request_controls_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
+            # This retired header is deliberately ignored. Clients must use
+            # request.parameters["enable_thinking"] instead.
             {
                 "x-ds-llm-thinking": "false",
                 "x-dashscope-inner-timeout": 1800,
@@ -799,13 +812,27 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         op = parse_request_controls(req)
         self.assertFalse(op.return_input_ids)
-        self.assertIs(op.enable_thinking, False)
+        self.assertIsNone(op.enable_thinking)
         self.assertEqual(op.max_new_think_tokens, 0)
         self.assertEqual(op.timeout_ms, 1_800_000)
         self.assertEqual(op.traffic_reject_priority, 10)
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_parse_request_controls_enable_thinking_only_from_parameter(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-ds-llm-thinking": "false",
+                "parameters": {"enable_thinking": False},
+            }
+        )
+
+        op = parse_request_controls(req)
+
+        self.assertIs(op.enable_thinking, True)
 
     def test_parse_request_controls_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -842,7 +869,10 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "top_k", "INT32", [1], struct.pack("<i", 10))
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")
         ids, sp, op = parse_dash_sc_grpc_request(req)
-        self.assertEqual(ids, [1, 2])
+        self.assertIsInstance(ids, ParsedInputIds)
+        assert ids is not None
+        self.assertEqual(ids.values, [1, 2])
+        self.assertEqual(ids.tensor.tolist(), [1, 2])
         self.assertIsNotNone(sp)
         self.assertIsNotNone(op)
         assert sp is not None and op is not None
@@ -855,6 +885,67 @@ class DashScGrpcRequestTest(TestCase):
         self.assertIsNone(ids)
         self.assertIsNone(sp)
         self.assertIsNone(op)
+
+    def test_inference_input_ids_from_int32_wire_buffer(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "input_ids", "INT32", [3], struct.pack("<3i", 7, 8, 9))
+
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.tensor.dtype, torch.int32)
+        self.assertEqual(parsed.tensor.tolist(), [7, 8, 9])
+        parsed.tensor[0] = 99
+        self.assertEqual(parsed.values, [7, 8, 9])
+        self.assertEqual(parse_input_ids_from_request(req), [7, 8, 9])
+
+
+    def test_inference_input_ids_from_int64_converts_to_engine_dtype(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "input_ids", "INT64", [2], struct.pack("<2q", 10, 11))
+
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.tensor.dtype, torch.int32)
+        self.assertEqual(parsed.tensor.tolist(), [10, 11])
+
+
+    def test_inference_input_ids_from_int64_accepts_int32_boundaries(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(
+            req,
+            "input_ids",
+            "INT64",
+            [2],
+            struct.pack("<2q", -(2**31), 2**31 - 1),
+        )
+
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.tensor.tolist(), [-(2**31), 2**31 - 1])
+
+
+    def test_inference_input_ids_from_int64_rejects_int32_overflow(self) -> None:
+        for value in (-(2**40), 2**40):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                _add_tensor(req, "input_ids", "INT64", [1], struct.pack("<q", value))
+                with self.assertRaisesRegex(
+                    DashScInputIdsError, "outside the INT32 range"
+                ):
+                    parse_dash_sc_grpc_request(req)
+
+
+    def test_inference_input_ids_rejects_misaligned_wire_buffer(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "input_ids", "INT32", [1], b"\x01\x02\x03")
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+        self.assertIsNone(parsed)
 
     def test_sampling_to_generate_config(self) -> None:
         sp = SamplingParams(
@@ -873,16 +964,326 @@ class DashScGrpcRequestTest(TestCase):
         self.assertTrue(gc.return_input_ids)
 
 
+class DashScMultimodalRequestTest(TestCase):
+    @staticmethod
+    def _set_payload(
+        request: predict_v2_pb2.ModelInferRequest,
+        payload: object,
+        key: str = "payload",
+    ) -> None:
+        request.parameters[key].string_param = json.dumps(payload)
+
+    def test_parses_openai_image_video_and_audio_parts(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "http://x.png"},
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": "http://y.mp4"},
+                                },
+                                {
+                                    "type": "audio_url",
+                                    "audio_url": {"url": "http://z.wav"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE),
+                MultimodalPart("http://y.mp4", MMUrlType.VIDEO),
+                MultimodalPart("http://z.wav", MMUrlType.AUDIO),
+            ],
+        )
+
+    def test_parses_nested_dashscope_payload_wrapper(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "payload": {
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"image": "http://nested.png"}],
+                            }
+                        ]
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [MultimodalPart("http://nested.png", MMUrlType.IMAGE)],
+        )
+
+    def test_parses_dashscope_native_string_video(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"image": "http://x.png", "max_pixels": 4096},
+                        {
+                            "video": "http://video.mp4",
+                            "fps": 2,
+                            "max_frames": 32,
+                        },
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE, max_pixels=4096),
+                MultimodalPart(
+                    "http://video.mp4",
+                    MMUrlType.VIDEO,
+                    fps=2,
+                    max_frames=32,
+                ),
+            ],
+        )
+
+    def test_rejects_dashscope_native_video_frame_list(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"video": ["http://f1.jpg", "http://f2.jpg"]},
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+
+        with self.assertRaisesRegex(
+            DashScParameterError, "video frame lists are not supported"
+        ):
+            parse_multimodal_parts_from_request(request)
+
+    def test_inline_preprocess_values_override_nested_values(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": "http://x.png",
+                                "preprocess_config": {
+                                    "min_pixels": 100,
+                                    "max_pixels": 200,
+                                },
+                                "min_pixels": 300,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart(
+                    "http://x.png",
+                    MMUrlType.IMAGE,
+                    min_pixels=300,
+                    max_pixels=200,
+                )
+            ],
+        )
+
+    def test_preserves_mixed_part_order_and_filters_invalid_config(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": "http://x.png",
+                                "max_pixels": -1,
+                            },
+                            {
+                                "type": "video_url",
+                                "video_url": "http://v.mp4",
+                                "preprocess_config": {
+                                    "fps": True,
+                                    "max_frames": 0,
+                                    "min_frames": 3,
+                                },
+                            },
+                            {
+                                "image": "http://native.png",
+                                "video": "http://native.mp4",
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE),
+                MultimodalPart(
+                    "http://v.mp4",
+                    MMUrlType.VIDEO,
+                    min_frames=3,
+                ),
+                MultimodalPart("http://native.png", MMUrlType.IMAGE),
+                MultimodalPart("http://native.mp4", MMUrlType.VIDEO),
+            ],
+        )
+
+    def test_nested_enable_thinking_is_a_compatibility_fallback(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"body": {"parameters": {"enable_thinking": False}}}
+        )
+
+        self.assertIs(parse_request_controls(request).enable_thinking, False)
+
+    def test_missing_payload_is_text_only(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self.assertEqual(parse_multimodal_parts_from_request(request), [])
+
+    def test_rejects_empty_or_non_string_payload(self) -> None:
+        for field, value in (
+            ("int64_param", 1),
+            ("string_param", ""),
+        ):
+            with self.subTest(field=field):
+                request = predict_v2_pb2.ModelInferRequest()
+                setattr(request.parameters["payload"], field, value)
+                with self.assertRaisesRegex(
+                    DashScParameterError, "must be a non-empty JSON string"
+                ):
+                    parse_multimodal_parts_from_request(request)
+
+    def test_rejects_invalid_payload_json(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        request.parameters["payload"].string_param = "not-json"
+        with self.assertRaisesRegex(DashScParameterError, "failed to parse"):
+            parse_multimodal_parts_from_request(request)
+
+    def test_payload_takes_precedence_over_legacy_messages(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": "http://payload.png"}
+                        ],
+                    }
+                ]
+            },
+            key="payload",
+        )
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": "http://legacy.png"}
+                        ],
+                    }
+                ]
+            },
+            key="__messages__",
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [MultimodalPart("http://payload.png", MMUrlType.IMAGE)],
+        )
+
+    def test_rejects_invalid_openai_multimodal_urls(self) -> None:
+        for part in (
+            {"type": "image_url", "image_url": ""},
+            {"type": "video_url", "video_url": {"url": None}},
+            {"type": "audio_url"},
+        ):
+            with self.subTest(part=part):
+                request = predict_v2_pb2.ModelInferRequest()
+                self._set_payload(
+                    request,
+                    {"messages": [{"role": "user", "content": [part]}]},
+                )
+                with self.assertRaisesRegex(
+                    DashScParameterError, "requires a non-empty URL string"
+                ):
+                    parse_multimodal_parts_from_request(request)
+
+    def test_rejects_invalid_dashscope_multimodal_urls(self) -> None:
+        for part in (
+            {"image": ""},
+            {"video": None},
+            {"audio": {"url": "http://audio"}},
+        ):
+            with self.subTest(part=part):
+                request = predict_v2_pb2.ModelInferRequest()
+                self._set_payload(
+                    request,
+                    [{"role": "user", "content": [part]}],
+                    key="__messages__",
+                )
+                with self.assertRaisesRegex(
+                    DashScParameterError, "requires a non-empty URL string"
+                ):
+                    parse_multimodal_parts_from_request(request)
+
+
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
+        builder = StreamResponseBuilder(
+            dash_sc_request_id="r1",
+            model_name="m",
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r1"),
+        )
         with self.assertRaises(ValueError) as ctx:
-            build_stream_response_from_generate_outputs(
-                dash_sc_request_id="r1",
-                model_name="m",
-                go=go,
-                request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r1"),
-            )
+            builder.build(go)
         self.assertIn("non-empty", str(ctx.exception))
 
     def test_basic_generated_ids_finish_aux(self) -> None:
@@ -892,13 +1293,12 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             aux_info=AuxInfo(input_len=10, reuse_len=4),
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="req-a",
             model_name="mdl",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=99, trace_id="req-a"),
             return_input_ids=False,
-        )
+        ).build(go)
         self.assertFalse(resp.error_message)
         infer = resp.infer_response
         self.assertEqual(infer.id, "req-a")
@@ -950,6 +1350,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertIsInstance(payload["status_code"], int)
         self.assertEqual(payload["status_name"], "InvalidParameter")
         self.assertIn("max_new_tokens", payload["status_message"])
+        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "InvalidParameter"
+        )
+        self.assertIn("max_new_tokens", infer.parameters["status_message"].string_param)
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
@@ -982,26 +1387,77 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
                 self.assertNotIn(f'"status_code":"{status_code}"', error_msg)
                 self.assertEqual(json.loads(error_msg)["status_code"], status_code)
 
+    def test_capacity_error_uses_use_parameter_status(self) -> None:
+        """DASH_ERROR_CAPACITY must use finish_reason=USE_PARAMETER_STATUS so
+        the DashScope api-server passes the explicit status_code=503 through
+        verbatim instead of re-deriving HTTP from the finish_reason code."""
+        self.assertEqual(
+            DASH_ERROR_CAPACITY.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS
+        )
+        self.assertEqual(DASH_ERROR_CAPACITY.status_code, 503)
+        self.assertEqual(DASH_ERROR_CAPACITY.error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(DASH_ERROR_CAPACITY.status_name, "ServiceUnavailable")
+
+        resp = build_dash_error_response(
+            "req-cap",
+            "mdl",
+            error_spec=DASH_ERROR_CAPACITY,
+            status_message="engine task list full",
+        )
+        infer = resp.infer_response
+        self.assertEqual(infer.parameters["error_no"].int64_param, 5)
+        payload = json.loads(infer.parameters["error_msg"].string_param)
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(infer.parameters["status_code"].int64_param, 503)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "ServiceUnavailable"
+        )
+        self.assertEqual(
+            infer.parameters["status_message"].string_param,
+            "engine task list full",
+        )
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [LLMFinishReason.USE_PARAMETER_STATUS],
+        )
+
+    def test_timeout_and_abort_specs_use_use_parameter_status(self) -> None:
+        """DASH_ERROR_TIMEOUT and DASH_ERROR_ABORT must also use
+        USE_PARAMETER_STATUS so their 504/499 codes survive the api-server."""
+        for spec, expected_code in (
+            (DASH_ERROR_TIMEOUT, 504),
+            (DASH_ERROR_ABORT, 499),
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(
+                    spec.finish_reason, LLMFinishReason.USE_PARAMETER_STATUS
+                )
+                self.assertEqual(spec.status_code, expected_code)
+
     def test_finish_reason_length_override_repro_p1(self) -> None:
         """P1 repro: when generation finishes because ``max_new_tokens`` was
         reached, the wire protocol currently has no way to signal 'length' —
         ``finished=True`` always maps to 0 (stop), so dashscope-serving
         collapses every cutoff into ``finish_reason='stop'``.
 
-        Expected fix: codec exposes ``LLMFinishReason.LENGTH = 1`` and
-        ``build_stream_response_from_generate_outputs`` takes a
-        ``finish_reason_override`` argument the caller can set when the
-        cumulative output reaches the per-request budget."""
+        The response builder accepts a ``finish_reason_override`` the caller can
+        set when cumulative output reaches the per-request budget."""
         out = GenerateOutput(
             output_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
             finished=True,
             aux_info=AuxInfo(input_len=4, reuse_len=0, output_len=3),
         )
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=GenerateOutputs(generate_outputs=[out]),
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+        ).build(
+            GenerateOutputs(generate_outputs=[out]),
             finish_reason_override=LLMFinishReason.LENGTH,
         )
         infer = resp.infer_response
@@ -1021,12 +1477,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             aux_info=None,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1048,13 +1503,12 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             aux_info=None,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
             request_input_ids=[10, 11, 12],
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1071,12 +1525,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             finished=True,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1090,14 +1543,13 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             finished=True,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
             request_input_ids=[1, 2, 3],
             return_input_ids=True,
-        )
+        ).build(go)
         infer = resp.infer_response
         names = [infer.outputs[i].name for i in range(len(infer.outputs))]
         self.assertEqual(
@@ -1121,12 +1573,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
     def test_missing_output_ids_empty_generated(self) -> None:
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1134,6 +1585,137 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+
+    def test_updates_dynamic_fields_without_mutating_prior_frames(self) -> None:
+        generate_config = SamplingParams(
+            max_new_tokens=64, max_new_think_tokens=32
+        ).to_generate_config()
+        static = {
+            "dash_sc_request_id": "req-cached",
+            "model_name": "mdl",
+            "request_log_tag": stream_log_tag(
+                request_id_numeric=99, trace_id="req-cached"
+            ),
+            "request_input_ids": [10, 11, 12],
+            "return_input_ids": True,
+            "is_streaming": True,
+            "generate_config": generate_config,
+            "eos_token_id": 151643,
+            "max_token_id": 151936,
+        }
+        builder = StreamResponseBuilder(**static)
+        cases = (
+            (
+                GenerateOutput(
+                    output_ids=torch.tensor([1, 2]),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=3, reuse_len=1),
+                ),
+                None,
+                None,
+                LLMFinishReason.STREAMING,
+            ),
+            (
+                GenerateOutput(
+                    output_ids=torch.tensor([3, 4, 5]),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=2),
+                ),
+                7,
+                None,
+                LLMFinishReason.STREAMING,
+            ),
+            (
+                GenerateOutput(
+                    output_ids=torch.tensor([6]),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=5, reuse_len=3),
+                ),
+                None,
+                LLMFinishReason.LENGTH,
+                LLMFinishReason.LENGTH,
+            ),
+        )
+
+        frames = []
+        for output, think_len, finish_override, expected_finish_reason in cases:
+            go = GenerateOutputs(generate_outputs=[output])
+            token_ids = output.output_ids.tolist()
+            frame = builder.build(
+                go,
+                token_ids=token_ids,
+                generate_think_token_num=think_len,
+                finish_reason_override=finish_override,
+            )
+            frames.append(frame)
+            infer = frame.infer_response
+            by_name = {
+                infer.outputs[i].name: infer.raw_output_contents[i]
+                for i in range(len(infer.outputs))
+            }
+            self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), token_ids)
+            self.assertEqual(
+                _unpack_int64_le(by_name["finish_reason"]),
+                [expected_finish_reason],
+            )
+            self.assertEqual(
+                by_name["finished"], b"\x01" if output.finished else b"\x00"
+            )
+            self.assertEqual(
+                _unpack_int32_le(by_name["prompt_token_num"]),
+                [output.aux_info.input_len],
+            )
+            self.assertEqual(
+                _unpack_int32_le(by_name["prompt_cached_token_num"]),
+                [output.aux_info.reuse_len],
+            )
+            self.assertEqual(
+                infer.parameters["prompt_token_num"].int64_param,
+                output.aux_info.input_len,
+            )
+            self.assertEqual(
+                infer.parameters["prompt_cached_token_num"].int64_param,
+                output.aux_info.reuse_len,
+            )
+            if think_len is None:
+                self.assertNotIn("generate_think_token_num", infer.parameters)
+            else:
+                self.assertEqual(
+                    infer.parameters["generate_think_token_num"].int64_param,
+                    think_len,
+                )
+
+        first_by_name = {
+            frames[0]
+            .infer_response.outputs[i]
+            .name: (frames[0].infer_response.raw_output_contents[i])
+            for i in range(len(frames[0].infer_response.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(first_by_name["generated_ids"]), [1, 2])
+
+    def test_stream_response_builder_removes_template_dynamic_parameter(self) -> None:
+        output = GenerateOutput(
+            output_ids=torch.tensor([1]),
+            finished=False,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        go = GenerateOutputs(generate_outputs=[output])
+        static = {
+            "dash_sc_request_id": "r",
+            "model_name": "m",
+            "request_log_tag": stream_log_tag(request_id_numeric=1, trace_id="r"),
+        }
+        builder = StreamResponseBuilder(**static)
+        builder.build(go, token_ids=[1], generate_think_token_num=4)
+
+        actual = builder.build(go, token_ids=[2], generate_think_token_num=None)
+        infer = actual.infer_response
+        self.assertNotIn("generate_think_token_num", infer.parameters)
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [2])
 
 
 class PrependToGeneratedIdsTensorTest(TestCase):
@@ -1144,12 +1726,11 @@ class PrependToGeneratedIdsTensorTest(TestCase):
             aux_info=AuxInfo(input_len=0, reuse_len=0),
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        ).build(go)
         return resp.infer_response
 
     def test_prepend_list_success(self) -> None:

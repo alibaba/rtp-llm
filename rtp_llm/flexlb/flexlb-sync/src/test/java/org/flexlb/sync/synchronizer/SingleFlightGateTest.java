@@ -73,16 +73,11 @@ class SingleFlightGateTest {
         AtomicInteger ran = new AtomicInteger();
         for (int i = 0; i < 5; i++) {
             CountDownLatch done = new CountDownLatch(1);
-            assertTrue(gate.submit("m/PDFUSION", executor, () -> {
+            assertTrue(submitEventually(() -> {
                 ran.incrementAndGet();
                 done.countDown();
             }), "a tick after the previous round finished must run");
             assertTrue(done.await(5, TimeUnit.SECONDS));
-            // The gate is cleared in a finally *inside* the task, so give the wrapper a moment to
-            // return before the next submit.
-            for (int spin = 0; spin < 100 && ran.get() != i + 1; spin++) {
-                Thread.sleep(1);
-            }
         }
         assertEquals(5, ran.get(), "the gate must not wedge a key permanently");
     }
@@ -103,16 +98,8 @@ class SingleFlightGateTest {
         }));
         assertTrue(threw.await(5, TimeUnit.SECONDS));
 
-        // The release lives in a finally inside the wrapper; give it a moment to run, then the
-        // key must accept work again — otherwise one bad round would stop a model/role forever.
-        boolean resubmitted = false;
-        for (int spin = 0; spin < 5000 && !resubmitted; spin++) {
-            resubmitted = gate.submit("m/PDFUSION", executor, () -> { });
-            if (!resubmitted) {
-                Thread.sleep(1);
-            }
-        }
-        assertTrue(resubmitted, "a task that throws must still release its key");
+        assertTrue(submitEventually(() -> { }),
+                "a task that throws must still release its key");
     }
 
     @Test
@@ -125,5 +112,16 @@ class SingleFlightGateTest {
         // If the gate stayed latched on a rejected submit, this key would never sync again.
         assertTrue(gate.submit("m/PDFUSION", executor, () -> { }),
                 "a rejected submission must not wedge the key");
+    }
+
+    private boolean submitEventually(Runnable task) throws InterruptedException {
+        long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        do {
+            if (gate.submit("m/PDFUSION", executor, task)) {
+                return true;
+            }
+            Thread.sleep(1);
+        } while (System.nanoTime() < deadlineNanos);
+        return false;
     }
 }

@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsVerifyRunner.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 
 namespace rtp_llm {
@@ -15,47 +16,115 @@ public:
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        propose_step_(sp_config.gen_num_per_cycle) {}
+        propose_step_(sp_config.gen_num_per_cycle),
+        vocab_size_(model_config.vocab_size),
+        is_dspark_(sp_config.type == SP_TYPE_DSPARK),
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
                                  const MergedOutput& propose_output) const;
 
+    // CP slices the draft forward output per rank, so the per-request MTP last
+    // hidden rows must be handed in explicitly instead of read off
+    // propose_output.model_output.all_hidden_states.
+    absl::Status dispatchPrefill(const StreamGroups&  stream_groups,
+                                 const MergedOutput&  prefill_output,
+                                 const MergedOutput&  propose_output,
+                                 const torch::Tensor& draft_last_hidden_states) const;
+
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output) const;
 
-    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups) const;
+    absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
+                                                          TensorHolder&       host_holder) const;
 
-    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
-                                                         const GptModelInputs&  model_inputs,
-                                                         const GptModelOutputs& model_output) const;
+    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
+                                                         const GptModelOutputs&                      model_output,
+                                                         const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                         const torch::Tensor& draft_token_ids) const;
 
-    void prepareDecodeDraftModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+    void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
+                                      GptModelInputs&     model_input,
+                                      TensorHolder&       host_holder);
 
-    void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups, GptModelInputs& model_input);
+    void prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups,
+                                            GptModelInputs&     model_input,
+                                            TensorHolder&       host_holder);
+
+    // Device-state target-verify gather. Returns true only when every stream
+    // has CUDA accept_len/tokens/next_seq_len/propose_tokens; otherwise leaves
+    // model_input untouched so the caller can use the legacy mixed path.
+    bool gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
+                                                  GptModelInputs&     model_input,
+                                                  TensorHolder&       host_holder) const;
 
     void expandTargetVerifyPositionIds(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
     void updateDecodeDraftModelInput(GptModelInputs&        model_input,
                                      const GptModelOutputs& model_output,
-                                     const torch::Tensor&   draft_token_ids);
+                                     const torch::Tensor&   draft_token_ids,
+                                     TensorHolder&          host_holder);
 
     void updatePrefillPostDraftModelInput(const StreamGroups&    stream_groups,
                                           GptModelInputs&        model_input,
                                           const GptModelOutputs& model_output,
-                                          const SamplerOutput&   sampler_output);
+                                          const SamplerOutput&   sampler_output,
+                                          TensorHolder&          host_holder);
+
+    // DSpARK runs two standard-slot draft calls per round: a commit call
+    // (incremental-prefill shape, normalized target feature rows handed off
+    // through last_hidden_states) and a
+    // fixed-width propose call ([anchor, noise x (gamma - 1)] against the
+    // committed feature KV).
+    void validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const;
+
+    void buildDSparkProposeInput(GptModelInputs&      model_input,
+                                 const torch::Tensor& anchors,
+                                 const torch::Tensor& committed_ends,
+                                 TensorHolder&        host_holder);
+
+    // Round-head stream state (anchor = last accepted token, committed_end =
+    // committed length - 1), derived once per decode round and consumed by
+    // both the propose and verify input builders below; new PD streams and
+    // steady streams take the same path. Consumers must treat both tensors as
+    // immutable — propose and verify alias this one storage.
+    struct DSparkRoundHead {
+        torch::Tensor anchors;
+        torch::Tensor committed_ends;
+    };
+    DSparkRoundHead buildDSparkRoundHead(const StreamGroups&   stream_groups,
+                                         const GptModelInputs& model_input,
+                                         TensorHolder&         host_holder) const;
+
+    // Prepare the fixed-width DSpARK proposal input from current stream state.
+    // The returned round head is reused after sampling to build target verify.
+    DSparkRoundHead prepareDSparkDraftModelInput(const StreamGroups& stream_groups,
+                                                 GptModelInputs&     model_input,
+                                                 TensorHolder&       host_holder);
+
+    // Convert the proposal-stage input into dense target-verify rows.
+    void updateDSparkTargetVerifyModelInput(const DSparkRoundHead& round_head,
+                                            GptModelInputs&        model_input,
+                                            const torch::Tensor&   proposals,
+                                            TensorHolder&          host_holder);
+
+    void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
+                                           const torch::Tensor& target_features,
+                                           size_t               batch_size);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
                                          torch::Tensor&                               hidden_states_d_t,
-                                         size_t&                                      total_accept_len);
+                                         TensorHolder&                                host_holder);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
-                                         torch::Tensor&      draft_token_probs_d_t);
+                                         torch::Tensor&      draft_token_probs_d_t,
+                                         TensorHolder&       host_holder);
 
     void updateMultiStepDraftSamplerOutput(const StreamGroups&         stream_groups,
                                            SamplerOutput&              draft_sampler_output,
@@ -72,6 +141,7 @@ protected:
     void preparePrefillSpecUpdateInfo(const StreamGroups&                stream_groups,
                                       const MergedOutput&                prefill_output,
                                       const MergedOutput&                propose_output,
+                                      const torch::Tensor&               draft_last_hidden_states,
                                       const torch::Tensor&               new_tokens_all,
                                       std::vector<StreamSpecUpdateInfo>& spec_update_infos) const;
 
@@ -87,6 +157,20 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
-    int propose_step_;
+    torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
+    torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
+    torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
+
+    int     propose_step_;
+    size_t  vocab_size_           = 0;
+    bool    is_dspark_            = false;
+    int32_t dspark_mask_token_id_ = -1;
+
+    // Decode-round constants are grow-only device buffers.  Keeping them on
+    // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
+    // introduced on the scheduling thread.
+    torch::Tensor dspark_combo_cache_;
+    torch::Tensor dspark_input_lengths_cache_;
+    torch::Tensor dspark_lm_indexes_cache_;
 };
 }  // namespace rtp_llm

@@ -1,5 +1,7 @@
 package org.flexlb.sync;
 
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
@@ -11,10 +13,11 @@ import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Collections;
@@ -36,8 +39,17 @@ class WorkerAddressServiceTest {
     @Mock
     private ServiceDiscovery serviceDiscovery;
 
-    @InjectMocks
+    @Mock
+    private ConfigService configService;
+
     private WorkerAddressService workerAddressService;
+
+    @BeforeEach
+    void setUp() {
+        Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        workerAddressService = new WorkerAddressService(engineHealthReporter, modelMetaConfig,
+                serviceDiscovery, configService);
+    }
 
     @Test
     void testGetHosts_EmptySuccess() throws Exception {
@@ -92,7 +104,6 @@ class WorkerAddressServiceTest {
         // Assertions - should return hosts
         Assertions.assertFalse(actualHosts.isEmpty());
     }
-
     @Test
     void testGetEngineWorkerList_OneGroupDiscoveryFailure_AbortsWholeRoleRefresh() throws Exception {
         // Multi-group role where one group's discovery fails. getEngineWorkerList has no per-group

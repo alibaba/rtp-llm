@@ -15,7 +15,8 @@ def _convert_req_index_to_global_index_kernel(
     workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    TOKENS_PER_BLOCK_FOR_BLOCK_TABLE: tl.constexpr,
+    ENTRIES_PER_BLOCK: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     # strides (in elements)
@@ -41,22 +42,23 @@ def _convert_req_index_to_global_index_kernel(
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
     tok = tl.load(ti_ptr)  # int32
 
-    # Only token == -1 should propagate as -1
+    # Invalid local indices and unallocated block-table entries propagate as -1.
     is_invalid_tok = tok < 0
     is_prefill = False
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
     # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
+    block_id = tok // TOKENS_PER_BLOCK_FOR_BLOCK_TABLE
+    inblock_off = tok % ENTRIES_PER_BLOCK
 
     # Guard block_table access
     valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     is_invalid_tok |= ~valid_block
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
-    out_val = base * BLOCK_SIZE + inblock_off
+    is_invalid_tok |= (base <= 0) & ~is_prefill
+    out_val = base * ENTRIES_PER_BLOCK + inblock_off
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -76,7 +78,8 @@ def triton_convert_req_index_to_global_index(
     req_id: torch.Tensor,  # int32 [num_tokens]
     block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    BLOCK_SIZE: int = 64,
+    TOKENS_PER_BLOCK_FOR_BLOCK_TABLE: int,
+    ENTRIES_PER_BLOCK: int,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
     HAS_PREFILL_WORKSPACE: bool = False,
@@ -86,12 +89,14 @@ def triton_convert_req_index_to_global_index(
     """
     out[token_id, indice_id] =
         block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
-        + token_indices[token_id, indice_id] % BLOCK_SIZE
+            token_indices[token_id, indice_id] // TOKENS_PER_BLOCK_FOR_BLOCK_TABLE]
+            * ENTRIES_PER_BLOCK
+        + token_indices[token_id, indice_id] % ENTRIES_PER_BLOCK
 
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
+    Negative token_indices propagate as -1. For safety, we also output -1
+        if the derived block_id would be out-of-bounds, or if the block-table
+        entry is unallocated (<= 0; block 0 is reserved by the framework
+        BlockPool).
 
     When HAS_PREFILL_WORKSPACE is True, prefill tokens are mapped to workspace offsets
     instead of global cache slots. prefill_workspace_request_ids and
@@ -106,6 +111,10 @@ def triton_convert_req_index_to_global_index(
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
+    ENTRIES_PER_BLOCK = int(ENTRIES_PER_BLOCK)
+    TOKENS_PER_BLOCK_FOR_BLOCK_TABLE = int(TOKENS_PER_BLOCK_FOR_BLOCK_TABLE)
+    assert ENTRIES_PER_BLOCK > 0
+    assert TOKENS_PER_BLOCK_FOR_BLOCK_TABLE > 0
     assert (
         NUM_TOPK_TOKENS % BLOCK_N == 0
     ), f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
@@ -150,7 +159,8 @@ def triton_convert_req_index_to_global_index(
         prefill_workspace_starts,
         # shapes / constexprs
         max_num_blocks_per_req,
-        BLOCK_SIZE,
+        TOKENS_PER_BLOCK_FOR_BLOCK_TABLE,
+        ENTRIES_PER_BLOCK,
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         # strides

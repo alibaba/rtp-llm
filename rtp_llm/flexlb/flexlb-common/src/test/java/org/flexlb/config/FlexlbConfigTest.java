@@ -31,10 +31,11 @@ class FlexlbConfigTest {
     }
 
     @Test
-    void llm_engine_defaults_to_shortest_ttft_when_strategy_unset() {
+    void llm_engine_keeps_mainline_cost_based_prefill_default_when_strategy_unset() {
         FlexlbConfig config = new FlexlbConfig();
 
-        assertEquals(LoadBalanceStrategyEnum.SHORTEST_TTFT, config.getStrategyForRoleType(RoleType.PDFUSION));
+        assertEquals(LoadBalanceStrategyEnum.COST_BASED_PREFILL,
+                config.getStrategyForRoleType(RoleType.PDFUSION));
     }
 
     @Test
@@ -81,7 +82,7 @@ class FlexlbConfigTest {
         config.setEngineType(EngineType.EMBEDDING);
         config.setLoadBalanceStrategy(LoadBalanceStrategyEnum.ROUND_ROBIN);
 
-        // DECODE default is WEIGHTED_CACHE (load-aware), but DECODE is not deployed
+        // DECODE's COST_BASED_DECODE default is load-aware, but DECODE is not deployed.
         assertDoesNotThrow(() -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION)));
         assertThrows(IllegalStateException.class,
                 () -> config.validateEngineTypeConfig(List.of(RoleType.PDFUSION, RoleType.DECODE)));

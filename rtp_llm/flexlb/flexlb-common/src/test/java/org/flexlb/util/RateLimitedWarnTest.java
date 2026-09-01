@@ -34,7 +34,7 @@ class RateLimitedWarnTest {
 
     @BeforeEach
     void setUp() {
-        Logger.setGlobalLogLevel(null);
+        Logger.setLevel(null);
         flexlbLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
         appender = new ListAppender<>();
         appender.start();

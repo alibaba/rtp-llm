@@ -1,10 +1,7 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
-#include <iostream>
 #include <memory>
-#include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -27,10 +24,11 @@ public:
     NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
     ~NormalEngine();
 
-    std::shared_ptr<GenerateStream>   makeStream(const std::shared_ptr<GenerateInput>& input) override;
-    std::shared_ptr<GenerateStream>   enqueue(const std::shared_ptr<GenerateInput>& input) override;
-    std::vector<GenerateStreamPtr>    batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override;
-    void                              enqueue(std::shared_ptr<GenerateStream>& stream) override;
+    std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+         enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override;
+    void enqueue(std::shared_ptr<GenerateStream>& stream) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
@@ -59,12 +57,14 @@ private:
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
+    size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
     bool isMTPEagle() override;
     bool isEagle() override;
+    bool isDSpark() override;
 
 private:
     autil::ThreadPtr                              loop_thread_;
@@ -77,6 +77,7 @@ private:
     PDSepConfig                                   pd_sep_config;
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
     KVCacheConfig                                 kv_cache_config;
+    CacheStoreConfig                              cache_store_config;
     FfnDisAggregateConfig                         ffn_disaggregate_config;
     ModelSpecificConfig                           model_specific_config;
     SpeculativeExecutionConfig                    sp_config;

@@ -205,6 +205,14 @@ msgid "Disables FlashInfer native attention backends."
 msgstr ""
 
 #: ../../backend/server_arguments.md
+msgid "`--disable_flashinfer_hybrid_prefill`"
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "Disables FlashInfer native Hybrid Prefill implementation."
+msgstr ""
+
+#: ../../backend/server_arguments.md
 msgid "`--enable_xqa`"
 msgstr ""
 

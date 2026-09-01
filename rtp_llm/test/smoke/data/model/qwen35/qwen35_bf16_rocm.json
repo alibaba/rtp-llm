@@ -36,6 +36,52 @@
                     }
                 ]
             }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x6",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成靠拢",
+                "response_alternatives": [
+                    "\r\n\r\n——基本形成现代"
+                ],
+                "aux_info": {
+                    "input_len": 10913,
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "output_len": 5,
+                    "iter_count": 5
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x6",
+                "generate_config": {
+                    "max_new_tokens": 5,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成靠拢",
+                "response_alternatives": [
+                    "\r\n\r\n——基本形成现代"
+                ],
+                "aux_info": {
+                    "input_len": 10913,
+                    "reuse_len": 10240,
+                    "local_reuse_len": 10240,
+                    "output_len": 5,
+                    "iter_count": 5
+                }
+            }
         }
     ]
 }

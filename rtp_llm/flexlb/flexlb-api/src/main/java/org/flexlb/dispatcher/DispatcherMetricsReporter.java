@@ -47,10 +47,10 @@ public class DispatcherMetricsReporter {
     public static final String CHUNK_TRANSPORT = "transport";
     public static final String CHUNK_PICK_FAILED = "pick_failed";
     /**
-     * The master assigned no FE for this chunk (short/empty target list, or the elected master has
-     * no FE view). Distinct from {@link #CHUNK_PICK_FAILED} on purpose: FE selection is sourced
-     * solely from the master with no local fallback, so this reason reads straight off the metric as
-     * "the master isn't assigning FEs" rather than being conflated with a serialization pick failure.
+     * The configured source assigned no FE for this chunk: a short/empty master target list or an
+     * empty/failed local pool. Distinct from {@link #CHUNK_PICK_FAILED} so allocation failures are
+     * not conflated with serialization or transport failures; {@code fanout.rt}'s
+     * {@code fe_allocation} tag identifies the active source.
      */
     public static final String CHUNK_NO_FE = "no_fe_assignment";
     public static final String CHUNK_HTTP_4XX = "http_4xx";
@@ -81,6 +81,7 @@ public class DispatcherMetricsReporter {
      */
     private final Map<String, FlexMetricTags> requestTags = new ConcurrentHashMap<>();
     private final Map<String, FlexMetricTags> pathTags = new ConcurrentHashMap<>();
+    private final Map<String, FlexMetricTags> allocationTags = new ConcurrentHashMap<>();
 
     private final FlexMonitor monitor;
 
@@ -123,22 +124,40 @@ public class DispatcherMetricsReporter {
     }
 
     /**
-     * Latency of the master {@code batch_schedule} resolve, which now runs for every splittable
-     * batch (FE selection is sourced solely from the master, so the call is unconditional and also
-     * carries the per-chunk {@code fe_url}). {@code gotTargets=false} means the master returned an
-     * empty target list — no BE pre-assignment and, more importantly, no FE assignment, so those
-     * chunks fail in fanout ({@link #CHUNK_NO_FE}). The metric name stays {@code preassign.rt} for
-     * dashboard continuity; it measures the same master-call latency it always did.
+     * Latency of a master {@code batch_schedule} resolve. The allocation flags say whether the
+     * call requested BE fields, FE URLs, or both; local-FE mode with BE assignment disabled makes
+     * no call and therefore emits no sample. {@code gotTargets=false} means every requested
+     * dimension was unavailable. The metric name stays {@code preassign.rt} for dashboard
+     * continuity.
      */
     public void reportPreassignRt(long ms, boolean gotTargets) {
-        monitor.report(DISPATCHER_PREASSIGN_RT, gotTargets ? RESULT_OK : RESULT_EMPTY, ms);
+        reportPreassignRt(ms, gotTargets, true, true);
+    }
+
+    public void reportPreassignRt(
+            long ms, boolean gotTargets, boolean assignBe, boolean assignFe) {
+        String result = gotTargets ? "ok" : "empty";
+        FlexMetricTags tags = allocationTags.computeIfAbsent(
+                "preassign\u0000" + result + '\u0000' + assignBe + '\u0000' + assignFe,
+                ignored -> FlexMetricTags.of(
+                        "result", result,
+                        "assign_be", String.valueOf(assignBe),
+                        "assign_fe", String.valueOf(assignFe)));
+        monitor.report(DISPATCHER_PREASSIGN_RT, tags, ms);
     }
 
     /**
      * Fanout latency: first chunk dispatch to all sub-batch responses collected.
      */
     public void reportFanoutRt(long ms) {
-        monitor.report(DISPATCHER_FANOUT_RT, NO_TAGS, ms);
+        reportFanoutRt(ms, FeAllocationMode.MASTER.configValue());
+    }
+
+    public void reportFanoutRt(long ms, String feAllocation) {
+        FlexMetricTags tags = allocationTags.computeIfAbsent(
+                "fanout\u0000" + feAllocation,
+                ignored -> FlexMetricTags.of("fe_allocation", feAllocation));
+        monitor.report(DISPATCHER_FANOUT_RT, tags, ms);
     }
 
     /**
@@ -154,8 +173,8 @@ public class DispatcherMetricsReporter {
     }
 
     /**
-     * Current FE pool size and alive count (reported periodically from the health-probe loop).
-     * {@code alive == 0} is the all-FE-dead fallback signal.
+     * Current local FE snapshot size and alive count (reported periodically from the health-probe
+     * loop). {@code alive == 0} identifies an all-FE-dead allocation source.
      */
     public void reportFePool(int size, int alive) {
         monitor.report(DISPATCHER_FEPOOL_SIZE, NO_TAGS, size);

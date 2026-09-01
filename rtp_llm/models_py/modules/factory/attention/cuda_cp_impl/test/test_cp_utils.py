@@ -7,14 +7,20 @@ Covers:
   - generate_nonlocal_causal_kv_indices
   - generate_half_q_indices
   - generate_half_kv_indices
+  - select_prefill_position_ids
 
 Correctness is verified against an independent reference implementation
 that computes zigzag positions from first principles.
 """
 
 import unittest
+from types import SimpleNamespace
 from typing import List, Set, Tuple
+from unittest.mock import patch
 
+import torch
+
+from rtp_llm.models_py.modules.factory.attention import common as attention_common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_full_causal_kv_indices,
     generate_half_kv_indices,
@@ -22,6 +28,43 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
 )
+from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyContextParallelParams
+
+
+class CacheStoreInputLengthTest(unittest.TestCase):
+    # Cache-store planning moved into the C++ CacheStoreWriter (main #1250);
+    # python only forwards the writer + inputs pair. The CP full-length
+    # override now happens in PyWrappedModel::forward before the writer runs.
+    def test_writer_receives_writer_and_inputs_pair(self):
+        cache_store_inputs = object()
+        writer = object()
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=cache_store_inputs,
+            cache_store_writer=writer,
+        )
+
+        op = object()
+        with patch.object(
+            attention_common, "WriteCacheStoreOp", return_value=op
+        ) as constructor:
+            self.assertIs(
+                attention_common.create_write_cache_store_impl(attn_inputs), op
+            )
+
+        args = constructor.call_args.args
+        self.assertIs(args[0], writer)
+        self.assertIs(args[1], cache_store_inputs)
+
+    def test_no_writer_returns_none(self):
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=object(),
+            cache_store_writer=None,
+        )
+        self.assertIsNone(attention_common.create_write_cache_store_impl(attn_inputs))
+
 
 # ---------------------------------------------------------------------------
 # Reference helpers (independent of the code under test)
@@ -280,6 +323,113 @@ class TestGenerateHalfKvIndices(unittest.TestCase):
             hq = generate_half_q_indices(chunks)
             self.assertEqual(len(set(hk) & set(hq)), 0)
             self.assertEqual(sorted(hk + hq), list(range(sum(chunks))))
+
+
+class TestPrefillPositionIds(unittest.TestCase):
+
+    def _make_cp_inputs(self) -> PyAttentionInputs:
+        attn_inputs = PyAttentionInputs()
+        cp_info = PyContextParallelParams()
+        cp_info.prefill_shuffle_indices = torch.arange(8, dtype=torch.int32)
+        attn_inputs.context_parallel_info = cp_info
+        attn_inputs.is_prefill = True
+        return attn_inputs
+
+    def test_cp_keeps_explicit_three_axis_mrope_position_ids(self):
+        position_ids = torch.stack(
+            (
+                torch.arange(8, dtype=torch.int32),
+                torch.arange(100, 108, dtype=torch.int32),
+                torch.arange(200, 208, dtype=torch.int32),
+            ),
+            dim=1,
+        ).flatten()
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.combo_position_ids = position_ids
+
+        selected = select_prefill_position_ids(attn_inputs)
+
+        self.assertEqual(selected.shape, (24,))
+        torch.testing.assert_close(selected, position_ids)
+
+    def test_cp_text_path_falls_back_when_positions_are_unassigned(self):
+        attn_inputs = self._make_cp_inputs()
+        shuffle_indices = torch.arange(8, dtype=torch.int32)
+
+        self.assertIsNone(attn_inputs.combo_position_ids)
+        torch.testing.assert_close(
+            select_prefill_position_ids(attn_inputs), shuffle_indices
+        )
+
+    def test_cp_text_path_falls_back_for_empty_explicit_positions(self):
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.combo_position_ids = torch.empty(0, dtype=torch.int32)
+        shuffle_indices = torch.arange(8, dtype=torch.int32)
+
+        torch.testing.assert_close(
+            select_prefill_position_ids(attn_inputs), shuffle_indices
+        )
+
+    def test_cp_text_path_rejects_prefix_reuse_without_explicit_positions(self):
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.prefix_lengths = torch.tensor([4], dtype=torch.int32)
+
+        with self.assertRaisesRegex(
+            ValueError, "prefix reuse requires explicit position ids"
+        ):
+            select_prefill_position_ids(attn_inputs)
+
+    def test_cp_rejects_position_ids_with_unsupported_axis_count(self):
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.combo_position_ids = torch.arange(16, dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "one text axis or three mRoPE axes"):
+            select_prefill_position_ids(attn_inputs)
+
+    def test_cp_rejects_positions_when_local_token_count_is_zero(self):
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.context_parallel_info.prefill_shuffle_indices = torch.empty(
+            0, dtype=torch.int32
+        )
+        attn_inputs.combo_position_ids = torch.arange(3, dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "align with the local token count"):
+            select_prefill_position_ids(attn_inputs)
+
+    def test_cp_rejects_misaligned_position_ids(self):
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.context_parallel_info.prefill_shuffle_indices = torch.arange(
+            8, dtype=torch.int32
+        )
+        attn_inputs.combo_position_ids = torch.arange(9, dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "align with the local token count"):
+            select_prefill_position_ids(attn_inputs)
+
+    def test_non_cp_path_keeps_explicit_positions(self):
+        attn_inputs = PyAttentionInputs()
+        position_ids = torch.arange(8, dtype=torch.int32)
+        attn_inputs.combo_position_ids = position_ids
+        attn_inputs.context_parallel_info = None
+
+        torch.testing.assert_close(
+            select_prefill_position_ids(attn_inputs), position_ids
+        )
+
+    def test_non_cp_path_without_positions_returns_none(self):
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.context_parallel_info = None
+
+        self.assertIsNone(select_prefill_position_ids(attn_inputs))
+
+    def test_cp_rejects_non_prefill_batch(self):
+        attn_inputs = self._make_cp_inputs()
+        attn_inputs.is_prefill = False
+
+        with self.assertRaisesRegex(
+            ValueError, "context-parallel position ids require a pure-prefill batch"
+        ):
+            select_prefill_position_ids(attn_inputs)
 
 
 if __name__ == "__main__":

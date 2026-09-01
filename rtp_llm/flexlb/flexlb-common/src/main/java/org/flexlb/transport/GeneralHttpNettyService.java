@@ -16,6 +16,8 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.timeout.ReadTimeoutException;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
@@ -29,12 +31,13 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
+import javax.annotation.PreDestroy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -49,16 +52,35 @@ public class GeneralHttpNettyService {
 
     private final HttpNettyClientHandler nettyClient;
     private final Scheduler httpRequestScheduler;
+    private final ThreadPoolExecutor httpRequestExecutor;
 
-    public static final ThreadPoolExecutor httpRequestExecutor = new ThreadPoolExecutor(10 * Runtime.getRuntime()
-            .availableProcessors(), 15 * Runtime.getRuntime()
-            .availableProcessors(), 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), new NamedThreadFactory("req-thread"),
-            // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
-            new ThreadPoolExecutor.CallerRunsPolicy());
-
-    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient) {
+    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
+        FlexlbConfig config = configService.loadBalanceConfig();
+        httpRequestExecutor = new ThreadPoolExecutor(
+                config.getHttpRequestExecutorCoreSize(),
+                config.getHttpRequestExecutorMaxSize(),
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(config.getHttpRequestExecutorQueueSize()),
+                new NamedThreadFactory("req-thread"),
+                // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
+                new ThreadPoolExecutor.CallerRunsPolicy());
         httpRequestScheduler = Schedulers.fromExecutor(httpRequestExecutor);
+    }
+
+    /** Test seam that keeps {@code EmbeddedChannel} access on the test thread. */
+    GeneralHttpNettyService(HttpNettyClientHandler nettyClient, Scheduler httpRequestScheduler) {
+        this.nettyClient = Objects.requireNonNull(nettyClient);
+        this.httpRequestScheduler = Objects.requireNonNull(httpRequestScheduler);
+        this.httpRequestExecutor = null;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        if (httpRequestExecutor != null) {
+            httpRequestScheduler.dispose();
+            httpRequestExecutor.shutdownNow();
+        }
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<Result> responseClz) {
@@ -137,6 +159,9 @@ public class GeneralHttpNettyService {
                 if (!future.isSuccess()) {
                     failSink(nettyCtx, () -> StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
                             .toException("failed to write request, uri=" + uri + ", path=" + path, future.cause()));
+                    // An outbound-handler failure can leave the channel technically open even
+                    // though no response can complete this exchange.
+                    nettyCtx.getChannel().close();
                 }
             });
         }).last();
@@ -202,7 +227,13 @@ public class GeneralHttpNettyService {
 
     private <Result> void handleNettyMessage(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
                                              Class<Result> responseClz) {
-        if (nettyCtx.getSink().isCancelled()) {
+        FluxSink<Result> sink = nettyCtx.getSink();
+        if (sink == null) {
+            handlerNettyError(nettyCtx,
+                    new IllegalStateException("received HTTP data before request sink was installed"));
+            return;
+        }
+        if (sink.isCancelled()) {
             NettyUtils.finish(nettyCtx);
             log.error("sink canceled, finish netty");
             return;

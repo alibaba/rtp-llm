@@ -7,18 +7,18 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class LoadBalanceStrategyFactory {
 
-    private static final Map<LoadBalanceStrategyEnum, LoadBalancer> loadBalancerFactory = new ConcurrentHashMap<>();
+    private static final Map<LoadBalanceStrategyEnum, LoadBalanceStrategy> loadBalanceStrategyMap = new ConcurrentHashMap<>();
 
-    public static void register(LoadBalanceStrategyEnum strategy, LoadBalancer loadBalancer) {
-        loadBalancerFactory.put(strategy, loadBalancer);
+    public static void register(LoadBalanceStrategyEnum strategy, LoadBalanceStrategy loadBalanceStrategy) {
+        loadBalanceStrategyMap.put(strategy, loadBalanceStrategy);
     }
 
-    public static LoadBalancer getLoadBalancer(LoadBalanceStrategyEnum strategy) {
-        LoadBalancer loadBalancer = loadBalancerFactory.get(strategy);
-        if (loadBalancer == null) {
+    public static LoadBalanceStrategy getLoadBalanceStrategy(LoadBalanceStrategyEnum strategy) {
+        LoadBalanceStrategy loadBalanceStrategy = loadBalanceStrategyMap.get(strategy);
+        if (loadBalanceStrategy == null) {
             throw new RuntimeException("loadBalanceStrategy not found: " + strategy);
         }
-        return loadBalancer;
+        return loadBalanceStrategy;
     }
 
     /**
@@ -28,10 +28,10 @@ public class LoadBalanceStrategyFactory {
      *
      * <p>Never call from production code. Strategies register exactly once during Spring
      * initialization; clearing the registry at runtime is unrecoverable — every subsequent
-     * {@link #getLoadBalancer} throws until the process restarts. Public only because test
+     * {@link #getLoadBalanceStrategy} throws until the process restarts. Public only because test
      * callers live in more than one package.
      */
     public static void resetForTesting() {
-        loadBalancerFactory.clear();
+        loadBalanceStrategyMap.clear();
     }
 }

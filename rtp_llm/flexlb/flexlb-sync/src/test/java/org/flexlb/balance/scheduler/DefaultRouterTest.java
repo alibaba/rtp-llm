@@ -1,7 +1,11 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.balance.policy.GroupRoutingPolicy;
+import org.flexlb.balance.strategy.LoadBalanceStrategy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -53,16 +57,22 @@ class DefaultRouterTest {
     private FlexlbConfig loadBalanceConfig;
 
     @Mock
-    private LoadBalancer prefillLoadBalancer;
+    private GroupRoutingPolicy groupRoutingPolicy;
 
     @Mock
-    private LoadBalancer decodeLoadBalancer;
+    private LoadBalanceStrategy prefillStrategy;
 
     @Mock
-    private LoadBalancer vitLoadBalancer;
+    private LoadBalanceStrategy decodeStrategy;
 
     @Mock
-    private LoadBalancer fusionLoadBalancer;
+    private LoadBalanceStrategy vitStrategy;
+
+    @Mock
+    private LoadBalanceStrategy fusionStrategy;
+
+    @Mock
+    private EndpointRegistry endpointRegistry;
 
     @Mock
     private BalanceContext balanceContext;
@@ -85,16 +95,16 @@ class DefaultRouterTest {
 
         // Mock config service
         when(configService.loadBalanceConfig()).thenReturn(loadBalanceConfig);
-        lenient().when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.SHORTEST_TTFT);
+        lenient().when(loadBalanceConfig.getLoadBalanceStrategy()).thenReturn(LoadBalanceStrategyEnum.COST_BASED_PREFILL);
         when(loadBalanceConfig.getStrategyForRoleType(any(RoleType.class))).thenAnswer(inv -> {
             RoleType roleType = inv.getArgument(0);
             if (roleType == RoleType.DECODE) {
-                return LoadBalanceStrategyEnum.WEIGHTED_CACHE;
+                return LoadBalanceStrategyEnum.COST_BASED_DECODE;
             }
             if (roleType == RoleType.PDFUSION) {
                 return LoadBalanceStrategyEnum.RANDOM;
             }
-            return LoadBalanceStrategyEnum.SHORTEST_TTFT;
+            return LoadBalanceStrategyEnum.COST_BASED_PREFILL;
         });
         // batchStrategy is decoupled from regular strategy: defaults to ROUND_ROBIN.
         // mockStaticLoadBalanceStrategyFactory below resets the batch balancer to a plain
@@ -103,21 +113,24 @@ class DefaultRouterTest {
         lenient().when(loadBalanceConfig.getBatchLoadBalanceStrategy())
                 .thenReturn(LoadBalanceStrategyEnum.ROUND_ROBIN);
         lenient().when(loadBalanceConfig.getBatchScheduleMaxCount()).thenReturn(1000);
-        // Default: no configured service routes — role inference falls back to the runtime
-        // view, matching the pre-existing single-role tests. Multi-role-config tests
-        // override this stub explicitly.
-        lenient().when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of());
+        // Batch pre-assignment is valid only when configuration and runtime both
+        // declare the same single role. Individual topology tests override this.
+        lenient().when(modelMetaConfig.getConfiguredRoleTypes())
+                .thenReturn(List.of(RoleType.PDFUSION));
 
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, prefillLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.WEIGHTED_CACHE, decodeLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, vitLoadBalancer);
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
-        // batchStrategy default is ROUND_ROBIN; the constructor resolves it via factory before
-        // mockStaticLoadBalanceStrategyFactory swaps the map, so a placeholder must be registered.
-        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, fusionLoadBalancer);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, prefillStrategy);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, decodeStrategy);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, vitStrategy);
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionStrategy);
+        // The constructor resolves the independent batch strategy eagerly. A
+        // plain strategy is intentional: the negative capability test uses it,
+        // while batch-path tests replace it with ScriptedBatchLoadBalancer.
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, fusionStrategy);
 
         // Create scheduler instance
-        defaultRouter = new DefaultRouter(configService, modelMetaConfig);
+        lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
+        defaultRouter = new DefaultRouter(
+                configService, groupRoutingPolicy, endpointRegistry, modelMetaConfig);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -147,18 +160,18 @@ class DefaultRouterTest {
      */
     private void mockStaticLoadBalanceStrategyFactory() {
         try {
-            // Use reflection to set the loadBalancerMap in DefaultRouter
-            Field loadBalancerMapField = DefaultRouter.class.getDeclaredField("loadBalancerMap");
-            loadBalancerMapField.setAccessible(true);
+            // Use reflection to set the loadBalanceStrategyMap in DefaultRouter
+            Field loadBalanceStrategyMapField = DefaultRouter.class.getDeclaredField("loadBalanceStrategyMap");
+            loadBalanceStrategyMapField.setAccessible(true);
 
             @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
+            Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap = (Map<RoleType, LoadBalanceStrategy>) loadBalanceStrategyMapField.get(defaultRouter);
 
-            // Put mocked LoadBalancer instances into the map
-            loadBalancerMap.put(RoleType.PREFILL, prefillLoadBalancer);
-            loadBalancerMap.put(RoleType.DECODE, decodeLoadBalancer);
-            loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);
-            loadBalancerMap.put(RoleType.PDFUSION, fusionLoadBalancer);
+            // Put mocked LoadBalanceStrategy instances into the map
+            loadBalanceStrategyMap.put(RoleType.PREFILL, prefillStrategy);
+            loadBalanceStrategyMap.put(RoleType.DECODE, decodeStrategy);
+            loadBalanceStrategyMap.put(RoleType.VIT, vitStrategy);
+            loadBalanceStrategyMap.put(RoleType.PDFUSION, fusionStrategy);
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
@@ -194,7 +207,8 @@ class DefaultRouterTest {
     @Test
     void route_refuses_embedding_engine_on_single_schedule_path() {
         when(loadBalanceConfig.getEngineType()).thenReturn(EngineType.EMBEDDING);
-        DefaultRouter embeddingRouter = new DefaultRouter(configService, modelMetaConfig);
+        DefaultRouter embeddingRouter = new DefaultRouter(
+                configService, groupRoutingPolicy, endpointRegistry, modelMetaConfig);
 
         Response response = embeddingRouter.route(balanceContext);
 
@@ -227,14 +241,14 @@ class DefaultRouterTest {
         prefillServerStatus.setHttpPort(8080);
         prefillServerStatus.setGroup("group1");
         prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
+        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(true);
         decodeServerStatus.setServerIp("192.168.1.2");
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -256,7 +270,7 @@ class DefaultRouterTest {
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
         prefillServerStatus.setMessage("No prefill worker available");
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
+        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -281,7 +295,7 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRequestId(54321L);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -389,7 +403,8 @@ class DefaultRouterTest {
         when(loadBalanceConfig.getBatchScheduleMaxCount()).thenReturn(0);
 
         org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
-                () -> new DefaultRouter(configService, modelMetaConfig),
+                () -> new DefaultRouter(
+                        configService, groupRoutingPolicy, endpointRegistry, modelMetaConfig),
                 "batchScheduleMaxCount=0 must fail startup");
     }
 
@@ -415,6 +430,43 @@ class DefaultRouterTest {
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void feOnlyBatchScheduleReturnsPlaceholdersWithoutAdvancingBeStrategy() {
+        ScriptedBatchLoadBalancer scripted = new ScriptedBatchLoadBalancer(List.of(
+                target("must-not-be-selected", 8080)));
+        replaceBatchLoadBalancer(scripted);
+        // Model config/runtime workers are intentionally not prepared. FE-only allocation must
+        // remain available during BE warm-up because no BE topology is consulted or chosen.
+
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setBatchCount(3);
+        request.setAssignBe(false);
+        request.setAssignFe(true);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(request);
+
+        assertTrue(response.isSuccess());
+        assertEquals(3, response.getServerStatus().size());
+        assertEquals(0, scripted.selectBatchCalls,
+                "FE-only allocation must not perturb any BE cursor");
+        assertTrue(response.getServerStatus().stream()
+                .allMatch(target -> target.getServerIp() == null && target.getRole() == null));
+    }
+
+    @Test
+    void batchScheduleRejectsRequestThatAsksForNoAllocation() {
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setBatchCount(1);
+        request.setAssignBe(false);
+        request.setAssignFe(false);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(request);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("assign_be"));
     }
 
     @Test
@@ -634,7 +686,7 @@ class DefaultRouterTest {
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(false);
         fusionServerStatus.setMessage("No fusion worker available");
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -664,14 +716,14 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRole(RoleType.PDFUSION);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.4");
         vitServerStatus.setHttpPort(8083);
         vitServerStatus.setRole(RoleType.VIT);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -701,12 +753,12 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRole(RoleType.PDFUSION);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
         vitServerStatus.setMessage("No vit worker available");
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -740,7 +792,7 @@ class DefaultRouterTest {
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(false);
         decodeServerStatus.setMessage("No decode worker available");
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -769,12 +821,16 @@ class DefaultRouterTest {
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setGroup("group1");
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
         prefillServerStatus.setMessage("No prefill worker available");
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
+        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
+
+        // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
+        lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081"))
+                .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -782,7 +838,7 @@ class DefaultRouterTest {
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeLoadBalancer).rollBack(eq("192.168.1.2:8081"), anyLong());
+        verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), anyLong());
     }
 
     @Test
@@ -797,7 +853,7 @@ class DefaultRouterTest {
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.5");
         vitServerStatus.setHttpPort(8084);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
+        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -819,7 +875,7 @@ class DefaultRouterTest {
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
         vitServerStatus.setMessage("No vit worker available");
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
+        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -849,14 +905,14 @@ class DefaultRouterTest {
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
         fusionServerStatus.setRequestId(54321L);
-        when(fusionLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
+        when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.4");
         vitServerStatus.setHttpPort(8083);
         vitServerStatus.setRole(RoleType.VIT);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -891,21 +947,21 @@ class DefaultRouterTest {
         prefillServerStatus.setHttpPort(8080);
         prefillServerStatus.setGroup("group1");
         prefillServerStatus.setRole(RoleType.PREFILL);
-        when(prefillLoadBalancer.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
+        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(true);
         decodeServerStatus.setServerIp("192.168.1.2");
         decodeServerStatus.setHttpPort(8081);
         decodeServerStatus.setRole(RoleType.DECODE);
-        when(decodeLoadBalancer.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
+        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
         vitServerStatus.setServerIp("192.168.1.5");
         vitServerStatus.setHttpPort(8084);
         vitServerStatus.setRole(RoleType.VIT);
-        when(vitLoadBalancer.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
+        when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -921,19 +977,15 @@ class DefaultRouterTest {
     }
 
     /**
-     * Replace the batch-path LoadBalancer — the {@code batchLoadBalancer} that
-     * {@code /batch_schedule} consults, independent of the regular {@code loadBalancerMap}
-     * that {@code /schedule} uses.
-     */
-    /**
      * Swaps the batch balancer through the factory the constructor actually reads, then rebuilds
      * the router. Writing {@code DefaultRouter.batchLoadBalancer} by reflection would reach past
      * the supported extension point into a private final field — it breaks silently on a rename
      * and depends on the JDK continuing to permit final-field writes.
      */
-    private void replaceBatchLoadBalancer(LoadBalancer loadBalancer) {
+    private void replaceBatchLoadBalancer(LoadBalanceStrategy loadBalancer) {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, loadBalancer);
-        defaultRouter = new DefaultRouter(configService, modelMetaConfig);
+        defaultRouter = new DefaultRouter(
+                configService, groupRoutingPolicy, endpointRegistry, modelMetaConfig);
         // The rebuild starts from a fresh per-role map, so re-apply the role mocks setUp installed.
         mockStaticLoadBalanceStrategyFactory();
     }
@@ -966,8 +1018,53 @@ class DefaultRouterTest {
         }
 
         @Override
-        public void rollBack(String ipPort, long requestId) {
+        public void rollBack(WorkerEndpoint endpoint, long requestId) {
             // No rollback in batch path; route() uses this for /schedule rollback only.
         }
+    }
+
+    @Test
+    void should_force_initial_group_when_traffic_policy_matches() {
+        // Setup - add dummy workers to trigger role types
+        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyDecodeWorker.setIp("192.168.1.2");
+        dummyDecodeWorker.setPort(8081);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+
+        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        dummyPrefillWorker.setIp("192.168.1.1");
+        dummyPrefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+
+        Request actualRequest = new Request();
+        actualRequest.setRequestId(12345L);
+        actualRequest.setSeqLen(10000L);
+        when(balanceContext.getRequest()).thenReturn(actualRequest);
+        when(groupRoutingPolicy.route(balanceContext)).thenReturn(GroupRoutingDecision.of("long-group", "long-context"));
+
+        ServerStatus decodeServerStatus = new ServerStatus();
+        decodeServerStatus.setSuccess(true);
+        decodeServerStatus.setServerIp("192.168.1.2");
+        decodeServerStatus.setHttpPort(8081);
+        decodeServerStatus.setGroup("long-group");
+        decodeServerStatus.setRole(RoleType.DECODE);
+        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"))).thenReturn(decodeServerStatus);
+
+        ServerStatus prefillServerStatus = new ServerStatus();
+        prefillServerStatus.setSuccess(true);
+        prefillServerStatus.setServerIp("192.168.1.1");
+        prefillServerStatus.setHttpPort(8080);
+        prefillServerStatus.setGroup("long-group");
+        prefillServerStatus.setRole(RoleType.PREFILL);
+        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
+
+        // Execute
+        Response response = defaultRouter.route(balanceContext);
+
+        // Verify
+        assertTrue(response.isSuccess(), "Response should be successful");
+        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        verify(decodeStrategy).select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"));
+        verify(prefillStrategy).select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"));
     }
 }

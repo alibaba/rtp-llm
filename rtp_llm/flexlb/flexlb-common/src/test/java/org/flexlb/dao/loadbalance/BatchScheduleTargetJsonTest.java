@@ -41,6 +41,17 @@ class BatchScheduleTargetJsonTest {
     }
 
     @Test
+    void feOnlyPlaceholderOmitsUnusedWorkerFields() {
+        BatchScheduleTarget placeholder = new BatchScheduleTarget();
+        placeholder.setFeUrl("http://10.0.0.9:26002");
+
+        String json = JsonUtils.toString(placeholder);
+
+        assertEquals("{\"fe_url\":\"http://10.0.0.9:26002\"}", json,
+                "an FE-only target must not expose a misleading http_port=0");
+    }
+
+    @Test
     void legacyJsonWithoutFeUrlStillDeserializes() {
         // An older master build never sends fe_url; the newer peer must parse the body and leave
         // feUrl null (those chunks then fail with CHUNK_NO_FE, no fallback) rather than fail to parse.

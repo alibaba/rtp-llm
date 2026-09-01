@@ -466,25 +466,24 @@ class PassthroughClientTest {
                 .verifyComplete();
     }
 
-    /**
-     * Production-equivalent wiring: ChannelOption.CONNECT_TIMEOUT_MILLIS for dead-FE fast-fail,
-     * but no {@code responseTimeout} — mid-stream silence is normal for SSE. A body delay
-     * longer than any plausible response timeout must not be cut off.
-     */
+    /** Production wiring must not impose a response timeout on a valid quiet SSE stream. */
     @Test
     void streamingResponseWithLongBodyDelayIsNotCutOff() {
         server.enqueue(buildSseResponseWithDelayedBody());
 
-        HttpClient http = HttpClient.create()
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 2000);
-        WebClient webClient = WebClient.builder()
-                .clientConnector(new ReactorClientHttpConnector(http))
-                .build();
-        PassthroughClient client = streamingPassthroughClient(webClient);
+        reactor.netty.resources.ConnectionProvider provider =
+                reactor.netty.resources.ConnectionProvider.builder("sse-production-wiring").build();
+        try {
+            WebClient webClient = new DispatcherConfiguration()
+                    .dispatcherPassthroughWebClient(WebClient.builder(), provider);
+            PassthroughClient client = streamingPassthroughClient(webClient);
 
-        StepVerifier.create(forwardForStreaming(client))
-                .expectComplete()
-                .verify(Duration.ofSeconds(10));
+            StepVerifier.create(forwardForStreaming(client))
+                    .expectComplete()
+                    .verify(Duration.ofSeconds(10));
+        } finally {
+            provider.disposeLater().block(Duration.ofSeconds(5));
+        }
     }
 
     /**

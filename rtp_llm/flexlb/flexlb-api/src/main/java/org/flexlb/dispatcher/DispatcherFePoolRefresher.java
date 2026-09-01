@@ -17,6 +17,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -49,6 +50,8 @@ import java.util.stream.Collectors;
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
 public class DispatcherFePoolRefresher {
 
+    private static final AtomicInteger DISCOVERY_THREAD_ID = new AtomicInteger();
+
     /**
      * Bound on a synchronous discovery lookup. Both the inline boot seed and the periodic poll run
      * on shared pools (Spring bean construction, then the shared {@code task-scheduler} that also
@@ -79,6 +82,7 @@ public class DispatcherFePoolRefresher {
     private final ServiceDiscovery serviceDiscovery;
     private final String serviceId;
     private final LongSupplier nanoClock;
+    private final long discoveryTimeoutMs;
     private final AtomicReference<List<String>> fePoolUrls = new AtomicReference<>(List.of());
     private final RateLimitedWarn emptyDiscoveryWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
@@ -94,17 +98,15 @@ public class DispatcherFePoolRefresher {
      * must not park a {@code ForkJoinPool.commonPool()} thread (shared JVM-wide) nor the master's
      * sync pool — its own daemon thread absorbs the stall and is cancelled on timeout.
      */
-    private final ExecutorService discoveryExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "dispatcher-fe-discovery");
-        t.setDaemon(true);
-        return t;
-    });
+    private final AtomicReference<ExecutorService> discoveryExecutor =
+            new AtomicReference<>(newDiscoveryExecutor());
 
     @Autowired
     public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
                                      ConfigService configService) {
         this(serviceDiscovery, cfg,
-                configService.loadBalanceConfig().getDiscoveryFailureGraceMs(), System::nanoTime);
+                configService.loadBalanceConfig().getDiscoveryFailureGraceMs(), System::nanoTime,
+                DISCOVERY_TIMEOUT_MS);
     }
 
     /**
@@ -113,10 +115,18 @@ public class DispatcherFePoolRefresher {
      */
     DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
                               long emptyDiscoveryGraceMs, LongSupplier nanoClock) {
+        this(serviceDiscovery, cfg, emptyDiscoveryGraceMs, nanoClock, DISCOVERY_TIMEOUT_MS);
+    }
+
+    /** Test seam for exercising timeout recovery without waiting the production three seconds. */
+    DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
+                              long emptyDiscoveryGraceMs, LongSupplier nanoClock,
+                              long discoveryTimeoutMs) {
         this.serviceDiscovery = serviceDiscovery;
         this.serviceId = cfg.getFePoolServiceId();
         this.emptyDiscoveryGraceNanos = resolveGraceNanos(emptyDiscoveryGraceMs);
         this.nanoClock = nanoClock;
+        this.discoveryTimeoutMs = discoveryTimeoutMs;
         this.lastNonEmptyNanos = nanoClock.getAsLong();
         // Boot seed first — guarantees source() returns the freshest available view by the
         // time downstream beans (FePool, FeHealthChecker) read it during their own init.
@@ -242,18 +252,42 @@ public class DispatcherFePoolRefresher {
      * caller degrades to a warn (the retained snapshot is kept by {@link #applyUrls}).
      */
     private List<WorkerHost> boundedGetHosts() throws Exception {
-        Future<List<WorkerHost>> future = discoveryExecutor.submit(() -> serviceDiscovery.getHosts(serviceId));
+        ExecutorService executor = discoveryExecutor.get();
+        Future<List<WorkerHost>> future = executor.submit(() -> serviceDiscovery.getHosts(serviceId));
         try {
-            return future.get(DISCOVERY_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return future.get(discoveryTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             future.cancel(true);
+            replaceTimedOutExecutor(executor);
             throw e;
         }
     }
 
+    /**
+     * Interrupting a native/socket-backed lookup is advisory. Retire the executor after a timeout
+     * so the next poll can run instead of queueing forever behind the wedged call.
+     */
+    private void replaceTimedOutExecutor(ExecutorService timedOut) {
+        ExecutorService replacement = newDiscoveryExecutor();
+        if (discoveryExecutor.compareAndSet(timedOut, replacement)) {
+            timedOut.shutdownNow();
+        } else {
+            replacement.shutdownNow();
+        }
+    }
+
+    private static ExecutorService newDiscoveryExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r,
+                    "dispatcher-fe-discovery-" + DISCOVERY_THREAD_ID.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
     @PreDestroy
     void shutdown() {
-        discoveryExecutor.shutdownNow();
+        discoveryExecutor.get().shutdownNow();
     }
 
     private static List<String> toUrls(List<WorkerHost> hosts) {

@@ -145,17 +145,23 @@ def assert_close_with_mismatch_tolerance(
 ):
     """
     Asserts that two tensors are close, allowing for a specified number of mismatched elements.
-    This function correctly implements the same logic as torch.isclose.
+    NaN and Inf values count against the mismatch allowance.
     """
     # Ensure tensors are float for comparison
     actual_float = actual.float()
     expected_float = expected.float()
 
-    # This is the core logic from torch.isclose
-    # A mismatch occurs if the difference is greater than the combined tolerance
-    mismatched = torch.abs(actual_float - expected_float) > (
-        atol + rtol * torch.abs(expected_float)
+    non_finite = ~torch.isfinite(actual_float) | ~torch.isfinite(expected_float)
+    mismatched = ~torch.isclose(
+        actual_float,
+        expected_float,
+        rtol=rtol,
+        atol=atol,
+        equal_nan=False,
     )
+    # torch.isclose considers equal infinities close. Keep all non-finite values
+    # subject to max_mismatched_elements instead.
+    mismatched |= non_finite
 
     num_mismatched = torch.sum(mismatched).item()
 
@@ -163,19 +169,27 @@ def assert_close_with_mismatch_tolerance(
         # For a helpful error message, let's find the worst offenders
         actual_flat = actual_float.flatten()
         expected_flat = expected_float.flatten()
-        abs_diff = torch.abs(actual_flat - expected_flat)
-
-        # Calculate relative difference only where expected is not zero to avoid division by zero
-        # Add a small epsilon to the denominator for stability
-        rel_diff = abs_diff / (torch.abs(expected_flat) + 1e-12)
+        finite = torch.isfinite(actual_flat) & torch.isfinite(expected_flat)
+        if finite.any().item():
+            finite_abs_diff = torch.abs(actual_flat[finite] - expected_flat[finite])
+            finite_rel_diff = finite_abs_diff / (
+                torch.abs(expected_flat[finite]) + 1e-12
+            )
+            greatest_abs_diff = f"{torch.max(finite_abs_diff).item():.4g}"
+            greatest_rel_diff = f"{torch.max(finite_rel_diff).item():.4g}"
+        else:
+            greatest_abs_diff = "N/A"
+            greatest_rel_diff = "N/A"
 
         total_elements = actual_flat.numel()
+        num_non_finite = torch.sum(non_finite).item()
 
         raise AssertionError(
             f"Tensors are not close enough!\n"
             f"Mismatched elements: {num_mismatched} / {total_elements} "
             f"({100.0 * num_mismatched / total_elements:.2f}%)\n"
+            f"Non-finite element pairs: {num_non_finite}\n"
             f"Allowed mismatched elements: {max_mismatched_elements}, but found {num_mismatched}.\n"
-            f"Greatest absolute difference: {torch.max(abs_diff).item():.4g} (atol={atol})\n"
-            f"Greatest relative difference: {torch.max(rel_diff).item():.4g} (rtol={rtol})"
+            f"Greatest finite absolute difference: {greatest_abs_diff} (atol={atol})\n"
+            f"Greatest finite relative difference: {greatest_rel_diff} (rtol={rtol})"
         )

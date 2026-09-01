@@ -50,7 +50,10 @@ class BatchHandlerPvTest {
     void setUp() {
         when(cfg.getSubBatchSpec()).thenReturn(SubBatchSpec.parse("count:2"));
         when(cfg.isPreAssignBe()).thenReturn(false);
-        lenient().when(batchScheduleClient.requestTargets(org.mockito.ArgumentMatchers.anyInt()))
+        lenient().when(batchScheduleClient.requestTargets(
+                        org.mockito.ArgumentMatchers.anyInt(),
+                        org.mockito.ArgumentMatchers.anyBoolean(),
+                        org.mockito.ArgumentMatchers.anyBoolean()))
                 .thenReturn(Mono.just(List.of()));
         // BatchHandler now relays the caller's end-to-end headers + query to each chunk.
         ServerRequest.Headers headers = mock(ServerRequest.Headers.class);

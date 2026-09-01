@@ -4,12 +4,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
-import java.util.Arrays;
-import java.util.Locale;
 import java.util.Map;
 
 /**
- * Reflection-based env-variable override for plain config beans. For each declared field of
+ * Reflection-based env-variable override for plain config beans. For each field declared directly
+ * on the concrete config class (inherited fields are intentionally outside this helper's contract),
  * supported type, looks up an env var named {@code <prefix><FIELD_NAME_UPPER_SNAKE>} and, when
  * present and non-empty, writes the parsed value into the field. Convention matches the existing
  * {@code FLEXLB_CONFIG} contract: {@code enableQueueing} → {@code ENABLE_QUEUEING}.
@@ -21,17 +20,18 @@ import java.util.Map;
  * <p>A malformed numeric value logs an error and leaves the field at its default, so a typo in a
  * tuning knob cannot crash startup. Booleans follow {@link Boolean#parseBoolean}: anything but a
  * case-insensitive {@code "true"} — including {@code "1"}/{@code "yes"}/typos — reads as
- * {@code false}, never errors (deliberate backward compatibility with live deployments). A
- * malformed <em>enum</em> override fails fast instead: an unknown categorical value (e.g. a
- * mistyped {@code ENGINE_TYPE}) must not silently fall back to the default and run the wrong mode.
+ * {@code false}, never errors. Enums preserve the legacy {@code ConfigService} contract too:
+ * matching is case-sensitive and an invalid value is logged and ignored. In particular, upgrading
+ * must not make a previously ignored lowercase value suddenly take effect or turn a tolerated typo
+ * into a startup failure.
  *
  * <p>On the empty-prefix path the bare names are dangerously generic ({@code ENGINE_TYPE},
  * {@code DEPLOY}, ...) and can collide with unrelated variables lingering in the container. Bare
  * names still apply — live deployments set them — so the collision is not closed here: a
  * {@code FLEXLB_}-prefixed form of each name is consulted first and wins when present, giving a
  * deployment that hits a collision a way out without renaming anything else. Absent the prefixed
- * form an unrelated bare {@code ENGINE_TYPE} still takes effect, and being an enum still fails
- * startup. Callers that already pass a namespace prefix (e.g. {@code DISPATCH_}) are collision-safe
+ * form an unrelated bare {@code ENGINE_TYPE} still takes effect when it is valid; an invalid value
+ * is logged and ignored. Callers that already pass a namespace prefix (e.g. {@code DISPATCH_}) are collision-safe
  * and get no extra prefixing.
  */
 @Slf4j
@@ -82,21 +82,22 @@ public final class EnvConfigOverrides {
             if (value.isEmpty()) {
                 continue;
             }
+            Object parsed;
+            try {
+                parsed = parseValue(value, type);
+            } catch (IllegalArgumentException e) {
+                log.error("env override failed for {} = {}: {}", envName, raw, e.getMessage(), e);
+                continue;
+            }
             try {
                 field.setAccessible(true);
                 Object oldValue = field.get(config);
-                Object parsed = parseValue(value, type);
                 field.set(config, parsed);
                 // WARN, not info: an override silently flipping behavior is exactly what an
                 // upgrade postmortem needs to see, including which env name matched.
                 log.warn("env override: {} = {} (field: {}, old: {})",
                         envName, parsed, field.getName(), oldValue);
-            } catch (Exception e) {
-                if (type.isEnum()) {
-                    throw new IllegalArgumentException(
-                            "invalid enum value for env override " + envName + "=" + raw
-                                    + " (valid: " + Arrays.toString(type.getEnumConstants()) + ")", e);
-                }
+            } catch (ReflectiveOperationException | SecurityException e) {
                 log.error("env override failed for {} = {}: {}", envName, raw, e.getMessage(), e);
             }
         }
@@ -141,7 +142,7 @@ public final class EnvConfigOverrides {
             return value;
         }
         if (targetType.isEnum()) {
-            return Enum.valueOf((Class<Enum>) targetType, value.toUpperCase(Locale.ROOT));
+            return Enum.valueOf((Class<Enum>) targetType, value);
         }
         throw new IllegalArgumentException("unsupported type: " + targetType);
     }

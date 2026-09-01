@@ -2,9 +2,11 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.pv.DispatchPvLogData;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.stereotype.Component;
@@ -43,12 +45,35 @@ public class BatchHandler {
     private final PassthroughClient passthroughClient;
     private final DispatcherMetricsReporter metricsReporter;
     private final boolean preAssignBe;
+    private final FeAllocationMode feAllocationMode;
+    private final int maxChunkCount;
 
+    @Autowired
     public BatchHandler(FanoutService fanoutService,
                         DispatchConfig cfg,
                         BatchScheduleClient batchScheduleClient,
                         PassthroughClient passthroughClient,
-                        DispatcherMetricsReporter metricsReporter) {
+                        DispatcherMetricsReporter metricsReporter,
+                        ConfigService configService) {
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter,
+                configService.loadBalanceConfig().getBatchScheduleMaxCount());
+    }
+
+    /** Package-private convenience for focused tests; mirrors the production default. */
+    BatchHandler(FanoutService fanoutService,
+                 DispatchConfig cfg,
+                 BatchScheduleClient batchScheduleClient,
+                 PassthroughClient passthroughClient,
+                 DispatcherMetricsReporter metricsReporter) {
+        this(fanoutService, cfg, batchScheduleClient, passthroughClient, metricsReporter, 1000);
+    }
+
+    BatchHandler(FanoutService fanoutService,
+                 DispatchConfig cfg,
+                 BatchScheduleClient batchScheduleClient,
+                 PassthroughClient passthroughClient,
+                 DispatcherMetricsReporter metricsReporter,
+                 int maxChunkCount) {
         this.fanoutService = fanoutService;
         this.subBatch = cfg.getSubBatchSpec();
         this.splitPolicy = subBatch.mode().name().toLowerCase() + ":" + subBatch.value();
@@ -56,6 +81,10 @@ public class BatchHandler {
         this.passthroughClient = passthroughClient;
         this.metricsReporter = metricsReporter;
         this.preAssignBe = cfg.isPreAssignBe();
+        this.feAllocationMode = cfg.getFeAllocation() == null
+                ? FeAllocationMode.MASTER
+                : FeAllocationMode.parse(cfg.getFeAllocation());
+        this.maxChunkCount = maxChunkCount;
     }
 
     public Mono<ServerResponse> handle(ServerRequest request, BatchEndpointSpec spec) {
@@ -99,21 +128,26 @@ public class BatchHandler {
             List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
             pv.setChunkCount(chunks.size());
             recordChunkShape(pv, chunks);
+            if (chunks.size() > maxChunkCount) {
+                return DispatcherResponses.error(413, "too_many_sub_batches",
+                        "batch produces " + chunks.size() + " sub-batches; maximum is "
+                                + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
+            }
             List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                     body, chunks, spec.getRequestArrayField());
             spec.prepareChunkBodies(body, chunkBodies);
-            return resolveTargets(chunks.size())
+            boolean assignBe = preAssignBe && spec.isPreAssignable();
+            boolean assignFe = feAllocationMode == FeAllocationMode.MASTER;
+            return resolveTargets(chunks.size(), assignBe, assignFe)
                     .flatMap(targets -> {
-                        // BE role_addrs stamping stays gated on the toggle + endpoint support; FE
-                        // assignment does not — it is always sourced from the master (below).
-                        if (preAssignBe && spec.isPreAssignable()) {
+                        if (assignBe) {
                             BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
                         }
-                        // Per-chunk FE the master assigned from its single global cursor. There is
-                        // no local fallback by design: a chunk with no master fe_url fails visibly
-                        // in fanout, so FE load stays fully attributable to the master cursor and
-                        // never splits across a second, per-instance distribution.
-                        List<String> preAssignedFeUrls = preAssignedFeUrls(targets);
+                        // In master mode these are index-aligned authoritative assignments. Local
+                        // mode deliberately passes none; FanoutService reserves one contiguous
+                        // batch from this node's health-filtered FePool instead.
+                        List<String> preAssignedFeUrls = assignFe
+                                ? preAssignedFeUrls(targets) : List.of();
                         long fanoutStart = System.currentTimeMillis();
                         // Relay the caller's end-to-end headers and query to every chunk: the split
                         // path must not silently change auth/tenancy/tracing semantics relative to
@@ -122,7 +156,8 @@ public class BatchHandler {
                                         preAssignedFeUrls, spec,
                                         request.headers().asHttpHeaders(), request.uri().getRawQuery())
                                 .doOnNext(subs -> metricsReporter.reportFanoutRt(
-                                        System.currentTimeMillis() - fanoutStart))
+                                        System.currentTimeMillis() - fanoutStart,
+                                        feAllocationMode.configValue()))
                                 .map(subs -> ResponseMerger.merge(subs, spec, body))
                                 .flatMap(merged -> {
                                     pv.setFailedChunks(merged.failedReasons().size());
@@ -208,10 +243,9 @@ public class BatchHandler {
     }
 
     /**
-     * The master's per-chunk FE assignment, index-aligned to {@code targets} (and thus to chunks).
+     * Master mode's per-chunk FE assignment, index-aligned to {@code targets} (and thus to chunks).
      * A null entry — or an index past a short target list — means "no master FE for this chunk";
-     * {@link FanoutService} fails such a chunk visibly rather than picking a local FE, so FE load
-     * has exactly one source.
+     * {@link FanoutService} fails such a chunk visibly rather than changing allocation source.
      */
     private static List<String> preAssignedFeUrls(List<BatchScheduleTarget> targets) {
         List<String> feUrls = new ArrayList<>(targets.size());
@@ -243,18 +277,19 @@ public class BatchHandler {
     }
 
     /**
-     * Resolves per-chunk targets from the master for every splittable batch. FE selection is
-     * sourced solely from the master's single global cursor with no local fallback, so this
-     * {@code /batch_schedule} round-trip is now unconditional — it also carries the per-chunk
-     * {@code fe_url}, which is never wasted even on endpoints that ignore BE {@code role_addrs}
-     * stamping (those merely skip the stamp, see {@link #handle}). All {@link BatchScheduleClient}
-     * failure paths collapse to an empty list; the affected chunks then fail visibly in fanout
-     * rather than silently falling onto a per-instance FE distribution.
+     * Resolves only the allocation dimensions the request will consume. Master FE mode always asks
+     * for {@code assign_fe}; BE selection is requested only when this endpoint can consume the
+     * stamped role address. Local FE mode with BE pre-assignment disabled needs no master call at
+     * all. This keeps both global cursors free of invisible, discarded advances.
      */
-    private Mono<List<BatchScheduleTarget>> resolveTargets(int chunkCount) {
+    private Mono<List<BatchScheduleTarget>> resolveTargets(
+            int chunkCount, boolean assignBe, boolean assignFe) {
+        if (!assignBe && !assignFe) {
+            return Mono.just(List.of());
+        }
         long start = System.currentTimeMillis();
-        return batchScheduleClient.requestTargets(chunkCount)
+        return batchScheduleClient.requestTargets(chunkCount, assignBe, assignFe)
                 .doOnNext(targets -> metricsReporter.reportPreassignRt(
-                        System.currentTimeMillis() - start, !targets.isEmpty()));
+                        System.currentTimeMillis() - start, !targets.isEmpty(), assignBe, assignFe));
     }
 }

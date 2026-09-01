@@ -127,6 +127,9 @@ public class DispatcherConfiguration {
                     "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
                             + "or /health (vLLM) etc.; got '" + c.getProbePath() + "'");
         }
+        FeAllocationMode allocationMode = FeAllocationMode.parse(c.getFeAllocation());
+        // Normalize once so logs, metrics, and JSON-loaded vs env-loaded configs expose one value.
+        c.setFeAllocation(allocationMode.configValue());
         // SubBatchSpec.parse throws IllegalArgumentException with a precise message on bad DSL.
         c.setSubBatchSpec(SubBatchSpec.parse(c.getSubBatch()));
     }
@@ -199,9 +202,10 @@ public class DispatcherConfiguration {
     SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg, DispatcherFePoolRefresher refresher) {
         return () -> Logger.warn(
                 "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
-                        + "batchTimeoutMs={}, probePath={}, preAssignBe={}",
+                        + "batchTimeoutMs={}, probePath={}, feAllocation={}, preAssignBe={}",
                 cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
                 BatchEndpointSpec.SPECS.size(),
-                cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.isPreAssignBe());
+                cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.getFeAllocation(),
+                cfg.isPreAssignBe());
     }
 }

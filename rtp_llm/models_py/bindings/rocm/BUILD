@@ -82,11 +82,9 @@ cc_library(
 cc_library(
     name = "speculative_sampling",
     srcs = [
-        "speculative_sampling/sampling_ops.cu",
         "speculative_sampling/sampling.cu"
     ],
     hdrs = [
-        "speculative_sampling/sampling.cuh",
         "speculative_sampling/utils.cuh",
         "speculative_sampling/vec_dtypes.cuh"
     ],

@@ -20,6 +20,8 @@ cc_library(
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
+        "@local_config_cuda//cuda:cublas_headers",
+        "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
     ],
     copts = copts(),
@@ -119,10 +121,27 @@ cc_library(
 )
 
 cc_library(
+    name = "bf16_gemm_op",
+    srcs = [
+        "Bf16GemmOp.cc",
+    ],
+    hdrs = [
+        "Bf16GemmOp.h",
+    ],
+    copts = cuda_copts(),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cublas",
+        "@local_config_cuda//cuda:cublas_headers",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_bindings",
     srcs = glob([
         "*.cc",
     ], exclude = [
+        "Bf16GemmOp.cc",
         "RegisterCudaOps.cc",
         "SplitKvCacheCopy.cc",
         "NoBlockCopy.cc",
@@ -132,6 +151,7 @@ cc_library(
     hdrs = glob([
         "*.h",
     ], exclude = [
+        "Bf16GemmOp.h",
         "SplitKvCacheCopy.h",
         "cuda_host_utils.h",
         "launch_utils.h",
@@ -141,12 +161,18 @@ cc_library(
     copts = cuda_copts(),
     deps = torch_deps() + [
         ":cuda_host_utils",
+        "@local_config_cuda//cuda:cuda_headers",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_ep_util",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/cuda/kernels:fast_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:persistent_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_persistent_topk",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
+        "//rtp_llm/models_py/bindings/cuda/kernels:mha_paged_attn_plan",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
@@ -154,7 +180,15 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:user_buffers",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
+        # topk_v3's cluster-launch kernels need cooperative_groups::this_cluster,
+        # which the PPU toolkit lacks; python indexer.py degrades via hasattr.
+        "@//:using_ppu": [],
+        "//conditions:default": ["//rtp_llm/models_py/bindings/cuda/kernels:topk_v3"],
+    }) + select({
         "@//:using_cuda12_9": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
+        ],
+        "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
         "//conditions:default": [],
@@ -170,6 +204,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         ":cuda_bindings",
     ],
     visibility = ["//visibility:public"],
@@ -198,10 +233,14 @@ cc_library(
     copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        ":bf16_gemm_op",
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({
         "@//:using_cuda12_9": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "@//:using_cuda13_x86": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],

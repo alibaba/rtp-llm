@@ -1,11 +1,59 @@
 import json
+import logging
 import os
 import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
+
+
+def _validate_compressed_targets(group_name: str, group_config: Dict[str, Any]) -> None:
+    targets = group_config.get("targets")
+    if targets is None:
+        return
+    if not isinstance(targets, (list, tuple)) or sorted(targets) != ["Linear"]:
+        raise ValueError(
+            f"compressed-tensors group {group_name} limits quantization to "
+            f"targets={targets}, which is not supported; only a whole-model "
+            '["Linear"] scope can be applied'
+        )
+
+
+def _pick_config_group(config_groups: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Resolve the config group a compressed-tensors checkpoint describes.
+
+    ``group_0`` still wins whenever it is present, so every checkpoint that loads
+    today keeps loading identically. The fallback only covers what the previous
+    hardcoded ``config_groups["group_0"]`` lookup could not read at all: a single
+    group under a checkpoint-defined name, which is how Qwen3.5 ships W8A8.
+    """
+    if "group_0" in config_groups:
+        if len(config_groups) > 1:
+            # Only group_0 is read, exactly as before. Say so, because a
+            # multi-scheme checkpoint would otherwise load as if the other
+            # groups did not exist.
+            logging.getLogger(__name__).warning(
+                "compressed-tensors config_groups %s: only group_0 is applied, "
+                "the rest are ignored",
+                sorted(config_groups),
+            )
+        group_name = "group_0"
+        group_config = config_groups[group_name]
+        return group_name, group_config
+    if len(config_groups) != 1:
+        raise ValueError(
+            "compressed-tensors needs a group_0 entry or exactly one named group, "
+            f"got {sorted(config_groups)}"
+        )
+    group_name, group_config = next(iter(config_groups.items()))
+    # targets describes which modules the group covers and nothing reads it, so
+    # only a whole-model scope can be honoured. Anything narrower would be
+    # applied as if it covered everything and fail later asking a BF16 module
+    # for a weight scale.
+    _validate_compressed_targets(group_name, group_config)
+    return group_name, group_config
 
 
 class QuantizationType(str, Enum):
@@ -169,20 +217,35 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            config_groups = quant_config["config_groups"]
-            weights_config = config_groups["group_0"]["weights"]
-            activation_config = config_groups["group_0"]["input_activations"]
-            bits = weights_config["num_bits"]
+            group_name, group_config = _pick_config_group(
+                quant_config["config_groups"]
+            )
+            weights_config = group_config["weights"]
+            # Absent or explicitly null when the checkpoint quantizes weights
+            # only. Legacy FP8 per-channel checkpoints accept that shape, while
+            # activation-dependent schemes below require a dict.
+            activation_config = group_config.get("input_activations")
+            bits = weights_config.get("num_bits")
+            weight_type = weights_config.get("type")
+            weight_strategy = weights_config.get("strategy")
+            weight_dynamic = weights_config.get("dynamic", False)
             if (
-                weights_config["type"] == "float"
+                weight_type == "float"
                 and bits == 8
-                and weights_config["strategy"] == "channel"
+                and weight_strategy == "channel"
             ):
+                if activation_config is None:
+                    logging.getLogger(__name__).warning(
+                        "compressed-tensors group %s has no input_activations; "
+                        "preserving legacy FP8 per-channel weight-only loading",
+                        group_name,
+                    )
                 quant_method = Fp8PerChannelCompressedQuantConfig.get_method()
             elif (
-                weights_config["type"] == "float"
+                weight_type == "float"
                 and bits == 8
-                and weights_config["strategy"] == "tensor"
+                and weight_strategy == "tensor"
+                and isinstance(activation_config, dict)
             ):
                 quant_method = Fp8PerTensorCompressedQuantConfig.get_method()
                 return Fp8PerTensorCompressedQuantConfig.from_config(
@@ -191,15 +254,48 @@ class QuantizationConfig(ABC):
                         "method": quant_method,
                         "group_size": group_size,
                         "is_quanted": True,
-                        "dynamic": activation_config["dynamic"],
+                        "dynamic": activation_config.get("dynamic", False),
                         "act_scale_suffix": ".input_scale",
                         "weight_scale_suffix": ".weight_scale",
                     }
                 )
             elif (
-                weights_config["type"] == "int"
+                weight_type == "int"
+                and bits == 8
+                and weight_strategy == "channel"
+                and not weight_dynamic
+                # Weight-only INT8 checkpoints leave input_activations null; they
+                # fall through to the generic paths below instead of subscripting
+                # a None here.
+                and isinstance(activation_config, dict)
+                and activation_config.get("type") == "int"
+                and activation_config.get("num_bits") == 8
+                and activation_config.get("strategy") == "token"
+                and activation_config.get("dynamic", False)
+            ):
+                _validate_compressed_targets(group_name, group_config)
+                if not weights_config.get(
+                    "symmetric", True
+                ) or not activation_config.get("symmetric", True):
+                    raise ValueError(
+                        f"compressed-tensors group {group_name} uses asymmetric INT8, "
+                        "but only symmetric W8A8 is supported"
+                    )
+                ignore_patterns = quant_config.get("ignore") or []
+                quant_method = CompressedW8A8Int8PerChannelQuantConfig.get_method()
+                return CompressedW8A8Int8PerChannelQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": quant_method,
+                        "group_size": 0,
+                        "is_quanted": True,
+                        "ignore_patterns": ignore_patterns,
+                    }
+                )
+            elif (
+                weight_type == "int"
                 and bits == 4
-                and weights_config["strategy"] == "group"
+                and weight_strategy == "group"
             ):
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
@@ -215,6 +311,15 @@ class QuantizationConfig(ABC):
                         "is_quanted": True,
                         "ignore_patterns": ignore_patterns,
                     }
+                )
+            if quant_method == "compressed-tensors":
+                # Nothing above recognised the scheme. The generic tail would
+                # otherwise try to instantiate the abstract
+                # CompressedTensorsQuantConfig and surface a TypeError, so name
+                # the unsupported combination instead.
+                raise ValueError(
+                    f"unsupported compressed-tensors scheme in group {group_name}: "
+                    f"weights={weights_config}, input_activations={activation_config}"
                 )
 
         if quant_method == "quark":
@@ -801,6 +906,83 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return CompressedW4A8Int4PerChannelQuantConfig(**config)
+
+
+class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
+    """Pre-quantized compressed-tensors W8A8 INT8 configuration.
+
+    Weights are static symmetric INT8 per output channel and activations are
+    dynamically quantized to symmetric INT8 per token.
+    """
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 0,
+        is_quanted: bool = True,
+        ignore_patterns: Optional[Sequence[str]] = None,
+    ):
+        assert (
+            bits == 8 and group_size == 0
+        ), f"invalid params {bits} != 8 or {group_size} != 0"
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        # Every parameter is named and there is no kwargs sink, so a misspelled
+        # key raises instead of silently leaving the exclude set empty.
+        self._ignore_patterns: List[str] = list(ignore_patterns or [])
+        # WeightModule support checks use exclude_modules for checkpoint paths and
+        # {i}-templated model weight definitions. Concrete layer entries are
+        # allowed here because compressed-tensors checkpoints also list ignored
+        # non-quantized parameters. Regex entries are interpreted against the
+        # template by the loader; a concrete partial-layer entry still fails
+        # fast when it intersects a quantizable template.
+        self.exclude_modules = set(self._ignore_patterns)
+
+    @classmethod
+    def get_method(cls) -> str:
+        # Not registered in preset_quant_config: this scheme is recognised from
+        # the checkpoint's own quantization_config, not selected by hand through
+        # --quantization.
+        return "W8A8_INT8_PER_CHANNEL_COMPRESSED"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "w8a8_int8_per_channel"
+
+    @property
+    def ignore_patterns(self) -> List[str]:
+        return self._ignore_patterns
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        # Narrower than the sibling per-channel schemes, which also accept
+        # float8_e4m3fn: linear-layer INT8 and attention KV cache dtype are
+        # independent, but this combination has not been verified here, so a
+        # deployment carrying --fp8_kv_cache is failed at startup rather than
+        # served on an unvalidated path. Widen it with evidence, not by default.
+        return [torch.float16, torch.bfloat16]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        allowed_keys = {
+            "bits",
+            "method",
+            "group_size",
+            "is_quanted",
+            "ignore_patterns",
+        }
+        unknown_keys = set(config) - allowed_keys
+        if unknown_keys:
+            raise TypeError(
+                f"unexpected W8A8 quantization config keys: {sorted(unknown_keys)}"
+            )
+        return cls(
+            bits=config.get("bits", 8),
+            group_size=config.get("group_size", 0),
+            is_quanted=config.get("is_quanted", True),
+            ignore_patterns=config.get("ignore_patterns"),
+        )
 
 
 DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(

@@ -4,8 +4,8 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONWriter;
-import lombok.RequiredArgsConstructor;
 import org.flexlb.util.RateLimitedWarn;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
@@ -22,12 +22,13 @@ import java.util.concurrent.TimeUnit;
  * {@link JSON#toJSONBytes(Object, JSONWriter.Feature...)} and parses the FE response bytes back
  * into a {@link JSONObject}. Whether the serialize includes {@link JSONWriter.Feature#WriteNulls}
  * is driven by {@link BatchEndpointSpec#isFanoutWriteNulls()} — see the field's Javadoc for
- * when null preservation matters. Failed chunks become {@link SubBatchResult#failed} and never
- * abort their siblings.
+ * when null preservation matters. FE URLs come from the master-stamped target vector or one local
+ * {@link FePool#nextBatch(int)} reservation according to {@link FeAllocationMode}; the service
+ * never silently crosses between those sources. Failed chunks become
+ * {@link SubBatchResult#failed} and never abort their siblings.
  */
 @Component
 @ConditionalOnProperty(prefix = "dispatch", name = "fe-pool-service-id")
-@RequiredArgsConstructor
 public class FanoutService {
 
     private static final JSONWriter.Feature[] WRITE_NULLS = { JSONWriter.Feature.WriteNulls };
@@ -50,8 +51,30 @@ public class FanoutService {
 
     private final FeClient feClient;
     private final DispatcherMetricsReporter metricsReporter;
+    private final FePool fePool;
+    private final FeAllocationMode feAllocationMode;
     /** During an FE outage the fanout path fails per chunk; cap the WARN stream at 1/s. */
     private final RateLimitedWarn failureWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
+
+    @Autowired
+    public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
+                         FePool fePool, DispatchConfig config) {
+        this(feClient, metricsReporter, fePool, FeAllocationMode.parse(config.getFeAllocation()));
+    }
+
+    /** Focused-test constructor preserving the default master-authoritative behavior. */
+    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter) {
+        this(feClient, metricsReporter, null, FeAllocationMode.MASTER);
+    }
+
+    /** Test seam for exercising both allocation modes with a controlled pool. */
+    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
+                  FePool fePool, FeAllocationMode feAllocationMode) {
+        this.feClient = feClient;
+        this.metricsReporter = metricsReporter;
+        this.fePool = fePool;
+        this.feAllocationMode = feAllocationMode;
+    }
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
                                                      List<JSONObject> chunkBodies,
@@ -61,15 +84,13 @@ public class FanoutService {
                                                      String rawQuery) {
         JSONWriter.Feature[] features = spec.isFanoutWriteNulls() ? WRITE_NULLS : NO_FEATURES;
         String arrayField = spec.getRequestArrayField();
+        List<String> effectiveFeUrls = resolveFeUrls(chunkBodies.size(), preAssignedFeUrls);
         List<ChunkPlan> plans = new ArrayList<>(chunkBodies.size());
         int start = 0;
         for (int i = 0; i < chunkBodies.size(); i++) {
             JSONObject body = chunkBodies.get(i);
             int chunkSize = body.getJSONArray(arrayField).size();
-            // Master-assigned FE for this chunk (single global cursor); null for chunks the master
-            // did not cover (short list, no FE view) — dispatchOne then fails such a chunk with
-            // CHUNK_NO_FE, no local fallback.
-            String preAssignedFe = i < preAssignedFeUrls.size() ? preAssignedFeUrls.get(i) : null;
+            String preAssignedFe = i < effectiveFeUrls.size() ? effectiveFeUrls.get(i) : null;
             plans.add(new ChunkPlan(body, start, chunkSize, preAssignedFe));
             start += chunkSize;
         }
@@ -78,6 +99,26 @@ public class FanoutService {
                         FANOUT_MAX_CONCURRENCY)
                 .collectList()
                 .publishOn(Schedulers.parallel());
+    }
+
+    /** Reserve a deterministic, index-aligned FE vector from the configured source. */
+    private List<String> resolveFeUrls(int count, List<String> masterAssignments) {
+        if (feAllocationMode == FeAllocationMode.MASTER) {
+            return masterAssignments != null ? masterAssignments : List.of();
+        }
+        if (fePool == null) {
+            failureWarn.warn("local FE allocation requested but no FePool is wired: count={}", count);
+            return java.util.Collections.nCopies(count, null);
+        }
+        try {
+            // nextBatch reserves one contiguous cursor range and uses one health snapshot, so
+            // concurrent flatMap subscriptions cannot reorder local round-robin assignment.
+            return fePool.nextBatch(count);
+        } catch (RuntimeException e) {
+            failureWarn.warn("local FE allocation failed: count={}, err={}", count,
+                    DispatcherResponses.briefReason(e));
+            return java.util.Collections.nCopies(count, null);
+        }
     }
 
     /**
@@ -95,18 +136,12 @@ public class FanoutService {
      */
     private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features,
                                              BatchEndpointSpec spec, HttpHeaders inboundHeaders, String rawQuery) {
-        // FE selection is sourced solely from the master's single global cursor — there is no
-        // local fallback by design, so FE load stays fully attributable to that one cursor and
-        // load debugging never has to reason about a second, per-instance distribution. A chunk
-        // the master did not assign (null fe_url) fails here with its OWN reason (CHUNK_NO_FE),
-        // never folded into the generic serialization pick failure, so "the master isn't assigning
-        // FEs" reads straight off the metric rather than silently rerouting.
-        if (plan.feUrl() == null) {
+        if (plan.feUrl() == null || plan.feUrl().isBlank()) {
             metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_NO_FE, 0);
-            failureWarn.warn("chunk has no master FE assignment, failing without fallback: size={}",
-                    plan.chunkSize());
+            failureWarn.warn("chunk has no {} FE assignment: size={}",
+                    feAllocationMode.configValue(), plan.chunkSize());
             return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
-                    "no master FE assignment"));
+                    "no " + feAllocationMode.configValue() + " FE assignment"));
         }
         return Mono.fromCallable(() -> new Pick(plan.feUrl(), JSON.toJSONBytes(plan.body(), features)))
                 .flatMap(pick -> {
@@ -188,8 +223,8 @@ public class FanoutService {
 
     /**
      * A chunk's request body plus its absolute offset and item count in the batch. {@code feUrl}
-     * is the master's pre-assigned FE for this chunk, or {@code null} — which fails the chunk with
-     * CHUNK_NO_FE, there is no local fallback.
+     * is the FE selected by the configured allocation source, or {@code null} when that source
+     * could not cover the chunk (reported as CHUNK_NO_FE).
      */
     private record ChunkPlan(JSONObject body, int startIndex, int chunkSize, String feUrl) {
     }

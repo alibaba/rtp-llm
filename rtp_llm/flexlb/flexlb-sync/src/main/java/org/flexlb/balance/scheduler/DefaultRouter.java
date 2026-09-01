@@ -1,9 +1,14 @@
 package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.BatchLoadBalancer;
+import org.flexlb.balance.strategy.LoadBalanceStrategy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
-import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -32,255 +37,261 @@ import java.util.Map;
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
 @Component
-@DependsOn({"randomStrategy", "weightedCacheStrategy", "shortestTTFTStrategy", "roundRobinStrategy"})
+@DependsOn({
+        "randomStrategy",
+        "costBasedDecodeStrategy",
+        "costBasedPrefillStrategy",
+        "shortestTtftStrategy",
+        "roundRobinStrategy"
+})
 public class DefaultRouter implements Router {
 
-    private final Map<RoleType, LoadBalancer> loadBalancerMap;
-    /**
-     * Balancer for {@code /batch_schedule}, separate from {@link #loadBalancerMap} which
-     * governs {@code /schedule}. Decoupling lets operators keep e.g. SHORTEST_TTFT for
-     * single-request routing while the batch endpoint defaults to ROUND_ROBIN — the only
-     * batch-capable strategy today and the source of batch_schedule's atomic-distribution
-     * guarantee. See {@link FlexlbConfig#getBatchLoadBalanceStrategy}.
-     */
-    private final LoadBalancer batchLoadBalancer;
+    private final Map<RoleType, LoadBalanceStrategy> loadBalanceStrategyMap;
+    private final GroupRoutingPolicy groupRoutingPolicy;
+    private final EndpointRegistry endpointRegistry;
+    private final LoadBalanceStrategy batchLoadBalanceStrategy;
+    private final LoadBalanceStrategyEnum batchStrategyType;
     private final int batchScheduleMaxCount;
     private final ModelMetaConfig modelMetaConfig;
-    /** EMBEDDING is served only via {@code /batch_schedule} (ARPC); the single-call /schedule path is refused. */
     private final boolean embeddingEngine;
 
-    public DefaultRouter(ConfigService configService, ModelMetaConfig modelMetaConfig) {
+    public DefaultRouter(
+            ConfigService configService,
+            GroupRoutingPolicy groupRoutingPolicy,
+            EndpointRegistry endpointRegistry,
+            ModelMetaConfig modelMetaConfig) {
+        this.groupRoutingPolicy = groupRoutingPolicy;
+        this.endpointRegistry = endpointRegistry;
         this.modelMetaConfig = modelMetaConfig;
+
         FlexlbConfig config = configService.loadBalanceConfig();
         this.embeddingEngine = config.getEngineType() == EngineType.EMBEDDING;
-        this.loadBalancerMap = new EnumMap<>(RoleType.class);
-
+        this.loadBalanceStrategyMap = new EnumMap<>(RoleType.class);
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
-            loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
-            Logger.info("DefaultRouter role={}: schedule={}", roleType, strategy);
+            if (strategy != null) {
+                loadBalanceStrategyMap.put(
+                        roleType,
+                        LoadBalanceStrategyFactory.getLoadBalanceStrategy(strategy));
+                Logger.info("DefaultRouter role={}: schedule={}", roleType, strategy);
+            }
         }
 
-        LoadBalanceStrategyEnum batchStrategy = config.getBatchLoadBalanceStrategy();
-        this.batchLoadBalancer = LoadBalanceStrategyFactory.getLoadBalancer(batchStrategy);
+        this.batchStrategyType = config.getBatchLoadBalanceStrategy();
+        this.batchLoadBalanceStrategy =
+                LoadBalanceStrategyFactory.getLoadBalanceStrategy(batchStrategyType);
         this.batchScheduleMaxCount = config.getBatchScheduleMaxCount();
         if (batchScheduleMaxCount < 1) {
-            throw new IllegalStateException("batchScheduleMaxCount must be >= 1, got "
-                    + batchScheduleMaxCount + "; check BATCH_SCHEDULE_MAX_COUNT");
+            throw new IllegalStateException(
+                    "batchScheduleMaxCount must be >= 1, got " + batchScheduleMaxCount
+                            + "; check BATCH_SCHEDULE_MAX_COUNT");
         }
         Logger.info("DefaultRouter batchSchedule={}, batchScheduleMaxCount={}",
-                batchStrategy, batchScheduleMaxCount);
+                batchStrategyType, batchScheduleMaxCount);
     }
 
-    /**
-     * Routes a request to appropriate worker nodes based on model requirements and role types.
-     *
-     * <p>This method implements the core routing logic for load balancing across different
-     * worker types (Prefill, Decode, PDFusion, VIT).
-     *
-     * @param balanceContext the context containing request information and model details
-     * @return Response containing selected server statuses or error information
-     */
     @Override
-    public Response route(BalanceContext balanceContext) {
-        long startTimeInMicros = System.nanoTime() / 1000;
-        // 1. Validate request
-        Response validationResponse = validateRequest(balanceContext);
+    public Response route(BalanceContext context) {
+        Response validationResponse = validateRequest(context);
         if (validationResponse != null) {
             return validationResponse;
         }
-
         if (embeddingEngine) {
-            Response response = Response.error(StrategyErrorType.INVALID_REQUEST,
-                    StrategyErrorType.INVALID_REQUEST.getErrorMsg()
-                    + ": engineType=EMBEDDING is batch-only; route through /batch_schedule "
-                    + "(single /schedule cannot express arpc_port)");
-            return response;
+            return Response.error(
+                    StrategyErrorType.INVALID_REQUEST,
+                    "engineType=EMBEDDING is batch-only; use /batch_schedule because "
+                            + "the single-request response cannot express arpc_port");
         }
 
-        // 2. Get routing configuration
-        long requestId = balanceContext.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
-        if (CollectionUtils.isEmpty(roleTypeList)) {
-            return Response.error(NO_AVAILABLE_WORKER);
-        }
-
-        // 3. Execute routing decision
-        RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
-
-        // 4. Build response based on routing result
-        Response response;
-        if (routingResult.success()) {
-            response = buildSuccessResponse(requestId, routingResult.serverStatusList());
-        } else {
-            rollBackRoutingFailure(balanceContext, routingResult);
-            response = buildFailureResponse(requestId, routingResult);
-        }
-
-        return response;
-    }
-
-    /**
-     * Single-role batch dispatch. Scope: only callable when the cluster has exactly one
-     * registered role. Multi-stage deployments (disaggregated PD / VL) should fan out
-     * via {@link #route} per request.
-     */
-    public BatchScheduleResponse batchSchedule(BatchScheduleRequest batchRequest) {
-        // (1) batch_count validation
-        if (batchRequest == null) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST, "batch_schedule request is null");
-        }
-        int count = batchRequest.getBatchCount();
-        if (count < 1 || count > batchScheduleMaxCount) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batch_count must be in [1, " + batchScheduleMaxCount + "]");
-        }
-
-        // (2) Master readiness. The MODEL_ROLE_WORKER_STATUS singleton is never null; readiness is
-        //     expressed by an empty role list, checked identically to /schedule below.
-        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-
-        // (3) Single-role check against deployment configuration first: the runtime view
-        //     can transiently hide a role (workers down or not yet synced), which must not
-        //     make a multi-role deployment look single-role and get a partial pre-assignment.
-        List<RoleType> configuredRoles = modelMetaConfig.getConfiguredRoleTypes();
-        if (configuredRoles.size() > 1) {
-            return rejectMultiRole("Configured", configuredRoles);
-        }
-
-        // Role inference: reuse the same data source /schedule uses
         List<RoleType> roleTypes = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypes)) {
-            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,
-                    "master not ready or MODEL_SERVICE_CONFIG missing");
-        }
-        if (roleTypes.size() > 1) {
-            return rejectMultiRole("Detected", roleTypes);
-        }
-        RoleType roleType = roleTypes.get(0);
-
-        // (4) Batch strategy (independent of /schedule's strategy) must support batch.
-        //     Default is ROUND_ROBIN; an operator-configured non-batch-capable batchStrategy
-        //     fails loudly here rather than silently falling back, so misconfiguration is loud.
-        if (!(this.batchLoadBalancer instanceof BatchLoadBalancer batch)) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batchStrategy for role " + roleType.getCode() + " does not support batch_schedule");
+            Logger.debug("No worker roles registered yet (total workers: {})",
+                    workerStatus.getWorkerTotalCount());
+            return Response.error(NO_AVAILABLE_WORKER, noWorkerDetail());
         }
 
-        // (5) RR pick N targets
-        List<BatchScheduleTarget> targets = batch.selectBatch(count, roleType, null);
+        RoutingResult routingResult = routeByRoleType(context, roleTypes);
+        if (routingResult.success()) {
+            return buildSuccessResponse(routingResult.serverStatusList());
+        }
+
+        rollBackRoutingFailure(context, routingResult);
+        return buildFailureResponse(routingResult);
+    }
+
+    @Override
+    public BatchScheduleResponse batchSchedule(BatchScheduleRequest request) {
+        if (request == null) {
+            return BatchScheduleResponse.error(
+                    StrategyErrorType.INVALID_REQUEST, "batch_schedule request is null");
+        }
+        int count = request.getBatchCount();
+        if (count < 1 || count > batchScheduleMaxCount) {
+            return BatchScheduleResponse.error(
+                    StrategyErrorType.INVALID_REQUEST,
+                    "batch_count must be in [1, " + batchScheduleMaxCount + "]");
+        }
+        if (!request.isAssignBe() && !request.isAssignFe()) {
+            return BatchScheduleResponse.error(
+                    StrategyErrorType.INVALID_REQUEST,
+                    "batch_schedule must request at least one of assign_be or assign_fe");
+        }
+
+        if (!request.isAssignBe()) {
+            // FE-only allocation deliberately bypasses worker topology and the batch strategy. The
+            // outer master handler stamps fe_url onto these index-preserving placeholders. Keeping
+            // this branch ahead of role validation also lets healthy FE fanout operate while the BE
+            // route table is warming up or the deployment is multi-role.
+            List<BatchScheduleTarget> targets = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                targets.add(new BatchScheduleTarget());
+            }
+            return BatchScheduleResponse.success(targets);
+        }
+
+        List<RoleType> configuredRoles = modelMetaConfig.getConfiguredRoleTypes();
+        if (configuredRoles.size() != 1) {
+            return rejectRoleTopology("Configured", configuredRoles);
+        }
+
+        List<RoleType> runtimeRoles =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getRoleTypeList();
+        if (CollectionUtils.isEmpty(runtimeRoles)) {
+            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER, noWorkerDetail());
+        }
+        if (runtimeRoles.size() != 1) {
+            return rejectRoleTopology("Detected", runtimeRoles);
+        }
+
+        RoleType roleType = runtimeRoles.get(0);
+        if (configuredRoles.get(0) != roleType) {
+            return BatchScheduleResponse.error(
+                    NO_AVAILABLE_WORKER,
+                    "configured role " + configuredRoles.get(0)
+                            + " does not match runtime role " + roleType);
+        }
+
+        if (!(batchLoadBalanceStrategy instanceof BatchLoadBalancer batchLoadBalancer)) {
+            return BatchScheduleResponse.error(
+                    StrategyErrorType.INVALID_REQUEST,
+                    "batch strategy " + batchStrategyType
+                            + " does not support batch_schedule; check "
+                            + "BATCH_LOAD_BALANCE_STRATEGY");
+        }
+
+        List<BatchScheduleTarget> targets =
+                batchLoadBalancer.selectBatch(count, roleType, null);
         if (targets == null || targets.isEmpty()) {
             return BatchScheduleResponse.error(roleType.getErrorType());
         }
-        // BatchLoadBalancer is an extension point whose contract is "exactly count targets", and the
-        // dispatcher consumes them positionally 1:1 with the chunks. Enforce it at the single
-        // consumer instead of trusting the javadoc: an implementation returning a short list would
-        // otherwise silently under-assign chunks rather than fail here.
         if (targets.size() != count) {
-            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                    "batchStrategy for role " + roleType.getCode() + " returned " + targets.size()
-                    + " targets for batch_count " + count);
+            return BatchScheduleResponse.error(
+                    StrategyErrorType.INVALID_REQUEST,
+                    "batch strategy " + batchStrategyType + " returned "
+                            + targets.size() + " targets for batch_count " + count);
         }
-
         return BatchScheduleResponse.success(targets);
     }
 
-    private static BatchScheduleResponse rejectMultiRole(String kind, List<RoleType> roles) {
-        return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
-                "batch_schedule only supports single-role deployments; "
-                + "multi-stage deployments (disaggregated PD / VL) should use /schedule per request. "
-                + kind + " roles: " + roles);
+    /** Distinguish a missing route table from discovery resolving a configured route to no hosts. */
+    private String noWorkerDetail() {
+        List<String> addresses = modelMetaConfig.getConfiguredDiscoveryAddresses();
+        String detail = CollectionUtils.isEmpty(addresses)
+                ? "master not ready: no service route registered; check MODEL_SERVICE_CONFIG is present and parses"
+                : "master not ready: route table is loaded but no worker was discovered through " + addresses
+                        + "; check the configured discovery service and its host membership";
+        return NO_AVAILABLE_WORKER.getErrorMsg() + ": " + detail;
     }
 
-    /**
-     * Validates the incoming request and checks model availability.
-     *
-     * @param balanceContext the context to validate
-     * @return error response if validation fails, null if validation succeeds
-     */
-    private Response validateRequest(BalanceContext balanceContext) {
-        if (balanceContext.getRequest() == null) {
+    private static BatchScheduleResponse rejectRoleTopology(
+            String source, List<RoleType> roles) {
+        return BatchScheduleResponse.error(
+                StrategyErrorType.INVALID_REQUEST,
+                "batch_schedule supports single-role deployments only and requires "
+                        + "exactly one configured and one runtime role; use /schedule "
+                        + "for multi-role routing. " + source + " roles: " + roles);
+    }
+
+    private Response validateRequest(BalanceContext context) {
+        if (context.getRequest() == null) {
             Logger.error("masterRequest is null");
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
-
         return null;
     }
 
-    /**
-     * Execute routing decision, select optimal server for each role type
-     *
-     * @param balanceContext Routing context
-     * @param roleTypeList List of required role types
-     * @return Routing result
-     */
-    public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
+    private RoutingResult routeByRoleType(
+            BalanceContext context, List<RoleType> roleTypes) {
         List<ServerStatus> serverStatusList = new ArrayList<>();
-        String group = null;
-
-        for (RoleType roleType : roleTypeList) {
-            LoadBalancer loadBalancer = getLoadBalancer(roleType);
-            ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
-
-            if (!serverStatus.isSuccess()) {
-                // Selection failed, return failure result
-                Logger.warn("Failed to select {} worker: {}", roleType.getCode(), serverStatus.getMessage());
-                return RoutingResult.failure(serverStatusList, roleType, serverStatus.getMessage());
-            }
-
-            // Record server selection metrics
-            serverStatusList.add(serverStatus);
-
-            // Update group for affinity-based selection of subsequent roles
-            group = serverStatus.getGroup();
+        GroupRoutingDecision groupDecision = groupRoutingPolicy.route(context);
+        String policyGroup = groupDecision.group();
+        String group = policyGroup;
+        if (groupDecision.hasGroup()) {
+            Logger.info(
+                    "Group routing policy selected group, requestId: {}, policy: {}, group: {}",
+                    context.getRequestId(), groupDecision.policyName(), group);
         }
 
+        for (RoleType roleType : roleTypes) {
+            LoadBalanceStrategy strategy = getLoadBalanceStrategy(roleType);
+            if (strategy == null) {
+                return RoutingResult.failure(
+                        serverStatusList,
+                        roleType,
+                        "no load-balancing strategy configured");
+            }
+            ServerStatus serverStatus = strategy.select(context, roleType, group);
+            if (!serverStatus.isSuccess()) {
+                Logger.warn("Failed to select {} worker: {}",
+                        roleType.getCode(), serverStatus.getMessage());
+                return RoutingResult.failure(
+                        serverStatusList, roleType, serverStatus.getMessage());
+            }
+
+            serverStatusList.add(serverStatus);
+            if (StringUtils.isBlank(policyGroup)) {
+                group = serverStatus.getGroup();
+            }
+        }
         return RoutingResult.success(serverStatusList);
     }
 
-    /**
-     * Get LoadBalancer based on role type
-     */
-    private LoadBalancer getLoadBalancer(RoleType roleType) {
-        return loadBalancerMap.get(roleType);
+    private LoadBalanceStrategy getLoadBalanceStrategy(RoleType roleType) {
+        return loadBalanceStrategyMap.get(roleType);
     }
 
-    /**
-     * Rollback handling for routing failure
-     * If partial roles succeeded but subsequent roles failed, rollback local incremental updates for previously selected roles
-     *
-     * @param balanceContext Routing context
-     * @param routingResult Routing result
-     */
-    private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
-
-        List<ServerStatus> partialResults = routingResult.serverStatusList();
-        for (ServerStatus serverStatus : partialResults) {
-            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            long requestId = balanceContext.getRequestId();
-
+    private void rollBackRoutingFailure(
+            BalanceContext context, RoutingResult routingResult) {
+        for (ServerStatus serverStatus : routingResult.serverStatusList()) {
+            String serverIpPort =
+                    serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
             RoleType role = serverStatus.getRole();
-            LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(serverIpPort, requestId);
+            WorkerEndpoint endpoint = endpointRegistry.get(role, serverIpPort);
+            if (endpoint == null) {
+                Logger.debug("DefaultRouter.rollBack: endpoint not found for ipPort={}",
+                        serverIpPort);
+                continue;
+            }
+            LoadBalanceStrategy strategy = getLoadBalanceStrategy(role);
+            strategy.rollBack(endpoint, context.getRequestId());
         }
     }
 
-    private Response buildSuccessResponse(long requestId, List<ServerStatus> serverStatusList) {
+    private Response buildSuccessResponse(List<ServerStatus> serverStatusList) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(serverStatusList);
         return response;
     }
 
-    private Response buildFailureResponse(long requestId, RoutingResult routingResult) {
+    private Response buildFailureResponse(RoutingResult routingResult) {
         StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
-        String detailMessage = routingResult.errorMessage();
-
         Response response = new Response();
         response.setSuccess(false);
         response.setCode(errorType.getErrorCode());
-        response.setErrorMessage(errorType.getErrorMsg() + ": " + detailMessage);
+        response.setErrorMessage(
+                errorType.buildErrorMessage(routingResult.errorMessage()));
         return response;
     }
 }

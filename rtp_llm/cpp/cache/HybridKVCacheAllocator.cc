@@ -210,15 +210,11 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     if (malloc_info.enable_device_cache) {
         // CP-sharded: subsample to last-rank canonical key namespace before matching.
         CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
-        // Off mode drops the last key to skip the partial trailing block. Under
-        // CP sharding canonicalCacheKeys already excludes the partial block
-        // (last-rank stride lands inside completed full blocks only), so the
-        // extra drop would discard a valid full-block key — costing the SWA
-        // tail-loop its only matchable key (full_keys[cp_size-1 + (n-1)*cp_size]
-        // is exactly what the non-sharded SWA group caches).
-        const bool    cp_active = cp_mapper && cp_mapper->isSharded();
-        CacheKeysType match_keys(cp_keys.begin(),
-                                 cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
+        // Always drop the last match key, CP-sharded or not. It may be a partial
+        // tail; and even when it is a full block, fully reusing the input leaves
+        // no prefill tokens to compute. Keeping every canonical key under CP
+        // sharding is exactly that degenerate case: zero prefill tokens left.
+        CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
         auto          begin_us = currentTimeUs();
         reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
         match_cost_time_us     = currentTimeUs() - begin_us;
@@ -240,9 +236,22 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
     }
 
+    // Post-match capacity preflight. Device-cache matching has already run, so
+    // the allocator now knows how many *new* physical blocks are required and can
+    // separate "pools are momentarily full" (RETRYABLE, keeps the stream WAITING)
+    // from "this request can never fit" (PERMANENT).
+    const auto capacity_status =
+        evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityMode::TOTAL_AND_AVAILABLE);
+    if (capacity_status != MallocStatus::NONE) {
+        rollbackInitMalloc(*kv_resource, referenced_blocks, {});
+        logMallocFailure(malloc_info, "init_reserve", 0, -1, false, -1);
+        return {false, 0, match_cost_time_us, capacity_status};
+    }
+
     if (reserve_blocks > 0 && !hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
         rollbackInitMalloc(*kv_resource, referenced_blocks, {});
-        return {false, 0};
+        logMallocFailure(malloc_info, "init_reserve", 0, -1, false, -1);
+        return {false, 0, match_cost_time_us, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
     }
 
     std::vector<size_t> original_sizes(static_cast<size_t>(kv_resource->groupNums()));
@@ -252,8 +261,17 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
         auto&     block_ids_0   = kv_resource->mutableBlockIds(0, gid);
         const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
-        if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
+        const auto& group = kv_cache_groups_[static_cast<size_t>(gid)];
+        // Snapshot the slot count before the call so a failure can report this
+        // group's exact physical request in the error_code=602 record.
+        const int blocks_before = static_cast<int>(block_ids_0.blocksNum());
+        if (!group->malloc(block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
+            logMallocFailure(malloc_info,
+                             "init_group_malloc",
+                             0,
+                             gid,
+                             false,
+                             group->needBlocksNum(group_seq_len, blocks_before, 0));
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
@@ -285,19 +303,25 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         }
     }
 
-    bool all_success  = true;
-    int  failed_batch = -1;
-    int  failed_group = -1;
+    bool all_success        = true;
+    int  failed_batch       = -1;
+    int  failed_group       = -1;
+    int  failed_need_blocks = -1;
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto&     block_ids        = kv_resource->mutableBlockIds(b, gid);
             const int group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, raw_seq_len);
             auto&     filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(gid)];
+            // Snapshot the slot count before the call so a failure can report this
+            // group's exact physical request in the error_code=602 record.
+            const int blocks_before = static_cast<int>(block_ids.blocksNum());
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
                     block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
-                all_success  = false;
-                failed_batch = b;
-                failed_group = gid;
+                all_success        = false;
+                failed_batch       = b;
+                failed_group       = gid;
+                failed_need_blocks = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(
+                    group_seq_len, blocks_before, reserve_step);
                 break;
             }
         }
@@ -318,6 +342,11 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         }
         return {true, 0};
     }
+
+    // Emit the pool snapshot before rolling back: once the partially allocated
+    // blocks go back to the pools, available_blocks no longer reflects the state
+    // that caused the failure.
+    logMallocFailure(malloc_info, "incremental_group_malloc", failed_batch, failed_group, true, failed_need_blocks);
 
     for (int b = 0; b <= failed_batch && b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
@@ -793,6 +822,30 @@ bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& mall
                          reserve_blocks);
     }
     return accepted;
+}
+
+// Primary field-debug record for KV-exhaustion incidents. HybridPool overrides it
+// with a per-pool breakdown; this base version reports the aggregate view.
+void HybridKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
+                                              const char*       phase,
+                                              int               failed_batch,
+                                              int               failed_group,
+                                              bool              incremental,
+                                              int               failed_need_blocks) const {
+    if (!malloc_info.verbose) {
+        return;
+    }
+    RTP_LLM_LOG_WARNING("Hybrid malloc failure: error_code=602 request_id=%ld phase=%s failed_batch=%d failed_group=%d "
+                        "incremental=%d failed_need_blocks=%d need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
+                        malloc_info.request_id,
+                        phase,
+                        failed_batch,
+                        failed_group,
+                        incremental,
+                        failed_need_blocks,
+                        getNeedBlocks(malloc_info),
+                        availableBlocksNum(),
+                        reserveBlocksNum());
 }
 
 void HybridKVCacheAllocator::rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size) {

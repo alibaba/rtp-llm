@@ -6,7 +6,7 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 
 /**
- * Optional sub-interface for {@link LoadBalancer} implementations that support
+ * Optional sub-interface for {@link LoadBalanceStrategy} implementations that support
  * batch worker selection.
  *
  * <p>Returns a list of worker targets sized exactly {@code count}, picked in
@@ -18,7 +18,7 @@ import java.util.List;
  * subsequent worker heartbeats. Return an empty list to signal "no alive
  * worker"; the caller will surface a role-specific error.
  */
-public interface BatchLoadBalancer extends LoadBalancer {
+public interface BatchLoadBalancer extends LoadBalanceStrategy {
 
     List<BatchScheduleTarget> selectBatch(int count, RoleType roleType, String group);
 }

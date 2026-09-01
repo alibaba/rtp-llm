@@ -275,6 +275,35 @@ class FanoutServiceTest {
     }
 
     @Test
+    void localModeUsesOneHealthFilteredPoolReservationAndIgnoresMasterUrls() {
+        FeClient feClient = mock(FeClient.class);
+        when(feClient.postBytes(eq("http://local-a"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.just(responseBatchBytes("r0")));
+        when(feClient.postBytes(eq("http://local-b"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.just(responseBatchBytes("r1")));
+        FePool pool = mock(FePool.class);
+        when(pool.nextBatch(2)).thenReturn(List.of("http://local-a", "http://local-b"));
+        FanoutService svc = new FanoutService(
+                feClient, DispatcherTestSupport.noopMetrics(), pool, FeAllocationMode.LOCAL);
+
+        StepVerifier.create(svc.dispatchChunks(
+                        "/batch_infer", List.of(chunk("p0"), chunk("p1")),
+                        List.of("http://stale-master-a", "http://stale-master-b"),
+                        BATCH_INFER, new HttpHeaders(), null))
+                .assertNext(subs -> {
+                    assertEquals(2, subs.size());
+                    assertTrue(subs.stream().allMatch(SubBatchResult::success));
+                })
+                .verifyComplete();
+
+        verify(pool).nextBatch(2);
+        verify(feClient, never()).postBytes(
+                eq("http://stale-master-a"), anyString(), any(), any(), any());
+        verify(feClient, never()).postBytes(
+                eq("http://stale-master-b"), anyString(), any(), any(), any());
+    }
+
+    @Test
     void missingMasterFeUrlFailsChunkWithNoFallback() {
         // No local fallback by design: a chunk the master did not assign (null fe_url) must FAIL
         // visibly, not silently reroute to some local pick. The proof of "no fallback" is that the

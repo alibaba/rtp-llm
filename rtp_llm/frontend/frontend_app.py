@@ -36,6 +36,9 @@ from rtp_llm.openai.api_datatype import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
+from rtp_llm.server.misc import format_exception
+from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
+from rtp_llm.utils.concurrency_controller import ConcurrencyException
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
 from rtp_llm.utils.shutdown_config import (
     AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
@@ -284,8 +287,11 @@ class FrontendApp(object):
             world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
+        client_config = self.py_env_configs.grpc_config.get_client_config()
         self.grpc_client = GrpcClientWrapper(
-            self.server_config.rpc_server_port, dp_addresses=dp_addresses
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            client_config=client_config,
         )
 
         logging.info(
@@ -322,6 +328,9 @@ class FrontendApp(object):
         )
 
     def start(self):
+        # trace telemetry runtime: per-process init after spawn; no-op unless
+        # RTP_LLM_OTEL_TRACE_ENABLE is set
+        init_telemetry("frontend", 0)
         self.frontend_server.start()
         app = self.create_app()
 
@@ -379,6 +388,9 @@ class FrontendApp(object):
             server.run()
         except BaseException as e:
             raise e
+        finally:
+            # bounded flush; drops remaining spans past the deadline (fail-open)
+            shutdown_telemetry()
 
     def create_app(self):
         middleware = [
@@ -431,6 +443,9 @@ class FrontendApp(object):
                     )
                     should_finish = False
                 return response
+            except ConcurrencyException as e:
+                # Safety net: never let concurrency-limit overflow surface as 500.
+                return ORJSONResponse(format_exception(e), status_code=429)
             finally:
                 if should_finish:
                     self.shutdown_manager.finish_request()

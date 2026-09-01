@@ -22,6 +22,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     OutputDelta,
     RenderedInputs,
     RendererParams,
+    StreamResponseObject,
     StreamStatus,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
@@ -98,6 +99,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     ) -> Optional[ReasoningParser]:
         """创建Resoning解析器，子类可选实现"""
         return None
+
+    def _effective_tools(
+        self, request: ChatCompletionRequest
+    ) -> Optional[List[GPTToolDefinition]]:
+        return request.tools
 
     @override
     def should_process_think(self, request: ChatCompletionRequest):
@@ -345,6 +351,29 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     ) + new.function.arguments
 
     @override
+    def _should_yield_stream_response(
+        self, response: StreamResponseObject, is_final: bool = False
+    ) -> bool:
+        if is_final:
+            return True
+
+        for choice in response.choices:
+            if choice.finish_reason is not None or choice.logprobs is not None:
+                return True
+
+            delta = choice.delta
+            if (
+                delta.role is not None
+                or delta.function_call is not None
+                or delta.tool_calls
+                or delta.content
+                or delta.reasoning_content
+            ):
+                return True
+
+        return False
+
+    @override
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -504,7 +533,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
         tool_calls, remaining_after_tools = await self._extract_tool_calls_content(
             status.detector,
-            status.request.tools,
+            self._effective_tools(status.request),
             remaining_after_reasoning,
             is_streaming,
         )

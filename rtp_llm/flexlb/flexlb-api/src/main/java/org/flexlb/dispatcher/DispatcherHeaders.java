@@ -4,6 +4,7 @@ import org.springframework.http.HttpHeaders;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -50,10 +51,29 @@ final class DispatcherHeaders {
      */
     static final Set<String> FANOUT_SKIP = caseInsensitiveSet(HOP_BY_HOP, "content-type", "accept-encoding");
 
-    /** Copy every header from {@code source} into {@code sink} except the names in {@code skip}. */
+    /**
+     * Copy end-to-end headers while also honoring fields dynamically nominated by
+     * {@code Connection}, which are hop-by-hop even when absent from the fixed standard list.
+     */
     static void copyEndToEnd(HttpHeaders source, HttpHeaders sink, Set<String> skip) {
+        Set<String> effectiveSkip = skip;
+        List<String> connectionValues = source.get(HttpHeaders.CONNECTION);
+        if (connectionValues != null) {
+            Set<String> withConnectionTokens = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            withConnectionTokens.addAll(skip);
+            for (String value : connectionValues) {
+                for (String token : value.split(",")) {
+                    String name = token.trim();
+                    if (!name.isEmpty()) {
+                        withConnectionTokens.add(name);
+                    }
+                }
+            }
+            effectiveSkip = withConnectionTokens;
+        }
+        Set<String> namesToSkip = effectiveSkip;
         source.forEach((name, values) -> {
-            if (!skip.contains(name)) {
+            if (!namesToSkip.contains(name)) {
                 sink.addAll(name, values);
             }
         });

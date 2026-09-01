@@ -1,14 +1,13 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
-#include <map>
 #include <optional>
 #include <string>
 #include <memory>
@@ -36,12 +35,15 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
-    torch::Tensor         input_lengths;      // [batch_size]
-    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;  // [sum(lm_output_lengths)]
-    torch::Tensor         lm_output_lengths;  // [total_batch_size]
-    torch::Tensor         prefix_lengths;     // [context_batch_size]
+    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
+    torch::Tensor         input_lengths;            // [batch_size]
+    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;        // selected output rows
+    // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
+    // scheduling redesign no longer populates it (stays undefined).
+    torch::Tensor         lm_output_lengths;        // [total_batch_size]
+    torch::Tensor         prefix_lengths;           // [context_batch_size]
+    torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -81,10 +83,14 @@ struct GptModelInputs {
     bool   use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
-    bool need_moe_gating = false;
-    bool warmup          = false;
-    bool skip_run        = false;
-    bool is_fake_stream  = false;
+    // Set when any stream requests return_all_hidden_states. Gates whether the
+    // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
+    // (true) or may gather only the last-token rows lm_head needs (false).
+    bool need_all_hidden_states = false;
+    bool need_moe_gating        = false;
+    bool warmup                 = false;
+    bool skip_run               = false;
+    bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
@@ -172,58 +178,12 @@ struct KvCacheInfo {
     torch::Tensor kv_scale_buffer;
 };
 
-struct CacheStoreInputs {
-    torch::Tensor                                    input_lengths_host;
-    torch::Tensor                                    prefix_lengths_host;
-    torch::Tensor                                    host_kv_cache_offset;
-    std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
-    std::map<std::string, size_t>                    tokens_per_block_by_tag;
-    // Address strides describe the backing allocation. Transfer sizes describe
-    // the tag-local payload registered by the decode-side allocator.
-    std::map<std::string, size_t> kv_block_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_block_transfer_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_transfer_bytes_by_tag;
-
-    size_t context_batch_size = 0;
-    size_t decoder_batch_size = 0;
-
-    torch::Tensor            request_id;             // [context_batch_size]
-    torch::Tensor            request_pd_separation;  // [context_batch_size]
-    std::vector<std::string> cache_keys;             // [context_batch_size]
-    size_t                   tokens_per_block          = 0;
-    size_t                   kv_block_stride_bytes     = 0;
-    size_t                   kv_scale_stride_bytes     = 0;
-    bool                     pd_separation             = false;
-    size_t                   model_id                  = 0;
-    bool                     decode_entrance           = false;
-    bool                     warmup                    = false;
-    bool                     use_opaque_kv_cache_store = true;
-
-    int         layer_id = 0;
-    std::string tag;
-
-    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
-    // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;
-    // the writer must re-pair (cache_keys[r + i*cp_size], offset[i]) instead
-    // of the legacy (cache_keys[i], offset[i]). Defaults of (0, 1) preserve
-    // the non-sharded path. See ``buildCacheStorePlan``.
-    int cp_rank = 0;
-    int cp_size = 1;
-
-    // Pre-created event from the main thread to avoid cudaEventRecord
-    // contention on background threads. nullptr means writeCacheStore will
-    // create an event on the spot (single-threaded / C++ path).
-    std::shared_ptr<torch::Event> pre_created_event = nullptr;
-};
-
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
     torch::Tensor input_lengths;     // int32_t, [decoder_batch_size + context_batch_size]
     torch::Tensor sequence_lengths;  // int32_t, [decoder_batch_size]
 
-    std::optional<KvCacheInfo>      kv_cache;
-    std::optional<CacheStoreInputs> cache_store_inputs;
+    std::optional<KvCacheInfo> kv_cache;
 
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
@@ -382,31 +342,6 @@ struct AllGatherParams {
     bool                              overlapped = false;
 };
 
-struct SpeculativeSamplingParams {
-    torch::Tensor& draft_probs_d;
-    torch::Tensor& draft_token_ids_d;
-    torch::Tensor& uniform_samples_d;
-    torch::Tensor& target_probs_d;
-    torch::Tensor& output_token_ids_d;
-    torch::Tensor& output_accepted_token_num_d;
-    torch::Tensor& output_emitted_token_num_d;
-
-    SpeculativeSamplingParams(torch::Tensor& draft_probs_d,
-                              torch::Tensor& draft_token_ids_d,
-                              torch::Tensor& uniform_samples_d,
-                              torch::Tensor& target_probs_d,
-                              torch::Tensor& output_token_ids_d,
-                              torch::Tensor& output_accepted_token_num_d,
-                              torch::Tensor& output_emitted_token_num_d):
-        draft_probs_d(draft_probs_d),
-        draft_token_ids_d(draft_token_ids_d),
-        uniform_samples_d(uniform_samples_d),
-        target_probs_d(target_probs_d),
-        output_token_ids_d(output_token_ids_d),
-        output_accepted_token_num_d(output_accepted_token_num_d),
-        output_emitted_token_num_d(output_emitted_token_num_d) {}
-};
-
 struct RejectionSamplingParams {
     torch::Tensor draft_probs_d;
     torch::Tensor draft_token_ids_d;
@@ -416,6 +351,18 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+    // True when draft_probs_d is a degenerate point mass on draft_token_ids_d
+    // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
+    // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.
+    bool draft_probs_point_mass = false;
+};
+
+struct MappingDraft2TargetParams {
+    torch::Tensor tokens;
+    torch::Tensor d2t_map;
+    int           batch_size;
+    int           token_offset;
+    int           token_stride;
 };
 
 }  // namespace rtp_llm

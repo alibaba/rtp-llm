@@ -29,6 +29,7 @@ public class BatchScheduleTarget {
     private String serverIp;
 
     @JsonProperty("http_port")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private int httpPort;
 
     /** Engine gRPC port (LLM engines only). */
@@ -49,13 +50,11 @@ public class BatchScheduleTarget {
     private RoleType role;
 
     /**
-     * FE base URL ({@code http://ip:port}) the dispatcher should fan this chunk out to, assigned
-     * by the master so a single global cursor is the one and only source of FE selection across
-     * every dispatcher instance (each instance round-robining its own {@code FePool} would collide
-     * under load and split FE load across per-instance cursors). Filled only by the elected
-     * master's {@code /batch_schedule} response; {@code null} when the master has no FE view (a
-     * master node not running the dispatcher) — the dispatcher then fails that chunk visibly rather
-     * than picking a local FE, keeping FE load fully attributable to the single master cursor.
+     * Optional master-assigned FE base URL ({@code http://ip:port}) for this chunk. Present when
+     * the request carries {@code assign_fe=true}; {@code null} for BE-only and FE-only placeholder
+     * responses the master could not stamp. A dispatcher in master mode treats a missing value as
+     * a visible chunk failure. A dispatcher in local mode ignores this field and reserves its own
+     * index-aligned FE vector.
      */
     @JsonProperty("fe_url")
     private String feUrl;

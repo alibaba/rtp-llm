@@ -1,7 +1,8 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.Request;
@@ -11,11 +12,13 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -24,7 +27,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -36,14 +38,19 @@ class RoundRobinLoadBalancerTest {
 
     private EngineWorkerStatus engineWorkerStatus;
     private ConfigService configService;
+    private EndpointRegistry endpointRegistry;
     private RoundRobinLoadBalancer rr;
 
     @BeforeEach
     void setUp() {
         LoadBalanceStrategyFactory.resetForTesting();
         clearWorkerMaps();
-        engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         configService = new ConfigService();
+        endpointRegistry = new EndpointRegistry(
+                configService,
+                () -> null,
+                Mockito.mock(BatchSchedulerReporter.class));
+        engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
         rr = new RoundRobinLoadBalancer(engineWorkerStatus, configService);
         populatePdFusion(4);
     }
@@ -52,11 +59,13 @@ class RoundRobinLoadBalancerTest {
     void tearDown() {
         clearWorkerMaps();
         LoadBalanceStrategyFactory.resetForTesting();
+        endpointRegistry.close();
     }
 
     @Test
     void registers_under_round_robin_strategy() {
-        LoadBalancer registered = LoadBalanceStrategyFactory.getLoadBalancer(LoadBalanceStrategyEnum.ROUND_ROBIN);
+        LoadBalanceStrategy registered = LoadBalanceStrategyFactory.getLoadBalanceStrategy(
+                LoadBalanceStrategyEnum.ROUND_ROBIN);
         Assertions.assertSame(rr, registered);
     }
 
@@ -280,42 +289,32 @@ class RoundRobinLoadBalancerTest {
     }
 
     @Test
-    void selectBatch_does_not_record_local_task() {
+    void selectBatch_does_not_change_endpoint_load() {
+        WorkerEndpoint endpoint = endpointRegistry.get(
+                RoleType.PDFUSION, "10.0.0.0:8080");
+        long before = endpoint.getLoadMetric();
+
         rr.selectBatch(4, RoleType.PDFUSION, null);
 
-        int totalLocalTasks = 0;
-        for (WorkerStatus w : EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().values()) {
-            totalLocalTasks += w.getLocalTaskMap().size();
-        }
-        Assertions.assertEquals(0, totalLocalTasks,
-                "batch path must not write to localTaskMap (no bookkeeping)");
+        Assertions.assertEquals(before, endpoint.getLoadMetric(),
+                "round-robin batch selection must stay reservation-free");
     }
 
     @Test
-    void select_still_records_local_task() {
+    void select_and_rollback_are_stateless() {
+        WorkerEndpoint endpoint = endpointRegistry.get(
+                RoleType.PDFUSION, "10.0.0.0:8080");
+        long before = endpoint.getLoadMetric();
         BalanceContext ctx = newSingleContext(5000L);
         ServerStatus assigned = rr.select(ctx, RoleType.PDFUSION, null);
         Assertions.assertTrue(assigned.isSuccess());
 
         String ipPort = assigned.getServerIp() + ":" + assigned.getHttpPort();
-        WorkerStatus worker = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().get(ipPort);
-        Assertions.assertNotNull(worker.getLocalTaskMap().get(5000L),
-                "select() path still records to localTaskMap for /schedule use");
-    }
+        WorkerEndpoint selected = endpointRegistry.get(RoleType.PDFUSION, ipPort);
+        rr.rollBack(selected, 5000L);
 
-    @Test
-    void rollBack_removes_local_task() {
-        BalanceContext ctx = newSingleContext(5000L);
-        ServerStatus assigned = rr.select(ctx, RoleType.PDFUSION, null);
-        Assertions.assertTrue(assigned.isSuccess());
-
-        String ipPort = assigned.getServerIp() + ":" + assigned.getHttpPort();
-        WorkerStatus worker = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().get(ipPort);
-        Assertions.assertNotNull(worker.getLocalTaskMap().get(5000L), "localTaskMap must contain the assignment");
-
-        rr.rollBack(ipPort, 5000L);
-
-        Assertions.assertNull(worker.getLocalTaskMap().get(5000L), "rollBack must remove the local task");
+        Assertions.assertEquals(before, endpoint.getLoadMetric(),
+                "stateless strategy must neither reserve nor release endpoint load");
     }
 
     @SuppressWarnings("unchecked")
@@ -420,22 +419,27 @@ class RoundRobinLoadBalancerTest {
             WorkerStatus w = new WorkerStatus();
             w.setIp("10.0.0." + i);
             w.setPort(8080);
-            w.setRole(RoleType.PDFUSION.getCode());
+            w.setRole(RoleType.PDFUSION);
             w.setAlive(true);
             w.setAvailableConcurrency(1L);
-            w.setWaitingTaskList(new HashMap<>());
             w.setRunningTaskList(new HashMap<>());
-            w.updateTaskStates(new HashMap<>(), new HashMap<>(), new HashMap<>());
-            w.setLocalTaskMap(new ConcurrentHashMap<>());
             CacheStatus cs = new CacheStatus();
             cs.setAvailableKvCache(100_000);
             cs.setBlockSize(16);
             w.setCacheStatus(cs);
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put(w.getIpPort(), w);
+            endpointRegistry.ensureEndpoint(RoleType.PDFUSION, w.getIpPort(), w);
         }
     }
 
     private void clearWorkerMaps() {
+        if (endpointRegistry != null) {
+            for (RoleType roleType : RoleType.values()) {
+                new ArrayList<>(endpointRegistry.getEndpoints(roleType).entrySet())
+                        .forEach(entry -> endpointRegistry.remove(
+                                roleType, entry.getKey(), entry.getValue().getStatus()));
+            }
+        }
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();

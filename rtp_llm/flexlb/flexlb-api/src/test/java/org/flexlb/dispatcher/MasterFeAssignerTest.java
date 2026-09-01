@@ -1,5 +1,6 @@
 package org.flexlb.dispatcher;
 
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.junit.jupiter.api.Test;
 
@@ -25,6 +26,20 @@ class MasterFeAssignerTest {
 
     private static BatchScheduleTarget target(String ip) {
         return new BatchScheduleTarget(ip, 23840, 23841);
+    }
+
+    @Test
+    void assignFeFalseDoesNotAdvanceMasterPool() {
+        FePool pool = mock(FePool.class);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setAssignFe(false);
+        BatchScheduleTarget target = target("10.0.0.1");
+
+        assigner.assign(request, List.of(target));
+
+        assertNull(target.getFeUrl());
+        verifyNoInteractions(pool);
     }
 
     @Test

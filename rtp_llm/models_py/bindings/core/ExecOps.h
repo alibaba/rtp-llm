@@ -15,8 +15,14 @@
 #include <ATen/hip/HIPContext.h>
 #endif
 
+namespace torch_ext {
+struct LayerKVCache;
+struct PyCacheStoreInputs;
+}  // namespace torch_ext
+
 namespace rtp_llm {
 
+class CacheConfig;
 class CacheStore;
 
 // ===================================================================
@@ -38,7 +44,6 @@ int64_t getDeviceId();
 void runtimeSyncAndCheck();
 void cudaSyncAndCheck();
 void cudaCheckLastError();
-void cudaPreRun(int device_id);
 
 // ===================================================================
 // Config accessors (set once during initRuntime)
@@ -68,6 +73,13 @@ void          setTraceMemory(bool trace_memory);
 void runtimeCopy(const CopyParams& params);
 void runtimeBatchCopy(const BatchCopyParams& params);
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask);
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  const torch::Tensor& row_indices,
+                                  size_t               vocab_size);
+void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
+                                  const torch::Tensor& packed_allow_mask,
+                                  size_t               vocab_size);
 
 void execNoBlockCopy(const CopyParams& params);
 void execBatchCopy(const BatchCopyParams& params);
@@ -81,15 +93,21 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 // ===================================================================
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
+torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
-void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
+void             execMappingDraft2Target(const MappingDraft2TargetParams& params);
 
 // ===================================================================
 // Communication ops (backed by c10d ProcessGroup)
 // ===================================================================
 
-void            execBroadcast(const BroadcastParams& params);
+void execBroadcast(const BroadcastParams& params);
+// CPU-only UDS broadcast for small per-step tensors, avoiding NCCL cuda sync
+// when intra-node TP is initialized. Otherwise falls back to execBroadcast.
+// All ranks must call with identical tensor counts and byte sizes.
+void            execBroadcastCpu(const BroadcastParams& params);
+bool            isCpuTpBroadcasterInitialized();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);
@@ -108,17 +126,17 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params);
 std::shared_ptr<torch::Event> runtimeCreateEvent();
 
 // ===================================================================
-// CacheStore (cache_store passed explicitly; see KVCacheManager::getCacheStore)
+// CacheStore
 // ===================================================================
 
-void runtimeWriteCacheStore(const CacheStoreInputs&     inputs,
-                            const KvCacheInfo&          kv_cache,
-                            bool                        mla_kvcache,
-                            std::shared_ptr<CacheStore> cache_store);
-void execWriteCacheStore(const CacheStoreInputs&     inputs,
-                         const KvCacheInfo&          kv_cache,
-                         bool                        mla_kvcache,
-                         std::shared_ptr<CacheStore> cache_store);
+void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
+                            const torch_ext::LayerKVCache&       layer_kv,
+                            const CacheConfig&                   cache_config,
+                            std::shared_ptr<CacheStore>          cache_store,
+                            size_t                               cache_model_id,
+                            int                                  cp_rank,
+                            int                                  cp_size,
+                            std::shared_ptr<torch::Event>        pre_created_event);
 
 // ===================================================================
 // Static ops (weight preprocessing)

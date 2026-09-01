@@ -15,6 +15,7 @@ import org.flexlb.exception.HttpErrorResponseException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import reactor.core.scheduler.Schedulers;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -24,6 +25,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -58,7 +60,7 @@ class GeneralHttpNettyServiceTest {
             }
         };
         channel = new EmbeddedChannel(handler);
-        service = new GeneralHttpNettyService(handler);
+        service = new GeneralHttpNettyService(handler, Schedulers.immediate());
     }
 
     @AfterEach
@@ -70,16 +72,7 @@ class GeneralHttpNettyServiceTest {
         CompletableFuture<EchoResponse> result = service
                 .request(Map.of("k", "v"), URI.create("http://backend:8080"), "/path", EchoResponse.class)
                 .toFuture();
-        // The request is written from the shared request-thread scheduler; pump the embedded
-        // event loop until the outbound write lands so inbound frames cannot race the sink setup.
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (channel.outboundMessages().isEmpty()) {
-            channel.runPendingTasks();
-            if (System.nanoTime() > deadline) {
-                throw new AssertionError("request was never written to the channel");
-            }
-            Thread.sleep(1);
-        }
+        assertFalse(channel.outboundMessages().isEmpty(), "request was never written to the channel");
         return result;
     }
 

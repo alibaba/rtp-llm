@@ -1,6 +1,9 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -9,18 +12,22 @@ import org.flexlb.enums.EngineType;
 import org.flexlb.exception.ServiceDiscoveryException;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.RateLimitedWarn;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -30,7 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -95,6 +104,8 @@ class EngineSyncRunnerTest {
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
+                null,
+                null,
                 engineType,
                 discoveryFailureGraceMs,
                 lastDiscoverySuccessUs,
@@ -129,8 +140,7 @@ class EngineSyncRunnerTest {
         assertTrue(status.isAlive());
         assertEquals("group-a", status.getGroup());
         assertEquals("site-a", status.getSite());
-        assertEquals(roleType.getCode(), status.getRole(),
-                "role must use the RoleType code format that RoleType.matches() consumers expect");
+        assertEquals(roleType, status.getRole());
         assertTrue(status.getStatusLastUpdateTime().get() > 0);
     }
 
@@ -185,7 +195,7 @@ class EngineSyncRunnerTest {
 
     @Test
     void empty_discovery_result_beyond_grace_lets_workers_age_out() {
-        EngineSyncRunner zeroGraceRunner = newRunner(EngineType.EMBEDDING, 0L);
+        EngineSyncRunner expiredGraceRunner = newRunner(EngineType.EMBEDDING, 1L);
         WorkerStatus alive = new WorkerStatus();
         alive.setIp("10.0.0.9");
         alive.setPort(23950);
@@ -197,11 +207,12 @@ class EngineSyncRunnerTest {
                 .thenReturn(List.of(host("10.0.0.9", 23950)))
                 .thenReturn(List.of());
 
-        zeroGraceRunner.run();
+        expiredGraceRunner.run();
         // The successful round stamps the clock itself (embedding liveness comes from the discovery
         // list); reset it so the assertion observes only what the empty round does.
         alive.getStatusLastUpdateTime().set(1L);
-        zeroGraceRunner.run();
+        lastDiscoverySuccessUs.put(modelName + "/" + roleType, 0L);
+        expiredGraceRunner.run();
 
         assertEquals(1L, alive.getStatusLastUpdateTime().get(),
                 "once the empty results outlast the grace window the staleness clock stops being "
@@ -428,7 +439,7 @@ class EngineSyncRunnerTest {
 
     @Test
     void llm_discovery_failure_beyond_grace_stops_probing_so_workers_can_age_out() {
-        EngineSyncRunner zeroGraceRunner = newRunner(EngineType.LLM, 0L);
+        EngineSyncRunner expiredGraceRunner = newRunner(EngineType.LLM, 1L);
         WorkerStatus alive = new WorkerStatus();
         alive.setIp("10.0.0.9");
         alive.setPort(23950);
@@ -441,13 +452,14 @@ class EngineSyncRunnerTest {
                 .thenThrow(new ServiceDiscoveryException(
                         BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, "vipserver down", null));
 
-        zeroGraceRunner.run();
+        expiredGraceRunner.run();
         // The mocked executor never runs the probes, so complete them by hand — otherwise the
         // in-progress flags alone would suppress the gap round's submissions and hide whether the
         // grace window is what stopped them.
         alive.getStatusCheckInProgress().set(false);
         alive.getCacheCheckInProgress().set(false);
-        zeroGraceRunner.run();
+        lastDiscoverySuccessUs.put(modelName + "/" + roleType, 0L);
+        expiredGraceRunner.run();
 
         // Probing is the only thing an LLM gap round does, so it is the only way to tell a
         // beyond-grace round from a within-grace one: the sibling test pins 4 submits over two
@@ -485,6 +497,115 @@ class EngineSyncRunnerTest {
         verify(statusCheckExecutor, org.mockito.Mockito.times(2)).submit(any(Runnable.class));
         WorkerStatus status = workerStatusMap.get("10.0.0.1:23950");
         assertNotNull(status);
-        assertFalse(status.isAlive());
+        assertTrue(status.isAlive(),
+                "discovery establishes current membership before asynchronous health probes run");
+    }
+
+    @Test
+    void vit_submits_only_the_worker_status_probe() {
+        WorkerHost discovered = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
+                .thenReturn(List.of(discovered));
+
+        createRunner(RoleType.VIT, workerStatusMap, null).run();
+
+        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor).submit(taskCaptor.capture());
+        assertTrue(taskCaptor.getValue() instanceof GrpcWorkerStatusRunner);
+        assertFalse(workerStatusMap.get(discovered.getIpPort())
+                .getCacheCheckInProgress().get());
+    }
+
+    @Test
+    void prefill_submits_worker_and_cache_status_probes() {
+        WorkerHost discovered = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(discovered));
+
+        createRunner(RoleType.PREFILL, workerStatusMap, null).run();
+
+        ArgumentCaptor<Runnable> taskCaptor = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor, times(2)).submit(taskCaptor.capture());
+        assertTrue(taskCaptor.getAllValues().stream()
+                .anyMatch(GrpcWorkerStatusRunner.class::isInstance));
+        assertTrue(taskCaptor.getAllValues().stream()
+                .anyMatch(GrpcCacheStatusCheckRunner.class::isInstance));
+    }
+
+    @Test
+    void rejected_vit_probe_resets_the_in_progress_flag() {
+        WorkerHost discovered = new WorkerHost("127.0.0.1", 8080, "test-site");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
+                .thenReturn(List.of(discovered));
+        doThrow(new RejectedExecutionException("executor stopped"))
+                .when(statusCheckExecutor).submit(any(Runnable.class));
+
+        createRunner(RoleType.VIT, workerStatusMap, null).run();
+
+        assertFalse(workerStatusMap.get(discovered.getIpPort())
+                .getStatusCheckInProgress().get());
+    }
+
+    @Test
+    void discovery_publishes_the_role_before_submitting_probes() {
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));
+
+        createRunner(RoleType.PREFILL, workerStatusMap, null).run();
+
+        assertEquals(RoleType.PREFILL,
+                workerStatusMap.get("127.0.0.1:61000").getRole());
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+    }
+
+    @Test
+    void confirmed_fleet_change_removes_status_and_endpoint_together() {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        EndpointRegistry registry = new EndpointRegistry(
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
+        Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        String staleIpPort = "127.0.0.1:8080";
+        WorkerStatus stale = new WorkerStatus();
+        stale.setRole(RoleType.PREFILL);
+        stale.setIp("127.0.0.1");
+        stale.setPort(8080);
+        stale.setAlive(true);
+        stale.getStatusLastUpdateTime().set(System.nanoTime() / 1000 - 2_000_000L);
+        stale.getStatusUpdateIntervalUs().set(20_000L);
+        statuses.put(staleIpPort, stale);
+        registry.ensureEndpoint(RoleType.PREFILL, staleIpPort, stale);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.2", 8080)));
+
+        createRunner(RoleType.PREFILL, statuses, registry).run();
+
+        assertFalse(statuses.containsKey(staleIpPort));
+        assertNull(registry.get(RoleType.PREFILL, staleIpPort));
+        registry.close();
+    }
+
+    private EngineSyncRunner createRunner(
+            RoleType actualRoleType,
+            Map<String, WorkerStatus> statuses,
+            EndpointRegistry endpointRegistry) {
+        return new EngineSyncRunner(
+                modelName,
+                statuses,
+                workerAddressService,
+                statusCheckExecutor,
+                engineHealthReporter,
+                engineGrpcService,
+                actualRoleType,
+                localKvCacheAwareManager,
+                syncRequestTimeoutMs,
+                syncCount,
+                syncEngineStatusInterval,
+                null,
+                endpointRegistry,
+                EngineType.LLM,
+                300_000L,
+                lastDiscoverySuccessUs,
+                new RateLimitedWarn(1, TimeUnit.SECONDS));
     }
 }

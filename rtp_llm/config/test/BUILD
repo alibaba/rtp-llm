@@ -14,3 +14,23 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "grammar_tokenizer_info_test",
+    srcs = [
+        "grammar_tokenizer_info_test.py",
+    ],
+    data = [
+        "//:th_grammar_tokenizer_info",
+    ],
+    deps = [
+        "//rtp_llm:config",
+    ],
+)
+
+py_test(
+    name = "output_vocab_config_test",
+    srcs = ["output_vocab_config_test.py"],
+    deps = [
+        "//rtp_llm:config",
+    ],
+)

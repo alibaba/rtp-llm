@@ -1,11 +1,10 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.EngineType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
@@ -74,20 +73,19 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
 
     @Override
     public ServerStatus select(BalanceContext context, RoleType roleType, String group) {
-        List<WorkerStatus> alive = aliveWorkers(roleType, group);
+        List<WorkerEndpoint> alive = aliveWorkers(roleType, group);
         if (alive.isEmpty()) {
             return ServerStatus.code(roleType.getErrorType());
         }
-        WorkerStatus selected = alive.get(
+        WorkerEndpoint selected = alive.get(
                 Math.floorMod(cursor(roleType, group).getAndIncrement(), alive.size()));
         long requestId = context.getRequestId();
-        recordTask(selected, requestId, context.getRequest().getSeqLen());
-        return ServerStatus.ok(selected, roleType, requestId);
+        return ServerStatus.ok(selected.getStatus(), roleType, requestId);
     }
 
     @Override
     public List<BatchScheduleTarget> selectBatch(int count, RoleType roleType, String group) {
-        List<WorkerStatus> alive = aliveWorkers(roleType, group);
+        List<WorkerEndpoint> alive = aliveWorkers(roleType, group);
         if (alive.isEmpty()) {
             return new ArrayList<>();
         }
@@ -96,46 +94,33 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         List<BatchScheduleTarget> targets = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             int idx = Math.floorMod(start + i, aliveSize);
-            targets.add(BatchScheduleTarget.of(alive.get(idx), roleType, embeddingEngine));
+            targets.add(BatchScheduleTarget.of(
+                    alive.get(idx).getStatus(), roleType, embeddingEngine));
         }
         return targets;
     }
 
     @Override
-    public void rollBack(String ipPort, long requestId) {
-        for (RoleType role : RoleType.values()) {
-            Map<String, WorkerStatus> map = engineWorkerStatus.selectModelWorkerStatus(role, null);
-            if (map == null) {
-                continue;
-            }
-            WorkerStatus worker = map.get(ipPort);
-            if (worker != null) {
-                worker.removeLocalTask(requestId);
-                return;
-            }
-        }
+    public void rollBack(WorkerEndpoint endpoint, long requestId) {
+        // Round-robin selection is stateless. Role-specific reservation belongs
+        // to admission-aware strategies and Endpoint implementations.
     }
 
-    private List<WorkerStatus> aliveWorkers(RoleType roleType, String group) {
-        Map<String, WorkerStatus> map = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        List<WorkerStatus> alive = new ArrayList<>();
+    private List<WorkerEndpoint> aliveWorkers(RoleType roleType, String group) {
+        Map<String, WorkerEndpoint> map =
+                engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        List<WorkerEndpoint> alive = new ArrayList<>();
         if (map == null) {
             return alive;
         }
-        for (WorkerStatus w : map.values()) {
-            if (w != null && w.isAlive()) {
-                alive.add(w);
+        for (WorkerEndpoint endpoint : map.values()) {
+            if (endpoint != null
+                    && endpoint.getStatus() != null
+                    && endpoint.getStatus().isAlive()) {
+                alive.add(endpoint);
             }
         }
         return alive;
-    }
-
-    private void recordTask(WorkerStatus worker, long requestId, long seqLen) {
-        TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
-        task.setInputLength(seqLen);
-        task.setPrefixLength(0);
-        worker.putLocalTask(requestId, task);
     }
 
 }

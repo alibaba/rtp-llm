@@ -1,8 +1,13 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
@@ -11,20 +16,21 @@ import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.pv.BatchPvLogData;
-import org.flexlb.dao.pv.PvLogData;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.exception.BatchScheduleTransportException;
-import org.flexlb.exception.EngineReadTimeoutException;
 import org.flexlb.service.BatchScheduleCoordinator;
-import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.transport.GeneralHttpNettyService;
+import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
@@ -35,7 +41,10 @@ import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
-import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.accept;
@@ -43,44 +52,47 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 
 @Component
 public class HttpLoadBalanceServer {
-    private final GeneralHttpNettyService generalHttpNettyService;
-    private final RouteService routeService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
-    private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
+    private final ConfigService configService;
+    private final FlexlbBatchScheduler batchScheduler;
+    private final EndpointRegistry endpointRegistry;
+    private final MasterEngineSynchronizer masterEngineSynchronizer;
+    private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final ActiveRequestCounter activeRequestCounter;
     private final BatchScheduleCoordinator batchScheduleCoordinator;
-    /**
-     * Stamps the master's single-cursor {@code fe_url} onto a locally-resolved {@code /batch_schedule}
-     * response. This HTTP handler resolves locally only for a slave's forwarded request (the master
-     * answers it here); the master's own in-process dispatcher stamps through the same
-     * {@link MasterFeAssigner} bean, so one cursor drives FE selection fleet-wide.
-     */
     private final MasterFeAssigner masterFeAssigner;
+    private final EngineHealthReporter engineHealthReporter;
 
-    public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
-                                 RouteService routeService,
-                                 LBStatusConsistencyService lbStatusConsistencyService,
-                                 EngineHealthReporter engineHealthReporter,
-                                 QueueManager queueManager,
-                                 ActiveRequestCounter activeRequestCounter,
-                                 BatchScheduleCoordinator batchScheduleCoordinator,
-                                 MasterFeAssigner masterFeAssigner) {
-        this.generalHttpNettyService = generalHttpNettyService;
-        this.routeService = routeService;
+    public HttpLoadBalanceServer(
+            LBStatusConsistencyService lbStatusConsistencyService,
+            QueueManager queueManager,
+            ConfigService configService,
+            FlexlbBatchScheduler batchScheduler,
+            EndpointRegistry endpointRegistry,
+            @org.springframework.beans.factory.annotation.Autowired(required = false)
+            MasterEngineSynchronizer masterEngineSynchronizer,
+            ServerScheduleLatencyRecorder serverLatencyRecorder,
+            ActiveRequestCounter activeRequestCounter,
+            BatchScheduleCoordinator batchScheduleCoordinator,
+            MasterFeAssigner masterFeAssigner,
+            EngineHealthReporter engineHealthReporter) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
-        this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
+        this.configService = configService;
+        this.batchScheduler = batchScheduler;
+        this.endpointRegistry = endpointRegistry;
+        this.masterEngineSynchronizer = masterEngineSynchronizer;
+        this.serverLatencyRecorder = serverLatencyRecorder;
         this.activeRequestCounter = activeRequestCounter;
         this.batchScheduleCoordinator = batchScheduleCoordinator;
         this.masterFeAssigner = masterFeAssigner;
+        this.engineHealthReporter = engineHealthReporter;
     }
 
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
-                .POST("/rtp_llm/schedule", accept(MediaType.APPLICATION_JSON),
-                        this::scheduleRequest)
                 .POST("/rtp_llm/batch_schedule", accept(MediaType.APPLICATION_JSON),
                         this::batchScheduleRequest)
                 .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
@@ -91,131 +103,84 @@ public class HttpLoadBalanceServer {
                         this::notifyParticipant)
                 .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
+                .POST("/rtp_llm/update_traffic_policy", accept(MediaType.APPLICATION_JSON),
+                        this::updateTrafficPolicy)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
+                .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
+                        this::inflightStatus)
+                .GET("/rtp_llm/server_latency", this::serverLatency)
+                .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
                 .build();
     }
 
-    /**
-     * Handles load balancing request scheduling.
-     *
-     * @param request the HTTP request containing the model inference request
-     * @return a reactive response containing the load balancing result
-     */
-    public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
-        BalanceContext ctx = new BalanceContext();
-        return request.bodyToMono(Request.class)
-                .flatMap(req -> {
-                    if (req.getRequestId() == 0) {
-                        throw new IllegalArgumentException("requestId is 0");
-                    }
-                    ctx.setRequest(req);
-                    return Mono.using(
-                            activeRequestCounter::acquire,
-                            ignored -> processScheduledRequest(ctx, req),
-                            ActiveRequestCounter.RequestToken::close);
-                })
-                .onErrorResume(e -> handleRequestError(ctx, e))
-                .doFinally(signal -> finalizeRequestContext(ctx));
-    }
-
     public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
-        BatchScheduleContext bctx = new BatchScheduleContext();
+        BatchScheduleContext context = new BatchScheduleContext();
         return request.bodyToMono(BatchScheduleRequest.class)
                 .switchIfEmpty(Mono.error(new ServerWebInputException("empty request body")))
                 .flatMap(batchRequest -> {
-                    bctx.setBatchRequest(batchRequest);
+                    context.setBatchRequest(batchRequest);
                     return Mono.using(
                             activeRequestCounter::acquire,
-                            ignored -> processBatchScheduleRequest(bctx),
+                            ignored -> processBatchScheduleRequest(context),
                             ActiveRequestCounter.RequestToken::close);
                 })
-                .onErrorResume(e -> {
-                    Logger.error("Batch schedule request processing error", e);
-                    return batchError(bctx, errorTypeOf(bctx), e);
+                .onErrorResume(error -> {
+                    Logger.error("Batch schedule request processing error", error);
+                    return batchError(context, errorTypeOf(context), error);
                 })
-                .doFinally(signal -> finalizeBatchContext(bctx));
+                .doFinally(signal -> finalizeBatchContext(context));
     }
 
-    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext bctx) {
-        return batchScheduleCoordinator.schedule(bctx.getBatchRequest())
+    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext context) {
+        return batchScheduleCoordinator.schedule(context.getBatchRequest())
                 .flatMap(response -> {
-                    bctx.setBatchResponse(response);
-                    if (!response.isSuccess()) {
-                        Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
+                    context.setBatchResponse(response);
+                    if (response.isSuccess()) {
+                        // The same singleton cursor also serves the master's in-process dispatcher,
+                        // so locally handled and forwarded requests share one FE allocation order.
+                        masterFeAssigner.assign(
+                                context.getBatchRequest(), response.getServerStatus());
                     } else {
-                        // Slave-forwarded request the master resolved locally: stamp fe_url from the
-                        // single master cursor before answering. The master's OWN in-process
-                        // dispatcher stamps through the same bean (BatchScheduleClient), never here.
-                        masterFeAssigner.assign(response.getServerStatus());
+                        Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
                     }
                     return json(statusOf(response), response);
                 })
-                .onErrorResume(BatchScheduleTransportException.class,
-                        e -> batchError(bctx, StrategyErrorType.NO_AVAILABLE_WORKER, e));
+                .onErrorResume(
+                        BatchScheduleTransportException.class,
+                        error -> batchError(
+                                context, StrategyErrorType.NO_AVAILABLE_WORKER, error));
     }
 
-    /**
-     * HTTP status for a business response. INVALID_REQUEST rejections (batch_count out of range,
-     * multi-role deployment, null request) are deterministic client errors → 400; every other
-     * failure (NO_AVAILABLE_WORKER etc.) is a server-side condition and stays 500.
-     *
-     * <p>The body's error type is the single source of truth for the status, because a slave
-     * forwarding to the master reconstructs the response from the body alone
-     * ({@code BatchScheduleCoordinator#forwardToMaster}) and re-derives the status here. Deriving
-     * the two independently would let a forwarded 500 arrive at the caller as a 400 — a retryable
-     * server fault reported as "your request is bad".
-     */
     private static int statusOf(BatchScheduleResponse response) {
         if (response.isSuccess()) {
             return 200;
         }
-        return response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode() ? 400 : 500;
+        return response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode()
+                ? 400
+                : 500;
     }
 
-    /**
-     * Classifies a failure by the stage it escaped, not by its exception type: everything up to
-     * and including the body decode can only fail on what the caller sent, while the same
-     * exception type raised once scheduling is under way (an {@link IllegalArgumentException} from
-     * a malformed elected-master address, say) is a server fault that must alert and be retried.
-     * The decoded request is the marker — the flatMap stamps it before anything else can fail.
-     */
-    private static StrategyErrorType errorTypeOf(BatchScheduleContext bctx) {
-        return bctx.getBatchRequest() == null
+    private static StrategyErrorType errorTypeOf(BatchScheduleContext context) {
+        return context.getBatchRequest() == null
                 ? StrategyErrorType.INVALID_REQUEST
                 : StrategyErrorType.NO_AVAILABLE_WORKER;
     }
 
-    /** Builds the error response and stamps it on the context; pv success/error derive from it. */
-    private Mono<ServerResponse> batchError(BatchScheduleContext bctx, StrategyErrorType type, Throwable e) {
-        BatchScheduleResponse errorResponse = BatchScheduleResponse.error(type, e.getMessage());
-        bctx.setBatchResponse(errorResponse);
-        return json(statusOf(errorResponse), errorResponse);
-    }
-
-    private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
-        engineHealthReporter.reportArriveDelayTime(ctx);
-
-        if (lbStatusConsistencyService.isNeedConsistency() && !lbStatusConsistencyService.isMaster()) {
-            return forwardRequestToMaster(ctx, req);
-        }
-
-        return routeService.route(ctx)
-                .flatMap(response -> handleRoutingResult(ctx, response))
-                .doOnCancel(() -> {
-                    ctx.setSuccess(false);
-                    ctx.setErrorMessage("REQUEST_CANCELLED");
-                    routeService.cancel(ctx);
-                });
+    private Mono<ServerResponse> batchError(
+            BatchScheduleContext context, StrategyErrorType type, Throwable error) {
+        BatchScheduleResponse response = BatchScheduleResponse.error(type, error.getMessage());
+        context.setBatchResponse(response);
+        return json(statusOf(response), response);
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
         return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(logLevelUpdateRequest -> {
-                    Logger.setGlobalLogLevel(logLevelUpdateRequest.getLogLevel());
+                    Logger.setLevel(logLevelUpdateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + Logger.getGlobalLogLevel()), String.class);
+                            .body(Mono.just("Success! logLevel=" + Logger.getLevel()), String.class);
                 }).onErrorResume(e -> {
                     Logger.error("update logLevel error", e);
                     return ServerResponse.status(500)
@@ -224,14 +189,52 @@ public class HttpLoadBalanceServer {
                 });
     }
 
+    private Mono<ServerResponse> updateTrafficPolicy(ServerRequest serverRequest) {
+        return serverRequest.bodyToMono(TrafficPolicyConfig.class)
+                .flatMap(trafficPolicyConfig -> {
+                    configService.updateTrafficPolicy(trafficPolicyConfig);
+                    return ServerResponse.ok()
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(trafficPolicyConfig), TrafficPolicyConfig.class);
+                }).onErrorResume(e -> {
+                    Logger.error("update traffic policy error", e);
+                    return ServerResponse.status(500)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(e.getMessage()), String.class);
+                });
+    }
+
+    private Map<String, Response.WorkerRoleSummary> buildWorkerSummary() {
+        ModelWorkerStatus modelStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+        Map<String, Response.WorkerRoleSummary> summary = new LinkedHashMap<>();
+        for (RoleType role : RoleType.values()) {
+            Map<String, WorkerStatus> statusMap = modelStatus.getRoleStatusMap(role);
+            if (statusMap == null || statusMap.isEmpty()) {
+                continue;
+            }
+            Response.WorkerRoleSummary roleSummary = new Response.WorkerRoleSummary();
+            roleSummary.setDiscovered(statusMap.size());
+            for (WorkerStatus status : statusMap.values()) {
+                if (status.isAlive()) {
+                    roleSummary.setAlive(roleSummary.getAlive() + 1);
+                }
+            }
+            summary.put(role.getCode(), roleSummary);
+        }
+        return summary.isEmpty() ? null : summary;
+    }
+
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
-                .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
+                .flatMap((Function<Request, Mono<ServerResponse>>) ignored -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(queueManager.getQueue().size());
+                    result.setQueueLength(queueManager.queueSize());
                     result.setCode(200);
                     result.setSuccess(true);
+                    result.setWorkerSummary(buildWorkerSummary());
+                    result.setReady(masterEngineSynchronizer == null
+                            || masterEngineSynchronizer.isReady());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(result), Response.class);
@@ -250,10 +253,11 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {
         return request.bodyToMono(MasterChangeNotifyReq.class)
                 .flatMap(masterChangeNotifyReq -> {
-                    MasterChangeNotifyResp resp = lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
+                    MasterChangeNotifyResp response =
+                            lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), MasterChangeNotifyReq.class);
+                            .body(Mono.just(response), MasterChangeNotifyReq.class);
                 }).onErrorResume((Function<Throwable, Mono<ServerResponse>>) e -> {
                     Logger.error("notifyParticipant error", e);
                     return ServerResponse.status(500)
@@ -264,11 +268,11 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> dumpLBStatus(ServerRequest request) {
         return request.bodyToMono(SyncLBStatusReq.class)
-                .flatMap(syncLBStatusReq -> {
-                    SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus();
+                .flatMap(ignored -> {
+                    SyncLBStatusResp response = lbStatusConsistencyService.dumpLBStatus();
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), SyncLBStatusResp.class);
+                            .body(Mono.just(response), SyncLBStatusResp.class);
                 }).onErrorResume(e -> {
                     Logger.error("dumpLBStatus error", e);
                     return ServerResponse.status(500)
@@ -291,68 +295,53 @@ public class HttpLoadBalanceServer {
         }
     }
 
-    /**
-     * Forwards the request to the active master node.
-     *
-     * @param ctx the balance context
-     * @param request the master request to forward
-     * @return response from the master node
-     */
-    private Mono<ServerResponse> forwardRequestToMaster(BalanceContext ctx, Request request) {
-        String master = lbStatusConsistencyService.getMasterHostIpPort();
-        if (master == null) {
-            Logger.error("Master unreachable, routing locally");
-            engineHealthReporter.reportForwardToMasterResult("LOCAL", "MASTER_NULL");
-            return fallbackToLocalRouting(ctx);
+    public Mono<ServerResponse> inflightStatus(ServerRequest request) {
+        try {
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("scheduler_inflight", batchScheduler.getInflightSize());
+
+            List<Map<String, Object>> prefillList = new ArrayList<>();
+            for (Map.Entry<String, PrefillEndpoint> entry
+                    : endpointRegistry.getPrefillEndpoints().entrySet()) {
+                Map<String, Object> endpoint = new LinkedHashMap<>();
+                endpoint.put("ip_port", entry.getKey());
+                endpoint.put("inflight_batches", entry.getValue().getInflightBatchCount());
+                prefillList.add(endpoint);
+            }
+            result.put("prefill_endpoints", prefillList);
+
+            List<Map<String, Object>> decodeList = new ArrayList<>();
+            for (Map.Entry<String, DecodeEndpoint> entry
+                    : endpointRegistry.getDecodeEndpoints().entrySet()) {
+                Map<String, Object> endpoint = new LinkedHashMap<>();
+                endpoint.put("ip_port", entry.getKey());
+                endpoint.put("inflight_requests", entry.getValue().getInflightCount());
+                decodeList.add(endpoint);
+            }
+            result.put("decode_endpoints", decodeList);
+
+            return ServerResponse.ok()
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Mono.just(result), Map.class);
+        } catch (Exception e) {
+            Logger.error("inflightStatus error", e);
+            return ServerResponse.status(500)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Mono.just(e.getMessage()), String.class);
         }
-        Logger.info("Forwarding request to master: {}, requestId: {}", master, request.getRequestId());
-        URI uri = URI.create("http://" + master);
-        return generalHttpNettyService.request(request, uri, "/rtp_llm/schedule", Response.class)
-                .flatMap(resp -> {
-                            engineHealthReporter.reportForwardToMasterResult(uri.getHost(), String.valueOf(resp.getCode()));
-                            return ServerResponse.ok()
-                                    .contentType(MediaType.APPLICATION_JSON)
-                                    .bodyValue(resp);
-                        }
-                )
-                .onErrorResume(e -> {
-                    String errorCode = e instanceof EngineReadTimeoutException ? "TIMEOUT" : "CONNECT_FAILED";
-                    Logger.error("[Fallback] Master unreachable, routing locally: {}, errorCode: {}", e.getMessage(), errorCode);
-                    engineHealthReporter.reportForwardToMasterResult("LOCAL", errorCode);
-                    return fallbackToLocalRouting(ctx);
-                });
     }
 
-    private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
-        return routeService.route(ctx)
-                .flatMap(response -> handleRoutingResult(ctx, response))
-                .onErrorResume(e -> {
-                    Logger.error("[Fallback] Local routing failed", e);
-                    Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .bodyValue(errorResponse);
-                });
+    private Mono<ServerResponse> serverLatency(ServerRequest request) {
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(serverLatencyRecorder.snapshot());
     }
 
-    /**
-     * Processes the routing response and builds the appropriate HTTP response.
-     *
-     * @param ctx the balance context
-     * @param response the routing response
-     * @return HTTP response based on routing success or failure
-     */
-    private Mono<ServerResponse> handleRoutingResult(BalanceContext ctx, Response response) {
-
-        response.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-
-        if (response.isSuccess()) {
-            return json(200, response);
-        }
-        Logger.error("Routing failed with error code: {}", response.getErrorMessage());
-        ctx.setSuccess(false);
-        ctx.setErrorMessage("error_code:" + response.getErrorMessage());
-        return json(500, response);
+    private Mono<ServerResponse> resetServerLatency(ServerRequest request) {
+        serverLatencyRecorder.reset();
+        return ServerResponse.ok()
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("reset", true));
     }
 
     private Mono<ServerResponse> json(int status, Object body) {
@@ -361,50 +350,8 @@ public class HttpLoadBalanceServer {
                 .bodyValue(body);
     }
 
-    /**
-     * Handles global request errors.
-     *
-     * @param ctx the balance context
-     * @param throwable the error that occurred
-     * @return error response
-     */
-    private Mono<ServerResponse> handleRequestError(BalanceContext ctx, Throwable throwable) {
-        Logger.error("Request processing error", throwable);
-        ctx.setSuccess(false);
-        ctx.setErrorMessage(throwable.getMessage());
-
-        return ServerResponse.status(500)
-                .contentType(MediaType.APPLICATION_JSON)
-                .body(Mono.just(throwable.getMessage()), String.class);
+    private void finalizeBatchContext(BatchScheduleContext context) {
+        engineHealthReporter.reportBatchSchedule(context);
+        new BatchPvLogData(context).emit();
     }
-
-    /**
-     * Finalizes the request context by reporting metrics.
-     *
-     * @param ctx the balance context to finalize
-     */
-    private void finalizeRequestContext(BalanceContext ctx) {
-        engineHealthReporter.reportBalancingService(ctx);
-        logPvRecord(ctx);
-    }
-
-    /**
-     * Logs the PV record with appropriate log level based on success status.
-     *
-     * @param ctx the balance context containing PV log data
-     */
-    private void logPvRecord(BalanceContext ctx) {
-        new PvLogData(ctx).emit();
-    }
-
-    /**
-     * Finalizes the batch schedule context by reporting metrics and writing the PV log.
-     *
-     * @param bctx the batch schedule context to finalize
-     */
-    private void finalizeBatchContext(BatchScheduleContext bctx) {
-        engineHealthReporter.reportBatchSchedule(bctx);
-        new BatchPvLogData(bctx).emit();
-    }
-
 }

@@ -4,6 +4,8 @@ import org.flexlb.dao.master.WorkerHost;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.dispatcher.DispatcherTestSupport.StubServiceDiscovery;
 import static org.flexlb.dispatcher.DispatcherTestSupport.refresher;
@@ -66,6 +68,50 @@ class DispatcherFePoolRefresherTest {
         failing.set(false);
         r.refresh();
         assertEquals(1, r.currentSize(), "poll must repair the pool once discovery recovers");
+    }
+
+    @Test
+    void timeoutRetiresWedgedExecutorSoNextPollCanRecover() {
+        AtomicInteger calls = new AtomicInteger();
+        CountDownLatch releaseWedgedCall = new CountDownLatch(1);
+        org.flexlb.discovery.ServiceDiscovery discovery = new org.flexlb.discovery.ServiceDiscovery() {
+            @Override
+            public List<WorkerHost> getHosts(String address) {
+                if (calls.incrementAndGet() == 1) {
+                    while (true) {
+                        try {
+                            releaseWedgedCall.await();
+                            return List.of();
+                        } catch (InterruptedException ignored) {
+                            // Deliberately model a discovery implementation that ignores cancel.
+                        }
+                    }
+                }
+                return List.of(WorkerHost.of("10.0.0.9", 8088));
+            }
+
+            @Override
+            public void listen(String address, org.flexlb.discovery.ServiceHostListener listener) {
+            }
+
+            @Override
+            public void shutdown() {
+            }
+        };
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setFePoolServiceId("svc.fe");
+        DispatcherFePoolRefresher refresher = new DispatcherFePoolRefresher(
+                discovery, cfg, 60_000, System::nanoTime, 50);
+        try {
+            assertEquals(0, refresher.currentSize());
+            refresher.refresh();
+            assertEquals(1, refresher.currentSize(),
+                    "the next poll must not queue behind the timed-out lookup");
+            assertEquals(2, calls.get());
+        } finally {
+            releaseWedgedCall.countDown();
+            refresher.shutdown();
+        }
     }
 
     @Test

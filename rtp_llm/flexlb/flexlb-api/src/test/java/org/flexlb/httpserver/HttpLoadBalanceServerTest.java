@@ -1,17 +1,19 @@
 package org.flexlb.httpserver;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dispatcher.FePool;
-import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.dao.BatchScheduleContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dispatcher.FePool;
+import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.service.BatchScheduleCoordinator;
-import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.transport.GeneralHttpNettyService;
+import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,15 +38,21 @@ import static org.mockito.Mockito.when;
 class HttpLoadBalanceServerTest {
 
     @Mock
-    private GeneralHttpNettyService generalHttpNettyService;
-    @Mock
-    private RouteService routeService;
-    @Mock
     private LBStatusConsistencyService lbStatusConsistencyService;
     @Mock
     private EngineHealthReporter engineHealthReporter;
     @Mock
     private QueueManager queueManager;
+    @Mock
+    private ConfigService configService;
+    @Mock
+    private FlexlbBatchScheduler batchScheduler;
+    @Mock
+    private EndpointRegistry endpointRegistry;
+    @Mock
+    private MasterEngineSynchronizer masterEngineSynchronizer;
+    @Mock
+    private ServerScheduleLatencyRecorder serverLatencyRecorder;
     @Mock
     private ActiveRequestCounter activeRequestCounter;
     @Mock
@@ -64,9 +72,18 @@ class HttpLoadBalanceServerTest {
         // fePoolProvider.getIfAvailable() / isMaster() / isNeedConsistency() exactly as before, now
         // through the shared MasterFeAssigner bean instead of a private method.
         masterFeAssigner = new MasterFeAssigner(fePoolProvider, lbStatusConsistencyService);
-        server = new HttpLoadBalanceServer(generalHttpNettyService, routeService,
-                lbStatusConsistencyService, engineHealthReporter, queueManager,
-                activeRequestCounter, batchScheduleCoordinator, masterFeAssigner);
+        server = new HttpLoadBalanceServer(
+                lbStatusConsistencyService,
+                queueManager,
+                configService,
+                batchScheduler,
+                endpointRegistry,
+                masterEngineSynchronizer,
+                serverLatencyRecorder,
+                activeRequestCounter,
+                batchScheduleCoordinator,
+                masterFeAssigner,
+                engineHealthReporter);
     }
 
     private BatchScheduleContext capturedBatchContext() {
@@ -292,9 +309,18 @@ class HttpLoadBalanceServerTest {
         ServerRequest slaveRequest = org.mockito.Mockito.mock(ServerRequest.class);
         BatchScheduleCoordinator slaveCoordinator = org.mockito.Mockito.mock(BatchScheduleCoordinator.class);
         ActiveRequestCounter slaveCounter = org.mockito.Mockito.mock(ActiveRequestCounter.class);
-        HttpLoadBalanceServer slave = new HttpLoadBalanceServer(generalHttpNettyService, routeService,
-                lbStatusConsistencyService, org.mockito.Mockito.mock(EngineHealthReporter.class), queueManager,
-                slaveCounter, slaveCoordinator, masterFeAssigner);
+        HttpLoadBalanceServer slave = new HttpLoadBalanceServer(
+                lbStatusConsistencyService,
+                queueManager,
+                configService,
+                batchScheduler,
+                endpointRegistry,
+                masterEngineSynchronizer,
+                serverLatencyRecorder,
+                slaveCounter,
+                slaveCoordinator,
+                masterFeAssigner,
+                org.mockito.Mockito.mock(EngineHealthReporter.class));
         BatchScheduleRequest forwarded = new BatchScheduleRequest();
         forwarded.setBatchCount(2);
         when(slaveRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(forwarded));

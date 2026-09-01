@@ -5,8 +5,8 @@ Shared data model for both servicers (frontend ``inference`` + transparent
 the proxy is just one of its two consumers; ``access_log.py`` / ``grpc_metrics``
 also depend on it.
 
-This module intentionally has no logger or kmonitor dependencies. It owns the
-pure data path for dash-sc access logs:
+This module intentionally has no access-log handler or kmonitor dependencies.
+It owns the data path for dash-sc access logs:
 
 - record construction from a gRPC context (peer, upstream correlation id);
 - request-derived fields such as request id, model name, input length, and
@@ -30,16 +30,19 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import re
 import time
 from typing import Any, Optional, Sequence
 
 import grpc
+from pydantic import TypeAdapter
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.codec import (
     DashScRequestControls,
     SamplingParams,
+    _lookup_ds_request_control,
     parse_ds_header_attributes,
     parse_input_ids_from_request,
     parse_request_controls,
@@ -58,6 +61,37 @@ from rtp_llm.dash_sc.status import (
 )
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
+MAX_SPAN_EXTERNAL_REQUEST_ID_LEN = 128
+
+_SPAN_EXTERNAL_REQUEST_ID_METADATA_KEYS = (
+    "x-dashscope-request-id",
+    "x-request-id",
+    "dashscope-request-id",
+)
+
+# Auto-TPM QoS priority header conveyed by the DashScope gateway. Defined
+# locally (the literal also appears in ``codec.py`` / ``request_headers.py``)
+# rather than imported from ``rtp_llm.metrics`` so this module keeps its
+# no-kmonitor-dependency contract.
+QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+
+
+def _parse_qos_priority(value: Any) -> Optional[int]:
+    """Parse the ``x-dashscope-inner-qos-level`` header into its integer value.
+
+    Mirrors the servicer's ``generate_config.qos_priority`` parse: ``None`` for
+    an absent or unparseable value. The metrics layer maps ``None`` onto the
+    ``"0"`` (no-qos) priority bucket.
+    """
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+_AUX_INFO_ADAPTER = TypeAdapter(Any)
 
 _MAX_CONTROL_STRING_LEN = 4096
 _MAX_CONTROL_DEPTH = 8
@@ -150,6 +184,48 @@ def to_optional_int(value: object) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def span_external_request_id(value: object) -> str:
+    return str(value or "")[:MAX_SPAN_EXTERNAL_REQUEST_ID_LEN]
+
+
+def extract_body_trace_headers(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for key in ("traceparent", "tracestate", "baggage"):
+        if key not in request.parameters:
+            continue
+        parameter = request.parameters[key]
+        if parameter.HasField("string_param") and parameter.string_param:
+            headers[key] = str(parameter.string_param)
+    return headers
+
+
+def extract_span_external_request_id(
+    invocation_metadata: Sequence[tuple[object, object]],
+    request: predict_v2_pb2.ModelInferRequest,
+) -> str:
+    metadata_lookup: dict[str, str] = {}
+    for entry in invocation_metadata or ():
+        try:
+            key, value = entry
+        except Exception:
+            continue
+        if key is None or value is None:
+            continue
+        metadata_lookup[str(key).lower()] = str(value)
+    for key in _SPAN_EXTERNAL_REQUEST_ID_METADATA_KEYS:
+        value = metadata_lookup.get(key)
+        if value:
+            return span_external_request_id(value)
+
+    ds_attrs = parse_ds_header_attributes(request)
+    value = _lookup_ds_request_control(ds_attrs, "x-dashscope-requestid")
+    if value:
+        return span_external_request_id(value)
+    return span_external_request_id(request.id)
 
 
 # Upstream correlation headers, by priority. Whichever header the client
@@ -326,6 +402,24 @@ def _sampling_to_dict(sampling: SamplingParams) -> dict[str, Any]:
     return d
 
 
+def dump_aux_info(aux_info: Any) -> dict[str, Any]:
+    """Return a detached, JSON-safe aux-info dict or ``{}`` on any failure."""
+    try:
+        value = _AUX_INFO_ADAPTER.dump_python(aux_info, mode="json")
+        return value if isinstance(value, dict) else {}
+    except Exception as e:
+        logging.warning(
+            "[DashScGrpc] aux_info dump failed, using empty object: %s: %s, aux_info=%r",
+            type(e).__name__,
+            e,
+            aux_info,
+        )
+        return {}
+
+
+_CONTEXT_ATTR = "_dash_sc_forward_access_record"
+
+
 @dataclasses.dataclass
 class GrpcAccessRecord:
     """Mutable per-RPC access record for the dash-sc forward path."""
@@ -362,6 +456,7 @@ class GrpcAccessRecord:
     generated_ids: list[int] = dataclasses.field(default_factory=list)
     generate_config: Optional[dict[str, Any]] = None
     generate_config_role_addrs: Optional[dict[str, list[dict[str, Any]]]] = None
+    aux_info: Any = None
     output_len: int = 0
     first_token_frame_len: int = 0
     token_frame_count: int = 0
@@ -399,6 +494,11 @@ class GrpcAccessRecord:
     backend_rpc_detail: Optional[str] = None
     backend_resp_count: int = 0
     buffered_stage: Optional[str] = None
+    # Set by ``grpc_metrics.report_arrival_priority`` once the priority-tagged
+    # twin of the arrival QPS series has been emitted for this RPC (true value
+    # after the first frame parse, or the "0" fallback at the finally tail) —
+    # guarantees exactly one tagged arrival per RPC.
+    priority_arrival_reported: bool = False
     # Tool-call loop observability. The monitor owns detection and the flat
     # access-log fields; this record only feeds it request markers + the
     # generated token stream and reads back the result.
@@ -468,6 +568,11 @@ class GrpcAccessRecord:
         if token_ids:
             self.generated_ids.extend(token_ids)
 
+    def record_aux_info(self, aux_info: Any, *, overwrite: bool = True) -> None:
+        """Keep the latest backend ``AuxInfo`` for the frontend access log."""
+        if aux_info is None or (not overwrite and self.aux_info is not None):
+            return
+        self.aux_info = aux_info
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
 
@@ -510,10 +615,10 @@ class GrpcAccessRecord:
             return
         if self.first_request_ts is None:
             self.first_request_ts = time.time()
-        request_id = request.id
+        request_id = getattr(request, "id", None)
         if request_id and self.request_id is None:
             self.request_id = str(request_id)
-        model_name = request.model_name
+        model_name = getattr(request, "model_name", None)
         if model_name and self.model_name is None:
             self.model_name = str(model_name)
         controls = self.request_controls
@@ -523,11 +628,9 @@ class GrpcAccessRecord:
         if "parameters" not in controls and "ds_header_attributes" not in controls:
             controls.update(self._build_request_controls(request))
 
-    def _build_request_controls(
-        self, request: predict_v2_pb2.ModelInferRequest
-    ) -> dict[str, Any]:
+    def _build_request_controls(self, request) -> dict[str, Any]:
         parameters: dict[str, Any] = {}
-        for key, param in request.parameters.items():
+        for key, param in getattr(request, "parameters", {}).items():
             if str(key) == "ds_header_attributes":
                 continue
             parameters[str(key)] = _proto_parameter_value(key, param)
@@ -587,6 +690,12 @@ class GrpcAccessRecord:
                 self.generate_config["timeout_ms"] = request_controls.timeout_ms
                 self.generate_config["traffic_reject_priority"] = (
                     request_controls.traffic_reject_priority
+                )
+                # Auto-TPM QoS priority (x-dashscope-inner-qos-level) — the
+                # value FlexLB schedules by; grpc_metrics projects it onto the
+                # ``priority`` tag of the QPS metric family.
+                self.generate_config["qos_priority"] = _parse_qos_priority(
+                    request_controls.request_headers.get(QOS_PRIORITY_HEADER)
                 )
             except Exception:
                 self.generate_config = None
@@ -868,6 +977,7 @@ class GrpcAccessRecord:
                 "multi_token_frame_count": self.multi_token_frame_count,
                 "max_tokens_per_frame": self.max_tokens_per_frame,
                 "generate_config": self.generate_config,
+                "aux_info": dump_aux_info(self.aux_info),
                 "input_ids": self.input_ids,
                 "generated_ids": self.generated_ids or None,
             }
@@ -879,7 +989,7 @@ class GrpcAccessRecord:
 
     def attach_to_context(self, context: object) -> bool:
         try:
-            context._dash_sc_forward_access_record = self
+            setattr(context, _CONTEXT_ATTR, self)
             return True
         except Exception:
             return False
@@ -887,8 +997,6 @@ class GrpcAccessRecord:
     @staticmethod
     def from_context(context: object) -> Optional["GrpcAccessRecord"]:
         try:
-            return context._dash_sc_forward_access_record
-        except AttributeError:
-            return None
+            return getattr(context, _CONTEXT_ATTR, None)
         except Exception:
             return None

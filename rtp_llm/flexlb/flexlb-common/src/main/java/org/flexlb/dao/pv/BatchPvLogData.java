@@ -22,6 +22,8 @@ public class BatchPvLogData implements PvRecord {
     private String type = "batch_schedule";
     private int batchCount;
     private int targetCount;
+    private boolean assignBe;
+    private boolean assignFe;
     private boolean success;
     private int code;
     private String error;
@@ -33,6 +35,8 @@ public class BatchPvLogData implements PvRecord {
         BatchScheduleResponse response = bctx.getBatchResponse();
 
         this.batchCount = request != null ? request.getBatchCount() : 0;
+        this.assignBe = request != null && request.isAssignBe();
+        this.assignFe = request != null && request.isAssignFe();
         this.startTimeMs = bctx.getStartTime();
         this.costMs = System.currentTimeMillis() - bctx.getStartTime();
         this.success = bctx.isSuccess();

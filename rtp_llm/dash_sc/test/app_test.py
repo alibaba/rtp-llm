@@ -10,23 +10,27 @@ import threading
 import time
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import grpc
 
 from rtp_llm.dash_sc import app as bg_app
 from rtp_llm.dash_sc.app import (
     DashScShutdownManager,
+    _abort_bind_barrier,
     _create_proxy_servicer_on_loop,
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
     _pre_stop_drain_seconds,
+    _wait_for_bind_barrier,
 )
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
 
 
 class _EnvCfg:
-    def __init__(self, think_mode: int = 1, think_start_tag: str = "<think>\n"):
+    def __init__(
+        self, think_mode: str | int = "enabled", think_start_tag: str = "<think>\n"
+    ):
         self.think_mode = think_mode
         self.think_start_tag = think_start_tag
 
@@ -52,6 +56,75 @@ class _BaseTok:
         self.tokenizer = tok
 
 
+class BindBarrierTest(TestCase):
+    def test_waits_for_all_workers_before_bind(self) -> None:
+        barrier = Mock()
+        barrier.wait.return_value = 3
+
+        _wait_for_bind_barrier(barrier, rank_id=2, server_id=7)
+
+        barrier.wait.assert_called_once_with(timeout=600.0)
+
+    def test_broken_barrier_fails_startup(self) -> None:
+        barrier = Mock()
+        barrier.wait.side_effect = threading.BrokenBarrierError
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "DashSc gRPC bind barrier failed for rank 2 server 7",
+        ):
+            _wait_for_bind_barrier(barrier, rank_id=2, server_id=7)
+
+    def test_abort_is_best_effort(self) -> None:
+        barrier = Mock()
+
+        _abort_bind_barrier(barrier)
+
+        barrier.abort.assert_called_once_with()
+
+    def test_app_waits_at_barrier_before_starting_grpc_server(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = SimpleNamespace(
+            dash_sc_grpc_server_port=26818,
+            rank_id=2,
+            frontend_server_id=7,
+        )
+        app.py_env_configs = SimpleNamespace(
+            profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1)
+        )
+        app._grpc_server = Mock()
+        app._shutdown_manager = Mock()
+        app._shutdown_event = Mock()
+        app._install_signal_handlers = Mock()
+        app._start_enqueue_loop = Mock(return_value=Mock())
+        app.stop = Mock()
+
+        events = []
+        barrier = Mock()
+        barrier.wait.side_effect = lambda **_kwargs: events.append("barrier")
+        app._grpc_server.start_on_loop.side_effect = lambda *_args, **_kwargs: (
+            events.append("start_on_loop")
+        )
+        servicer = Mock()
+
+        def submit(coroutine, _loop):
+            coroutine.close()
+            future = Mock()
+            future.result.return_value = servicer
+            return future
+
+        with patch.object(bg_app, "_is_proxy_mode_enabled", return_value=True), patch(
+            "rtp_llm.dash_sc.app.asyncio.run_coroutine_threadsafe",
+            side_effect=submit,
+        ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
+            "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
+        ):
+            app.start(bind_barrier=barrier)
+
+        self.assertEqual(events, ["barrier", "start_on_loop"])
+        app._grpc_server.start_on_loop.assert_called_once()
+
+
 class DeriveEchoPrefixIdsTest(TestCase):
     def test_encodes_think_start_tag(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
@@ -60,11 +133,23 @@ class DeriveEchoPrefixIdsTest(TestCase):
         # Must encode without special tokens so only the tag bytes become ids.
         self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
-    def test_disabled_when_think_mode_off(self) -> None:
+    def test_normalizes_literal_newline_before_encoding(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
-        ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), _BaseTok(tok))
-        self.assertEqual(ids, [])
-        self.assertEqual(tok.encode_calls, [])
+
+        ids = _derive_echo_prefix_ids(
+            _EnvCfg(think_start_tag="<think>\\n"), _BaseTok(tok)
+        )
+
+        self.assertEqual(ids, [154841])
+        self.assertEqual(tok.encode_calls, [("<think>\n", False)])
+
+    def test_think_mode_does_not_gate_dash_sc_prefix_metadata(self) -> None:
+        for mode in ("disabled", "adaptive", "enabled", "0", 0, "1", 1):
+            with self.subTest(mode=mode):
+                tok = _FakeTokenizer(ids=[154841])
+                ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=mode), _BaseTok(tok))
+                self.assertEqual(ids, [154841])
+                self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
     def test_disabled_when_tag_empty(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
@@ -101,6 +186,63 @@ class CreateProxyServicerOnLoopTest(TestCase):
         loop, servicer = asyncio.run(run())
         self.assertIs(servicer, sentinel)
         self.assertEqual(created_loops, [loop])
+
+
+class TraceTelemetryLifecycleTest(TestCase):
+    def test_start_initializes_dash_role_and_shutdowns(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = SimpleNamespace(
+            rank_id=3,
+            dash_sc_grpc_server_port=18096,
+            ip="127.0.0.1",
+            frontend_server_id="42",
+        )
+        app.py_env_configs = MagicMock()
+        app.py_env_configs.generate_env_config.think_terminate_token_id = -1
+        app.py_env_configs.profiling_debug_logging_config.log_file_backup_count = 1
+        app._grpc_server = MagicMock()
+        app._shutdown_manager = MagicMock()
+        app._shutdown_event = MagicMock()
+        app._install_signal_handlers = MagicMock()
+        app._start_enqueue_loop = MagicMock(return_value=MagicMock())
+        app.stop = MagicMock()
+
+        with patch.object(
+            bg_app, "_is_proxy_mode_enabled", return_value=False
+        ), patch.object(
+            bg_app.ModelFactory, "create_model_config", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "create_backend_rpc_server_visitor", return_value=MagicMock()
+        ), patch.object(
+            bg_app.TokenizerFactory, "create", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "_derive_echo_prefix_ids", return_value=[]
+        ), patch.object(
+            bg_app, "_derive_stop_word_ids_list", return_value=[]
+        ), patch.object(
+            bg_app, "_build_repetition_monitor_config", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "build_think_runtime", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "DashScInferenceServicer", return_value=MagicMock()
+        ), patch.object(
+            bg_app.kmonitor, "init"
+        ), patch.object(
+            bg_app, "_init_trace_telemetry"
+        ) as init_trace, patch.object(
+            bg_app, "_shutdown_trace_telemetry"
+        ) as shutdown_trace:
+            app.start()
+
+        init_trace.assert_called_once_with()
+        shutdown_trace.assert_called_once_with()
+        app.stop.assert_called_once_with()
+
+    def test_init_failure_is_fail_open(self) -> None:
+        with patch.object(
+            bg_app, "init_telemetry", side_effect=RuntimeError("otel init failed")
+        ):
+            bg_app._init_trace_telemetry()
 
 
 class ProxyModeEnvTest(TestCase):

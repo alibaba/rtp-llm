@@ -46,15 +46,15 @@ void registerMultimodal(const py::module& m) {
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
         .def(pybind11::
                  init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
-             py::arg("width"),
-             py::arg("height"),
-             py::arg("min_pixels"),
-             py::arg("max_pixels"),
-             py::arg("fps"),
-             py::arg("min_frames"),
-             py::arg("max_frames"),
-             py::arg("crop_positions"),
-             py::arg("mm_timeout_ms"))
+             py::arg("width")          = -1,
+             py::arg("height")         = -1,
+             py::arg("min_pixels")     = -1,
+             py::arg("max_pixels")     = -1,
+             py::arg("fps")            = -1,
+             py::arg("min_frames")     = -1,
+             py::arg("max_frames")     = -1,
+             py::arg("crop_positions") = std::vector<float>{},
+             py::arg("mm_timeout_ms")  = -1)
         .def_readwrite("width", &MMPreprocessConfig::width)
         .def_readwrite("height", &MMPreprocessConfig::height)
         .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
@@ -265,6 +265,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(pybind11::init<>())  // Default constructor
         .def(pybind11::init<const std::string&>(),
              pybind11::arg("json_str"))  // JSON string constructor
+        .def_readwrite("max_server_pollers", &GrpcConfig::max_server_pollers)
         .def("to_string", &GrpcConfig::to_string)
         .def("from_json", &GrpcConfig::from_json, "Initialize from JSON string")
         .def("get_client_config", &GrpcConfig::get_client_config)
@@ -282,15 +283,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 for (const auto& pair : server_config) {
                     server_dict[py::str(pair.first)] = pair.second;
                 }
-                return py::make_tuple(client_dict, server_dict);
+                return py::make_tuple(client_dict, server_dict, self.max_server_pollers);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 GrpcConfig c;
                 try {
                     py::dict client_dict = t[0].cast<py::dict>();
                     py::dict server_dict = t[1].cast<py::dict>();
+                    int      max_pollers = (t.size() == 3) ? t[2].cast<int>() : 0;
 
                     // Convert Python dicts to JSON string
                     std::ostringstream oss;
@@ -310,7 +312,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         first = false;
                         oss << "\"" << py::str(item.first).cast<std::string>() << "\": " << py::cast<int>(item.second);
                     }
-                    oss << "}}";
+                    oss << "}";
+                    if (max_pollers > 0) {
+                        oss << ", \"max_server_pollers\": " << max_pollers;
+                    }
+                    oss << "}";
                     c.from_json(oss.str());
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrpcConfig unpickle error: ") + e.what());
@@ -343,9 +349,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid DashScGrpcConfig state!");
                 DashScGrpcConfig c;
                 try {
-                    py::dict client_dict = t[0].cast<py::dict>();
-                    py::dict server_dict = t[1].cast<py::dict>();
-                    int      mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
+                    py::dict           client_dict = t[0].cast<py::dict>();
+                    py::dict           server_dict = t[1].cast<py::dict>();
+                    int                mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -404,6 +410,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_open_source_fmha", &FMHAConfig::enable_open_source_fmha)
         .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
         .def_readwrite("disable_flashinfer_native", &FMHAConfig::disable_flashinfer_native)
+        .def_readwrite("disable_flashinfer_hybrid_prefill", &FMHAConfig::disable_flashinfer_hybrid_prefill)
         .def_readwrite("enable_xqa", &FMHAConfig::enable_xqa)
         .def_readwrite("use_aiter_pa", &FMHAConfig::use_aiter_pa)
         .def_readwrite("use_asm_pa", &FMHAConfig::use_asm_pa)
@@ -423,11 +430,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_asm_pa,
                                       self.use_triton_pa,
                                       self.absorb_opt_len,
-                                      self.enable_flashinfer_trtllm_gen);
+                                      self.enable_flashinfer_trtllm_gen,
+                                      self.disable_flashinfer_hybrid_prefill);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
-                    throw std::runtime_error("Invalid state!");
+                if (t.size() != 13)
+                    throw std::runtime_error("FMHAConfig: expected 13-element state, got " + std::to_string(t.size()));
                 FMHAConfig c;
                 try {
                     c.enable_fmha                         = t[0].cast<bool>();
@@ -442,6 +450,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_triton_pa                       = t[9].cast<bool>();
                     c.absorb_opt_len                      = t[10].cast<int64_t>();
                     c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
+                    c.disable_flashinfer_hybrid_prefill   = t[12].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }
@@ -485,6 +494,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
                        &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
+        .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
+        .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
+        .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         // Remote connector configuration fields
@@ -565,10 +577,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
-                                      self.load_cache_retry_times);
+                                      self.load_cache_retry_times,
+                                      self.dsv4_fixed_pool_blocks,
+                                      self.dsv4_hca_state_pool_blocks,
+                                      self.dsv4_fixed_pool_use_memory);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 57)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -627,6 +642,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
                         c.enable_independent_group_eviction       = t[52].cast<bool>();
                         c.load_cache_retry_times                  = t[53].cast<int>();
+                    }
+                    if (t.size() >= 57) {
+                        // DSV4 fixed-pool knobs.
+                        c.dsv4_fixed_pool_blocks     = t[54].cast<uint32_t>();
+                        c.dsv4_hca_state_pool_blocks = t[55].cast<uint32_t>();
+                        c.dsv4_fixed_pool_use_memory = t[56].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
@@ -898,7 +919,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MTP", SP_TYPE_MTP)
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
-        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC);
+        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
+        .value("DSPARK", SP_TYPE_DSPARK);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -924,6 +946,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
+        .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -936,10 +959,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_stream_sample,
                                       self.force_score_context_attention,
                                       self.quantization,
-                                      self.checkpoint_path);
+                                      self.checkpoint_path,
+                                      self.sp_dspark_mask_token_id);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 10 && t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -953,6 +977,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.force_score_context_attention = t[7].cast<bool>();
                     c.quantization                  = t[8].cast<std::string>();
                     c.checkpoint_path               = t[9].cast<std::string>();
+                    if (t.size() == 11) {
+                        c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
                 }
@@ -1132,7 +1159,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("FP8PTPC", QuantMethod::FP8PTPC)
         .value("W4A8INT4PTPC", QuantMethod::W4A8INT4PTPC)
         .value("ModelOptFP4", QuantMethod::ModelOptFP4)
-        .value("QuarkMXFP4", QuantMethod::QuarkMXFP4);
+        .value("QuarkMXFP4", QuantMethod::QuarkMXFP4)
+        .value("W8A8INT8PTPC", QuantMethod::W8A8INT8PTPC);
 
     // Register QuantAlgo
     py::class_<QuantAlgo>(m, "QuantAlgo")
@@ -1149,6 +1177,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("isW4a8Int4PTPC", &QuantAlgo::isW4a8Int4PTPC)
         .def("isModelOptFP4", &QuantAlgo::isModelOptFP4)
         .def("isQuarkMXFP4", &QuantAlgo::isQuarkMXFP4)
+        .def("isW8a8Int8PTPC", &QuantAlgo::isW8a8Int8PTPC)
         .def("isQuant", &QuantAlgo::isQuant)
         .def("isGroupwise", &QuantAlgo::isGroupwise)
         .def("getQuantMethod", &QuantAlgo::getQuantMethod)
@@ -1292,24 +1321,37 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
+        .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
+        .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
+        .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
                 return py::make_tuple(self.max_context_batch_size,
                                       self.max_batch_tokens_size,
                                       self.pdfusion_scheduler_mode,
-                                      self.decode_prefill_ratio);
+                                      self.decode_prefill_ratio,
+                                      self.cp_force_single_prefill,
+                                      self.max_inited_kv_cache_streams,
+                                      self.max_batch_tokens_without_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
                     c.max_context_batch_size = t[0].cast<int64_t>();
                     c.max_batch_tokens_size  = t[1].cast<int64_t>();
-                    if (t.size() == 4) {
+                    if (t.size() >= 4) {
                         c.pdfusion_scheduler_mode = t[2].cast<std::string>();
                         c.decode_prefill_ratio    = t[3].cast<std::string>();
+                    }
+                    if (t.size() >= 6) {
+                        c.cp_force_single_prefill     = t[4].cast<bool>();
+                        c.max_inited_kv_cache_streams = t[5].cast<int64_t>();
+                    }
+                    if (t.size() >= 7) {
+                        c.max_batch_tokens_without_cache = t[6].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -1320,31 +1362,70 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register GrammarConfig
     py::class_<GrammarConfig>(m, "GrammarConfig")
         .def(py::init<>())
-        .def_readwrite("grammar_backend", &GrammarConfig::grammar_backend)
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
+        .def_readwrite("terminate_without_stop_token", &GrammarConfig::terminate_without_stop_token)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
-        .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
+        .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def("to_string", &GrammarConfig::to_string)
+        .def("__repr__",
+             [](const GrammarConfig& c) {
+                 std::ostringstream oss;
+                 oss << "GrammarConfig(constrained_json_disable_any_whitespace="
+                     << c.constrained_json_disable_any_whitespace
+                     << ", terminate_without_stop_token=" << c.terminate_without_stop_token
+                     << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                 return oss.str();
+             })
         .def(py::pickle(
             [](const GrammarConfig& self) {
-                return py::make_tuple(self.grammar_backend,
-                                      self.constrained_json_disable_any_whitespace,
+                return py::make_tuple(self.constrained_json_disable_any_whitespace,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens);
+                                      self.compiler_cache_bytes,
+                                      self.terminate_without_stop_token);
             },
             [](py::tuple t) {
-                if (t.size() != 5)
+                if (t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
-                    c.grammar_backend                         = t[0].cast<std::string>();
-                    c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
-                    c.num_workers                             = t[2].cast<int>();
-                    c.tokenizer_info_json                     = t[3].cast<std::string>();
-                    c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                    if (py::isinstance<py::str>(t[0])) {
+                        // Legacy layout:
+                        // (grammar_backend, disable_any_whitespace, num_workers, tokenizer_info_json,
+                        //  override_stop_tokens). grammar_backend was removed; validate and discard it.
+                        static_cast<void>(t[0].cast<std::string>());
+                        c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
+                        c.num_workers                             = t[2].cast<int>();
+                        c.tokenizer_info_json                     = t[3].cast<std::string>();
+                        // override_stop_tokens was removed; validate and discard the legacy value.
+                        static_cast<void>(t[4].cast<std::vector<int32_t>>());
+                    } else {
+                        c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
+                        c.num_workers                             = t[1].cast<int>();
+                        c.tokenizer_info_json                     = t[2].cast<std::string>();
+                        if (t.size() == 6) {
+                            // Previous layout:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
+                            //  compiler_cache_bytes, terminate_without_stop_token).
+                            static_cast<void>(t[3].cast<std::vector<int32_t>>());
+                            c.compiler_cache_bytes         = t[4].cast<int64_t>();
+                            c.terminate_without_stop_token = t[5].cast<bool>();
+                        } else if (py::isinstance<py::int_>(t[3])) {
+                            // Current layout:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json,
+                            //  compiler_cache_bytes, terminate_without_stop_token).
+                            c.compiler_cache_bytes         = t[3].cast<int64_t>();
+                            c.terminate_without_stop_token = t[4].cast<bool>();
+                        } else {
+                            // Older layout without terminate_without_stop_token:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json,
+                            //  override_stop_tokens, compiler_cache_bytes).
+                            static_cast<void>(t[3].cast<std::vector<int32_t>>());
+                            c.compiler_cache_bytes = t[4].cast<int64_t>();
+                        }
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }
@@ -1359,6 +1440,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reserve_runtime_mem_mb", &RuntimeConfig::reserve_runtime_mem_mb)
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
+        .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
@@ -1388,10 +1470,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.model_name,
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
-                                      self.specify_gpu_arch);
+                                      self.specify_gpu_arch,
+                                      self.model_warm_up);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1407,6 +1490,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.worker_grpc_addrs             = t[9].cast<std::vector<std::string>>();
                     c.worker_addrs                  = t[10].cast<std::vector<std::string>>();
                     c.specify_gpu_arch              = t[11].cast<std::string>();
+                    if (t.size() >= 13) {
+                        c.model_warm_up = t[12].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
                 }
@@ -1575,7 +1661,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
-        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle);
+        .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
+        // DeepSeek-V4 fields
+        .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
+        .def_readwrite("o_groups", &AttentionConfigs::o_groups)
+        .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
+        .def_readwrite("sliding_window", &AttentionConfigs::sliding_window)
+        .def_readwrite("compress_rope_theta", &AttentionConfigs::compress_rope_theta);
 
     py::class_<EPLBConfig>(m, "EPLBConfig")
         .def(py::init<>())
@@ -1813,6 +1905,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_seq_len", &ModelConfig::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &ModelConfig::gen_num_per_cycle)
         .def_readwrite("vocab_size", &ModelConfig::vocab_size)
+        .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
+        .def_readwrite("output_vocab_padded_size", &ModelConfig::output_vocab_padded_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
         .def_readwrite("linear_attention_config", &ModelConfig::linear_attention_config)
@@ -1850,6 +1944,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("embedding_size", &ModelConfig::embedding_size)
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
+        .def_readwrite("hc_mult", &ModelConfig::hc_mult)
+        .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
+        .def_readwrite("hc_eps", &ModelConfig::hc_eps)
+        .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)
+        .def_readwrite("num_hash_layers", &ModelConfig::num_hash_layers)
         .def_readwrite("has_positional_encoding", &ModelConfig::has_positional_encoding)
         .def_readwrite("has_pre_decoder_layernorm", &ModelConfig::has_pre_decoder_layernorm)
         .def_readwrite("has_post_decoder_layernorm", &ModelConfig::has_post_decoder_layernorm)
@@ -1953,6 +2052,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
         .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
+        .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
+        .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -1975,33 +2076,38 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
                                       self.worker_port_offset,
-                                      self.decode_entrance);
+                                      self.decode_entrance,
+                                      self.prefill_stop_stream_wait_timeout_ms,
+                                      self.prefill_prepare_resource_pool_size);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
-                    throw std::runtime_error("Invalid state!");
+                if (t.size() != 22)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 22 fields, got "
+                                             + std::to_string(t.size()));
                 PDSepConfig c;
                 try {
-                    c.role_type                       = t[0].cast<RoleType>();
-                    c.cache_store_rdma_mode           = t[1].cast<bool>();
-                    c.cache_store_listen_port         = t[2].cast<int64_t>();
-                    c.cache_store_connect_port        = t[3].cast<int64_t>();
-                    c.cache_store_rdma_listen_port    = t[4].cast<int64_t>();
-                    c.cache_store_rdma_connect_port   = t[5].cast<int64_t>();
-                    c.remote_rpc_server_port          = t[6].cast<int64_t>();
-                    c.prefill_retry_times             = t[7].cast<int64_t>();
-                    c.prefill_retry_timeout_ms        = t[8].cast<int64_t>();
-                    c.prefill_max_wait_timeout_ms     = t[9].cast<int64_t>();
-                    c.decode_retry_times              = t[10].cast<int64_t>();
-                    c.decode_retry_timeout_ms         = t[11].cast<int64_t>();
-                    c.decode_retry_interval_ms        = t[12].cast<int64_t>();
-                    c.decode_polling_kv_cache_step_ms = t[13].cast<int64_t>();
-                    c.decode_polling_call_prefill_ms  = t[14].cast<int64_t>();
-                    c.rdma_connect_retry_times        = t[15].cast<int64_t>();
-                    c.load_cache_timeout_ms           = t[16].cast<int64_t>();
-                    c.max_rpc_timeout_ms              = t[17].cast<int64_t>();
-                    c.worker_port_offset              = t[18].cast<int64_t>();
-                    c.decode_entrance                 = t[19].cast<bool>();
+                    c.role_type                           = t[0].cast<RoleType>();
+                    c.cache_store_rdma_mode               = t[1].cast<bool>();
+                    c.cache_store_listen_port             = t[2].cast<int64_t>();
+                    c.cache_store_connect_port            = t[3].cast<int64_t>();
+                    c.cache_store_rdma_listen_port        = t[4].cast<int64_t>();
+                    c.cache_store_rdma_connect_port       = t[5].cast<int64_t>();
+                    c.remote_rpc_server_port              = t[6].cast<int64_t>();
+                    c.prefill_retry_times                 = t[7].cast<int64_t>();
+                    c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
+                    c.prefill_max_wait_timeout_ms         = t[9].cast<int64_t>();
+                    c.decode_retry_times                  = t[10].cast<int64_t>();
+                    c.decode_retry_timeout_ms             = t[11].cast<int64_t>();
+                    c.decode_retry_interval_ms            = t[12].cast<int64_t>();
+                    c.decode_polling_kv_cache_step_ms     = t[13].cast<int64_t>();
+                    c.decode_polling_call_prefill_ms      = t[14].cast<int64_t>();
+                    c.rdma_connect_retry_times            = t[15].cast<int64_t>();
+                    c.load_cache_timeout_ms               = t[16].cast<int64_t>();
+                    c.max_rpc_timeout_ms                  = t[17].cast<int64_t>();
+                    c.worker_port_offset                  = t[18].cast<int64_t>();
+                    c.decode_entrance                     = t[19].cast<bool>();
+                    c.prefill_stop_stream_wait_timeout_ms = t[20].cast<int64_t>();
+                    c.prefill_prepare_resource_pool_size  = t[21].cast<int64_t>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                 }

@@ -56,20 +56,19 @@ public abstract class AbstractEngineStatusSynchronizer {
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
         this.modelMetaConfig = modelMetaConfig;
-        int corePoolSize = 500;
-        int maximumPoolSize = 1000;
-
-        engineSyncExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
-
-        statusCheckExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
-                new ThreadPoolExecutor.AbortPolicy());
-
-        // Reuse the single FLEXLB_CONFIG parse/override pipeline owned by ConfigService rather than
-        // re-loading env -> JSON -> overrides here, so the two config views never diverge.
         this.flexlbConfig = configService.loadBalanceConfig();
+
+        engineSyncExecutor = new ThreadPoolExecutor(
+                flexlbConfig.getEngineSyncExecutorCoreSize(),
+                flexlbConfig.getEngineSyncExecutorMaxSize(), 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
+                new ThreadPoolExecutor.CallerRunsPolicy());
+
+        statusCheckExecutor = new ThreadPoolExecutor(
+                flexlbConfig.getStatusCheckExecutorCoreSize(),
+                flexlbConfig.getStatusCheckExecutorMaxSize(), 60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
+                 new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     protected abstract void syncEngineStatus();

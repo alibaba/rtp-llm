@@ -160,6 +160,22 @@ class FeClientTest {
     }
 
     @Test
+    void connectionHeaderNominatedFieldsAreAlsoDroppedCaseInsensitively() {
+        HttpHeaders inbound = new HttpHeaders();
+        inbound.add("Connection", "X-Internal-Hop, x-second-hop");
+        inbound.add("X-Internal-Hop", "secret-one");
+        inbound.add("X-Second-Hop", "secret-two");
+        inbound.add("X-End-To-End", "keep-me");
+        HttpHeaders copied = new HttpHeaders();
+
+        DispatcherHeaders.copyEndToEnd(inbound, copied, DispatcherHeaders.FANOUT_SKIP);
+
+        Assertions.assertNull(copied.getFirst("X-Internal-Hop"));
+        Assertions.assertNull(copied.getFirst("X-Second-Hop"));
+        Assertions.assertEquals("keep-me", copied.getFirst("X-End-To-End"));
+    }
+
+    @Test
     void feNon2xxResponseErrorsWithExtractableStatus() {
         // .retrieve() turns a 5xx into a WebClientResponseException; the fanout path relies on
         // DispatcherResponses.httpStatusOf recovering the status so a chunk degrades to a failed

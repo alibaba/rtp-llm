@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -83,7 +84,7 @@ class MasterEngineSynchronizerTest {
     private MasterEngineSynchronizer newSynchronizer(FlexlbConfig config, String modelConfigJson) {
         when(configService.loadBalanceConfig()).thenReturn(config);
         return new MasterEngineSynchronizer(workerAddressService, engineHealthReporter,
-                new EngineWorkerStatus(modelMetaConfig), engineGrpcService, modelMetaConfig,
+                mock(EngineWorkerStatus.class), engineGrpcService, modelMetaConfig,
                 cacheAwareService, configService, modelConfigJson, s -> {
                 });
     }
@@ -97,7 +98,7 @@ class MasterEngineSynchronizerTest {
 
         AtomicBoolean schedulerStarted = new AtomicBoolean();
         assertThrows(IllegalStateException.class, () -> new MasterEngineSynchronizer(
-                        workerAddressService, engineHealthReporter, new EngineWorkerStatus(modelMetaConfig),
+                        workerAddressService, engineHealthReporter, mock(EngineWorkerStatus.class),
                         engineGrpcService, modelMetaConfig, cacheAwareService, configService,
                         pdFusionOnlyConfig(), s -> schedulerStarted.set(true)),
                 "EMBEDDING workers are never probed, so a load-aware strategy must fail boot");

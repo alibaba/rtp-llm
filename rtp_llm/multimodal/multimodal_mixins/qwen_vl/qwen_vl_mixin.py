@@ -46,7 +46,11 @@ class QwenVLImageEmbedding(ImageEmbeddingInterface):
         assert len(mm_inputs) == 1
         mm_input = mm_inputs[0]
         mm_type = mm_input.mm_type
-        data = get_bytes_io_from_url(mm_input.url, vit_config.download_headers)
+        data = get_bytes_io_from_url(
+            mm_input.url,
+            vit_config.download_headers,
+            max_file_size_kb=vit_config.mm_image_max_file_size_kb,
+        )
         image = Image.open(data)
         return image
 

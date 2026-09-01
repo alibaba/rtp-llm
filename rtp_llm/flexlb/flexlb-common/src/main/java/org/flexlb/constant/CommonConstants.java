@@ -4,16 +4,9 @@ public class CommonConstants {
 
     public static final String FUNCTION = "aigc.text-generation.generation";
 
-    public static final String START = "start";
-
     public static final String CODEC = "codec";
 
     public static final String TIMEOUT_HANDLER = "timeoutHandler";
-
-    /**
-     * gRPC timeout message
-     */
-    public static final String DEADLINE_EXCEEDED_MESSAGE = "DEADLINE_EXCEEDED";
 
     /**
      * Both engines bind their RPC service to rpc_server_port = registered port + 1
@@ -25,5 +18,9 @@ public class CommonConstants {
      * the port layout is protocol-independent.
      */
     public static final int RPC_PORT_OFFSET = 1;
+
+    /** Backward-compatible name retained for callers that only speak gRPC. */
+    @Deprecated
+    public static final int GRPC_PORT_OFFSET = RPC_PORT_OFFSET;
 
 }

@@ -1,6 +1,8 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -8,11 +10,12 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
 import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
 @Component
@@ -21,65 +24,88 @@ public class RouteService {
     private final ConfigService configService;
     private final Router router;
     private final QueueManager queueManager;
+    private final FlexlbBatchScheduler flexlbBatchScheduler;
+    private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
-    public RouteService(ConfigService configService,
-                        Router defaultScheduler,
-                        QueueManager queueManager) {
+    public RouteService(
+            ConfigService configService,
+            Router router,
+            QueueManager queueManager,
+            FlexlbBatchScheduler flexlbBatchScheduler,
+            RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
-        this.router = defaultScheduler;
+        this.router = router;
         this.queueManager = queueManager;
+        this.flexlbBatchScheduler = flexlbBatchScheduler;
+        this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
     /**
-     * Route request to appropriate workers
-     * @param balanceContext Load balancing context
-     * @return Routing result
+     * Route request to appropriate workers based on the deployment-level schedule mode.
+     *
+     * @param balanceContext load-balancing context
+     * @return asynchronous routing result
      */
-    public Mono<Response> route(BalanceContext balanceContext) {
+    public CompletableFuture<Response> route(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(flexlbConfig);
 
-        Mono<Response> resultMono;
-        if (flexlbConfig.isEnableQueueing()) {
-            resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
-        } else {
-            // Direct routing runs inline on the subscribing thread so a client cancel cannot
-            // interleave with the worker reservation taken inside router.route().
-            resultMono = Mono.fromCallable(() -> router.route(balanceContext));
+        ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
+        balanceContext.setScheduleMode(mode);
+
+        CompletableFuture<Response> resultFuture;
+        switch (mode) {
+            case BATCH -> {
+                if (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext)) {
+                    Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
+                    balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+                    resultFuture = routeDirect(balanceContext);
+                } else {
+                    resultFuture = flexlbBatchScheduler.submit(balanceContext);
+                    balanceContext.setFuture(resultFuture);
+                }
+            }
+            case QUEUE -> resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();
+            case DIRECT -> resultFuture = routeDirect(balanceContext);
+            default -> resultFuture = routeDirect(balanceContext);
         }
 
-        return resultMono.doOnSuccess(result -> {
+        return resultFuture.whenComplete((result, throwable) -> {
+            if (throwable != null) {
+                return;
+            }
             balanceContext.setResponse(result);
+            if (result != null && result.isSuccess()) {
+                recentCacheKeyTraceReporter.report(balanceContext);
+            }
         });
     }
 
-    /**
-     * Cancel a specified request
-     * @param balanceContext Load balancing context
-     */
-    public void cancel(BalanceContext balanceContext) {
-        FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
-        if (flexlbConfig.isEnableQueueing()) {
-            balanceContext.cancel();
-            CompletableFuture<Response> future = balanceContext.getFuture();
-            if (future != null) {
-                future.completeExceptionally(new CancellationException("Request cancelled by client"));
-            }
+    private CompletableFuture<Response> routeDirect(BalanceContext context) {
+        try {
+            return CompletableFuture.completedFuture(router.route(context));
+        } catch (Exception error) {
+            return CompletableFuture.failedFuture(error);
         }
-        balanceContext.setSuccess(false);
-        balanceContext.setErrorMessage("request cancelled");
+    }
+
+    private boolean hasValidGenerateInput(BalanceContext context) {
+        byte[] bytes = context.getGenerateInputPbBytes();
+        return bytes != null && bytes.length > 0;
+    }
+
+    public RequestLifecycleSnapshot getRequestState(long requestId, long expectedBatchId) {
+        return flexlbBatchScheduler == null
+                ? null
+                : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
     }
 
     /**
-     * Batch dispatch for single-role deployments. Bypasses the request queue and the
-     * {@code localTaskMap} bookkeeping; reconciliation and lost-task detection are not
-     * available on this path. Multi-role deployments must use {@link #route} per request.
+     * Resolve a whole dispatcher chunk atomically for a single-role deployment.
+     * This intentionally bypasses the normal request queue and its per-request lifecycle.
      */
-    public Mono<BatchScheduleResponse> batchSchedule(BatchScheduleRequest batchScheduleRequest) {
-        // router.batchSchedule scans the worker map and allocates the target list; run it on a
-        // worker thread so it never executes on the caller's Netty event loop (the dispatcher's
-        // in-JVM call and the master's HTTP handler both subscribe from event-loop threads).
-        return Mono.fromCallable(() -> router.batchSchedule(batchScheduleRequest))
+    public Mono<BatchScheduleResponse> batchSchedule(BatchScheduleRequest request) {
+        return Mono.fromCallable(() -> router.batchSchedule(request))
                 .subscribeOn(Schedulers.parallel());
     }
 }

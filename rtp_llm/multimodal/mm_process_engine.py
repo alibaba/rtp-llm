@@ -336,18 +336,28 @@ class MMWorkItem:
     """Represents a work item for processing multimodal inputs."""
 
     def __init__(
-        self, mm_inputs: List[MultimodalInput], mm_timeout_ms: Optional[int] = 120000
+        self,
+        mm_inputs: List[MultimodalInput],
+        mm_timeout_ms: Optional[int] = VitConfig.DEFAULT_MM_TIMEOUT_MS,
     ):
         if not mm_inputs:
             raise ValueError("No mm_input for work item")
 
         self.mm_inputs = mm_inputs
-        # proto3 default for unset int is 0; treat <= 0 as "not set" and fall back to the
-        # caller-provided default (which comes from VitConfig.mm_timeout_ms, always initialized
-        # at server startup via --mm_timeout_ms / MM_TIMEOUT_MS env, default 120000ms).
-        per_request_timeout = self.mm_inputs[0].mm_preprocess_config.mm_timeout_ms
-        self.mm_timeout_ms = (
-            per_request_timeout if per_request_timeout > 0 else mm_timeout_ms
+        # Resolve each input independently, then use the largest budget for the
+        # shared batch so the worker matches the proxy deadline calculation.
+        default_timeout_ms = (
+            mm_timeout_ms
+            if mm_timeout_ms is not None and mm_timeout_ms > 0
+            else VitConfig.DEFAULT_MM_TIMEOUT_MS
+        )
+        self.mm_timeout_ms = max(
+            (
+                input.mm_preprocess_config.mm_timeout_ms
+                if input.mm_preprocess_config.mm_timeout_ms > 0
+                else default_timeout_ms
+            )
+            for input in self.mm_inputs
         )
         self.mm_type = self.mm_inputs[0].mm_type
 

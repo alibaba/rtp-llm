@@ -13,7 +13,10 @@ tf_proto_library_cc(
 py_binary(
     name = "create_grpc_proto",
     srcs = ["create_grpc_proto.py"],
-    data = ["model_rpc_service.proto"],
+    data = [
+        "flexlb_schedule_service.proto",
+        "model_rpc_service.proto",
+    ],
     deps = ["//rtp_llm:grpcio-tools", "//rtp_llm:setuptools"],
     visibility = ["//visibility:public"],
 )
@@ -24,6 +27,13 @@ generate_grpc_proto(
     create_grpc_proto = ":create_grpc_proto"
 )
 
+cc_library(
+    name = "grpc_buffer_list_link_fix",
+    srcs = ["@grpc//:src/core/lib/iomgr/buffer_list.cc"],
+    alwayslink = True,
+    copts = ["-DGRPC_LINUX_ERRQUEUE=1"],
+    deps = ["@grpc//:grpc_base_c"],
+)
 
 cc_library(
     name = "model_rpc_service_cc_proto",
@@ -31,12 +41,27 @@ cc_library(
             "model_rpc_service.grpc.pb.h"],
     srcs = ["model_rpc_service.pb.cc",
             "model_rpc_service.grpc.pb.cc"],
-    deps = [":model_rpc_service_cc_impl"],
+    deps = [
+        ":grpc_buffer_list_link_fix",
+        ":model_rpc_service_cc_impl",
+    ],
     visibility = ["//visibility:public"],
 )
 
 py_library(
     name = "model_rpc_service_py_proto",
     srcs = [":model_rpc_service_py"],
+    visibility = ["//visibility:public"],
+)
+
+generate_grpc_proto(
+    name = "flexlb_schedule_service_py",
+    proto = "flexlb_schedule_service.proto",
+    create_grpc_proto = ":create_grpc_proto",
+)
+
+py_library(
+    name = "flexlb_schedule_service_py_proto",
+    srcs = [":flexlb_schedule_service_py"],
     visibility = ["//visibility:public"],
 )

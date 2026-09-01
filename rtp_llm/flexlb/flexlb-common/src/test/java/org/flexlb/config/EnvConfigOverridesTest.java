@@ -6,7 +6,6 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EnvConfigOverridesTest {
@@ -115,10 +114,11 @@ class EnvConfigOverridesTest {
     }
 
     @Test
-    void flexlbFormStaysCaseInsensitiveForEnums() {
+    void flexlbFormUsesLegacyCaseSensitiveEnumParsing() {
         Sample s = new Sample();
         EnvConfigOverrides.apply(s, "", Map.of("FLEXLB_ENUM_FIELD", "b"));
-        assertEquals(Sample.Mode.B, s.enumField);
+        assertEquals(Sample.Mode.A, s.enumField,
+                "lowercase enum values were historically ignored and must stay ignored");
     }
 
     @Test
@@ -140,22 +140,17 @@ class EnvConfigOverridesTest {
     }
 
     @Test
-    void lowercaseEnumValueIsAcceptedCaseInsensitively() {
-        // New behavior vs the old Enum.valueOf path (case-sensitive, silently ignored on
-        // mismatch): a lowercase categorical value now genuinely applies. Deployments carrying
-        // e.g. LOAD_BALANCE_STRATEGY=random switch from "ignored" to "in effect" on upgrade.
+    void lowercaseEnumValueKeepsLegacyIgnoredSemantics() {
         Sample s = new Sample();
         EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_ENUM_FIELD", "c"));
-        assertEquals(Sample.Mode.C, s.enumField);
+        assertEquals(Sample.Mode.A, s.enumField);
     }
 
     @Test
-    void invalidEnumValueFailsFastInsteadOfSilentlyKeepingDefault() {
-        // Unlike a numeric knob, a mistyped categorical value (e.g. a bad ENGINE_TYPE) must not
-        // degrade to the default and run the wrong mode — it fails fast at startup instead.
+    void invalidEnumValueIsLoggedAndKeepsDefaultForCompatibility() {
         Sample s = new Sample();
-        assertThrows(IllegalArgumentException.class, () ->
-                EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_ENUM_FIELD", "NOPE")));
+        EnvConfigOverrides.apply(s, "TEST_", Map.of("TEST_ENUM_FIELD", "NOPE"));
+        assertEquals(Sample.Mode.A, s.enumField);
     }
 
     @Test

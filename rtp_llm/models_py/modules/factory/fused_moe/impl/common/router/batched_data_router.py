@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -72,6 +73,14 @@ class TopKWeightAndReduceNaiveBatched(object):
 
 
 class BatchedDataRouter(FusedMoeDataRouter):
+    """Router for the batched expert-output layout.
+
+    This router intentionally retains its own TP all-reduce in ``finalize``.
+    Its batched combine contract is not the pure-TP partial-output contract
+    required by GenericMoeLayer's unified shared-expert reduction, so it does
+    not advertise deferred TP all-reduce support.
+    """
+
     @classmethod
     def router_type(cls):
         return RouterType.BATCHED_DATA
@@ -164,7 +173,7 @@ class BatchedDataRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.ep_rank)
         output = weight_and_reduce_impl.apply(

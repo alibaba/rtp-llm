@@ -20,6 +20,7 @@ class TaskInfo(BaseModel):
     ptuning_path: Optional[str] = None
     update_lora_infos: Optional[List[LoraUpdateInfo]] = None
     taskinfo_rel_path: str = ""
+    grammar_constraint_only: bool = False
 
 
 class TaskStates(BaseModel):

@@ -1,11 +1,22 @@
 import asyncio
 import sys
+from enum import IntEnum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # Mock the ops module to avoid CUDA dependency in this unit test.
 # This MUST be at the very top, before any other rtp_llm import.
+class _FakeRoleType(IntEnum):
+    UNKNOWN = 0
+    PREFILL = 1
+    DECODE = 2
+    PDFUSION = 3
+    VIT = 4
+    FRONTEND = 5
+
+
 mock_ops = MagicMock()
+mock_ops.RoleType = _FakeRoleType
 mock_comm = MagicMock()
 mock_nccl_op = MagicMock()
 mock_compute_ops = MagicMock()
@@ -21,12 +32,12 @@ from unittest import TestCase, main
 
 import torch
 
-from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.generate_config import RoleType
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import GenerateConfig, RoleType
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
-from rtp_llm.utils.base_model_datatypes import RequestInfo
+from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
 
 """Batch routing/scheduling behaviour of the rtp_llm/server layer.
 
@@ -52,6 +63,7 @@ class BatchEnqueueRoutingTest(TestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.max_seq_len = 1024
         visitor.sp_config = None
+        visitor._prefill_cp_active = False
         visitor.host_service = SimpleNamespace(service_available=True)
         # batch_enqueue runs fill_request_info over every input before routing, so the stub needs
         # the same two identity fields the real visitor carries.
@@ -63,7 +75,10 @@ class BatchEnqueueRoutingTest(TestCase):
             sent["inputs"] = inputs
             return []
 
-        visitor.model_rpc_client = SimpleNamespace(batch_enqueue=fake_batch_enqueue)
+        model_rpc_client = ModelRpcClient.__new__(ModelRpcClient)
+        model_rpc_client._decode_entrance = False
+        model_rpc_client.batch_enqueue = fake_batch_enqueue
+        visitor.model_rpc_client = model_rpc_client
         route_calls = []
 
         async def fake_route_ips(inp, seq_len_hint=None):
@@ -142,44 +157,33 @@ class BatchEnqueueRoutingTest(TestCase):
         client._decode_entrance = False
         self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
 
-    def test_mixed_batch_converges_when_master_agrees_with_pre_assignment(self):
-        # A caller-assembled batch mixing pre-assigned and unrouted inputs is legal
-        # exactly when everything ends up on one backend: the unrouted subset gets one
-        # routing call, and if the master picks the same worker the batch goes through.
+    def test_mixed_batch_is_rejected_before_master_even_if_it_would_agree(self):
+        # A batch RPC must have one routing source. Asking the master to route only the
+        # unrouted suffix has a remote accounting side effect and cannot prove in advance
+        # that it will agree with the caller's existing assignment, so reject first.
         shared = self._addr("10.0.0.7")
         visitor, route_calls, sent = self._visitor([shared])
         inputs = [self._input(0, [shared]), self._input(1), self._input(2)]
 
-        asyncio.run(visitor.batch_enqueue(inputs))
+        with self.assertRaises(FtRuntimeException) as raised:
+            asyncio.run(visitor.batch_enqueue(inputs))
 
-        self.assertEqual(1, len(route_calls))
-        # The single routing call must report the WHOLE batch's weight (24 = 3*8), not just the
-        # unrouted subset (16 = 2*8). The batch lands on one backend, so the master must account
-        # all of it; summing over `unrouted` instead would under-report load and mis-balance.
-        self.assertEqual(
-            sum(inp.prompt_length for inp in inputs),
-            route_calls[0][1],
-            "a mixed batch must report the full batch weight, not just the unrouted subset",
-        )
-        client = ModelRpcClient.__new__(ModelRpcClient)
-        client._addresses = []
-        client._decode_entrance = False
-        self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
+        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertEqual(0, len(route_calls))
+        self.assertNotIn("inputs", sent)
 
-    def test_mixed_batch_is_rejected_when_master_disagrees_with_pre_assignment(self):
-        # ...and when the master picks a different worker, the batch must fail loudly
-        # (typed error) instead of silently shipping the pre-assigned input to the
-        # wrong backend.
+    def test_mixed_batch_is_rejected_before_master_when_it_would_disagree(self):
+        # The same fail-fast contract is independent of the master's next pick: neither
+        # routing nor dispatch may happen for a malformed mixed-source batch.
         visitor, route_calls, sent = self._visitor([self._addr("10.0.0.9")])
         inputs = [self._input(0, [self._addr("10.0.0.7")]), self._input(1)]
 
-        asyncio.run(visitor.batch_enqueue(inputs))
+        with self.assertRaises(FtRuntimeException) as raised:
+            asyncio.run(visitor.batch_enqueue(inputs))
 
-        client = ModelRpcClient.__new__(ModelRpcClient)
-        client._addresses = []
-        client._decode_entrance = False
-        with self.assertRaises(FtRuntimeException):
-            client._select_batch_address(inputs)
+        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertEqual(0, len(route_calls))
+        self.assertNotIn("inputs", sent)
 
     def test_service_unavailable_skips_routing_but_still_dispatches(self):
         # When the local host service is not ready, batch_enqueue must not contact the master;
@@ -238,10 +242,10 @@ class SchedulePayloadSeqLenTest(TestCase):
         async def fake_send(addr, payload, generate_timeout_ms, request_id):
             sent["payload"] = payload
             return SimpleNamespace(
-                connection_failed=False,
-                result=None,
-                error_code=None,
-                error_message=None,
+                code=200,
+                queue_length=0,
+                server_status=[],
+                enqueued_by_master=False,
             )
 
         client._send_schedule_request = fake_send
@@ -249,15 +253,14 @@ class SchedulePayloadSeqLenTest(TestCase):
 
     @staticmethod
     def _input(prompt_length):
-        return SimpleNamespace(
+        return GenerateInput(
             request_id=1,
-            prompt_length=prompt_length,
-            generate_config=SimpleNamespace(
-                role_addrs=[],
+            token_ids=torch.arange(prompt_length),
+            mm_inputs=[],
+            generate_config=GenerateConfig(
+                max_new_tokens=16,
                 timeout_ms=3000,
-                ttft_timeout_ms=None,
-                # Declared on the real GenerateConfig, so the stub must carry it too rather than
-                # the production code defending against its absence with getattr.
+                ttft_timeout_ms=-1,
                 traffic_reject_priority=100,
             ),
         )
@@ -267,22 +270,29 @@ class SchedulePayloadSeqLenTest(TestCase):
 
         asyncio.run(
             client.get_backend_role_addrs(
-                block_cache_keys=[], input=self._input(7), request_id=1, seq_len_hint=210
+                block_cache_keys=[],
+                cache_key_block_size=8,
+                input=self._input(7),
+                request_id=1,
+                seq_len_hint=210,
             )
         )
 
-        self.assertEqual(210, sent["payload"]["seq_len"])
+        self.assertEqual(210, sent["payload"].seq_len)
 
     def test_without_a_hint_the_single_input_length_is_reported(self):
         client, sent = self._client()
 
         asyncio.run(
             client.get_backend_role_addrs(
-                block_cache_keys=[], input=self._input(7), request_id=1
+                block_cache_keys=[],
+                cache_key_block_size=8,
+                input=self._input(7),
+                request_id=1,
             )
         )
 
-        self.assertEqual(7, sent["payload"]["seq_len"])
+        self.assertEqual(7, sent["payload"].seq_len)
 
     def test_a_zero_hint_is_honoured_rather_than_treated_as_absent(self):
         # `if seq_len_hint else` would silently fall back here; the guard must be `is not None`.
@@ -290,11 +300,15 @@ class SchedulePayloadSeqLenTest(TestCase):
 
         asyncio.run(
             client.get_backend_role_addrs(
-                block_cache_keys=[], input=self._input(7), request_id=1, seq_len_hint=0
+                block_cache_keys=[],
+                cache_key_block_size=8,
+                input=self._input(7),
+                request_id=1,
+                seq_len_hint=0,
             )
         )
 
-        self.assertEqual(0, sent["payload"]["seq_len"])
+        self.assertEqual(0, sent["payload"].seq_len)
 
 
 class RouteIpsSeqLenHintTest(TestCase):
@@ -310,12 +324,20 @@ class RouteIpsSeqLenHintTest(TestCase):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.master_config = None
         visitor.seq_size_per_block = 8
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        visitor._report_recent_cache_key_metrics = lambda keys: None
         visitor.backend_role_list = [RoleType.PDFUSION]
         visitor.host_service = SimpleNamespace(get_master_addr=lambda: "10.0.0.1:8090")
         seen = {}
 
         async def fake_get_backend_role_addrs(
-            block_cache_keys, input, request_id, seq_len_hint=None
+            block_cache_keys,
+            cache_key_block_size,
+            input,
+            request_id,
+            input_pb=None,
+            seq_len_hint=None,
         ):
             seen["seq_len_hint"] = seq_len_hint
             return SimpleNamespace(
@@ -328,6 +350,7 @@ class RouteIpsSeqLenHintTest(TestCase):
                         grpc_port=8089,
                     )
                 ],
+                enqueued_by_master=False,
                 connection_failed=False,
                 error_code=None,
                 error_message=None,
@@ -340,11 +363,11 @@ class RouteIpsSeqLenHintTest(TestCase):
 
     @staticmethod
     def _input():
-        return SimpleNamespace(
+        return GenerateInput(
             request_id=1,
-            prompt_length=8,
             token_ids=torch.tensor([1, 2, 3, 4]),
-            generate_config=SimpleNamespace(role_addrs=[], max_new_tokens=16),
+            mm_inputs=[],
+            generate_config=GenerateConfig(max_new_tokens=16),
         )
 
     def test_the_hint_survives_route_ips_down_to_the_master_client(self):

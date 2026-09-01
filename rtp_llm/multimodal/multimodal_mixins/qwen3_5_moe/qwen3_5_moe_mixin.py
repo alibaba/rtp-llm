@@ -188,4 +188,5 @@ class Qwen3_5MoeMixin(Qwen3_VLMixin):
 
 register_multimodal_mixin(["qwen35_moe"], Qwen3_5MoeMixin)
 register_multimodal_mixin(["qwen35_dense"], Qwen3_5MoeMixin)
+register_multimodal_mixin(["qwen35_dense_mtp"], Qwen3_5MoeMixin)
 register_multimodal_mixin(["qwen35_moe_mtp"], Qwen3_5MoeMixin)

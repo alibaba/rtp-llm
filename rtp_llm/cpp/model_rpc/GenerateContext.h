@@ -1,15 +1,16 @@
 #pragma once
 
+#include <memory>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
+#include "rtp_llm/cpp/telemetry/RpcTraceHelper.h"
 
 namespace rtp_llm {
-
-const int64_t MAX_GRPC_TIMEOUT_MS = 3600 * 1000;
 
 class GenerateContext {
 public:
@@ -30,7 +31,10 @@ public:
     virtual void                             reset();
     bool                                     ok() const;
     bool                                     hasError() const;
+    bool                                     shouldRetry() const;
+    void                                     setRetryable(bool retryable);
     bool                                     cancelled() const;
+    virtual bool                             isRequestCancelled() const;
     int64_t                                  executeTimeMs();
     void                                     reportTime();
     void                                     collectBasicMetrics(RpcMetricsCollector& collector);
@@ -49,12 +53,19 @@ public:
     int64_t                               request_begin_time_us = 0;
     ErrorInfo                             error_info;
     grpc::Status                          error_status = grpc::Status::OK;
+    RequestInfo                           request_info;
     grpc::ServerContext*                  server_context;
     kmonitor::MetricsReporterPtr          metrics_reporter;
     std::shared_ptr<RpcServerRuntimeMeta> meta;
 
+    // OTel SERVER span finish guard. Declared after `error_status` so it destructs
+    // before it and can still read the final status; nullptr when telemetry is
+    // disabled. Ends the span on every exit path (RAII).
+    std::unique_ptr<telemetry::GrpcStatusSpanGuard> trace_span_guard;
+
 protected:
     std::shared_ptr<GenerateStream> stream_;
+    bool                            retryable_ = true;
 
 protected:
     void stopStream();
@@ -77,16 +88,17 @@ protected:
                 ErrorCode::GENERATE_TIMEOUT,                                                                           \
                 "request cost time is " + std::to_string(request_cost_time_ms) + " ms" + ", request timeout is "       \
                     + std::to_string(generate_context.request_timeout_ms) + " ms");                                    \
-            generate_context.error_status =                                                                            \
-                serializeErrorMsg(generate_context.request_key, generate_context.error_info);                          \
+            generate_context.error_status = serializeErrorMsg(                                                         \
+                generate_context.request_key, generate_context.request_info, generate_context.error_info);             \
             return generate_context.error_status;                                                                      \
         }                                                                                                              \
     }
 
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
-    if (generate_context.server_context->IsCancelled()) {                                                              \
+    if (generate_context.isRequestCancelled()) {                                                                       \
         generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);  \
+        generate_context.error_status = serializeErrorMsg(                                                             \
+            generate_context.request_key, generate_context.request_info, generate_context.error_info);                 \
         return generate_context.error_status;                                                                          \
     }
 
@@ -110,6 +122,9 @@ protected:
         }                                                                                                              \
         auto cost_time_us                   = currentTimeUs() - begin_time_us;                                         \
         generate_context.retry_cost_time_ms = cost_time_us / 1000;                                                     \
+        if (!generate_context.shouldRetry()) {                                                                         \
+            break;                                                                                                     \
+        }                                                                                                              \
         if (retry_timeout_ms > 0 && cost_time_us >= retry_timeout_ms * 1000) {                                         \
             break;                                                                                                     \
         }                                                                                                              \

@@ -197,14 +197,18 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         // |<- Stage2Ids ->|<- Stage2LogProbs ->|<- Stage1Ids ->|<- Stage1LogProbs ->|<---- Stage1TopK ---->|
         //                                                                           |<- stage2TopK ->|
         //                                      |<------------------ Stage3 ------------------>|
+        // Stage buffers keep the 2x candidate sizing after the 2k->1k change: the layout
+        // stays compatible with the CBA restore path (which needs 2*nBMOut again), and the
+        // footprint is unchanged from before the candidate change. Halving it is a
+        // separate optimization.
         size_t const nByteStage1LogProbs = roundUp(sizeof(T) * batchSize * beamWidthIn * beamWidthOut * 2, 4);
         size_t const nByteStage1Ids = roundUp(sizeof(int) * batchSize * beamWidthIn * beamWidthOut * 2, 4);
         size_t const nByteStage2LogProbs = roundUp(sizeof(T) * batchSize * beamWidthOut * 2, 4);
         size_t const nByteStage2Ids = roundUp(sizeof(int) * batchSize * beamWidthOut * 2, 4);
-        size_t const nByteStage1TopK
-            = invokeComputeTopkLastDimWorkspaceSize<T>(batchSize * beamWidthIn, vocabSize, beamWidthOut * 2, true);
+        size_t const nByteStage1TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
+            batchSize * beamWidthIn, vocabSize, beamWidthOut, true, beamTopkForcePath());
         size_t const nByteStage2TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
-            batchSize, beamWidthIn * beamWidthOut * 2, beamWidthOut * 2, true);
+            batchSize, beamWidthIn * beamWidthOut, beamWidthOut, true, beamTopkForcePath());
         size_t const nByteStage3 = sizeof(T) * beamWidthIn * beamWidthOut * 2;
         config.mWorkspaceSize = nByteStage2LogProbs + nByteStage2Ids
             + std::max(nByteStage1LogProbs + nByteStage1Ids + std::max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
