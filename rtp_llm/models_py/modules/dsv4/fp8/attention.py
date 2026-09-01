@@ -241,7 +241,12 @@ def _build_suffix_pool_slot_mapping(
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
     assert int(gather_lens_l.numel()) == B
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    # P1b: host-side sources take the max on the host (free) instead of
+    # syncing the just-uploaded device copy (a deep-queue D2H drain).
+    if gather_lens.device.type == "cpu" and gather_lens.numel():
+        max_gather = int(gather_lens.reshape(-1).max().item())
+    else:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -304,7 +309,12 @@ def _build_suffix_cp_sliced_slot_mapping(
 
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
-    max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
+    # P1b: host-side sources take the max on the host (free) — see the
+    # sibling builder above.
+    if gather_lens.device.type == "cpu" and gather_lens.numel():
+        max_gather = int(gather_lens.reshape(-1).max().item())
+    else:
+        max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
     if max_gather <= 0:
         return torch.empty((B, 0), dtype=torch.long, device=device)
 
@@ -1657,6 +1667,22 @@ class AttentionFP8(nn.Module):
         if seq_t.numel() == 1 and bsz > 1:
             seq_t = seq_t.expand(bsz)
 
+        # P1b: host mirrors for the per-row overlay loop below — free when
+        # the sources are host-side; avoids 2×bsz D2H scalar syncs per call.
+        if isinstance(sp, torch.Tensor):
+            sp_host = sp.reshape(-1).tolist() if sp.device.type == "cpu" else None
+        else:
+            sp_host = [int(sp)] * bsz
+        seq_host = (
+            row_seqlens.reshape(-1).tolist()
+            if row_seqlens.device.type == "cpu"
+            else None
+        )
+        if sp_host is not None and len(sp_host) == 1 and bsz > 1:
+            sp_host = sp_host * bsz
+        if seq_host is not None and len(seq_host) == 1 and bsz > 1:
+            seq_host = seq_host * bsz
+
         pos = torch.arange(dense_len, device=device, dtype=torch.long)
         block_in_seq = pos // int(swa_tokens_per_block)
         in_block = pos % eb
@@ -1681,8 +1707,8 @@ class AttentionFP8(nn.Module):
         out = torch.where(valid.reshape(-1).unsqueeze(-1), gathered, zero_row)
         out = out.view(bsz, dense_len, self.head_dim).contiguous()
         for b in range(bsz):
-            sp_b = int(sp_t[b].item())
-            seq_b = int(seq_t[b].item())
+            sp_b = sp_host[b] if sp_host is not None else int(sp_t[b].item())
+            seq_b = seq_host[b] if seq_host is not None else int(seq_t[b].item())
             if current_kv_full is not None and seq_b > 0 and sp_b < dense_len:
                 dst_end = min(sp_b + seq_b, dense_len)
                 copy_len = dst_end - sp_b
