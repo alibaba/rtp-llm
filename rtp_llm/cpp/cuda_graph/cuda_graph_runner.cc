@@ -635,6 +635,22 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
 }
 
 bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state) {
+    // Ticket 1 Phase 3.2 (soft degradation): geometry mismatches on the
+    // decode replay path degrade to eager instead of throwing. A throw here
+    // unwinds through PyWrappedModel::forward's catch-all-rethrow into the
+    // bare engine-loop thread = std::terminate = whole rank group down
+    // (DSpark × graphs × concurrency crash, DSV4 Ticket 1). The eager path
+    // tolerates exactly these mixed batches (graphs-OFF c=4 cell passes).
+    // DEFAULT OFF (Sep 3): a rank-local graph-vs-eager flip can desync the
+    // MoE collective FAMILY across ranks (graph replays fixed_ep while an
+    // eager peer runs all_to_all — the boot-#63 deadlock class) whenever
+    // only SOME ranks see geometry drift. Enable via
+    // RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE=1 only with Phase-2 rank-invariant
+    // admission (uniform batches) in place.
+    static const bool soft_degrade = [] {
+        const char* e = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
+        return e && std::string(e) == "1";
+    }();
     int cuda_graph_bs        = inputs.attention_inputs.input_lengths.size(0);
     state.current_batch_size = cuda_graph_bs;
     RTP_LLM_LOG_DEBUG("canRun judge for batch size: %d", cuda_graph_bs);
@@ -643,11 +659,21 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
                             "(should not happen when enable_cuda_graph=true)");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_batch_size);
     // No captured graph for batch >= current (all captures smaller)
-    RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),
-                            "decode batch size %d exceeds max captured %d "
-                            "(extend decode_capture_batch_sizes or reduce batch size)",
-                            state.current_batch_size,
-                            capture_range_.back());
+    if (it == capture_range_.end()) {
+        if (soft_degrade) {
+            RTP_LLM_LOG_WARNING(
+                "decode batch size %d exceeds max captured %d — soft-degrading to eager "
+                "(extend decode_capture_batch_sizes to graph this size)",
+                state.current_batch_size,
+                capture_range_.back());
+            return false;
+        }
+        RTP_LLM_CHECK_WITH_INFO(false,
+                                "decode batch size %d exceeds max captured %d "
+                                "(extend decode_capture_batch_sizes or reduce batch size)",
+                                state.current_batch_size,
+                                capture_range_.back());
+    }
     state.current_real_graph_bs = *it;
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
@@ -679,14 +705,44 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             return false;
         }
         const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
-        RTP_LLM_CHECK_WITH_INFO(state.seq_len_sum == expected_tokens,
-                                "target-verify decode graph expects %d tokens (%d batches * %d), got %d",
-                                expected_tokens,
-                                state.current_batch_size,
-                                num_tokens_per_bs_,
-                                state.seq_len_sum);
+        if (state.seq_len_sum != expected_tokens) {
+            static const bool soft_degrade_tv = [] {
+                const char* e = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
+                return e && std::string(e) == "1";
+            }();
+            if (soft_degrade_tv) {
+                // Geometry drift = the fresh/steady stream mix of Ticket 1
+                // §3.2. Degrade to eager (which tolerates mixed batches);
+                // never abort the rank group over a padded-graph mismatch.
+                RTP_LLM_LOG_WARNING(
+                    "target-verify decode graph expects %d tokens (%d batches * %d), got %d "
+                    "— soft-degrading to eager",
+                    expected_tokens,
+                    state.current_batch_size,
+                    num_tokens_per_bs_,
+                    state.seq_len_sum);
+                return false;
+            }
+            RTP_LLM_CHECK_WITH_INFO(false,
+                                    "target-verify decode graph expects %d tokens (%d batches * %d), got %d",
+                                    expected_tokens,
+                                    state.current_batch_size,
+                                    num_tokens_per_bs_,
+                                    state.seq_len_sum);
+        }
         if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0
             && inputs.input_hiddens.size(0) != expected_tokens) {
+            static const bool soft_degrade_ih = [] {
+                const char* e = getenv("RTP_LLM_CUDA_GRAPH_SOFT_DEGRADE");
+                return e && std::string(e) == "1";
+            }();
+            if (soft_degrade_ih) {
+                RTP_LLM_LOG_WARNING(
+                    "target-verify decode graph expects %d input-hidden rows, got %ld — soft-degrading to eager",
+                    expected_tokens,
+                    inputs.input_hiddens.size(0));
+                return false;
+            }
             RTP_LLM_FAIL("target-verify decode graph expects %d input-hidden rows, got %ld",
                          expected_tokens,
                          inputs.input_hiddens.size(0));

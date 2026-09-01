@@ -1522,13 +1522,64 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
-    if (is_dspark_) {
-        dsparkModelDecode(
-            model_input, stream_groups, dspark_round_head, draft_sampler_output, draft_token_ids_t, model_forward_us);
-    } else if (propose_step_ > 1) {
-        RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
-        RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+    // Ticket 1 Phase 1 (exception isolation): the DSpark decode round can
+    // throw inside PyWrappedModel::forward (geometry invariants / python
+    // replay). Uncaught, it unwinds the bare engine-loop thread to
+    // std::terminate and the process manager SIGTERMs the whole rank group.
+    // Catch, agree across ranks, fail the batch's streams, keep the engine
+    // alive. Kill switch: RTP_LLM_DSPARK_EXCEPTION_ISOLATION=0 (exact legacy
+    // behaviour — throw propagates).
+    static const bool exception_isolation = [] {
+        const char* e = getenv("RTP_LLM_DSPARK_EXCEPTION_ISOLATION");
+        return !e || std::string(e) != "0";
+    }();
+    bool        model_round_failed = false;
+    std::string model_round_error;
+    try {
+        if (is_dspark_) {
+            dsparkModelDecode(
+                model_input, stream_groups, dspark_round_head, draft_sampler_output, draft_token_ids_t, model_forward_us);
+        } else if (propose_step_ > 1) {
+            RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
+            draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+            RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        }
+    } catch (const std::exception& e) {
+        if (!exception_isolation) {
+            throw;
+        }
+        model_round_failed = true;
+        model_round_error  = e.what();
+        RTP_LLM_LOG_ERROR("[Ticket1] rank %d decode model round threw: %s",
+                          (int)parallelism_config_.world_rank,
+                          e.what());
+    } catch (...) {
+        if (!exception_isolation) {
+            throw;
+        }
+        model_round_failed = true;
+        model_round_error  = "unknown exception in decode model round";
+        RTP_LLM_LOG_ERROR("[Ticket1] rank %d decode model round threw: unknown exception",
+                          (int)parallelism_config_.world_rank);
+    }
+    if (exception_isolation && model_round_failed) {
+        // Fail this rank's streams and keep the engine loop alive. NO
+        // agreement all-reduce on the happy path: a per-step AR must be
+        // round-cadence-identical on every rank, and DSpark fake-mirror vs
+        // real-stream rounds skew at stream completion (a per-step AR hung
+        // even c=1 traffic — measured Sep 3). Peers blocked in this round's
+        // collectives converge via the NCCL timeout, whose throw is caught
+        // by this same boundary, so the failure domain stays per-batch.
+        for (const auto& stream : streams) {
+            if (stream && !stream->isFakeStream()) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR,
+                                    "DSpark decode round failed: " + model_round_error);
+            }
+        }
+        RTP_LLM_LOG_ERROR("[Ticket1] rank %d failing decode batch (%zu streams), engine continues",
+                          (int)parallelism_config_.world_rank,
+                          streams.size());
+        return absl::OkStatus();
     }
 
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());

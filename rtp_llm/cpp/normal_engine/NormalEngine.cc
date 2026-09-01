@@ -505,10 +505,22 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     cudaPreRun(getDeviceId());
     while (running_) {
-        auto status = step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
-            THROW_IF_STATUS_ERROR(trySaveStepError());
+        // Ticket 1 Phase 1 belt-and-braces: this loop runs on a bare
+        // autil::Thread — any exception escaping step() reaches
+        // std::terminate and takes the whole rank group down. Executor-level
+        // isolation (MtpExecutor::decodeStep) already converts known throw
+        // sites to per-stream failures; this catch-all keeps the engine
+        // alive for anything that still escapes.
+        try {
+            auto status = step();
+            if (!status.ok()) {
+                RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
+                THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("[Ticket1] engine loop survived a step exception: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("[Ticket1] engine loop survived an unknown step exception");
         }
     }
 }
