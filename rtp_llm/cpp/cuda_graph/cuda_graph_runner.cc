@@ -999,7 +999,10 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
 
 void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
-    auto             options_cuda_int32 = options_cuda_int32_;
+    if (!position_encoding_.defined() && !token_type_embedding_.defined()) {
+        return;
+    }
+    auto options_cuda_int32 = options_cuda_int32_;
     // Initialize BertEmbeddingInputs for capture
     // combo_position_ids: empty tensor for capture (will be filled during actual forward)
     inputs.bert_embedding_inputs.combo_position_ids = torch::zeros({max_seq_len_ * max_bs}, options_cuda_int32);
