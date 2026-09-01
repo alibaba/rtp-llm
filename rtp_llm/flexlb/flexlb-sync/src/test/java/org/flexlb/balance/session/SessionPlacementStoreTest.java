@@ -64,4 +64,16 @@ class SessionPlacementStoreTest {
         assertEquals("10.0.0.2:9000",
                 store.find("model", "session-1", 1_000L).orElseThrow().ipPort());
     }
+
+    @Test
+    void missingStateRejectsStaleCompletion() {
+        SessionPlacementStore store = new SessionPlacementStore();
+
+        long epoch = store.currentEpoch("model", "session-1");
+        assertTrue(epoch > 0L);
+        assertEquals(epoch, store.currentEpoch("model", "session-1"));
+        store.record("model", "session-2", "10.0.0.1:9000", 101L, 0L);
+
+        assertTrue(store.find("model", "session-2", 1_000L).isEmpty());
+    }
 }
