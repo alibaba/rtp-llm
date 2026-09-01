@@ -130,12 +130,14 @@ py_test(
     size = "medium",
     timeout = "moderate",
     srcs = ["ckpt_database_fastsafetensors_multirank_test.py"],
+    data = ["//:th_transformer_config"],
     deps = [
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:config",
         "//rtp_llm:fast-safetensors",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:lora",
+        "//rtp_llm:ops",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
         "//rtp_llm:utils",
@@ -154,12 +156,14 @@ py_test(
     timeout = "moderate",
     srcs = ["ckpt_database_fastsafetensors_multirank_test.py"],
     main = "ckpt_database_fastsafetensors_multirank_test.py",
+    data = ["//:th_transformer_config"],
     deps = [
         "//rtp_llm:_ft_pickler",
         "//rtp_llm:config",
         "//rtp_llm:fast-safetensors",
         "//rtp_llm:fastsafetensors",
         "//rtp_llm:lora",
+        "//rtp_llm:ops",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",
         "//rtp_llm:utils",
@@ -178,9 +182,13 @@ py_test(
     main = "rtp_llm_wheel_metadata_test.py",
     args = [
         "cuda12_9_x86",
+        "$(location //deps:requirements_lock_torch_gpu_cuda12_9.txt)",
         "$(location //rtp_llm:rtp_llm_whl)",
     ],
-    data = ["//rtp_llm:rtp_llm_whl"],
+    data = [
+        "//deps:requirements_lock_torch_gpu_cuda12_9.txt",
+        "//rtp_llm:rtp_llm_whl",
+    ],
     target_compatible_with = select({
         "@//:using_cuda12_9_x86": [],
         "//conditions:default": ["@platforms//:incompatible"],
@@ -193,11 +201,37 @@ py_test(
     main = "rtp_llm_wheel_metadata_test.py",
     args = [
         "cuda13_x86",
+        "$(location //deps:requirements_lock_torch_gpu_cuda13.txt)",
         "$(location //rtp_llm:rtp_llm_whl)",
     ],
-    data = ["//rtp_llm:rtp_llm_whl"],
+    data = [
+        "//deps:requirements_lock_torch_gpu_cuda13.txt",
+        "//rtp_llm:rtp_llm_whl",
+    ],
     target_compatible_with = select({
         "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "rtp_llm_cuda12_arm_wheel_metadata_test",
+    srcs = ["rtp_llm_wheel_metadata_test.py"],
+    main = "rtp_llm_wheel_metadata_test.py",
+    args = [
+        "cuda12_arm",
+        "$(location //deps:requirements_lock_cuda12_arm.txt)",
+        "$(location //rtp_llm:rtp_llm_whl)",
+    ],
+    data = [
+        "//deps:requirements_lock_cuda12_arm.txt",
+        "//rtp_llm:rtp_llm_whl",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": ["@platforms//:incompatible"],
+        "@//:using_cuda12_arm": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
@@ -208,9 +242,13 @@ py_test(
     main = "rtp_llm_wheel_metadata_test.py",
     args = [
         "cuda13_arm",
+        "$(location //deps:requirements_lock_cuda13_arm.txt)",
         "$(location //rtp_llm:rtp_llm_whl)",
     ],
-    data = ["//rtp_llm:rtp_llm_whl"],
+    data = [
+        "//deps:requirements_lock_cuda13_arm.txt",
+        "//rtp_llm:rtp_llm_whl",
+    ],
     tags = ["SM100_ARM"],
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     target_compatible_with = select({

@@ -335,6 +335,51 @@ class FastsafetensorsAutoLoaderTest(unittest.TestCase):
         self.assertEqual([name for name, _tensor in result], ["experts.1.weight"])
         torch.testing.assert_close(result[0][1], torch.tensor([3, 4]))
 
+    def test_close_compatibility_failure_is_classified(self) -> None:
+        class FakeAutoLoader:
+            def __init__(self, pg, files, device, **kwargs) -> None:
+                pass
+
+            def iterate_weights(self):
+                yield "direct", torch.tensor([1])
+
+            def close(self) -> None:
+                raise AttributeError("incompatible close API")
+
+        _install_fake_fastsafetensors(FakeAutoLoader)
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+
+        with self.assertRaisesRegex(
+            FastSafeTensorsCompatibilityError,
+            "failed to close FastSafeTensors AutoLoader",
+        ):
+            list(database.fastsafetensors_weights_iterator("cuda"))
+
+    def test_close_failure_does_not_replace_checkpoint_error(self) -> None:
+        class FakeAutoLoader:
+            def __init__(self, pg, files, device, **kwargs) -> None:
+                pass
+
+            def iterate_weights(self):
+                raise FileNotFoundError("checkpoint shard disappeared")
+                yield
+
+            def close(self) -> None:
+                raise AttributeError("incompatible close API")
+
+        _install_fake_fastsafetensors(FakeAutoLoader)
+        database = object.__new__(CkptDatabase)
+        database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
+
+        with self.assertLogs(level="WARNING") as logs:
+            with self.assertRaisesRegex(
+                FileNotFoundError, "checkpoint shard disappeared"
+            ):
+                list(database.fastsafetensors_weights_iterator("cuda"))
+
+        self.assertIn("close failed while preserving", "\n".join(logs.output))
+
     def test_wrapper_without_auto_loader_fails_instead_of_legacy_fallback(self) -> None:
         _install_fake_fastsafetensors()
 

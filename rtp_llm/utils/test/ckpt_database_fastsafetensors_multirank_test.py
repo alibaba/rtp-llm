@@ -11,10 +11,15 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from safetensors.torch import save_file
 
+# The production entry installs the UE8M0 dist.broadcast compatibility shim.
+import rtp_llm.ops as _rtp_ops  # noqa: F401
 from rtp_llm.utils.database import (
     FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
     CkptDatabase,
 )
+
+_CHUNKED_TENSOR_NUMEL = 20 * 1024  # 80 KiB in float32, above the 64 KiB limits.
+_UE8M0_RAW_BYTES = [0, 1, 2, 63, 127, 128, 200, 254]
 
 
 class _CheckpointFile:
@@ -65,7 +70,9 @@ def _run_real_fastsafetensors_rank(
         )
 
         wanted_keys = (
-            {"direct", "experts.0.weight"} if rank == 0 else {"experts.1.weight"}
+            {"direct", "experts.0.weight", "ue8m0_scale"}
+            if rank == 0
+            else {"chunked", "experts.1.weight", "ue8m0_scale"}
         )
         database = object.__new__(CkptDatabase)
         database.pretrain_file_list = [_CheckpointFile(checkpoint_path)]
@@ -84,10 +91,30 @@ def _run_real_fastsafetensors_rank(
         # invocation is covered separately by the iterator failure-path unit
         # tests; this integration boundary intentionally patches no package API.
         torch.cuda.synchronize(rank)
+        chunked = outputs.get("chunked")
+        chunked_cpu = chunked.detach().cpu() if chunked is not None else None
+        ue8m0_cpu = outputs["ue8m0_scale"].detach().cpu()
         result = {
             "keys": sorted(outputs),
             "values": {
-                key: tensor.detach().cpu().tolist() for key, tensor in outputs.items()
+                key: tensor.detach().cpu().tolist()
+                for key, tensor in outputs.items()
+                if key not in {"chunked", "ue8m0_scale"}
+            },
+            "chunked": (
+                {
+                    "numel": chunked_cpu.numel(),
+                    "matches": torch.equal(
+                        chunked_cpu,
+                        torch.arange(_CHUNKED_TENSOR_NUMEL, dtype=torch.float32),
+                    ),
+                }
+                if chunked_cpu is not None
+                else None
+            ),
+            "ue8m0": {
+                "dtype": str(ue8m0_cpu.dtype),
+                "raw_bytes": ue8m0_cpu.view(torch.uint8).tolist(),
             },
         }
         with open(os.path.join(result_dir, f"rank-{rank}.json"), "w") as writer:
@@ -108,6 +135,10 @@ class InstalledFastsafetensorsMultiRankTest(unittest.TestCase):
             save_file(
                 {
                     "direct": torch.tensor([90.0, 91.0]),
+                    "chunked": torch.arange(_CHUNKED_TENSOR_NUMEL, dtype=torch.float32),
+                    "ue8m0_scale": torch.tensor(
+                        _UE8M0_RAW_BYTES, dtype=torch.uint8
+                    ).view(torch.float8_e8m0fnu),
                     "stacked": torch.tensor(
                         [
                             [[1.0, 2.0], [3.0, 4.0]],
@@ -133,8 +164,8 @@ class InstalledFastsafetensorsMultiRankTest(unittest.TestCase):
             with open(os.path.join(tmp_dir, "rank-1.json")) as reader:
                 rank1 = json.load(reader)
 
-        self.assertEqual(rank0["keys"], ["direct", "experts.0.weight"])
-        self.assertEqual(rank1["keys"], ["experts.1.weight"])
+        self.assertEqual(rank0["keys"], ["direct", "experts.0.weight", "ue8m0_scale"])
+        self.assertEqual(rank1["keys"], ["chunked", "experts.1.weight", "ue8m0_scale"])
         self.assertEqual(rank0["values"]["direct"], [90.0, 91.0])
         self.assertEqual(
             rank0["values"]["experts.0.weight"],
@@ -144,6 +175,14 @@ class InstalledFastsafetensorsMultiRankTest(unittest.TestCase):
             rank1["values"]["experts.1.weight"],
             [[5.0, 6.0], [7.0, 8.0]],
         )
+        self.assertIsNone(rank0["chunked"])
+        self.assertEqual(
+            rank1["chunked"],
+            {"matches": True, "numel": _CHUNKED_TENSOR_NUMEL},
+        )
+        for result in (rank0, rank1):
+            self.assertEqual(result["ue8m0"]["dtype"], "torch.float8_e8m0fnu")
+            self.assertEqual(result["ue8m0"]["raw_bytes"], _UE8M0_RAW_BYTES)
 
 
 if __name__ == "__main__":

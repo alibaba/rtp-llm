@@ -569,8 +569,25 @@ class CkptDatabase(BaseDatabase):
                     _raise_fastsafetensors_compatibility_error(
                         "FastSafeTensors iteration compatibility failure", error
                     )
-            finally:
-                loader.close()
+            except BaseException:
+                # Cleanup must never replace an active checkpoint, iteration or
+                # cancellation failure. Log the secondary close failure and
+                # preserve the exception that selected the original semantics.
+                try:
+                    loader.close()
+                except BaseException:
+                    logging.warning(
+                        "FastSafeTensors close failed while preserving the active error",
+                        exc_info=True,
+                    )
+                raise
+            else:
+                try:
+                    loader.close()
+                except Exception as error:
+                    _raise_fastsafetensors_compatibility_error(
+                        "failed to close FastSafeTensors AutoLoader", error
+                    )
 
         return iterator(device)
 
