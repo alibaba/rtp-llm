@@ -44,6 +44,7 @@ public final class RoutingConfig {
         private ExecutionTimeEstimatorConfig executionTimeEstimator = new FormulaEstimatorConfig();
         private PrefillSelectorConfig selector = new EstimatedTtftSelectorConfig();
         private CacheAffinityConfig cacheAffinity;
+        private SessionAffinityConfig sessionAffinity;
 
         private LoadBalanceStrategyEnum strategy() {
             if (selector instanceof RandomPrefillSelectorConfig) {
@@ -163,6 +164,13 @@ public final class RoutingConfig {
     public static final class CacheAffinityConfig {
         private long maxExtraTtftMs;
         private double minPrefixHitPercent = 5;
+    }
+
+    @Getter
+    @Setter
+    public static final class SessionAffinityConfig {
+        private long ttlMs;
+        private long maxExtraTtftMs;
     }
 
     @Getter

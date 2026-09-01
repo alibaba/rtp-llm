@@ -1,7 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
@@ -61,5 +61,17 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
+    private int sessionSchemaVersion;
+
+    private String inferenceSessionId = "";
+
+    private SessionState inferenceSessionState = SessionState.UNSPECIFIED;
+
+    public enum SessionState {
+        UNSPECIFIED,
+        NEW,
+        ESTABLISHED
+    }
 
 }

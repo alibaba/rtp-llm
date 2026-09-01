@@ -682,6 +682,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        if (pb.hasSessionRoutingHint()) {
+            var hint = pb.getSessionRoutingHint();
+            request.setSessionSchemaVersion(hint.getSchemaVersion());
+            request.setInferenceSessionId(hint.getSessionId());
+            request.setInferenceSessionState(switch (hint.getState()) {
+                case NEW -> Request.SessionState.NEW;
+                case ESTABLISHED -> Request.SessionState.ESTABLISHED;
+                default -> Request.SessionState.UNSPECIFIED;
+            });
+        }
 
         var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB

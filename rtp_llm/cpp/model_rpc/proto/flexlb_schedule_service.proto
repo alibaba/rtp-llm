@@ -38,6 +38,18 @@ message RequestLifecyclePB {
     int64 batch_id = 3;
 }
 
+enum SessionStatePB {
+    SESSION_STATE_UNSPECIFIED = 0;
+    NEW = 1;
+    ESTABLISHED = 2;
+}
+
+message SessionRoutingHintPB {
+    uint32 schema_version = 1;
+    string session_id = 2;
+    SessionStatePB state = 3;
+}
+
 message FlexlbScheduleRequestPB {
     int64 request_id = 1;
     // Wire-compatible with the historical GenerateInputPB message field:
@@ -64,6 +76,7 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    SessionRoutingHintPB session_routing_hint = 16;
 }
 
 message FlexlbServerStatusPB {
