@@ -135,9 +135,14 @@ efficiency, not GPU compute**: do not compare absolute values against
 production dashboards directly (the caliber semantics map one-to-one, the
 physics does not). `/snapshot` exposes the cumulative `hit_tokens_total`
 per engine (never drained — the `cache_saved_tokens` source via
-`final_snapshot`). The report layer renders these three series as P/D role
-charts (the context pair = P role, generate = D role — the production
-dashboard's hippo_role split read); the client-side token reconciliation is
+`final_snapshot`). The report layer renders these three series as P/D
+role charts at the **per-engine average** (cluster sum ÷ engine count —
+the production dashboard's single-instance-series read, so per-instance
+magnitudes line up; the aggregate's `mock_tps_ts` keeps the raw cluster
+sums and the division is presentation-layer, with a cluster-sum fallback
+caption 「集群和（引擎数未知）」 + stderr warning when the engine count
+is unavailable — chain: `run_meta.json` params > `engine_dist` > mock
+final_snapshot role counts); the client-side token reconciliation is
 not a report panel but the aggregate's fail-closed validity item
 `validity_checks.token_reconciliation_ok`: per input/output side,
 `|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×

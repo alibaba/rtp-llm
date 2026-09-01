@@ -40,7 +40,14 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
     出全部数据）> aggregate 同目录 engine_dist.json；
   * --run-id 未指定时取 aggregate 的 meta.run_dir；
   * P/D 引擎数优先取 engine_dist 的 engine_count，其次 --p-engines/--d-engines；
-  * shards 优先取 aggregate.summary 的 load_client_workers，其次 --shards，再缺省 8。
+  * shards 优先取 aggregate.summary 的 load_client_workers，其次 --shards，再缺省 8；
+  * 2.3 TPS P/D 主图为每引擎平均（集群和 ÷ 引擎数，生产大盘单实例
+    series 同构读法；mock_tps_ts/aggregate 语义不动，折算在呈现层）。
+    折算引擎数可靠链：aggregate 同目录 run_meta.json 的
+    params.n_prefill/n_decode > engine_dist.engine_count > mock.json
+    final_snapshot 角色计数；均缺失时回退集群和呈现（caption 明示
+    「集群和（引擎数未知）」+ stderr 告警），不吃 --p-engines CLI 缺省
+    （750/500 为面板刻度缺省而非真实引擎数）。
 """
 
 from __future__ import annotations
@@ -660,6 +667,60 @@ def main():
             p_engines = int(pe)
         if de:
             d_engines = int(de)
+
+    # ---- 2.3 TPS 每引擎平均折算的引擎数（20260901 呈现口径改版）----
+    # TPS P/D 主图从「集群和」改为「每引擎平均」（集群和 ÷ N），与生产
+    # 大盘单实例 series 的读法同构——集群和呈现下 12P 求和 p50 3.88M vs
+    # 生产单实例 ~58k，观感差 67 倍。引擎数按可靠性取链：
+    #   1. run_meta.json params.n_prefill/n_decode（部署配置真值；标准
+    #      管线 consolidate 步骤必写，aggregate 同目录兄弟文件）；
+    #   2. engine_dist.prefill/decode.engine_count（观察值：收到过流量
+    #      的引擎数，健康 run 等于部署数，短/断 run 可偏小）；
+    #   3. mock.json final_snapshot.engines 按角色计数（mock 自报终态）。
+    # 均不可得 → None：2.3 主图回退集群和呈现（caption 明示「集群和
+    # （引擎数未知）」+ stderr 告警；标准 run 引擎数恒可得，回退只是
+    # 防御）。刻意不吃 --p-engines/--d-engines：CLI 缺省 750/500 是
+    # 其它面板的刻度缺省而非真实引擎数，拿缺省折算会引入数十倍系统
+    # 性偏差，宁可回退集群和。aggregate 的 mock_tps_ts 语义不动（保留
+    # 原始集群和，无损原始数据）；折算只在 canvas 呈现层做。
+    def _tps_engine_count(raw):
+        try:
+            iv = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return iv if iv > 0 else None
+
+    _rm_path = os.path.join(agg_dir, "run_meta.json")
+    _rm_params = (
+        (load_json(_rm_path) or {}).get("params") or {}
+        if os.path.isfile(_rm_path)
+        else {}
+    )
+    tps_p_engines = _tps_engine_count(_rm_params.get("n_prefill"))
+    tps_d_engines = _tps_engine_count(_rm_params.get("n_decode"))
+    if tps_p_engines is None and ed:
+        tps_p_engines = _tps_engine_count((ed.get("prefill") or {}).get("engine_count"))
+    if tps_d_engines is None and ed:
+        tps_d_engines = _tps_engine_count((ed.get("decode") or {}).get("engine_count"))
+    if tps_p_engines is None or tps_d_engines is None:
+        _mock_fs_path = os.path.join(agg_dir, "mock.json")
+        _mock_fs = (
+            (load_json(_mock_fs_path) or {}).get("final_snapshot") or {}
+            if os.path.isfile(_mock_fs_path)
+            else {}
+        )
+        _fs_roles = {}
+        for _e in _mock_fs.get("engines") or []:
+            if isinstance(_e, dict) and _e.get("role"):
+                _fs_roles[_e["role"]] = _fs_roles.get(_e["role"], 0) + 1
+        if tps_p_engines is None:
+            tps_p_engines = _tps_engine_count(_fs_roles.get("prefill"))
+        if tps_d_engines is None:
+            tps_d_engines = _tps_engine_count(_fs_roles.get("decode"))
+    # 折算除数（引擎数未知 = 1.0，即集群和原值——回退呈现语义）
+    tps_p_div = float(tps_p_engines) if tps_p_engines else 1.0
+    tps_d_div = float(tps_d_engines) if tps_d_engines else 1.0
+
     shards = args.shards
     if shards is None:
         # load_client_workers：aggregate 透传的元数据键（client.json 直读，
@@ -860,6 +921,11 @@ def main():
         # context 对 = P 角色主图、generate = D 角色主图（生产大盘
         # hippo_role 切分同构读法）。全零序列不注册（与 2.2 节
         # input_len_n 的「非零才画」同规则，区分无键/全零）。
+        # 20260901 呈现口径：主图值为每引擎平均（集群和 ÷ 引擎数，
+        # tps_p_div/tps_d_div；引擎数未知时除数 1 = 集群和回退，引擎数
+        # 可靠链见 tps_p_engines 解析处注释）——mock_tps_ts/aggregate
+        # 语义不动，折算只在 canvas 呈现层（与 k/M 单位换算同类的
+        # 呈现层单位选择）。
         _mtps_bucket = {}
         for r in mock_tps_rows:
             try:
@@ -883,14 +949,24 @@ def main():
             mock_ctx_tps = const(
                 "mockCtxTps",
                 num_arr(
-                    [(_mtps_by_t.get(t) or {}).get("context_tps", 0) for t in tsec_vals]
+                    [
+                        round(
+                            (_mtps_by_t.get(t) or {}).get("context_tps", 0) / tps_p_div,
+                            1,
+                        )
+                        for t in tsec_vals
+                    ]
                 ),
             )
             mock_ctx_cache_tps = const(
                 "mockCtxCacheTps",
                 num_arr(
                     [
-                        (_mtps_by_t.get(t) or {}).get("context_tps_with_cache", 0)
+                        round(
+                            (_mtps_by_t.get(t) or {}).get("context_tps_with_cache", 0)
+                            / tps_p_div,
+                            1,
+                        )
                         for t in tsec_vals
                     ]
                 ),
@@ -899,7 +975,11 @@ def main():
                 "mockGenTps",
                 num_arr(
                     [
-                        (_mtps_by_t.get(t) or {}).get("generate_tps", 0)
+                        round(
+                            (_mtps_by_t.get(t) or {}).get("generate_tps", 0)
+                            / tps_d_div,
+                            1,
+                        )
                         for t in tsec_vals
                     ]
                 ),
@@ -2409,24 +2489,53 @@ def main():
     # with/without cache 双曲线，差值 = cache 复用等效吞吐（KV 容量
     # 对齐任务的收益面）；D 角色（decode 引擎聚合）= generate 单曲线。
     # mock_tps_ts 为集群级时序但语义天然按角色切分（context_* 只来自
-    # P 引擎、generate 只来自 D 引擎），无需 role 维度数据改造，面板
-    # 级角色标注即为满足「读法与生产大盘一致」的最小实现。原 input/
-    # output 侧 client 对账面板已移除（对账降级为 aggregate
-    # validity_checks 的 token_reconciliation_ok 断言，检测能力保留
-    # 但不占版面）。
+    # P 引擎、generate 只来自 D 引擎），无需 role 维度数据改造。
+    # 20260901 呈现口径改版：主图画每引擎平均（集群和 ÷ 引擎数，
+    # tps_p_engines/tps_d_engines 可靠链解析），与生产大盘单实例
+    # series 的读法同构——此前集群和呈现下 12P 求和 p50 3.88M vs
+    # 生产单实例 ~58k，观感差 67 倍。引擎数未知时回退集群和呈现，
+    # caption 明示「集群和（引擎数未知）」+ stderr 告警（标准 run
+    # 引擎数恒可得，回退只是防御）。
     # 口径提醒：mock TPS 是记账式模拟读数（分母固定 1s 窗口），
     # 衡量调度组织效率而非 GPU 算力，不可与生产数值直接对表（口径
     # 语义一一对应）。
     tps_containers = []
     if mock_ctx_tps is not None:
-        _ctx_cap = max((p.get("context_tps_with_cache", 0) or 0) for p in mock_tps_rows)
+        if tps_p_engines:
+            _p_y_scope = (
+                "y = context token/s，每引擎平均（集群和 ÷ P 引擎数 "
+                + str(tps_p_engines)
+                + "，生产大盘单实例 series 同构读法）；集群口径 = 生产同名指标 "
+                "rtp_llm_context_tps* 跨 P 引擎求和"
+            )
+            _p_cache_name = "with cache（Σil ÷ N）"
+            _p_compute_name = "compute（(Σil−hit) ÷ N）"
+        else:
+            sys.stderr.write(
+                TAG + " warning: 2.3 P 角色 TPS 主图 P 引擎数不可得（run_meta "
+                "params / engine_dist / mock final_snapshot 均未给出），"
+                "回退集群和呈现\n"
+            )
+            _p_y_scope = (
+                "y = context token/s 集群和（引擎数未知）；P 引擎数在 "
+                "run_meta params / engine_dist / mock final_snapshot 均缺失，"
+                "回退集群和呈现，与生产大盘单实例 series 不可直接对表；"
+                "集群口径 = 生产同名指标 rtp_llm_context_tps* 跨 P 引擎求和"
+            )
+            _p_cache_name = "with cache（Σil）"
+            _p_compute_name = "compute（Σil−hit）"
+        _ctx_cap = (
+            max((p.get("context_tps_with_cache", 0) or 0) for p in mock_tps_rows)
+            / tps_p_div
+        )
         tps_containers.append(
             emit_container(
                 "P 角色 context TPS：with cache vs compute（cache 复用等效吞吐）",
-                "P 角色（prefill 引擎聚合，生产大盘同款 hippo_role 切分读法）；"
-                "x = 压测时间（s，1s 窗口）；y = context token/s（集群 = 生产同名指标 "
-                "rtp_llm_context_tps* 跨 P 引擎求和，完成事件记账：compute = "
-                "Σ(il−hit)，with cache = Σil）；两线差值 = cache 复用等效吞吐"
+                "P 角色（prefill，生产大盘同款 hippo_role 切分读法）；"
+                "x = 压测时间（s，1s 窗口）；"
+                + _p_y_scope
+                + "，完成事件记账：compute = "
+                "Σ(il−hit)，with cache = Σil；两线差值 = cache 复用等效吞吐"
                 + (
                     "；累计复用 cache_saved_tokens = "
                     + fmt_int_trunc(sm.get("cache_saved_tokens"))
@@ -2441,11 +2550,11 @@ def main():
                     [
                         (
                             "mcc",
-                            "with cache（Σil）",
+                            _p_cache_name,
                             mock_ctx_cache_tps,
                             "success",
                         ),
-                        ("mct", "compute（Σil−hit）", mock_ctx_tps, "info"),
+                        ("mct", _p_compute_name, mock_ctx_tps, "info"),
                     ],
                     suffix=" tok/s",
                     domain="[0, " + num(nice_max(_ctx_cap * 1.15)) + "]",
@@ -2453,19 +2562,41 @@ def main():
             )
         )
     if mock_gen_tps is not None:
-        _gen_cap = max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows)
+        if tps_d_engines:
+            _d_y_scope = (
+                "y = generate token/s，每引擎平均（集群和 ÷ D 引擎数 "
+                + str(tps_d_engines)
+                + "，生产大盘单实例 series 同构读法）；集群口径 = 生产同名指标 "
+                "rtp_llm_generate_tps 跨 D 引擎求和"
+            )
+            _d_series_name = "generate（Σol ÷ N）"
+        else:
+            sys.stderr.write(
+                TAG + " warning: 2.3 D 角色 TPS 主图 D 引擎数不可得（run_meta "
+                "params / engine_dist / mock final_snapshot 均未给出），"
+                "回退集群和呈现\n"
+            )
+            _d_y_scope = (
+                "y = generate token/s 集群和（引擎数未知）；D 引擎数在 "
+                "run_meta params / engine_dist / mock final_snapshot 均缺失，"
+                "回退集群和呈现，与生产大盘单实例 series 不可直接对表；"
+                "集群口径 = 生产同名指标 rtp_llm_generate_tps 跨 D 引擎求和"
+            )
+            _d_series_name = "generate（Σol）"
+        _gen_cap = (
+            max((p.get("generate_tps", 0) or 0) for p in mock_tps_rows) / tps_d_div
+        )
         tps_containers.append(
             emit_container(
                 "D 角色 generate TPS（rtp_llm_generate_tps）",
-                "D 角色（decode 引擎聚合，生产大盘同款 hippo_role 切分读法）；"
-                "x = 压测时间（s，1s 窗口）；y = generate token/s（集群 = 生产同名指标 "
-                "rtp_llm_generate_tps 跨 D 引擎求和，完成事件记账：Σol）",
+                "D 角色（decode，生产大盘同款 hippo_role 切分读法）；"
+                "x = 压测时间（s，1s 窗口）；" + _d_y_scope + "，完成事件记账：Σol",
                 emit_chart(
                     "LineChart",
                     TSEC,
                     230,
                     [
-                        ("mgt", "generate（Σol）", mock_gen_tps, "success"),
+                        ("mgt", _d_series_name, mock_gen_tps, "success"),
                     ],
                     suffix=" tok/s",
                     domain="[0, " + num(nice_max(_gen_cap * 1.15)) + "]",
@@ -3612,6 +3743,10 @@ def main():
     #    复用语义标注。原 IO 对账面板相关断言（调度链路损耗/守恒）随
     #    面板移除同步删除（对账降级为 aggregate 的
     #    token_reconciliation_ok 断言）。
+    #    20260901 呈现口径（per-engine average）：引擎数可得时主图必含
+    #    「每引擎平均」标注与具体引擎数（集群和÷N 与生产大盘单实例
+    #    series 同构读法——防集群和当单实例读数的 67 倍量级误读）；
+    #    引擎数回退模式必含「集群和（引擎数未知）」回退标注。
     if mock_ctx_tps is not None or mock_gen_tps is not None:
         assert "完成事件记账" in html_out, (
             TAG + " mock TPS series present but accounting-scope annotation missing"
@@ -3626,10 +3761,39 @@ def main():
         assert "cache 复用等效吞吐" in html_out, (
             TAG + " context TPS pair present but cache-reuse annotation missing"
         )
+        if tps_p_engines:
+            assert "每引擎平均" in html_out, (
+                TAG
+                + " context TPS chart present but per-engine-average annotation missing"
+            )
+            assert ("P 引擎数 " + str(tps_p_engines)) in html_out, (
+                TAG + " context TPS chart present but P engine-count annotation missing"
+            )
+        else:
+            assert "集群和（引擎数未知）" in html_out, (
+                TAG
+                + " context TPS cluster-sum fallback present but fallback "
+                + "annotation missing"
+            )
     if mock_gen_tps is not None:
         assert "D 角色" in html_out, (
             TAG + " generate TPS chart present but D-role annotation missing"
         )
+        if tps_d_engines:
+            assert "每引擎平均" in html_out, (
+                TAG
+                + " generate TPS chart present but per-engine-average annotation missing"
+            )
+            assert ("D 引擎数 " + str(tps_d_engines)) in html_out, (
+                TAG
+                + " generate TPS chart present but D engine-count annotation missing"
+            )
+        else:
+            assert "集群和（引擎数未知）" in html_out, (
+                TAG
+                + " generate TPS cluster-sum fallback present but fallback "
+                + "annotation missing"
+            )
 
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
@@ -3706,6 +3870,23 @@ def main():
                 else ""
             )
             + ")"
+        )
+    if tps_containers:
+        print(
+            TAG
+            + " tps scope: P="
+            + (
+                "per-engine avg ÷" + str(tps_p_engines)
+                if tps_p_engines
+                else "cluster-sum (engine count unknown)"
+            )
+            + " D="
+            + (
+                "per-engine avg ÷" + str(tps_d_engines)
+                if tps_d_engines
+                else "cluster-sum (engine count unknown)"
+            )
+            + " (production dashboard single-instance series read)"
         )
     if full_e2e_sum:
         print(

@@ -52,7 +52,20 @@ section below for the full table):
   same read as the production dashboard's hippo_role split, engine-
   self-reported only — no client-side TPS concept; mock TPS values are
   accounting-style simulation readings over a fixed 1s window, not GPU
-  compute). The 20260901 correction moved the client-side token
+  compute). The 2.3 charts plot the **per-engine average** (cluster sum
+  ÷ engine count — the production dashboard's single-instance-series
+  read; the former cluster-sum presentation made a 12P run read p50
+  3.88M tok/s vs ~58k per production instance, a 67x apparent
+  magnitude mismatch). Engine-count chain, most reliable first:
+  sibling `run_meta.json` `params.n_prefill` / `n_decode` (deployed
+  config truth) > `engine_dist.engine_count` (observed engines that
+  received traffic) > `mock.json` final_snapshot engines counted by
+  role; when none is available the charts fall back to the cluster sum
+  with an explicit 「集群和（引擎数未知）」 caption and a stderr warning
+  (standard runs always expose the count; the fallback is defensive
+  only). `mock_tps_ts` itself keeps the raw cluster sums — the division
+  is a presentation-layer unit choice (same class as k/M rescaling).
+  The 20260901 correction moved the client-side token
   reconciliation from report panels into the fail-closed validity item
   `validity_checks.token_reconciliation_ok` (detects dropped requests /
   inflated self-reporting): per input/output side,
