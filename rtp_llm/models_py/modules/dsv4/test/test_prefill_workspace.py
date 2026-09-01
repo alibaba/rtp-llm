@@ -328,6 +328,14 @@ def test_cp_gather_restore_overflow():
 
 
 if __name__ == "__main__":
+    test_dynamic_workspace_rows_disabled_keeps_configured_capacity()
+    print("PASS test_dynamic_workspace_rows_disabled_keeps_configured_capacity")
+    test_dynamic_workspace_rows_grows_q_and_cp_capacity()
+    print("PASS test_dynamic_workspace_rows_grows_q_and_cp_capacity")
+    test_dynamic_workspace_rows_preserves_disabled_cp_region()
+    print("PASS test_dynamic_workspace_rows_preserves_disabled_cp_region")
+    test_dynamic_workspace_rows_never_shrinks_configured_capacity()
+    print("PASS test_dynamic_workspace_rows_never_shrinks_configured_capacity")
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
     test_prefill_q_full_capacity_and_overflow()

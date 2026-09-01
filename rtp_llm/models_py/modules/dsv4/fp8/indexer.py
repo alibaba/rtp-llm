@@ -308,8 +308,11 @@ class _IndexerFP8PrefillMeta(NamedTuple):
 
 
 class IndexerFP8(PoolBackedModule):
-    """FP8 lightning indexer. DeepGEMM-only score; nested
-    ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
+    """FP8 lightning indexer with architecture-specific score backends.
+
+    DeepGEMM handles supported datacenter GPUs; SM120 uses the bounded torch
+    fallback. ``CompressorFP8(head_dim=128)`` writes the shared 132B pool.
+    """
 
     def __init__(
         self,
@@ -336,8 +339,8 @@ class IndexerFP8(PoolBackedModule):
             f"(matches CompressorFP8 132B layout); got {index_head_dim}"
         )
         assert has_fp8_paged_mqa_logits(), (
-            "deep_gemm.fp8_paged_mqa_logits not available — IndexerFP8 cannot "
-            "operate without DeepGEMM. Use IndexerBF16 (or install deep_gemm)."
+            "FP8 paged indexer scoring is unavailable on this device. "
+            "Use IndexerBF16 or install the supported score backend."
         )
         assert layer_weights is not None, (
             "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
@@ -1123,9 +1126,9 @@ class IndexerFP8(PoolBackedModule):
                     self.rope_head_dim,
                 )
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="
@@ -1337,9 +1340,9 @@ class IndexerFP8(PoolBackedModule):
                     self.rope_head_dim,
                 )
 
-            assert (
-                has_fp8_mqa_logits()
-            ), "deep_gemm.fp8_mqa_logits required for IndexerFP8 prefill"
+            assert has_fp8_mqa_logits(
+                x.device
+            ), "FP8 MQA indexer scoring is unavailable for IndexerFP8 prefill"
             assert self._kv_pool_view.dim() == 3, (
                 "IndexerFP8 expects 3D ``_kv_pool_view`` "
                 "[num_blocks, eb, 132]; got dim="

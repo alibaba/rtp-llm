@@ -1,4 +1,5 @@
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from rtp_llm.config.py_config_modules import DeepEPConfig
 from rtp_llm.config.server_config_setup import auto_configure_deepep
@@ -68,6 +69,49 @@ class AutoConfigureDeepepTest(TestCase):
         )
 
         # Verify: use_deepep_moe should be True
+        self._assert_deepep_config(moe=True, low_latency=False, internode=False)
+
+    @patch(
+        "rtp_llm.config.server_config_setup."
+        "_auto_deepep_supported_on_visible_devices",
+        return_value=False,
+    )
+    def test_sm12x_auto_config_disables_deepep(self, _mock_supported):
+        self._setup_parallel_info(
+            world_size=4, tp_size=1, ep_size=4, local_world_size=4
+        )
+        self.moe_config.use_all_gather = False
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.PDFUSION,
+        )
+
+        self._assert_deepep_config(moe=False, low_latency=False, internode=False)
+
+    @patch(
+        "rtp_llm.config.server_config_setup."
+        "_auto_deepep_supported_on_visible_devices",
+        side_effect=AssertionError("explicit config must bypass auto detection"),
+    )
+    def test_sm12x_explicit_deepep_is_preserved(self, _mock_supported):
+        self._setup_parallel_info(
+            world_size=4, tp_size=1, ep_size=4, local_world_size=4
+        )
+        self.moe_config.use_all_gather = False
+        self.deep_ep_config.use_deepep_moe = True
+        self.deep_ep_config.use_deepep_low_latency = False
+        self.deep_ep_config.use_deepep_internode = False
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.PDFUSION,
+        )
+
         self._assert_deepep_config(moe=True, low_latency=False, internode=False)
 
     def test_inference_single_gpu(self):

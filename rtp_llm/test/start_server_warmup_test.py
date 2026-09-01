@@ -1,3 +1,4 @@
+import argparse
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -69,7 +70,16 @@ class StartupRealWarmupTest(unittest.TestCase):
                 config = self._warmup_config()
                 config.role_config.role_type = role_type
                 config.model_args.model_type = model_type
+                config.misc_config.dsv4_startup_real_warmup = "not-a-bool"
                 self.assertFalse(start_server._should_run_startup_real_warmup(config))
+
+    def test_relevant_worker_rejects_malformed_warmup_value(self):
+        config = self._warmup_config()
+        for value in ("", "not-a-bool"):
+            with self.subTest(value=value):
+                config.misc_config.dsv4_startup_real_warmup = value
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    start_server._should_run_startup_real_warmup(config)
 
 
 if __name__ == "__main__":

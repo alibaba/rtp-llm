@@ -18,8 +18,11 @@ if is_cuda():
     from .fp8_gemm_linear import CudaFp8GEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
 
-    major, minor = get_sm()
-    if major >= 10:
+    major, _ = get_sm()
+    # The legacy FP4 binding is compiled only for datacenter Blackwell
+    # (SM10x).  Consumer Blackwell (SM12x) deliberately omits those symbols
+    # and uses the FlashInfer/CUTLASS-specific implementations below.
+    if major == 10:
         from .fp4_linear import CudaFp4GEMMLinear
 
         LinearFactory.register(CudaFp4GEMMLinear)

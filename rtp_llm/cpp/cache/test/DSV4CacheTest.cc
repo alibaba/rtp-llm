@@ -1280,13 +1280,15 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
 TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency) {
     auto make_config = [](int64_t                             blocks,
                           std::optional<CacheMemoryPlacement> placement,
-                          std::optional<uint32_t>             descriptor_blocks = std::nullopt) {
+                          std::optional<uint32_t>             descriptor_blocks = std::nullopt,
+                          bool                                clear             = false) {
         auto              mc = makeProModelConfig();
         ParallelismConfig pc;
         RuntimeConfig     runtime_config;
         KVCacheConfig     kv_cache_config;
         kv_cache_config.test_block_num             = 100;
         kv_cache_config.dsv4_hca_state_pool_blocks = blocks;
+        kv_cache_config.dsv4_hca_state_pool_clear  = clear;
         for (auto& descs : mc.kv_cache_spec_descs) {
             for (auto& desc : descs) {
                 if (desc.tag != DSV4_HCA_STATE_TAG) {
@@ -1341,11 +1343,18 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency
     EXPECT_FALSE(host_config.policyForGroup(hca_gid).charge_to_paged_budget);
     EXPECT_EQ(host_config.explicitly_sized_pool_reserve_bytes, 0u);
 
-    // An explicit zero means no HCA override.  A host-resident descriptor
-    // must still remain outside the HBM budget on the framework fallback.
-    auto fallback_config = make_config(0, CacheMemoryPlacement::HOST_PINNED);
+    // A legacy zero is still unset and must preserve descriptor ownership.
+    auto legacy_zero_config = make_config(0, std::nullopt, 350u);
+    hca_gid                 = gidForTag(legacy_zero_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(legacy_zero_config.blockNumForGroup(hca_gid), 350u);
+    EXPECT_EQ(legacy_zero_config.policyForGroup(hca_gid).explicit_block_num, 350u);
+
+    // The separate clear flag requests framework sizing. A host-resident
+    // descriptor must still remain outside the HBM budget on the fallback.
+    auto fallback_config = make_config(-1, CacheMemoryPlacement::HOST_PINNED, 350u, true);
     hca_gid              = gidForTag(fallback_config, std::string(DSV4_HCA_STATE_TAG));
     EXPECT_EQ(fallback_config.blockNumForGroup(hca_gid), 100u);
+    EXPECT_EQ(fallback_config.policyForGroup(hca_gid).explicit_block_num, 0u);
     EXPECT_EQ(fallback_config.policyForGroup(hca_gid).memory_placement, CacheMemoryPlacement::HOST_PINNED);
     EXPECT_FALSE(fallback_config.policyForGroup(hca_gid).charge_to_paged_budget);
     EXPECT_EQ(fallback_config.explicitly_sized_pool_reserve_bytes, 0u);

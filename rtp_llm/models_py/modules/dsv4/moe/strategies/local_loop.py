@@ -38,6 +38,8 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.utils.arch import is_sm120
+
 from ...quant_layouts import prepare_fp4_weight_scale_for_deepgemm
 from ..expert import Expert
 from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
@@ -66,6 +68,10 @@ def _topk_dispatch_max_n() -> int:
 
 
 _LOCAL_Y_CACHE: dict[tuple, torch.Tensor] = {}
+
+
+def _uses_sm120_local_loop(weight: torch.Tensor) -> bool:
+    return weight.is_cuda and is_sm120(weight.device)
 
 
 def _get_or_create_local_y(
@@ -137,23 +143,39 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         self._W2_s = stacked_routed["w2_s"]
         self._W3_w = stacked_routed["w3_w"]
         self._W3_s = stacked_routed["w3_s"]
-        self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
-        )
-        self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
-        )
-        self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
-            self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
-        )
+        self._deepgemm_topk_available = not _uses_sm120_local_loop(self._W1_w)
+        if self._deepgemm_topk_available:
+            self._W1_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W1_s, cfg.moe_inter_dim, cfg.dim, self._W1_s.shape[0]
+            )
+            self._W2_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W2_s, cfg.dim, cfg.moe_inter_dim, self._W2_s.shape[0]
+            )
+            self._W3_s_gemm = prepare_fp4_weight_scale_for_deepgemm(
+                self._W3_s, cfg.moe_inter_dim, cfg.dim, self._W3_s.shape[0]
+            )
+        else:
+            # SM120's fallback intentionally uses QuantizedLinear's
+            # dequantize + F.linear path. It must stay usable when DeepGEMM is
+            # absent, so neither loader setup nor graph dispatch may touch a
+            # DeepGEMM-only packed scale.
+            self._W1_s_gemm = None
+            self._W2_s_gemm = None
+            self._W3_s_gemm = None
         # Per-expert DeepGEMM scales are MN-major: a direct
         # self._W*_s_gemm[i] view has stride (1, mn).  torch.index_select on
         # the grouped tensor returns a row-major copy, which fails
         # DeepGEMM's layout check during CUDA graph top-k dispatch.  Select
         # from the transposed view and transpose the selected copy back.
-        self._W1_s_gemm_t = self._W1_s_gemm.transpose(-1, -2)
-        self._W2_s_gemm_t = self._W2_s_gemm.transpose(-1, -2)
-        self._W3_s_gemm_t = self._W3_s_gemm.transpose(-1, -2)
+        self._W1_s_gemm_t = (
+            self._W1_s_gemm.transpose(-1, -2) if self._W1_s_gemm is not None else None
+        )
+        self._W2_s_gemm_t = (
+            self._W2_s_gemm.transpose(-1, -2) if self._W2_s_gemm is not None else None
+        )
+        self._W3_s_gemm_t = (
+            self._W3_s_gemm.transpose(-1, -2) if self._W3_s_gemm is not None else None
+        )
 
         def _expert_at(global_idx: int) -> Optional[Expert]:
             if not (cfg.local_expert_start <= global_idx < cfg.local_expert_end):
@@ -162,13 +184,19 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             ew = {
                 "w1_w": stacked_routed["w1_w"][local_idx],
                 "w1_s": stacked_routed["w1_s"][local_idx],
-                "w1_s_gemm": self._W1_s_gemm[local_idx],
+                "w1_s_gemm": (
+                    self._W1_s_gemm[local_idx] if self._W1_s_gemm is not None else None
+                ),
                 "w2_w": stacked_routed["w2_w"][local_idx],
                 "w2_s": stacked_routed["w2_s"][local_idx],
-                "w2_s_gemm": self._W2_s_gemm[local_idx],
+                "w2_s_gemm": (
+                    self._W2_s_gemm[local_idx] if self._W2_s_gemm is not None else None
+                ),
                 "w3_w": stacked_routed["w3_w"][local_idx],
                 "w3_s": stacked_routed["w3_s"][local_idx],
-                "w3_s_gemm": self._W3_s_gemm[local_idx],
+                "w3_s_gemm": (
+                    self._W3_s_gemm[local_idx] if self._W3_s_gemm is not None else None
+                ),
             }
             return Expert(
                 cfg.dim,
@@ -224,6 +252,13 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         This is the public entry point for communication strategies that own
         dispatch/combine but delegate rank-local expert compute here.
         """
+        capturing = torch.cuda.is_current_stream_capturing()
+        if capturing and not self._deepgemm_topk_available:
+            raise RuntimeError(
+                "SM120 LocalLoop is an eager-only correctness fallback; "
+                "CUDA graph capture requires the FlashInfer grouped FP4 backend"
+            )
+
         T = x.size(0)
         self._local_y_buf = _get_or_create_local_y(
             max(T, self.cfg.max_tokens_per_rank),
@@ -234,7 +269,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
         buf = self._local_y_buf
         y = buf[:T]
         y.zero_()
-        if torch.cuda.is_current_stream_capturing():
+        if capturing:
             # PATCH: top-K fast path. Only N×K Python iterations instead of
             # `local_end - local_start` (=n_routed_experts; 256 for V4-Flash).
             # Conditioned on ep_size==1 (so all experts are local — no per-rank
@@ -242,6 +277,7 @@ class LocalLoopStrategy(RoutedExpertsStrategy):
             topk_max_n = _topk_dispatch_max_n()
             if (
                 _bs1_fast_enabled()
+                and self._deepgemm_topk_available
                 and self.cfg.ep_size == 1
                 and topk_max_n > 0
                 and T <= topk_max_n

@@ -196,11 +196,12 @@ struct KVCacheConfig {
     // New deployments should use descriptor sizing plus the HCA-only override.
     uint32_t dsv4_fixed_pool_blocks = 0;
 
-    // HCA_STATE-only runtime override.  -1 = unset (honor the model
-    // descriptor), 0 = explicitly use framework sizing, >0 = fixed blocks.
-    // int64_t is intentional: pybind/server args must preserve all three
-    // states, while accepted non-negative values are range-checked to uint32.
+    // HCA_STATE-only runtime override. -1 = unset (honor the model
+    // descriptor), >0 = fixed blocks. A separate flag represents an explicit
+    // clear so legacy serialized/CLI zero values remain "unset" during
+    // rolling upgrades.
     int64_t dsv4_hca_state_pool_blocks = -1;
+    bool    dsv4_hca_state_pool_clear  = false;
 
     // DSV4 state/KV pool residency request. This does not change pool sizing;
     // each descriptor determines whether the requested placement is supported.

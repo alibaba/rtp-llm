@@ -18,6 +18,23 @@ from rtp_llm.ops import (
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
+def _auto_deepep_supported_on_visible_devices() -> bool:
+    """Whether automatic DeepEP selection is valid for this CUDA runtime.
+
+    Consumer Blackwell (SM12x) uses the generic SM120 collective strategy;
+    DeepEP does not ship compatible kernels there.  A user who explicitly
+    requests DeepEP still reaches the normal fail-fast validation path.
+    """
+    if not torch.cuda.is_available():
+        # Preserve CPU-only config parsing and unit-test behavior.  Runtime
+        # hardware validation occurs later when CUDA is initialized.
+        return True
+    return all(
+        torch.cuda.get_device_capability(device_index)[0] != 12
+        for device_index in range(torch.cuda.device_count())
+    )
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
@@ -125,12 +142,21 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        _apply_auto_deepep_config(
-            moe_config=moe_config,
-            world_size=parallelism_config.world_size,
-            local_world_size=parallelism_config.local_world_size,
-            role_type=role_type,
-        )
+        if _auto_deepep_supported_on_visible_devices():
+            _apply_auto_deepep_config(
+                moe_config=moe_config,
+                world_size=parallelism_config.world_size,
+                local_world_size=parallelism_config.local_world_size,
+                role_type=role_type,
+            )
+        else:
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+            logging.info(
+                "Automatic DeepEP selection is disabled on SM12x; using the "
+                "generic SM120 collective strategy"
+            )
     else:
         # User has set at least one value, copy them to moe_config
         if deep_ep_config.use_deepep_moe is not None:
@@ -508,6 +534,15 @@ def setup_default_args(py_env_configs):
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
+
+    if (
+        py_env_configs.kv_cache_config.dsv4_hca_state_pool_clear
+        and py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks > 0
+    ):
+        raise ValueError(
+            "DSV4_HCA_STATE_POOL_CLEAR cannot be enabled together with a positive "
+            "DSV4_HCA_STATE_POOL_BLOCKS"
+        )
 
     if py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks > 0:
         logging.warning(

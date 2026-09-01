@@ -202,7 +202,7 @@ class ModelDeployWeightInfo:
         # role-specialized speculative models (for example DSpARK's
         # prefill-only commit worker) can select a smaller, semantically
         # correct weight graph without changing the loader API.
-        self.role_type = getattr(parallelism_config, "role_type", None)
+        self.role_type = parallelism_config.role_type
 
         self._use_swizzleA = hw_kernel_config.use_swizzleA
         self._use_qk_norm = model_config.qk_norm

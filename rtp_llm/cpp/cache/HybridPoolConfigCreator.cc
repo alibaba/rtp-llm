@@ -314,8 +314,11 @@ void applyDsv4LegacyFixedPoolCapacity(LayerKVCacheSpecDescs& layer_descs, uint32
     applyDsv4PoolCapacity(layer_descs, isDsv4LegacyFixedPoolTag, static_cast<int64_t>(block_num));
 }
 
-void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, int64_t block_num) {
-    applyDsv4PoolCapacity(layer_descs, [](const std::string& tag) { return tag == DSV4_HCA_STATE_TAG; }, block_num);
+void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, int64_t block_num, bool clear) {
+    applyDsv4PoolCapacity(
+        layer_descs,
+        [](const std::string& tag) { return tag == DSV4_HCA_STATE_TAG; },
+        clear ? 0 : (block_num > 0 ? block_num : -1));
 }
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
@@ -359,7 +362,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         // Preserve the legacy all-fixed-pool knob first, then let the new
         // HCA-only three-state override take precedence when explicitly set.
         applyDsv4LegacyFixedPoolCapacity(layer_descs, kv_cache_config.dsv4_fixed_pool_blocks);
-        applyDsv4HcaStatePoolCapacity(layer_descs, kv_cache_config.dsv4_hca_state_pool_blocks);
+        applyDsv4HcaStatePoolCapacity(
+            layer_descs, kv_cache_config.dsv4_hca_state_pool_blocks, kv_cache_config.dsv4_hca_state_pool_clear);
         SpecBuildContext ctx;
         ctx.dtype                   = dtype;
         ctx.seq_size_per_block      = physical_tokens_per_block;

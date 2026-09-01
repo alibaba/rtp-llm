@@ -7,6 +7,11 @@ _DSV4_CUDA13_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 _DSV4_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
     "//rtp_llm:testlib",
@@ -229,7 +234,7 @@ py_test(
         "gpu": "RTX_5000_PRO",
         "gpu_count": "2",
     },
-    target_compatible_with = _DSV4_CUDA13_ONLY,
+    target_compatible_with = _DSV4_SM120_ONLY,
 )
 
 py_test(

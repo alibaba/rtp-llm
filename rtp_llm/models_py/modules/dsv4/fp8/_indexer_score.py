@@ -60,12 +60,24 @@ except ImportError:
     _HAS_DEEP_GEMM_MQA = False
 
 
-def has_fp8_paged_mqa_logits() -> bool:
-    return _HAS_DEEP_GEMM
+def _has_sm120_fallback(
+    device: Optional[torch.device | str | int] = None,
+) -> bool:
+    return torch.cuda.is_available() and is_sm120(device)
 
 
-def has_fp8_mqa_logits() -> bool:
-    return _HAS_DEEP_GEMM_MQA
+def has_fp8_paged_mqa_logits(
+    device: Optional[torch.device | str | int] = None,
+) -> bool:
+    """Whether paged FP8 indexer scoring is available on ``device``."""
+    return _HAS_DEEP_GEMM or _has_sm120_fallback(device)
+
+
+def has_fp8_mqa_logits(
+    device: Optional[torch.device | str | int] = None,
+) -> bool:
+    """Whether contiguous/prefill FP8 indexer scoring is available."""
+    return _HAS_DEEP_GEMM_MQA or _has_sm120_fallback(device)
 
 
 _sched_cache: Optional[torch.Tensor] = None

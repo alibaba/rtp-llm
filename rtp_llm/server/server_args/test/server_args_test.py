@@ -7,6 +7,7 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.server.server_args.kv_cache_group_args import _dsv4_hca_state_pool_blocks
 from rtp_llm.server.server_args.util import nonnegative_uint32
 from rtp_llm.utils.backend_registry import (
     register_backend_hook,
@@ -84,6 +85,45 @@ class ServerArgsSetTest(TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(argparse.ArgumentTypeError):
                     nonnegative_uint32(value)
+
+    def test_dsv4_hca_pool_zero_preserves_legacy_unset_semantics(self):
+        self.assertEqual(_dsv4_hca_state_pool_blocks("0"), -1)
+        self.assertEqual(_dsv4_hca_state_pool_blocks("96"), 96)
+
+    def test_unrelated_model_preserves_malformed_dsv4_warmup_env(self):
+        import rtp_llm.server.server_args.server_args
+
+        for value in ("", "not-a-bool"):
+            with self.subTest(value=value):
+                os.environ.clear()
+                os.environ.update(
+                    {
+                        "MODEL_TYPE": "qwen",
+                        "DSV4_STARTUP_REAL_WARMUP": value,
+                    }
+                )
+                sys.argv = ["prog"]
+                importlib.reload(rtp_llm.server.server_args.server_args)
+                config = rtp_llm.server.server_args.server_args.setup_args()
+                self.assertEqual(
+                    config.misc_config.dsv4_startup_real_warmup,
+                    value,
+                )
+
+    def test_dsv4_hca_explicit_clear_is_a_separate_flag(self):
+        import rtp_llm.server.server_args.server_args
+
+        sys.argv = [
+            "prog",
+            "--dsv4_hca_state_pool_blocks",
+            "0",
+            "--dsv4_hca_state_pool_clear",
+            "true",
+        ]
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        config = rtp_llm.server.server_args.server_args.setup_args()
+        self.assertEqual(config.kv_cache_config.dsv4_hca_state_pool_blocks, -1)
+        self.assertTrue(config.kv_cache_config.dsv4_hca_state_pool_clear)
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
@@ -201,7 +241,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
-        self.assertFalse(py_env_configs.misc_config.dsv4_startup_real_warmup)
+        self.assertEqual(py_env_configs.misc_config.dsv4_startup_real_warmup, "0")
         self.assertEqual(py_env_configs.kv_cache_config.dsv4_fixed_pool_blocks, 64)
         self.assertEqual(
             py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks,
@@ -312,6 +352,7 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.kv_cache_config.dsv4_hca_state_pool_blocks,
             -1,
         )
+        self.assertFalse(py_env_configs.kv_cache_config.dsv4_hca_state_pool_clear)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 

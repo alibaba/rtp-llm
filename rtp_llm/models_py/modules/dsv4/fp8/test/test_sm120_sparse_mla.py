@@ -1,17 +1,94 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     _fp8_paged_indexer_score_sm120,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.attention import _decode_sched_meta
 from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
     SM120_EXTRA_TOPK_WIDTHS,
+    _cached_buffer,
     canonical_topk,
 )
 
 
 class Sm120SparseMlaCanonicalTest(unittest.TestCase):
+    @patch(
+        "rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata."
+        "get_or_build_sched_meta"
+    )
+    @patch("rtp_llm.models_py.modules.dsv4.fp8.attention.is_sm120")
+    def test_sm120_decode_does_not_build_flash_mla_metadata(
+        self, mock_is_sm120, mock_build
+    ):
+        mock_is_sm120.return_value = True
+        metadata = object()
+
+        result = _decode_sched_meta(
+            torch.device("cuda", 0),
+            metadata,
+            batch_size=2,
+            q_len=1,
+            num_heads=8,
+            topk=64,
+            extra_attn_type=None,
+        )
+
+        self.assertIsNone(result)
+        mock_build.assert_not_called()
+
+    @patch(
+        "rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata."
+        "get_or_build_sched_meta"
+    )
+    @patch("rtp_llm.models_py.modules.dsv4.fp8.attention.is_sm120")
+    def test_non_sm120_decode_builds_flash_mla_metadata(
+        self, mock_is_sm120, mock_build
+    ):
+        mock_is_sm120.return_value = False
+        sentinel = object()
+        mock_build.return_value = sentinel
+        metadata = object()
+
+        result = _decode_sched_meta(
+            torch.device("cuda", 0),
+            metadata,
+            batch_size=2,
+            q_len=1,
+            num_heads=8,
+            topk=64,
+            extra_attn_type="HCA_KV",
+        )
+
+        self.assertIs(result, sentinel)
+        mock_build.assert_called_once_with(
+            metadata,
+            batch_size=2,
+            q_len=1,
+            num_heads=8,
+            topk=64,
+            extra_attn_type="HCA_KV",
+        )
+
+    def test_cached_buffer_growth_retains_captured_addresses(self):
+        cache = {}
+        first = _cached_buffer(
+            cache, ("cpu",), (3,), dtype=torch.float32, device=torch.device("cpu")
+        )
+        first_ptr = first.data_ptr()
+        grown = _cached_buffer(
+            cache, ("cpu",), (9,), dtype=torch.float32, device=torch.device("cpu")
+        )
+        reused = _cached_buffer(
+            cache, ("cpu",), (2,), dtype=torch.float32, device=torch.device("cpu")
+        )
+
+        self.assertNotEqual(grown.data_ptr(), first_ptr)
+        self.assertEqual(reused.data_ptr(), first_ptr)
+        self.assertEqual(sorted(buffer.numel() for buffer in cache[("cpu",)]), [4, 16])
+
     def test_none_length_compacts_non_negative_slots(self):
         indices = torch.tensor([[11, -1, 13, -1], [-1, 7, 8, 9]], dtype=torch.int64)
         canonical, lengths = canonical_topk(indices, None, (4, 8))
@@ -49,7 +126,14 @@ class Sm120SparseMlaCanonicalTest(unittest.TestCase):
             canonical_topk(torch.zeros(1, 9, dtype=torch.int32), None, (4, 8))
 
     def test_hca_long_context_widths_cover_one_million_tokens(self):
-        for source_width, expected_width in ((2049, 4096), (4097, 8192), (8192, 8192)):
+        for source_width, expected_width in (
+            (0, 2),
+            (1, 2),
+            (1562, 2048),
+            (2049, 4096),
+            (4097, 8192),
+            (8192, 8192),
+        ):
             with self.subTest(source_width=source_width):
                 indices = torch.arange(source_width, dtype=torch.int32).view(1, -1)
                 canonical, lengths = canonical_topk(

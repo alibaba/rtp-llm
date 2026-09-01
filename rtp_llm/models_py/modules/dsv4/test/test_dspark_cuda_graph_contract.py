@@ -8,14 +8,18 @@ import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_mod
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
+from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs
 
 
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
     model._gen_num_per_cycle = gamma
+    model._commit_only_prefill = False
     model._dspark_commit_cp_enabled = False
     model._dspark_kv_cache_sharded = False
+    model.kv_cache = None
+    model.fp8_kv_cache = True
     model.tp_size = 2
     model.tp_rank = 0
     model._v4_args = type(

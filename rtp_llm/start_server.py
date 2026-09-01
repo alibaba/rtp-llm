@@ -19,6 +19,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.server.server_args.util import str2bool
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
@@ -551,7 +552,8 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if py_env_configs.model_args.model_type != "deepseek_v4":
         return False
 
-    if not py_env_configs.misc_config.dsv4_startup_real_warmup:
+    warmup_enabled = str2bool(py_env_configs.misc_config.dsv4_startup_real_warmup)
+    if not warmup_enabled:
         logging.info(
             "skip DSV4 startup real warmup: DSV4_STARTUP_REAL_WARMUP is disabled"
         )
