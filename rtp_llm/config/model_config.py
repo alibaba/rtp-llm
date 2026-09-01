@@ -141,6 +141,8 @@ class ModelConfig(CppModelConfig):
         "type_vocab_size",
         "gen_num_per_cycle",
         "index_share_for_mtp_iteration",
+        "enable_glm52_shared_indexer_kv_cache",
+        "glm52_indexer_kv_slot_mapping",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -537,6 +539,7 @@ class ModelConfig(CppModelConfig):
         self.render_config: Optional[Any] = None  # RenderConfig for renderer factory
         self.mm_related_params = VitParameters()
         self.quant_config = None
+        self._is_glm52_architecture: bool = False
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -890,6 +893,45 @@ def build_model_config(
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
-    # Apply model override args
+    # Apply user overrides before deriving the final GLM5.2 cache layout.
     if model_args.json_model_override_args:
         model_config.apply_override_args(model_args.json_model_override_args)
+
+    model_config.enable_glm52_shared_indexer_kv_cache = bool(
+        model_args.enable_glm52_shared_indexer_kv_cache
+    )
+    if model_config.enable_glm52_shared_indexer_kv_cache:
+        from rtp_llm.utils.dsa_indexing import build_dsa_indexer_kv_slot_mapping
+
+        if not model_config._is_glm52_architecture:
+            raise ValueError(
+                "GLM5.2 shared Indexer KV cache requires architecture=GlmMoeDsaForCausalLM"
+            )
+        model_config.glm52_indexer_kv_slot_mapping = build_dsa_indexer_kv_slot_mapping(
+            model_config, model_config.num_layers
+        )
+        mapping = list(model_config.glm52_indexer_kv_slot_mapping)
+        if model_config.model_type != "glm_5":
+            raise ValueError(
+                "ENABLE_GLM52_SHARED_INDEXER_KV_CACHE only supports model_type=glm_5"
+            )
+        if (
+            not model_config.attn_config.is_sparse
+            or len(mapping) != model_config.num_layers
+        ):
+            raise ValueError(
+                "GLM5.2 shared Indexer KV cache requires a sparse "
+                "GlmMoeDsaForCausalLM checkpoint with a complete layer mapping"
+            )
+        physical_slots = max(mapping, default=-1) + 1
+        if physical_slots <= 0 or physical_slots >= model_config.num_layers:
+            raise ValueError(
+                "GLM5.2 shared Indexer KV cache did not find any shared Indexer layers"
+            )
+        logging.info(
+            "enable GLM5.2 shared Indexer KV cache: logical_layers=%d, "
+            "physical_slots=%d, shared_layers=%d",
+            model_config.num_layers,
+            physical_slots,
+            model_config.num_layers - physical_slots,
+        )

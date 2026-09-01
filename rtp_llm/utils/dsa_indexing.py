@@ -63,3 +63,16 @@ def dsa_layer_has_indexer(config: Any, layer_idx: int) -> bool:
     if attn_config is not None and not bool(getattr(attn_config, "is_sparse", False)):
         return False
     return not dsa_layer_skips_topk(config, layer_idx)
+
+
+def build_dsa_indexer_kv_slot_mapping(config: Any, num_layers: int) -> list[int]:
+    """Map each logical DSA layer to the latest full layer's physical KV slot."""
+    mapping: list[int] = []
+    current_slot = -1
+    for layer_idx in range(num_layers):
+        if dsa_layer_has_indexer(config, layer_idx):
+            current_slot += 1
+        elif current_slot < 0:
+            raise ValueError("DSA layer 0 cannot share Indexer KV before a full layer")
+        mapping.append(current_slot)
+    return mapping

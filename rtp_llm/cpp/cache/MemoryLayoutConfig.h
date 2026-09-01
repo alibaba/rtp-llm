@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -8,6 +10,11 @@ namespace rtp_llm {
 struct MemoryLayoutConfig {
     uint32_t layer_num = 0;
     uint32_t block_num = 0;
+
+    // Scale/indexer cache can have fewer physical slots than logical layers.
+    // Empty mapping preserves the legacy identity layout.
+    uint32_t         scale_layer_num = 0;
+    std::vector<int> layer_to_scale_slot;
 
     rtp_llm::DataType dtype = rtp_llm::TYPE_INVALID;
 

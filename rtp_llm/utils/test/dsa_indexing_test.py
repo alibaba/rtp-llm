@@ -1,7 +1,11 @@
 import unittest
 from types import SimpleNamespace
 
-from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
+from rtp_llm.utils.dsa_indexing import (
+    build_dsa_indexer_kv_slot_mapping,
+    dsa_layer_has_indexer,
+    dsa_layer_skips_topk,
+)
 
 
 def _config(**kwargs):
@@ -44,6 +48,19 @@ class DsaIndexingTest(unittest.TestCase):
             self.assertEqual(
                 dsa_layer_skips_topk(config, layer_idx), layer_idx not in full_layers
             )
+
+    def test_glm52_shared_indexer_kv_mapping_has_21_physical_slots(self):
+        full_layers = {0, 1, 2, *range(6, 78, 4)}
+        indexer_types = [
+            "full" if layer_idx in full_layers else "shared" for layer_idx in range(78)
+        ]
+        config = _config(indexer_types=indexer_types)
+        mapping = build_dsa_indexer_kv_slot_mapping(config, num_layers=78)
+
+        self.assertEqual(len(mapping), 78)
+        self.assertEqual(max(mapping) + 1, 21)
+        self.assertEqual(sum(dsa_layer_has_indexer(config, i) for i in range(78)), 21)
+        self.assertEqual(mapping[:7], [0, 1, 2, 2, 2, 2, 3])
 
     def test_mtp_layer_always_has_indexer(self):
         config = _config(

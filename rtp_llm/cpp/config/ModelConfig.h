@@ -124,6 +124,11 @@ public:
     // Reuse DSA top-k indices within one MTP proposal cycle.
     bool index_share_for_mtp_iteration = false;
 
+    // GLM5.2-only opt-in: only full DSA layers own physical Indexer KV slots;
+    // shared layers have no Indexer KV tensor. Empty mapping keeps the legacy layout.
+    bool             enable_glm52_shared_indexer_kv_cache = false;
+    std::vector<int> glm52_indexer_kv_slot_mapping;
+
     // Model loading and quantization
     std::string   tokenizer_path = "";
     std::string   ckpt_path      = "";

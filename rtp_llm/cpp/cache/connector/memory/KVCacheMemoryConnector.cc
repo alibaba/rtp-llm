@@ -82,7 +82,10 @@ const char* memoryCacheCopyModeName(MemoryCacheCopyMode mode) {
 // When set on MultiCopyParams, execNoBlockCopy may try CUDA split scatter/gather (SplitKvCacheCopy; not on PPU).
 // This legacy SM-copy path is only used for non typed layer-region layouts.
 static void applySplitKvMultiCopyFieldsIfEligible(bool enable_sm_copy, const CacheConfig& cfg, MultiCopyParams& out) {
-    if (!enable_sm_copy) {
+    // SplitKvCacheCopy assumes every logical layer contributes exactly one KV
+    // and one scale tensor. GLM5.2 compact layouts omit the scale tensor for
+    // shared layers, so use the existing variable-tensor fallback instead.
+    if (!enable_sm_copy || !cfg.layer_to_indexer_kv_slot.empty()) {
         return;
     }
     out.split_kv_layer_num          = static_cast<int>(cfg.layer_all_num);
