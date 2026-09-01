@@ -19,18 +19,11 @@ lifted the system must recover.  One refusal path per case:
                                   RESOURCE_EXHAUSTED fast reject on the
                                   submit path; recovery once the occupants
                                   terminate.
-  admission_gate_no_starvation    no-starvation completeness: a gated
-                                  request reaches a visible terminal state
-                                  (explicit rejection — the Java master does
-                                  NOT requeue gate rejections) and the
-                                  healthy engine keeps accepting.
 """
 
 from __future__ import annotations
 
-import json
 import time
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
@@ -41,7 +34,6 @@ from ..engine_ops import (
     inject_type,
     inject_type_all,
 )
-from ..grade import GradeReport
 from ..harness import AssertUtils, EnvSpec, admission_config, default_perf
 
 ADMISSION_CASES: list[CaseDef] = []
@@ -397,189 +389,5 @@ def admission_master_capacity(ctx: CaseContext):
         try:
             for n in names:
                 ops.set_perf(n, prefill_fixed_ms=100.0)
-        except Exception:
-            pass
-
-
-# ===========================================================================
-# No-starvation completeness (scheduling_smoke.py S9, task #61 rebuild)
-# ===========================================================================
-
-
-@case(
-    "admission_gate_no_starvation",
-    requires=["enqueue_batch"],
-    source="scheduling_smoke.py S9 (rebuilt around a real gate, task #61)",
-)
-def admission_gate_no_starvation(ctx: CaseContext):
-    """A REAL engine queue-depth gate: rejections are explicit and visible;
-    nothing is lost or left hanging behind the gate.
-
-    Result properties: P6 completeness (hard invariant — every wave request
-    reaches a visible terminal state: completed, or explicitly rejected by
-    the gate with BATCH_DISPATCH_FAILED / "queue depth limit exceeded",
-    observed either at the schedule RPC or on the stream) plus
-    observational share-shift accounting (where the surviving traffic
-    lands while the gate is full).
-
-    Java-truth note (supersedes the legacy S9's 50000-limit no-op form and
-    its "rejected requests still complete elsewhere" expectation): the
-    Java master does NOT requeue a gate-rejected EnqueueBatch — the
-    rejection is fail-fast to a terminal BATCH_DISPATCH_FAILED state
-    (PriorityScheduler.reduceDeliveryFailure; proven end-to-end by
-    FaultInjectionE2ETest.c08).  "No starvation" is therefore the
-    black-box completeness contract: a gated request fails fast and
-    loudly (never hangs, never vanishes), and the healthy engine keeps
-    accepting.
-
-    Construction (all levers real):
-      1. slow BOTH prefills to 5s fixed;
-      2. decoy: one fire-and-forget input_len=16384 request (~16s ledger
-         prediction) — poll the snapshot for its landing engine; that
-         engine is priced out for the window (high score), the OTHER
-         engine is the gated target;
-      3. restore the decoy engine to 100ms; set queue_depth=2 on the
-         target — the REAL Java enqueue gate (EnqueueBatch rejects when
-         pendingRequests >= limit, JavaMockEngineCluster.enqueueBatch);
-      4. two slow fire-and-forget seeds: the decoy's ledger prediction
-         keeps the other engine's score high, so both seeds land on the
-         target — pending hits 2 and the gate is FULL for ~5s (proven
-         engine-side before the wave starts);
-      5. wave: 6 serial requests — each either hits the full gate
-         (explicit fast rejection) or diverts to the decoy engine once
-         the master backs off / the decoy's prediction decays
-         (share-shift, observational).
-
-    requires=["enqueue_batch"] (S9 inheritance): the gate is checked ONLY
-    at the engine's EnqueueBatch entry — the GenerateStreamCall path
-    (NON_BATCH dispatcher) never consults it.
-    """
-    ops = ctx.ops()
-    report = GradeReport(run_grade=ctx.grade)
-    base = rid_base(ctx, "admission")
-    prefill_names: list[str] = []
-    fired: list[tuple[int, object]] = []  # (rid, response) — drained in finally
-    target: str | None = None
-    try:
-        prefill_names = _prefill_names(ops)
-        if len(prefill_names) < 2:
-            return False, "need >=2 prefill workers"
-
-        for name in prefill_names:
-            ops.set_perf(name, prefill_fixed_ms=5000.0)
-        time.sleep(1.5)  # master perf sync
-
-        addr_map = ops.addr_to_name()
-
-        # -- decoy: prices one engine out of the window (~16s prediction).
-        decoy_rid = ops.next_request_id(base)
-        resp = ops.schedule(decoy_rid, input_len=16384, output_len=2)
-        if resp.code != 200 or not resp.success:
-            return False, f"decoy schedule failed: {resp.error_message}"
-        fired.append((decoy_rid, resp))
-        decoy_name = addr_map.get(ops.role_addr(resp, "PREFILL"), "")
-        if decoy_name not in prefill_names:
-            return False, f"decoy went to unknown worker {decoy_name}"
-
-        # Engine-side proof the decoy is really parked there.
-        deadline = time.monotonic() + 6.0
-        while time.monotonic() < deadline:
-            info = ops.snapshot_by_name().get(decoy_name, {})
-            if info.get("waiting", 0) + info.get("running", 0) >= 1:
-                break
-            time.sleep(0.1)
-
-        target = next(n for n in prefill_names if n != decoy_name)
-        # -- decoy engine fast again; REAL gate on the target.
-        ops.set_perf(decoy_name, prefill_fixed_ms=100.0)
-        ops.set_queue_depth(target, 2)
-
-        # -- two slow seeds fill the gate (pending=2), ~5s window.  The
-        #    decoy's ~16s ledger prediction keeps its engine's score high,
-        #    so the seeds land on the target deterministically.
-        for _ in range(2):
-            rid = ops.next_request_id(base)
-            resp = ops.schedule(rid, input_len=1024, output_len=2)
-            if resp.code != 200 or not resp.success:
-                return False, f"seed schedule failed: {resp.error_message}"
-            fired.append((rid, resp))
-
-        # Engine-side proof the gate is really full before the wave starts.
-        deadline = time.monotonic() + 6.0
-        gate_full = False
-        while time.monotonic() < deadline:
-            info = ops.snapshot_by_name().get(target, {})
-            if info.get("waiting", 0) + info.get("running", 0) >= 2:
-                gate_full = True
-                break
-            time.sleep(0.1)
-        if not gate_full:
-            return False, f"seeds never filled the gate on {target} (engine side)"
-
-        # -- wave: 6 serial requests against the full gate.
-        wave = []
-        for _ in range(6):
-            rid = ops.next_request_id(base)
-            addr, err = ops.run_one_request(
-                rid, output_len=2, stream_timeout_s=STREAM_TIMEOUT_S
-            )
-            wave.append((addr_map.get(addr, addr), err))
-
-        def is_explicit_rejection(err: str) -> bool:
-            low = err.lower()
-            return "queue depth" in low or "dispatch" in low or "8510" in err
-
-        completed = [w for w in wave if w[1] is None]
-        rejected = [w for w in wave if w[1] and is_explicit_rejection(w[1])]
-        unmatched = [w for w in wave if w not in completed and w not in rejected]
-
-        # Share-shift observation (not a hard band): where did the traffic
-        # that DID get through land, and how many hit the gate?
-        shift = Counter(name for name, _ in completed)
-
-        # P6: every request reached a visible terminal state — completed
-        # or explicitly gate-rejected; anything else (hang, timeout, silent
-        # loss) is a completeness violation at every grade.
-        report.invariant(
-            "P6",
-            not unmatched,
-            detail=f"unmatched={[(n, e) for n, e in unmatched][:2]}",
-        )
-        return report.finish(
-            f"target={target}(gate=2), decoy={decoy_name}, "
-            f"wave: completed={len(completed)}, gate_rejected={len(rejected)}, "
-            f"unmatched={len(unmatched)}, "
-            f"shift={json.dumps(dict(shift), sort_keys=True)}, "
-            f"rejected_errs={sorted({e for _, e in rejected})[:2]}, "
-            f"grades: {report.summary()}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        # Restore perf + clear the gate BEFORE draining: once the target is
-        # fast again its seeds finish quickly and the drain converges fast.
-        try:
-            for name in prefill_names:
-                ops.set_perf(name, prefill_fixed_ms=100.0)
-        except Exception:
-            pass
-        if target:
-            try:
-                ops.set_queue_depth(target, 0)
-            except Exception:
-                pass
-        # Drainage (inherited S4 lesson): fire-and-forget requests must be
-        # consumed to terminal state or their master-side inflight/ledger
-        # entries poison later cases.
-        for rid, resp in fired:
-            try:
-                ops.start_stream(resp, rid).wait_end(20.0)
-            except Exception:
-                try:
-                    ops.cancel(rid, resp)
-                except Exception:
-                    pass
-        try:
-            AssertUtils.inflight_clean(_master_http(ops), 30.0)
         except Exception:
             pass

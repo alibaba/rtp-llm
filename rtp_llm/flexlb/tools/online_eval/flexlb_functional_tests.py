@@ -17,10 +17,10 @@ injection is a MECHANISM inside case tests (the engine_fault / status /
 direct categories), not a suite name.
 
 Nine scenario categories (flexlb_ft/cases/, one contract theme per
-module — 68 cases total):
+module — 75 cases total):
 
-    cancel 7 | status 19 | kv 15 | balance 6 | elastic 6
-    engine_fault 7 | master 3 | admission 4 | direct 1
+    cancel 13 | status 19 | kv 15 | balance 6 | elastic 8
+    engine_fault 7 | master 3 | admission 3 | direct 1
 
 Usage:
     python3 flexlb_functional_tests.py --category all --profile batch-window
