@@ -16,6 +16,28 @@
 
 namespace rtp_llm {
 
+struct BlockTreeMatchPolicy {
+    bool enable_device{true};
+    bool enable_host{true};
+    bool enable_disk{true};
+    bool enable_remote{true};
+
+    bool allows(Tier tier) const {
+        switch (tier) {
+            case Tier::DEVICE:
+                return enable_device;
+            case Tier::HOST:
+                return enable_host;
+            case Tier::DISK:
+                return enable_disk;
+            case Tier::REMOTE:
+                return enable_remote;
+            default:
+                return false;
+        }
+    }
+};
+
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
@@ -46,18 +68,25 @@ public:
                     SettledFn                       settled);
 
     // The caller must hold the shared BlockTreeCache mutex.
-    BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys);
+    BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys, const BlockTreeMatchPolicy& policy);
     BlockIndicesType     matchedBlocksForGroup(size_t                                group_id,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void                 shutdown();
 
 private:
-    bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
-                                                                                  size_t  matched_device_blocks,
-                                                                                  int64_t access_time_us) const;
-    BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys);
+    bool validMatch(std::vector<TreeNode*>&     path,
+                    std::vector<bool>&          candidate_valid,
+                    const BlockTreeMatchPolicy& policy) const;
+    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
+                         collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
+                                                   size_t                        matched_device_blocks,
+                                                   int64_t                       access_time_us,
+                                                   const BlockTreeMatchPolicy&   policy) const;
+    BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>&     path,
+                                           const CacheKeysType&        cache_keys,
+                                           const BlockTreeMatchPolicy& policy);
+    Tier                 sourceTier(const GroupSetResource& resource, const BlockTreeMatchPolicy& policy) const;
     StorageRequest       makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool                 commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,

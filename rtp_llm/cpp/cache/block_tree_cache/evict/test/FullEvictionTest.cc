@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
@@ -68,7 +69,7 @@ std::vector<TreeNode*> insertFullSandwich(TieredFullCache& environment) {
     resources[1][0].device_blocks = {11};
     resources[2][0].host_block    = host_block;
     resources[3][0].device_blocks = {12};
-    resources[4][0].disk_block     = disk_block;
+    resources[4][0].disk_block    = disk_block;
     RTP_LLM_CHECK(
         block_tree_cache_test::insertGroupSetResources(*environment.cache, {100, 200, 300, 400, 500}, resources));
     return environment.cache->tree()->findNode({100, 200, 300, 400, 500});
@@ -84,7 +85,7 @@ std::vector<TreeNode*> insertFullLowerTierDescendants(TieredFullCache& environme
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
     resources[2][0].host_block    = host_block;
-    resources[3][0].disk_block     = disk_block;
+    resources[3][0].disk_block    = disk_block;
     RTP_LLM_CHECK(block_tree_cache_test::insertGroupSetResources(*environment.cache, {100, 200, 300, 400}, resources));
     return environment.cache->tree()->findNode({100, 200, 300, 400});
 }
@@ -408,6 +409,37 @@ TEST(FullPruneTest, PrunesDependentFullSubtreeAcrossTiers) {
     EXPECT_FALSE(environment.disk_pool->isAllocated(disk_block));
 }
 
+TEST(FullPruneTest, DirectFullTriggerReleasesEveryTierAtClosureRoot) {
+    DeviceBlockPoolPtr full_device_pool = block_tree_cache_test::makeStructuralDevicePool(0);
+    DeviceBlockPoolPtr swa_device_pool  = block_tree_cache_test::makeStructuralDevicePool(1);
+    auto               swa_host_pool    = block_tree_cache_test::makeHostPool(1, 2);
+    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{full_device_pool}, nullptr, nullptr);
+    auto swa  = std::make_shared<SWAGroupSet>(
+        128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, swa_host_pool, nullptr);
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa});
+    ASSERT_NE(cache, nullptr);
+
+    const BlockIdxType host_block = swa->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
+    resources[0][0].device_blocks = {10};
+    resources[1][0].device_blocks = {11};
+    resources[0][1].device_blocks = {20};
+    resources[1][1].device_blocks = {21};
+    resources[1][1].host_block    = host_block;
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200}, resources));
+
+    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+
+    const auto remaining = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(remaining.size(), 1u);
+    EXPECT_EQ(cache->getStats().tree_node_count, 1u);
+    EXPECT_FALSE(full_device_pool->isAllocated(11));
+    EXPECT_FALSE(swa_device_pool->isAllocated(21));
+    EXPECT_FALSE(swa_host_pool->isAllocated(host_block));
+    EXPECT_EQ(swa_host_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+}
+
 TEST(FullPruneTest, PrunesBranchedFullSubtreeBottomUp) {
     TieredFullCache    environment      = makeTieredFullCache();
     const size_t       host_free_before = environment.host_pool->freeBlocksNum();
@@ -653,6 +685,39 @@ TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
     const auto remaining_path = cache->tree()->findNode({100, 200, 300});
     EXPECT_TRUE(remaining_path.empty());
     EXPECT_FALSE(full_host_pool->isAllocated(host_descendant));
+}
+
+TEST(FullPruneTest, CascadedFullTriggerReleasesEveryTierAtClosureRoot) {
+    DeviceBlockPoolPtr full_device_pool   = block_tree_cache_test::makeStructuralDevicePool(0);
+    DeviceBlockPoolPtr swa_device_pool    = block_tree_cache_test::makeStructuralDevicePool(1);
+    DeviceBlockPoolPtr linear_device_pool = block_tree_cache_test::makeStructuralDevicePool(2);
+    auto               linear_host_pool   = block_tree_cache_test::makeHostPool(1, 1);
+    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{full_device_pool}, nullptr, nullptr);
+    auto swa =
+        std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, nullptr, nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{linear_device_pool}, linear_host_pool, nullptr);
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa, linear});
+    ASSERT_NE(cache, nullptr);
+
+    const BlockIdxType host_block = linear->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(3));
+    resources[0][0].device_blocks = {10};
+    resources[0][1].device_blocks = {20};
+    resources[0][2].device_blocks = {30};
+    resources[0][2].host_block    = host_block;
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100}, resources));
+
+    EXPECT_EQ(cache->evictForGroup(/*group_id=*/1, /*num_blocks=*/1), 1);
+
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+    EXPECT_FALSE(full_device_pool->isAllocated(10));
+    EXPECT_FALSE(swa_device_pool->isAllocated(20));
+    EXPECT_FALSE(linear_device_pool->isAllocated(30));
+    EXPECT_FALSE(linear_host_pool->isAllocated(host_block));
+    EXPECT_EQ(linear_host_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
 }
 
 TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {

@@ -40,8 +40,8 @@ using block_tree_cache_test::unreferenceDeviceBlocksForTest;
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().settleEvictionLocked(
     std::declval<const EvictionTask&>(), std::declval<const EvictionTaskResult&>())));
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().abortEvictionLocked(std::declval<const EvictionTask&>())));
-static_assert(noexcept(std::declval<BlockTreeEvictor&>().runEvictionTask(
-    std::declval<std::shared_ptr<const EvictionTask>>())));
+static_assert(
+    noexcept(std::declval<BlockTreeEvictor&>().runEvictionTask(std::declval<std::shared_ptr<const EvictionTask>>())));
 static_assert(noexcept(std::declval<BlockTreeEvictor&>().finalizeEvictionLocked(
     std::declval<const EvictionTask&>(), std::declval<const EvictionTaskResult&>())));
 
@@ -296,9 +296,9 @@ public:
     }
 
 private:
-    std::mutex                                             mutex_;
-    std::condition_variable                                cv_;
-    std::vector<std::vector<TransferDescriptor>>           descriptors_;
+    std::mutex                                              mutex_;
+    std::condition_variable                                 cv_;
+    std::vector<std::vector<TransferDescriptor>>            descriptors_;
     std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts_;
 };
 
@@ -335,28 +335,29 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
 
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/1, "eviction_async_test");
     ASSERT_TRUE(task_pool.start());
-    auto deferred_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
-    BlockTransferDispatcher dispatcher(deferred_engine);
+    auto                          deferred_engine = std::make_shared<DeferredEvictionTransferEngine>(groups);
+    BlockTransferDispatcher       dispatcher(deferred_engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    std::mutex cache_mutex;
-    size_t     settled_count = 0;
-    BlockTreeEvictor evictor(&tree,
-                             EvictionPolicy::LRU,
-                             EvictionPolicy::LRU,
-                             EvictionPolicy::FIFO,
-                             &dispatcher,
-                             &task_pool,
-                             metrics_reporter,
-                             cache_mutex,
-                             0,
-                             0,
-                             [](Tier) { return true; },
-                             [&](bool, bool) { ++settled_count; });
+    std::mutex                    cache_mutex;
+    size_t                        settled_count = 0;
+    BlockTreeEvictor              evictor(
+        &tree,
+        EvictionPolicy::LRU,
+        EvictionPolicy::LRU,
+        EvictionPolicy::FIFO,
+        &dispatcher,
+        &task_pool,
+        metrics_reporter,
+        cache_mutex,
+        0,
+        0,
+        [](Tier) { return true; },
+        [&](bool, bool) { ++settled_count; });
 
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
     const BlockIdxType source = device_blocks.front().front();
-    auto inserted = tree.insertNode({100}, {{makeResource(Tier::DEVICE, source)}}, /*collect_path=*/false);
+    auto inserted             = tree.insertNode({100}, {{makeResource(Tier::DEVICE, source)}}, /*collect_path=*/false);
     unreferenceDeviceBlocksForTest(*group, device_blocks, BlockTreeRefType::CACHE);
     evictor.onInserted(inserted);
 
@@ -508,10 +509,9 @@ public:
 
     EvictionTaskResult runTransfer(const EvictionTask& task) {
         std::optional<EvictionTaskResult> result;
-        evictor_->task_runner_->runTransfer(
-            std::make_shared<EvictionTask>(task),
-            *evictor_->metrics_reporter_,
-            [&](EvictionTaskResult completed) { result = std::move(completed); });
+        evictor_->task_runner_->runTransfer(std::make_shared<EvictionTask>(task),
+                                            *evictor_->metrics_reporter_,
+                                            [&](EvictionTaskResult completed) { result = std::move(completed); });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted eviction transfer did not complete inline";
             return {};
@@ -537,7 +537,7 @@ public:
             }
             if (resource.hasTier(Tier::DISK)) {
                 const BlockIdxType block = resource.disk_block;
-                resource.disk_block       = NULL_BLOCK_IDX;
+                resource.disk_block      = NULL_BLOCK_IDX;
                 groups_[group_set_id]->releaseSingleBlock(Tier::DISK, block, BlockTreeRefType::CACHE);
             }
         }
@@ -1177,6 +1177,154 @@ TEST_F(BlockTreeEvictorTest, EvictForceDropsSelectedVictim) {
     EXPECT_EQ(device_pool_->freeBlocksNum(), 128u);
 }
 
+TEST_F(BlockTreeEvictorTest, DeviceDropUsesExistingHostWhenDiskPoolIsFull) {
+    auto host_pool = makePageableHostPool(1);
+    auto disk_pool = makeTestDiskPool(1, "device_drop_existing_host_disk");
+    ASSERT_NE(host_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+    resetGroup(host_pool, disk_pool);
+
+    const BlockIdxType disk_blocker = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(disk_blocker));
+
+    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    ASSERT_EQ(device_blocks.front().size(), 1u);
+    const BlockIdxType device_block = device_blocks.front().front();
+    const BlockIdxType host_block   = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+
+    GroupSetResource resource = makeResource(Tier::DEVICE, device_block);
+    resource.host_block       = host_block;
+    auto      result          = insert({100}, {{resource}});
+    TreeNode* node            = insertedNode(result);
+    ASSERT_NE(node, nullptr);
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
+    ASSERT_EQ(node->group_set_resources[0].servingTierCount(), 2u);
+    ASSERT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    ASSERT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
+
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false));
+    ASSERT_EQ(tree_->size(), 1u);
+    const GroupSetResource& retained = node->group_set_resources[0];
+    EXPECT_FALSE(retained.hasTier(Tier::DEVICE));
+    EXPECT_TRUE(retained.hasTier(Tier::HOST));
+    EXPECT_TRUE(retained.isValidSteadyState());
+    EXPECT_FALSE(device_pool_->isAllocated(device_block));
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 0u);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
+    EXPECT_TRUE(disk_pool->isAllocated(disk_blocker));
+
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::HOST, /*force_drop=*/true));
+    EXPECT_EQ(tree_->size(), 0u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
+    group_->releaseSingleBlock(Tier::DISK, disk_blocker, BlockTreeRefType::CACHE);
+    EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
+}
+
+TEST_F(BlockTreeEvictorTest, DeviceDropUsesExistingDiskWhenHostPoolIsFull) {
+    auto host_pool = makePageableHostPool(1);
+    auto disk_pool = makeTestDiskPool(1, "device_drop_existing_disk_host");
+    ASSERT_NE(host_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+    resetGroup(host_pool, disk_pool);
+
+    const BlockIdxType host_blocker = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_blocker));
+    const BlockIdxType disk_block = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(disk_block));
+    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    const BlockIdxType device_block = device_blocks.front().front();
+
+    GroupSetResource resource = makeResource(Tier::DEVICE, device_block);
+    resource.disk_block       = disk_block;
+    auto      result          = insert({100}, {{resource}});
+    TreeNode* node            = insertedNode(result);
+    ASSERT_NE(node, nullptr);
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
+
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false));
+    ASSERT_EQ(tree_->size(), 1u);
+    const GroupSetResource& retained = node->group_set_resources[0];
+    EXPECT_FALSE(retained.hasTier(Tier::DEVICE));
+    EXPECT_TRUE(retained.hasTier(Tier::DISK));
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DISK), 1u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
+    EXPECT_TRUE(host_pool->isAllocated(host_blocker));
+
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::DISK, /*force_drop=*/true));
+    EXPECT_EQ(tree_->size(), 0u);
+    group_->releaseSingleBlock(Tier::HOST, host_blocker, BlockTreeRefType::CACHE);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
+}
+
+TEST_F(BlockTreeEvictorTest, LowerTierAdoptionPreservesTopCandidateMetadata) {
+    auto host_pool = makePageableHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+
+    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    auto      first = insert({100}, {{makeResource(Tier::DEVICE, device_blocks.front().front())}});
+    TreeNode* node  = insertedNode(first);
+    ASSERT_NE(node, nullptr);
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
+    evictor_->onMatched({node});
+    const CandidateMeta before = node->group_set_resources[0].candidate_meta;
+
+    const BlockIdxType host_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+    GroupSetResource host_resource;
+    host_resource.host_block = host_block;
+    const auto adopted       = insert({100}, {{host_resource}});
+    ASSERT_EQ(adopted.adopted_nodes.size(), 1u);
+    EXPECT_EQ(adopted.adopted_nodes.front().old_top_tiers, (std::vector<Tier>{Tier::DEVICE}));
+    EXPECT_EQ(adopted.adopted_nodes.front().new_top_tiers, (std::vector<Tier>{Tier::DEVICE}));
+
+    const CandidateMeta& after = node->group_set_resources[0].candidate_meta;
+    EXPECT_EQ(after.last_access_seq, before.last_access_seq);
+    EXPECT_EQ(after.admission_seq, before.admission_seq);
+    EXPECT_EQ(after.hit_count, before.hit_count);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
+
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/true));
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::HOST, /*force_drop=*/true));
+    EXPECT_EQ(tree_->size(), 0u);
+}
+
+TEST_F(BlockTreeEvictorTest, HigherTierAdoptionMovesTheSoleCandidate) {
+    auto host_pool = makePageableHostPool(1);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+
+    const BlockIdxType host_block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+    GroupSetResource host_resource;
+    host_resource.host_block = host_block;
+    auto      first          = insert({100}, {{host_resource}});
+    TreeNode* node           = insertedNode(first);
+    ASSERT_NE(node, nullptr);
+    ASSERT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
+
+    MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    const auto adopted = insert({100}, {{makeResource(Tier::DEVICE, device_blocks.front().front())}});
+    unreferenceDeviceBlocksForTest(*group_, device_blocks, BlockTreeRefType::CACHE);
+    ASSERT_EQ(adopted.adopted_nodes.size(), 1u);
+    EXPECT_EQ(adopted.adopted_nodes.front().old_top_tiers, (std::vector<Tier>{Tier::HOST}));
+    EXPECT_EQ(adopted.adopted_nodes.front().new_top_tiers, (std::vector<Tier>{Tier::DEVICE}));
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
+    EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+    EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::HOST).has_value());
+
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/true));
+    EXPECT_TRUE(evictor_->evictLocked(/*group_set_id=*/0, Tier::HOST, /*force_drop=*/true));
+    EXPECT_EQ(tree_->size(), 0u);
+}
+
 TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
@@ -1367,7 +1515,7 @@ TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCan
         insert({100, 200}, {{makeResource(Tier::DEVICE, parent_block)}, {makeResource(Tier::DEVICE, child_block)}});
     ASSERT_TRUE(fill_result.inserted_nodes.empty());
     ASSERT_EQ(fill_result.adopted_nodes.size(), 1u);
-    EXPECT_EQ(fill_result.adopted_nodes.front().first, insertedNode(empty_child));
+    EXPECT_EQ(fill_result.adopted_nodes.front().node, insertedNode(empty_child));
 
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
     const std::optional<TransferDescriptor> victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
@@ -2195,7 +2343,7 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     EXPECT_EQ(disk_victim->group_set_id, 1);
 
     insertedNode(first)->group_set_resources[0].evictFromTier(Tier::DEVICE);
-    insertedNode(first)->group_set_resources[1].disk_block   = NULL_BLOCK_IDX;
+    insertedNode(first)->group_set_resources[1].disk_block  = NULL_BLOCK_IDX;
     insertedNode(second)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     unreferenceDeviceBlocksForTest(*group0, device_set, BlockTreeRefType::CACHE);
     group0->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::CACHE);
@@ -2276,7 +2424,7 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
     unreferenceDeviceBlocksForTest(*group, device_set, BlockTreeRefType::CACHE);
     evictor.onInserted(mixed);
 
-    TreeNode* filled_node = mixed.adopted_nodes.front().first;
+    TreeNode* filled_node = mixed.adopted_nodes.front().node;
     TreeNode* new_node    = mixed.inserted_nodes.front();
     ASSERT_NE(filled_node, nullptr);
     ASSERT_NE(new_node, nullptr);

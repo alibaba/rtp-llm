@@ -11,7 +11,7 @@
 namespace rtp_llm {
 
 // Sorting metadata for a candidate node. A single copy per GroupSetResource follows the
-// data to its current serving tier (steady-state single-tier-service invariant).
+// highest resident tier, which is the resource's sole eviction candidate.
 struct CandidateMeta {
     uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
     uint64_t admission_seq{0};    // FIFO: logical clock of entering the current tier
@@ -39,11 +39,14 @@ struct GroupSetResource {
     // L3: Disk — one disk resource
     BlockIdxType disk_block{NULL_BLOCK_IDX};
 
-    // Async migration state and the single sorting-metadata copy (current serving tier).
+    // Async migration state and one sorting-metadata copy shared by resident tiers.
     GroupSetTransferState transfer_state{GroupSetTransferState::IDLE};
+    // Source tier reserved by DEMOTING/LOAD_PENDING/LOADING. It lets a second
+    // lookup join only the same real lower-tier load when multiple copies exist.
+    Tier transfer_source_tier{Tier::NONE};
     // The source remains owned by the in-flight operation, but its target must no longer be installed.
-    bool                  transfer_detached{false};
-    CandidateMeta         candidate_meta;
+    bool          transfer_detached{false};
+    CandidateMeta candidate_meta;
 
     bool hasTier(Tier tier) const {
         switch (tier) {
@@ -64,7 +67,8 @@ struct GroupSetResource {
                + static_cast<size_t>(hasTier(Tier::DISK));
     }
     bool isValidSteadyState() const {
-        return transfer_state == GroupSetTransferState::IDLE && servingTierCount() <= 1;
+        return transfer_state == GroupSetTransferState::IDLE && transfer_source_tier == Tier::NONE
+               && (!hasTier(Tier::DEVICE) || hasCompleteDeviceValue());
     }
     bool is_empty() const {
         return !hasTier(Tier::DEVICE) && !hasTier(Tier::HOST) && !hasTier(Tier::DISK);
