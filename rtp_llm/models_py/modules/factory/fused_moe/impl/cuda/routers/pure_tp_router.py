@@ -60,9 +60,13 @@ class PureTpRouterBase(FusedMoeDataRouter):
         """Check if PureTpRouter can handle the configuration"""
         resolver = MoeConfigResolver()
         # Keep the existing CUDA strategy coverage for EP-equivalent layouts.
-        # The unified TP all-reduce optimization is independently restricted to
-        # ep_size == 1 in GenericMoeLayer, so this router selection predicate
-        # must not narrow the pre-existing CUDA policy here.
+        # Note this predicate now also decides who gets GenericMoeLayer's unified
+        # TP all-reduce: that fold keys off supports_skip_tp_allreduce, which this
+        # base advertises, and no longer off ep_size == 1.  So admitting a layout
+        # here admits it to the fold as well -- which is correct for both arms,
+        # since each leaves finalize() owning a partial output, but it does mean a
+        # future arm whose finalize completes the output on its own must override
+        # supports_skip_tp_allreduce rather than rely on this check.
         checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
         checker.check(resolver.use_all_gather(config))
 

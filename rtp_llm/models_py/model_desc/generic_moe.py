@@ -148,15 +148,36 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
-        self.use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
-        )
+        # The fold is legal exactly when the routed output is still TP-partial on
+        # its way out of the router, and supports_skip_tp_allreduce is the property
+        # that says so: it advertises that finalize() owns the TP reduce and can be
+        # asked to skip it.  ep_size is deliberately not part of the predicate,
+        # because both pure-TP arms leave finalize() holding a partial sum, just for
+        # different reasons: at ep_size == 1 every rank owns all experts and slices
+        # the intermediate dim, while at ep_size == tp_size the loader splits the
+        # experts themselves (expert_num // ep_size per rank, see
+        # PureTpRouterBase.expert_start_id) so each rank contributes only its own
+        # experts' results.  An EP router (DeepEP, MoriEP) returns an output its own
+        # combine already completed and does not advertise the capability.
+        # Restricting the fold to ep_size == 1 therefore left the ep_size == tp_size
+        # layout -- which PureTpRouterBase.check_conditions admits on CUDA -- paying
+        # two small TP collectives per MoE layer where one is enough.  ROCm keeps
+        # its own PureTpRouter at ep_size == 1, so the widened arm never reaches the
+        # fold there.  The widened arm is exercised end to end by the kimi_linear
+        # and qwen3_next tp2 smoke cases: both set moe_style == 2 and leave ep_size
+        # to be auto-set to tp_size, and their goldens moved when this fold turned
+        # on, which is what pins the reassociated sum on real multi-rank hardware.
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
             and self.ffn_tp_size > 1
-            and self.ep_size == 1
             and self.ffn_tp_size == router_tp_size
             and router.supports_skip_tp_allreduce
+        )
+        self.use_ep_shared_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and not self.use_unified_tp_allreduce
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
