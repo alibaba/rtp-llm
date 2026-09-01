@@ -16,6 +16,19 @@ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_jit_cache-0.6.9-cp39-abi3-manylinux_2_28_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_cubin-0.6.9-py3-none-any.whl
+# CUTLASS DSL 4.4.0-4.4.2 has divergent libs-base/libs-cu13 payloads at the
+# same paths. If libs-base's _cutlass_ir.so wins, SM12x MmaMXF4NVF4Op lowering
+# emits malformed "_mma" PTX and FlashInfer B12X NVFP4 JIT fails with
+# "Unexpected instruction types specified for '_mma'". Install libs-cu13 so
+# the working 4.4.2 payload overrides libs-base. NVIDIA tracks this as
+# https://github.com/NVIDIA/cutlass/issues/3170 (also listed in the 4.6.0 fixes:
+# https://github.com/NVIDIA/cutlass/discussions/3385).
+# This selects only the CUTLASS DSL runtime/JIT payload; it does not replace the
+# CUDA toolkit, Torch cu129, or RTP-LLM's Bazel --config=cuda12_9 compilation.
+# CUDA 12.9 remains supported per NVIDIA's compatibility documentation:
+# https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/quick_start.html
+# must run `pip install nvidia-cutlass-dsl-libs-cu13==4.4.2 --force-reinstall` to override any previous install
+nvidia-cutlass-dsl-libs-cu13==4.4.2
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/rtp_kernel_260612/rtp_kernel-0.1.0%2B125c29e5-cp310-cp310-linux_x86_64.whl

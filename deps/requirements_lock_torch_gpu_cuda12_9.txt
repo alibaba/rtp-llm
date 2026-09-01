@@ -2314,7 +2314,21 @@ nvidia-cutlass-dsl-libs-base==4.4.2 \
     --hash=sha256:95db0c8d1d56992e2f5c2dcd5b3baab0297bedc0cbcefc1e70b57acd934e7b23 \
     --hash=sha256:af96c1170569138b3cb965202907fbf5ab95d7c1dcc210952d00cdf9ab7b859a \
     --hash=sha256:b59a052cbfb9a25747d1b6d413615456bea38d1f377da085af07c0d86a4c8b39
-    # via nvidia-cutlass-dsl
+    # via
+    #   nvidia-cutlass-dsl
+    #   nvidia-cutlass-dsl-libs-cu13
+nvidia-cutlass-dsl-libs-cu13==4.4.2 \
+    --hash=sha256:1ac533b6131bbf46fac78790c29d68ac40831b1cfe0a63be96ebe1bf9748035e \
+    --hash=sha256:1e82c30583b816a587becd61a9e26827fcdad7767d859352ffdb4206155ac879 \
+    --hash=sha256:2fb575c73233a99d3e12d27f7411c9161e8335200c652500e5f79be2bff7dca8 \
+    --hash=sha256:9f41ea01b18e4eb16ff45c595480efe6323450b77a8abbcccb208ac7431c3817 \
+    --hash=sha256:b066b9b9ac9cb27050c0a024092fd116cc7c68fcd5b4bb936489e35d2c6e294f \
+    --hash=sha256:b3bd6ea3ecc65cf1200a1efd429dd854fcfc27a7e1bc3986f409d5b2f085ff88 \
+    --hash=sha256:b67535ce55160207330a877ccb90837088dc79b730e9e2e66450fcc955365529 \
+    --hash=sha256:c7614afdbc03841db51abd84a542b79837d12a10b6f735bc58892fd2a8e5298b \
+    --hash=sha256:df78bc75efb54ed4e021c41d7b2d5a1fd97723bcec74108392013a2446d12b1a \
+    --hash=sha256:f2a7b742600ddd738b2b692f5a2c83abf7d1f863b70d5c382445d1a2cd74e8a7
+    # via -r deps/requirements_torch_gpu_cuda12_9.txt
 nvidia-ml-py==13.580.82 \
     --hash=sha256:0c028805dc53a0e2a6985ea801888197765ac2ef8f1c9e29a7bf0d3616a5efc7 \
     --hash=sha256:4361db337b0c551e2d101936dae2e9a60f957af26818e8c0c3a1f32b8db8d0a7
