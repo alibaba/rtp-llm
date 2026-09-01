@@ -1,6 +1,5 @@
 import unittest
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from rtp_llm.config.exceptions import (
@@ -9,13 +8,21 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    FlexlbScheduleResponsePB,
+)
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
 )
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
-from rtp_llm.server.master_client import FlexlbResponse, MasterClient
+from rtp_llm.server.master_client import (
+    FlexlbResponse,
+    MasterClient,
+    _ScheduleAttemptSucceeded,
+    _ScheduleAttemptTransportFailure,
+)
 
 
 class _FakeTokenIds:
@@ -211,11 +218,15 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             host_service=_FakeHostService(), master_config=_FakeMasterConfig()
         )
         master_client._send_schedule_request = AsyncMock(
-            return_value=SimpleNamespace(
-                code=int(ExceptionType.PRIORITY_ADMISSION_REJECTED),
-                error_message="same-priority request ahead",
-                admission_reject_reason=int(AdmissionRejectReason.SAME_PRIORITY_AHEAD),
-                queue_length=7,
+            return_value=_ScheduleAttemptSucceeded(
+                FlexlbScheduleResponsePB(
+                    code=int(ExceptionType.PRIORITY_ADMISSION_REJECTED),
+                    error_message="same-priority request ahead",
+                    admission_reject_reason=int(
+                        AdmissionRejectReason.SAME_PRIORITY_AHEAD
+                    ),
+                    queue_length=7,
+                )
             )
         )
         visitor = self._master_route_visitor(master_client)
@@ -247,7 +258,9 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         master_client = MasterClient(
             host_service=_FakeHostService(), master_config=_FakeMasterConfig()
         )
-        master_client._send_schedule_request = AsyncMock(return_value=None)
+        master_client._send_schedule_request = AsyncMock(
+            return_value=_ScheduleAttemptTransportFailure()
+        )
         visitor = self._master_route_visitor(master_client)
 
         with patch(
