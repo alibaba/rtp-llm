@@ -40,7 +40,7 @@ pynvml
 pyodps
 pyOpenSSL==24.1.0
 safetensors
-sentence-transformers==2.7.0
+sentence-transformers==5.2.0
 sentencepiece==0.2.0
 setproctitle
 setuptools==60.5.0
@@ -48,7 +48,7 @@ sympy
 thrift
 tiktoken==0.7.0
 timm==0.9.12
-transformers==4.51.2
+transformers==5.10.4
 typing-extensions
 uvicorn==0.30.0
 watchdog==6.0.0
@@ -56,4 +56,4 @@ xfastertransformer_devel==1.8.1.1 ; platform_machine == "x86_64"
 xfastertransformer_devel_icx==1.8.1.1 ; platform_machine == "x86_64"
 zstandard==0.25.0
 pybind11_stubgen
-xgrammar==0.2.5
+xgrammar==0.2.3

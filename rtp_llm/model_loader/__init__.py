@@ -12,6 +12,7 @@ from .ffn_weight import (
 )
 from .group_wise_quant_weight import GroupWiseWeight
 from .mixed_fp4_quant_weight import MixedFp4Weight
+from .mxfp8_quant_weight import Mxfp8Weight
 from .omni_quant_weight import OmniQuantWeightInfo
 from .online_modelopt_fp4_quant_weight import (
     OnlineMegaMoeFp4FromFp8Weight,
