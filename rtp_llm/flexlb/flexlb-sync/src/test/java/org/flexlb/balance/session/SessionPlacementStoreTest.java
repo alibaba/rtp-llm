@@ -14,8 +14,8 @@ class SessionPlacementStoreTest {
         AtomicLong now = new AtomicLong(1_000L);
         SessionPlacementStore store = new SessionPlacementStore(10, now::get);
 
-        store.record("model-a", "session-1", "10.0.0.1:9000", 101L);
-        store.record("model-b", "session-1", "10.0.0.2:9000", 102L);
+        record(store, "model-a", "session-1", "10.0.0.1:9000", 101L);
+        record(store, "model-b", "session-1", "10.0.0.2:9000", 102L);
 
         assertEquals("10.0.0.1:9000",
                 store.find("model-a", "session-1", 500L).orElseThrow().ipPort());
@@ -31,10 +31,10 @@ class SessionPlacementStoreTest {
         AtomicLong now = new AtomicLong(1_000L);
         SessionPlacementStore store = new SessionPlacementStore(2, now::get);
 
-        store.record("model", "session-1", "10.0.0.1:9000", 101L);
-        store.record("model", "session-2", "10.0.0.2:9000", 102L);
-        store.record("model", "session-3", "10.0.0.3:9000", 103L);
-        store.record("model", "x".repeat(257), "10.0.0.4:9000", 104L);
+        record(store, "model", "session-1", "10.0.0.1:9000", 101L);
+        record(store, "model", "session-2", "10.0.0.2:9000", 102L);
+        record(store, "model", "session-3", "10.0.0.3:9000", 103L);
+        record(store, "model", "x".repeat(257), "10.0.0.4:9000", 104L);
         store.cleanUp();
 
         assertTrue(store.estimatedSize() <= 2);
@@ -44,7 +44,7 @@ class SessionPlacementStoreTest {
     @Test
     void invalidationRemovesNewSessionPlacement() {
         SessionPlacementStore store = new SessionPlacementStore();
-        store.record("model", "session-1", "10.0.0.1:9000", 101L);
+        record(store, "model", "session-1", "10.0.0.1:9000", 101L);
 
         store.reset("model", "session-1");
 
@@ -75,5 +75,10 @@ class SessionPlacementStoreTest {
         store.record("model", "session-2", "10.0.0.1:9000", 101L, 0L);
 
         assertTrue(store.find("model", "session-2", 1_000L).isEmpty());
+    }
+
+    private static void record(SessionPlacementStore store, String model, String sessionId,
+                               String ipPort, long requestId) {
+        store.record(model, sessionId, ipPort, requestId, store.currentEpoch(model, sessionId));
     }
 }

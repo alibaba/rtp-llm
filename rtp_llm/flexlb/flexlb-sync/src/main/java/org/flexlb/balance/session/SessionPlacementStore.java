@@ -42,10 +42,6 @@ public final class SessionPlacementStore {
         return Optional.of(placement);
     }
 
-    public void record(String model, String sessionId, String ipPort, long requestId) {
-        record(model, sessionId, ipPort, requestId, currentEpoch(model, sessionId));
-    }
-
     public void record(String model, String sessionId, String ipPort,
                        long requestId, long expectedEpoch) {
         if (!valid(sessionId) || ipPort == null || ipPort.isBlank()) {

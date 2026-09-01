@@ -85,7 +85,7 @@ class ShortestTtftCacheAffinityTest {
         useFixedCandidatePool(config, 1);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 50);
-        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        record("10.0.0.2:8080");
         BalanceContext context = buildContext(1000, 101L, config);
         markEstablished(context, "kimi-k3", "session-1");
 
@@ -104,7 +104,7 @@ class ShortestTtftCacheAffinityTest {
         config.getRouter().getRoles().getPrefill().setCacheAffinity(cacheAffinity);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
-        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.1:8080", 1L);
+        record("10.0.0.1:8080");
         stubCacheMatches(Map.of("10.0.0.2:8080", 3));
         BalanceContext context = buildContext(1000, 102L, config);
         markEstablished(context, "kimi-k3", "session-1");
@@ -121,7 +121,7 @@ class ShortestTtftCacheAffinityTest {
         useFixedCandidatePool(config, 1);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 50);
-        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        record("10.0.0.2:8080");
         BalanceContext context = buildContext(1000, 103L, config);
         Request request = context.getRequest();
         request.setModel("kimi-k3");
@@ -142,7 +142,7 @@ class ShortestTtftCacheAffinityTest {
         useFixedCandidatePool(config, 1);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 50);
-        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L);
+        record("10.0.0.2:8080");
         BalanceContext context = buildContext(1000, 104L, config);
         Request request = context.getRequest();
         request.setModel("kimi-k3");
@@ -471,6 +471,11 @@ class ShortestTtftCacheAffinityTest {
         context.getRequest().setSessionSchemaVersion(1);
         context.getRequest().setInferenceSessionId(sessionId);
         context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
+    }
+
+    private void record(String ipPort) {
+        sessionPlacementStore.record("kimi-k3", "session-1", ipPort, 1L,
+                sessionPlacementStore.currentEpoch("kimi-k3", "session-1"));
     }
 
     private void stubCacheMatches(Map<String, Integer> matches) {
