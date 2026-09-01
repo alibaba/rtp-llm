@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 // REBASE CONFLICT CONTEXT(518707c73): keep new base logits-processor state
@@ -177,6 +178,12 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
                             "MTP multimodal feature/location count mismatch: features=%zu locs=%ld",
                             features.size(),
                             locs.numel());
+    const bool  has_extra_input = model_input.mm_extra_input.has_value() && !model_input.mm_extra_input->empty();
+    const auto* extra_input     = has_extra_input ? &model_input.mm_extra_input.value() : nullptr;
+    RTP_LLM_CHECK_WITH_INFO(!has_extra_input || extra_input->size() == features.size(),
+                            "MTP mm_extra_input count mismatch: extra_input=%zu features=%zu",
+                            extra_input ? extra_input->size() : 0,
+                            features.size());
 
     std::vector<int64_t> request_starts(input_lengths_cpu.numel() + 1, 0);
     const auto*          lengths = input_lengths_cpu.data_ptr<int32_t>();
@@ -188,17 +195,32 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
         request_starts[request + 1] = request_starts[request] + lengths[request];
     }
 
-    auto output =
-        torch::empty({locs.numel()}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+    std::vector<torch::Tensor> shifted_features;
+    std::vector<torch::Tensor> shifted_extra_input;
+    std::vector<int32_t>       shifted_locs;
+    shifted_features.reserve(features.size());
+    shifted_locs.reserve(features.size());
+    if (has_extra_input) {
+        shifted_extra_input.reserve(extra_input->size());
+    }
+
     const auto* src_locs = locs.data_ptr<int32_t>();
-    auto*       dst_locs = output.data_ptr<int32_t>();
     for (int64_t feature_idx = 0; feature_idx < locs.numel(); ++feature_idx) {
+        const auto& feature = features[feature_idx];
+        RTP_LLM_CHECK_WITH_INFO(feature.defined() && feature.dim() == 2,
+                                "MTP multimodal feature %ld must be a defined 2-D tensor",
+                                feature_idx);
         const int64_t feature_start = src_locs[feature_idx];
-        const int64_t feature_len   = features[feature_idx].size(0);
+        const int64_t feature_len   = feature.size(0);
         const int64_t feature_end   = feature_start + feature_len;
-        int64_t       owner         = -1;
+        RTP_LLM_CHECK_WITH_INFO(feature_start >= 0 && feature_len > 0,
+                                "MTP multimodal feature %ld has invalid range [%ld,%ld)",
+                                feature_idx,
+                                feature_start,
+                                feature_end);
+        int64_t owner = -1;
         for (int64_t request = 0; request < input_lengths_cpu.numel(); ++request) {
-            if (feature_start < request_starts[request + 1] && feature_end > request_starts[request]) {
+            if (feature_start >= request_starts[request] && feature_start < request_starts[request + 1]) {
                 owner = request;
                 break;
             }
@@ -208,19 +230,49 @@ void shiftMtpMultimodalLocations(GptModelInputs& model_input, const torch::Tenso
                                 feature_idx,
                                 feature_start,
                                 feature_end);
-        // A global multimodal feature may extend beyond the current prefill
-        // chunk. CP or the MTP embedding injector consumes only its overlap
-        // with the current local input, so do not reject a valid partial
-        // feature here. The feature must still overlap at least one request.
-        // MTP shifts each request in place and overwrites its last slot, so
-        // packed request boundaries and global offsets remain unchanged. The
-        // owner is only used to validate the request span; it must not be
-        // subtracted from the packed global location.
-        dst_locs[feature_idx] = static_cast<int32_t>(feature_start - 1);
+        RTP_LLM_CHECK_WITH_INFO(feature_end <= request_starts[owner + 1],
+                                "MTP multimodal feature %ld [%ld,%ld) crosses request %ld boundary [%ld,%ld)",
+                                feature_idx,
+                                feature_start,
+                                feature_end,
+                                owner,
+                                request_starts[owner],
+                                request_starts[owner + 1]);
+
+        // MTP removes the first token of every request and writes the sampled
+        // token into that request's last slot. A feature that starts at the
+        // request boundary therefore loses its first row as well; all other
+        // features simply move left by one packed position. The request owner
+        // is used only to detect this boundary and must not be subtracted from
+        // the packed global location.
+        const bool    starts_at_request = feature_start == request_starts[owner];
+        const int64_t feature_offset    = starts_at_request ? 1 : 0;
+        const int64_t shifted_len       = feature_len - feature_offset;
+        if (shifted_len <= 0) {
+            continue;
+        }
+
+        shifted_features.emplace_back(feature.slice(0, feature_offset, feature_len).contiguous());
+        shifted_locs.emplace_back(static_cast<int32_t>(starts_at_request ? feature_start : feature_start - 1));
+        if (has_extra_input) {
+            shifted_extra_input.emplace_back(
+                sliceMultimodalExtraInput((*extra_input)[feature_idx], feature, feature_offset, feature_len));
+        }
     }
-    model_input.mm_features_locs = model_input.mm_features_locs.is_cuda() ?
-                                       output.to(model_input.mm_features_locs.device(), /*non_blocking=*/true) :
-                                       output;
+
+    auto shifted_locs_cpu = torch::empty({static_cast<int64_t>(shifted_locs.size())},
+                                         torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+    if (!shifted_locs.empty()) {
+        std::memcpy(shifted_locs_cpu.data_ptr<int32_t>(), shifted_locs.data(), shifted_locs.size() * sizeof(int32_t));
+    }
+    model_input.multimodal_features = std::move(shifted_features);
+    if (has_extra_input) {
+        model_input.mm_extra_input = std::move(shifted_extra_input);
+    }
+    model_input.mm_features_locs =
+        model_input.mm_features_locs.is_cuda() ?
+            shifted_locs_cpu.to(model_input.mm_features_locs.device(), /*non_blocking=*/true) :
+            shifted_locs_cpu;
 }
 
 void shiftMtpMultimodalMetadata(GptModelInputs& model_input, const torch::Tensor& input_lengths) {

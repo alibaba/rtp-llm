@@ -102,31 +102,6 @@ class MultimodalEmbeddingTest(TestCase):
             ):
                 self._run_multimodal_embedding_test(*params)
 
-    def test_multimodal_embedding_clips_partial_feature(self):
-        embeddings = torch.zeros(5, 4, device="cuda", dtype=torch.float16)
-        feature = torch.arange(10 * 4, device="cuda", dtype=torch.float16).reshape(
-            10, 4
-        )
-        injector = MultimodalEmbeddingInjector().cuda()
-
-        output = injector(
-            embeddings.clone(),
-            [feature],
-            torch.tensor([-3], device="cuda", dtype=torch.int32),
-        )
-        expected = embeddings.clone()
-        expected[:] = feature[3:8]
-        self.assertTrue(torch.equal(output, expected))
-
-        output = injector(
-            embeddings.clone(),
-            [feature],
-            torch.tensor([3], device="cuda", dtype=torch.int32),
-        )
-        expected = embeddings.clone()
-        expected[3:] = feature[:2]
-        self.assertTrue(torch.equal(output, expected))
-
     def test_multimodal_deepstack_embedding(self):
         for params in itertools.product(
             self.SEQUENCE_LENGTH,
@@ -143,6 +118,42 @@ class MultimodalEmbeddingTest(TestCase):
                 dtype=params[4],
             ):
                 self._run_deepstack_embedding_test(*params)
+
+    def test_rejects_negative_multimodal_locations(self):
+        embeddings = torch.zeros(4, 2, dtype=torch.half)
+        feature = torch.ones(2, 2, dtype=torch.half)
+        locations = torch.tensor([-1], dtype=torch.int32)
+
+        with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
+            MultimodalEmbeddingInjector()(embeddings, [feature], locations)
+
+        deepstack = torch.ones(1, 2, 2, dtype=torch.half)
+        with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
+            MultimodalDeepstackInjector()(
+                embeddings,
+                [deepstack],
+                locations,
+                layer_id=0,
+            )
+
+    def test_injects_upstream_cropped_feature_at_zero(self):
+        embeddings = torch.zeros(4, 2, dtype=torch.half)
+        feature = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0]],
+            dtype=torch.half,
+        )
+
+        output = MultimodalEmbeddingInjector()(
+            embeddings,
+            [feature],
+            torch.tensor([0], dtype=torch.int32),
+        )
+
+        torch.testing.assert_close(output[:2], feature)
+        torch.testing.assert_close(
+            output[2:],
+            torch.zeros(2, 2, dtype=torch.half),
+        )
 
 
 if __name__ == "__main__":

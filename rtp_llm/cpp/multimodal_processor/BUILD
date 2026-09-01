@@ -29,6 +29,18 @@ cc_library(
 # Abstract embedding-RDMA transport interface + factory registry. The concrete
 # implementation lives in internal_source and self-registers via the arch_select alias.
 cc_library(
+    name = "multimodal_input_utils",
+    hdrs = [
+        "MultimodalInputUtils.h",
+    ],
+    deps = [
+        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mm_rdma_transport",
     srcs = [
         "MMRdmaTransport.cc",

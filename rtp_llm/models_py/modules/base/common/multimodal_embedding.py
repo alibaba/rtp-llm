@@ -4,6 +4,8 @@ import torch
 from torch import nn
 
 
+# Keep this layout contract aligned with cpp/multimodal_processor/MultimodalInputUtils.h.
+# Python consumes the flattened C++ representation after transport.
 def reshape_extra_input_to_deepstack(
     extra_input: Sequence[torch.Tensor],
     multimodal_features: Sequence[torch.Tensor],
@@ -69,25 +71,17 @@ class MultimodalEmbeddingInjector(nn.Module):
             if feature.device != embeddings.device:
                 feature = feature.to(embeddings.device)
 
-            # A feature may overlap only part of the current input: loc < 0 means
-            # its head is in the reused prefix, while the right edge may extend
-            # into a later prefill chunk. Inject only the intersection and keep
-            # the source rows aligned with the destination rows.
-            src_start = -loc if loc < 0 else 0
-            dst_start = max(loc, 0)
-            if src_start >= feature.size(0) or dst_start >= embeddings.size(0):
-                continue
+            if loc < 0:
+                raise ValueError(f"feature[{idx}] loc must be non-negative, got {loc}")
 
-            length = min(
-                feature.size(0) - src_start,
-                embeddings.size(0) - dst_start,
-            )
-            if length <= 0:
-                continue
+            length = feature.size(0)
+            if loc + length > embeddings.size(0):
+                raise IndexError(
+                    f"feature[{idx}] with length {length} cannot be placed at loc {loc} "
+                    f"within embeddings of length {embeddings.size(0)}"
+                )
 
-            embeddings.narrow(0, dst_start, length).copy_(
-                feature.narrow(0, src_start, length).contiguous()
-            )
+            embeddings.narrow(0, loc, length).copy_(feature.contiguous())
 
         return embeddings
 
@@ -147,13 +141,10 @@ class MultimodalDeepstackInjector(nn.Module):
             if layer_embed.device != hidden.device:
                 layer_embed = layer_embed.to(hidden.device)
 
-            # Same partial-prefix handling as the embedding injector: drop the head rows of a
-            # partially-cached leading image (loc < 0) and add only the remaining tail at position 0.
             if loc < 0:
-                layer_embed = layer_embed[-loc:]
-                loc = 0
-                if layer_embed.size(0) == 0:
-                    continue
+                raise ValueError(
+                    f"deepstack tensor[{idx}] loc must be non-negative, got {loc}"
+                )
 
             length = layer_embed.size(0)
             if loc + length > hidden.size(0):

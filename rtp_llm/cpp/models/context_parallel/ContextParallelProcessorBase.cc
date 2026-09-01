@@ -89,9 +89,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     const bool has_multimodal_input = hasMultimodalModelInputs(model_input);
     const bool has_explicit_position_ids =
         model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
+    // Multimodal features are token-aligned inputs too. Always build the
+    // global-to-CP-local map when they are present, even if this model does not
+    // expose an explicit position-id or token-type field.
     const bool need_token_remap = split_hidden_states || model_input.text_tokens_mask.defined()
-                                  || model_input.combo_tokens_type_ids.defined()
-                                  || (has_multimodal_input && has_explicit_position_ids);
+                                  || model_input.combo_tokens_type_ids.defined() || has_multimodal_input;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
     if (need_token_remap) {
@@ -230,13 +232,19 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         const bool has_multimodal_locs =
             model_input.mm_features_locs.defined() && model_input.mm_features_locs.numel() > 0;
         const bool has_mm_extra_input = model_input.mm_extra_input.has_value() && !model_input.mm_extra_input->empty();
+        RTP_LLM_CHECK_WITH_INFO(!has_multimodal_features || has_multimodal_locs,
+                                "multimodal_features require mm_features_locs");
+        RTP_LLM_CHECK_WITH_INFO(!has_multimodal_locs || has_multimodal_features,
+                                "mm_features_locs require multimodal_features");
         RTP_LLM_CHECK_WITH_INFO(!has_mm_extra_input || has_multimodal_features,
                                 "mm_extra_input requires multimodal_features");
-        if (has_multimodal_features && has_multimodal_locs) {
-            auto&      orig_features = model_input.multimodal_features.value();
-            auto       orig_locs_cpu = model_input.mm_features_locs.is_cuda() ?
-                                           model_input.mm_features_locs.cpu().contiguous() :
-                                           model_input.mm_features_locs.contiguous();
+        if (has_multimodal_features) {
+            auto& orig_features = model_input.multimodal_features.value();
+            auto  orig_locs_cpu = model_input.mm_features_locs.is_cuda() ?
+                                      model_input.mm_features_locs.cpu().contiguous() :
+                                      model_input.mm_features_locs.contiguous();
+            RTP_LLM_CHECK_WITH_INFO(orig_locs_cpu.dim() == 1 && orig_locs_cpu.scalar_type() == torch::kInt32,
+                                    "mm_features_locs must be a 1-D int32 tensor");
             const auto orig_locs_acc = orig_locs_cpu.accessor<int32_t, 1>();
             const auto num_features  = orig_features.size();
             RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(num_features) == orig_locs_cpu.size(0),
@@ -262,7 +270,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                 new_extra_input.reserve(num_features * 2);
             }
 
-            auto reshape_extra_input = [](const torch::Tensor& extra_input, const torch::Tensor& feature) {
+            int64_t previous_feature_end = 0;
+            auto    reshape_extra_input  = [](const torch::Tensor& extra_input, const torch::Tensor& feature) {
                 RTP_LLM_CHECK_WITH_INFO(feature.dim() == 2,
                                         "multimodal feature must be 2-D when mm_extra_input is present");
                 const int64_t feature_len = feature.size(0);
@@ -296,6 +305,19 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                 const int64_t g_end   = g_start + g_len;
                 RTP_LLM_CHECK_WITH_INFO(
                     g_len > 0 && orig_features[f].size(1) > 0, "multimodal feature %zu must have positive shape", f);
+                RTP_LLM_CHECK_WITH_INFO(g_start >= 0 && g_end <= global_token_num,
+                                        "multimodal feature %zu range [%ld,%ld) is outside global input [0,%ld)",
+                                        f,
+                                        g_start,
+                                        g_end,
+                                        global_token_num);
+                RTP_LLM_CHECK_WITH_INFO(f == 0 || g_start >= previous_feature_end,
+                                        "multimodal feature ranges must be sorted and non-overlapping: "
+                                        "feature=%zu, start=%ld, previous_end=%ld",
+                                        f,
+                                        g_start,
+                                        previous_feature_end);
+                previous_feature_end = g_end;
                 if (has_mm_extra_input) {
                     deepstack_features[f] =
                         reshape_extra_input(model_input.mm_extra_input.value()[f], orig_features[f]);

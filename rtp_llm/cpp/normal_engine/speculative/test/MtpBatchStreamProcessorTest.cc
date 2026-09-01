@@ -954,11 +954,20 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillMetadataShiftOnlyForMultimodal) {
     image_first_input.input_lengths      = torch::tensor({3, 2}, torch::kInt32);
     image_first_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11}, torch::kInt32);
     image_first_input.text_tokens_mask   = torch::tensor({1, 1, 1, 1, 1}, torch::kInt32);
-    image_first_input.mm_features_locs   = torch::tensor({0, 4}, torch::kInt32);
+    image_first_input.mm_features_locs   = torch::tensor({0, 3}, torch::kInt32);
     image_first_input.multimodal_features =
-        std::vector<torch::Tensor>{torch::ones({2, 4}, torch::kFloat32), torch::ones({1, 4}, torch::kFloat32)};
+        std::vector<torch::Tensor>{torch::ones({2, 4}, torch::kFloat32), torch::ones({2, 4}, torch::kFloat32)};
+    image_first_input.mm_extra_input =
+        std::vector<torch::Tensor>{torch::arange(16, torch::kFloat32), torch::arange(16, 32, torch::kFloat32)};
     processor.updatePrefillPostDraftModelInput(image_first_input, model_output, sampler_output, holder);
-    EXPECT_EQ(std::vector<int>({-1, 3}), toVec<int>(image_first_input.mm_features_locs));
+    EXPECT_EQ(std::vector<int>({0, 3}), toVec<int>(image_first_input.mm_features_locs));
+    ASSERT_EQ(2U, image_first_input.multimodal_features->size());
+    EXPECT_EQ(1, image_first_input.multimodal_features->at(0).size(0));
+    EXPECT_EQ(1, image_first_input.multimodal_features->at(1).size(0));
+    ASSERT_TRUE(image_first_input.mm_extra_input.has_value());
+    ASSERT_EQ(2U, image_first_input.mm_extra_input->size());
+    EXPECT_EQ(8, image_first_input.mm_extra_input->at(0).numel());
+    EXPECT_EQ(8, image_first_input.mm_extra_input->at(1).numel());
 
     // MROPE-style position IDs are flattened [tokens, 3] rows. Each appended
     // row follows the same max-component rule as the position generator.
