@@ -1,6 +1,7 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.grpc.Context;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
@@ -334,7 +335,8 @@ public final class JavaMockEngineCluster {
                         + "decode_admitted=%d decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
                         + "heap_used_mb=%d heap_max_mb=%d "
                         + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
-                        + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d%n",
+                        + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d "
+                        + "cancel_census_client_gone=%d%n",
                 System.currentTimeMillis(),
                 stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                 stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
@@ -348,7 +350,8 @@ public final class JavaMockEngineCluster {
                 heapUsedMb, heapMaxMb,
                 stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
                 stats.cancelCensusTracked.sum(), stats.cancelCensusAlreadyFinished.sum(),
-                stats.cancelCensusUnknown.sum(), stats.cancelCensusTombstone.sum());
+                stats.cancelCensusUnknown.sum(), stats.cancelCensusTombstone.sum(),
+                stats.cancelCensusClientGone.sum());
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
@@ -1065,6 +1068,14 @@ public final class JavaMockEngineCluster {
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
             stats.generateStreamRpcs.increment();
             rpcGenerateStream.incrementAndGet();
+            // Per-RPC gRPC context, captured on the handler thread (the only
+            // place where Context.current() is this request's cancellable
+            // context). The response pump holds the reference and checks
+            // isCancelled() cross-thread (supported grpc-java usage), while a
+            // registered CancellationListener delivers millisecond-level
+            // notification: the pump may sit in a 600 s queue.poll, so polling
+            // alone cannot meet the detection-latency budget.
+            Context rpcContext = Context.current();
 
             if (faultConfig.isGenerateError()) {
                 observer.onError(new RuntimeException("injected generate_error"));
@@ -1119,6 +1130,10 @@ public final class JavaMockEngineCluster {
                 }
             }
 
+            // Admitted: arm the autonomous client-gone detector for this
+            // stream (production C++ engine IsCancelled semantics).
+            registerClientGoneListener(requestId, rpcContext);
+
             // Use a separate executor for blocking poll to avoid starving the
             // completion scheduler which is responsible for producing responses.
             // Loop poll until a finished=true frame or timeout, so the mock can
@@ -1131,6 +1146,13 @@ public final class JavaMockEngineCluster {
                 try {
                     boolean anyDelivered = false;
                     while (true) {
+                        if (rpcContext.isCancelled()) {
+                            // Client stream broke mid-flight: the listener has
+                            // already driven the autonomous cancellation; stop
+                            // delivering frames to the dead observer and exit
+                            // WITHOUT onCompleted (the call is gone).
+                            return;
+                        }
                         EngineRpcService.GenerateOutputsPB output =
                                 queue.poll(responsePollTimeoutMs, TimeUnit.MILLISECONDS);
                         if (output == null) {
@@ -1174,6 +1196,14 @@ public final class JavaMockEngineCluster {
                     }
                 } catch (InterruptedException e) {
                     observer.onError(e);
+                } catch (RuntimeException e) {
+                    if (!rpcContext.isCancelled()) {
+                        throw e;
+                    }
+                    // Delivering a frame (e.g. the CANCELLED error frame the
+                    // autonomous cancel just queued) to an already-cancelled
+                    // call is expected here; swallow so the pump thread exits
+                    // cleanly instead of dying in the executor.
                 }
             });
         }
@@ -1183,6 +1213,12 @@ public final class JavaMockEngineCluster {
                 StreamObserver<EngineRpcService.GenerateOutputsPB> observer) {
             stats.fetchResponseRpcs.increment();
             rpcFetchResponse.incrementAndGet();
+            // Same client-gone capture as generateStreamCall: under the BATCH
+            // dispatcher the client's FetchResponse stream is glued to the
+            // ORIGINAL PREFILL engine, so a broken fetch must drive that
+            // prefill's autonomous cancel (and the P->D propagation when the
+            // hand-off already happened).
+            Context rpcContext = Context.current();
 
             long requestId = request.getRequestId();
 
@@ -1200,6 +1236,9 @@ public final class JavaMockEngineCluster {
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
 
+            // Arm the autonomous client-gone detector for this fetch stream.
+            registerClientGoneListener(requestId, rpcContext);
+
             // Loop poll until a finished=true frame or timeout — same pump as
             // generateStreamCall. Under the BATCH dispatcher the client polls
             // FetchResponse against the ORIGINAL PREFILL engine (startDecode
@@ -1216,6 +1255,12 @@ public final class JavaMockEngineCluster {
             responseExecutor.execute(() -> {
                 try {
                     while (true) {
+                        if (rpcContext.isCancelled()) {
+                            // Client fetch stream broke mid-flight: the
+                            // listener already drove the autonomous cancel;
+                            // exit without touching the dead observer.
+                            return;
+                        }
                         EngineRpcService.GenerateOutputsPB output =
                                 queue.poll(responsePollTimeoutMs, TimeUnit.MILLISECONDS);
                         if (output == null) {
@@ -1246,6 +1291,12 @@ public final class JavaMockEngineCluster {
                     observer.onCompleted();
                 } catch (InterruptedException e) {
                     observer.onError(e);
+                } catch (RuntimeException e) {
+                    if (!rpcContext.isCancelled()) {
+                        throw e;
+                    }
+                    // Delivering to an already-cancelled fetch call is
+                    // expected; swallow so the pump thread exits cleanly.
                 }
             });
         }
@@ -1280,7 +1331,19 @@ public final class JavaMockEngineCluster {
                 stats.cancelRpcs.increment();
                 rpcCancel.incrementAndGet();
             }
-            cancelledRequests.put(requestId, System.nanoTime());
+            // Terminal-ownership claim — the claimDecodeTerminalLocked pattern
+            // generalized to every cancel entry point: the FIRST cancel for a
+            // rid arms the cancelled marker and owns the terminal bookkeeping;
+            // a second cancel (an autonomous client-gone cancellation racing
+            // the explicit Cancel RPC, a duplicate channel cancel, ...) finds
+            // the marker armed and no-ops, so the typed CANCELLED terminal and
+            // cancelledCount are published exactly once per engine. The claim
+            // is also the marker the completion callbacks and
+            // scheduleDecodeCompletion check, so its ordering with the
+            // remove/release section below is unchanged.
+            if (cancelledRequests.putIfAbsent(requestId, System.nanoTime()) != null) {
+                return null;
+            }
             addCancelledRid(requestId);
             if (priorityPreemption) {
                 addPriorityCancelTombstone(requestId);
@@ -1508,13 +1571,47 @@ public final class JavaMockEngineCluster {
         }
 
         private CancelResult cancelFromPrefill(long requestId, FastRpcService expectedPrefill) {
+            return cancelDownstream(requestId, expectedPrefill, true);
+        }
+
+        /**
+         * Client-gone propagation variant used by the autonomous cancellation
+         * path: the client-facing stream glued to the ORIGINAL PREFILL broke
+         * while the Decode selected by role_addrs is executing the request.
+         * Same Decode-side cleanup and terminal discipline as the explicit
+         * priority-cancel propagation, except the Prefill publishes an
+         * ordinary typed CANCELLED terminal ("cancelled by client"), matching
+         * the production tryCancelDownstream contract for a broken P context.
+         */
+        private CancelResult cancelFromClientGone(long requestId, FastRpcService expectedPrefill) {
+            return cancelDownstream(requestId, expectedPrefill, false);
+        }
+
+        /**
+         * Shared P->D cancel propagation (explicit priority Cancel and
+         * autonomous client-gone). Runs on the DECODE side: ownership removal
+         * is the one-shot guard, cancel() cleans the decode bookkeeping and
+         * publishes the decode-local CANCELLED terminal, the prefill-side
+         * queue is terminated so its pump exits, and the PREFILL publishes the
+         * typed terminal (priority-preemption form for the explicit path,
+         * ordinary CANCELLED for the client-gone path).
+         */
+        private CancelResult cancelDownstream(long requestId,
+                                              FastRpcService expectedPrefill,
+                                              boolean priorityPreemption) {
             synchronized (decodeQueueLock) {
                 if (!upstreamPrefillOwners.remove(requestId, expectedPrefill)) {
                     return new CancelResult(false, null, false);
                 }
-                // A1 census (decode-side): a forwarded cancel landed on a
-                // request this Decode actively tracks via ownership.
-                stats.cancelCensusTracked.increment();
+                if (priorityPreemption) {
+                    // A1 census (decode-side): a forwarded cancel landed on a
+                    // request this Decode actively tracks via ownership.
+                    stats.cancelCensusTracked.increment();
+                } else {
+                    // Census: a client-gone propagation landed on a request
+                    // this Decode actively tracks via ownership.
+                    stats.cancelCensusClientGone.increment();
+                }
                 expectedPrefill.downstreamDecodeOwners.remove(requestId, this);
                 // This is downstream stream cancellation, not a Decode Cancel
                 // RPC.  Preserve ordinary Decode accounting/terminal behavior
@@ -1542,15 +1639,134 @@ public final class JavaMockEngineCluster {
                             .build());
                     expectedPrefill.responseQueues.remove(requestId);
                 }
-                // Decode retains its ordinary CANCELLED terminal for local
-                // accounting. The original Prefill is the authoritative
-                // producer of the typed priority-preemption completion.
-                expectedPrefill.recordPriorityPreemptionCanceled(requestId, observedPhase);
+                if (priorityPreemption) {
+                    // Decode retains its ordinary CANCELLED terminal for local
+                    // accounting. The original Prefill is the authoritative
+                    // producer of the typed priority-preemption completion.
+                    expectedPrefill.recordPriorityPreemptionCanceled(requestId, observedPhase);
+                } else {
+                    expectedPrefill.recordClientGoneCanceled(requestId, observedPhase);
+                }
                 // Ownership is itself the admission proof. A cancel may win the
                 // narrow hand-off race before Decode publishes runningTasks; the
                 // existing cancelled marker then prevents later scheduling.
                 return new CancelResult(true, observedPhase, false);
             }
+        }
+
+        // ──────────── Autonomous client-gone cancellation (production alignment) ────────────
+
+        /**
+         * Arm the client-gone detector for one client-facing stream
+         * (generateStreamCall / fetchResponse). The per-RPC gRPC context is
+         * captured on the handler thread — the only place where
+         * Context.current() is the request's cancellable context — and the
+         * registered listener fires on the response-pump executor within
+         * milliseconds of the client cancelling the call, because the pump
+         * itself may be blocked in a 600 s queue.poll and the per-iteration
+         * isCancelled() check alone cannot meet the detection-latency budget.
+         *
+         * <p>grpc-java supports holding the Context reference and checking
+         * isCancelled() from other threads; the listener callback re-checks
+         * isCancelled() because a CancellableContext also notifies listeners
+         * on normal close (stream completed fine), where isCancelled() stays
+         * false.
+         */
+        private void registerClientGoneListener(long requestId, Context rpcContext) {
+            if (rpcContext == Context.ROOT || shuttingDown) {
+                // In-process invocation (unit tests call the handler directly
+                // with no transport): there is no stream to break, and arming
+                // listeners on the process-wide ROOT context would never fire.
+                // During shutdown drain the executor is gone — the drain
+                // sweep already cancels everything in flight.
+                return;
+            }
+            rpcContext.addListener(context -> {
+                if (context.isCancelled()) {
+                    handleClientGone(requestId);
+                }
+            }, responseExecutor);
+        }
+
+        /**
+         * Autonomous cancellation driven by the CLIENT's stream breaking —
+         * the mock's counterpart of the production C++ engine checking
+         * IsCancelled in its per-token loop: a broken
+         * FetchResponse/GenerateStream context makes the engine itself clean
+         * the request up, record the cancel, publish the typed CANCELLED
+         * terminal, and propagate to the downstream decode once the P->D
+         * hand-off has happened.
+         *
+         * <p>Branching mirrors the production roles:
+         * <ul>
+         *   <li>this engine still tracks the request (runningTasks holds
+         *       it — the prefill is executing/queueing it, or a NON_BATCH
+         *       decode is directly serving it): cancel() here. For a prefill,
+         *       the batch completion callback's alreadyCancelled guard then
+         *       suppresses the P->D hand-off, so no propagation is needed —
+         *       exactly the explicit-cancel contract. For a decode, the
+         *       CANCELLED terminal is reported IMMEDIATELY (production's
+         *       early terminal for a decode-side broken stream: no stale
+         *       inflight TTL wait).</li>
+         *   <li>this engine is the prefill and the hand-off already happened
+         *       (downstreamDecodeOwners holds the decode selected from
+         *       role_addrs): propagate via cancelFromClientGone — the decode
+         *       cleans its own slot/KV bookkeeping and records its CANCELLED
+         *       terminal, and this prefill publishes the typed CANCELLED
+         *       terminal carrying the EnqueueBatch identity so the master
+         *       reconcile converges on both engines.</li>
+         *   <li>request already terminal (or unknown) on this engine — the
+         *       client dropped the stream after/without a live request;
+         *       no-op.</li>
+         * </ul>
+         *
+         * <p>Every race resolves through the existing terminal-ownership
+         * claims: cancel()'s cancelledRequests.putIfAbsent (vs an explicit
+         * Cancel RPC or a duplicate signal), the ownership remove in
+         * cancelDownstream (vs the decode's own completion), and
+         * runningTasks.remove (vs the normal completion callbacks) — first
+         * one to claim owns the terminal, later arrivals no-op.
+         */
+        private void handleClientGone(long requestId) {
+            if (runningTasks.containsKey(requestId)) {
+                stats.cancelCensusClientGone.increment();
+                cancel(requestId, false, false);
+                return;
+            }
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                FastRpcService decode = downstreamDecodeOwners.get(requestId);
+                if (decode != null) {
+                    decode.cancelFromClientGone(requestId, this);
+                }
+            }
+            // else: request already finished or unknown to this engine —
+            // nothing to clean (census counts only effective cancellations).
+        }
+
+        /**
+         * Typed CANCELLED terminal published by a PREFILL whose client stream
+         * broke after the P->D hand-off (autonomous client-gone propagation).
+         * Same batch-identity discipline as the explicit-cancel terminal —
+         * the master's reconcile must correlate the cancel with the batch it
+         * displaced or the inflight slot leaks.
+         */
+        private void recordClientGoneCanceled(long requestId,
+                                              EngineRpcService.TaskPhase phase) {
+            EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(requestId)
+                    .setPhase(phase)
+                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                            .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
+                            .setErrorMessage("cancelled by client (stream gone)")
+                            .build())
+                    .setEndTimeMs(System.currentTimeMillis())
+                    .setDpRank(0);
+            long batchId = positiveLifecycleBatchId(requestId);
+            if (batchId > 0L) {
+                task.setBatchId(batchId);
+            }
+            publishCompletion(task.build());
+            statusVersion.incrementAndGet();
         }
 
         private void recordPriorityPreemptionCanceled(long requestId,
@@ -2949,6 +3165,11 @@ public final class JavaMockEngineCluster {
         final LongAdder cancelCensusAlreadyFinished = new LongAdder();
         final LongAdder cancelCensusUnknown = new LongAdder();
         final LongAdder cancelCensusTombstone = new LongAdder();
+        // Autonomous client-gone cancellations (broken GenerateStream /
+        // FetchResponse stream): how many in-flight requests the engine
+        // cleaned up by itself because the client stream died, split from the
+        // explicit-Cancel census above so leak attribution stays clean.
+        final LongAdder cancelCensusClientGone = new LongAdder();
         // Epoch-aligned event counter: cumulative decode RUNNING admissions
         // (immediate admission + waiting-queue top-up). Differencing against
         // the stats line's ts_epoch_ms gives per-second "entered running" QPS;
