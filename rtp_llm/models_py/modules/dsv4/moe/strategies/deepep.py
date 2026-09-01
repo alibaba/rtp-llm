@@ -32,7 +32,21 @@ _EAGER_FIXED_EP_BOUND = int(os.environ.get("DSV4_SM120_EAGER_FIXED_EP", "0"))
 _DEEPEP_REAL = int(os.environ.get("DSV4_DEEPEP_REAL", "0"))
 _DEEPEP_REAL_MAX_TOKENS = int(os.environ.get("DSV4_DEEPEP_MAX_TOKENS", "8192"))
 _DEEPEP_BUFFER = None
+_DEEPEP_DISABLED = object()  # sentinel: fatal deep_ep failure -> NCCL fallback
 _DIAG_DE = [0]
+
+
+def _deepep_disable(reason: str):
+    """Permanently fall back to the NCCL emulation after a deep_ep failure
+    (a model exception otherwise kills the rank per the C++ supervisor)."""
+    global _DEEPEP_BUFFER
+    import sys
+    import traceback
+    print("[DIAGDE] DISABLING deep_ep path (%s) — NCCL fallback takes over" % reason,
+          file=sys.stderr, flush=True)
+    traceback.print_exc(file=sys.stderr)
+    _DEEPEP_BUFFER = _DEEPEP_DISABLED
+
 _DIAG_ATA = [0]
 _SERVE_PATH_CT = {"__total": 0}
 _DIAG_FE = [0]
@@ -249,6 +263,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                     )
             if (
                 _DEEPEP_REAL > 0
+                and _DEEPEP_BUFFER is not _DEEPEP_DISABLED
                 and not _capturing
                 and not _symbolic
                 and not replicated_tp_tokens
@@ -256,8 +271,13 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 and 0 <= _diag_x0 <= _DEEPEP_REAL_MAX_TOKENS
             ):
                 # Real deep_ep intranode kernels (prefill engine, flag ON).
-                # Oversized calls fall through to the NCCL emulation below.
-                return self._forward_sm120_deepep_real(x, weights, indices)
+                # Oversized calls fall through to the NCCL emulation below;
+                # a deep_ep failure disables the path permanently (the
+                # supervisor otherwise kills the rank on any exception).
+                try:
+                    return self._forward_sm120_deepep_real(x, weights, indices)
+                except Exception:
+                    _deepep_disable("dispatch/combine raised")
             if (
                 not _capturing
                 and not _symbolic
