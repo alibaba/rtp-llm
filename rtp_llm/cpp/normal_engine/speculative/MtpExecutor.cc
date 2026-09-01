@@ -651,6 +651,28 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                         true,
                                         target_cache_layer_layout.layer_to_groups,
                                         model_inputs_logger_));
+        // Variant B (DSV4_COMMIT_AS_DECODE): a normal-decode wrapper over the
+        // TARGET model. The T=1 commit round (the decode-arm prefill) is then
+        // routed here and replays standard decode graphs instead of running
+        // the eager 43-layer prefill path (~170 ms of every 212 ms step).
+        // sp_config is cleared so the PyWrappedModel decision table picks the
+        // "Normal Model (decode)" geometry (num_tokens_per_bs=1,
+        // is_target_verify=false) instead of inferring target-verify from the
+        // spec config; capture is clamped to small batch sizes to bound the
+        // extra graph memory (larger commit bsz falls back to eager via canRun).
+        static const bool kCommitAsDecode = getenv("DSV4_COMMIT_AS_DECODE") != nullptr;
+        if (is_dspark_ && kCommitAsDecode) {
+            auto decode_params = model_init_params;
+            decode_params.sp_config.type                              = SP_TYPE_NONE;
+            decode_params.hw_kernel_config.decode_capture_batch_sizes = {1, 2, 4};
+            target_sp_decode_model_.reset(new PyWrappedModel(decode_params,
+                                                             params.py_model,
+                                                             false,
+                                                             false,
+                                                             target_cache_layer_layout.layer_to_groups,
+                                                             model_inputs_logger_));
+            RTP_LLM_LOG_INFO("[commit-as-decode] target decode wrapper created (capture bsz 1/2/4)");
+        }
     }
 
     is_linear_attention_model_ = target_cache_config.linear_group_num > 0;
@@ -793,6 +815,63 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  * @param streams
  * @return absl::Status
  */
+bool MtpExecutor::useCommitDecodePath(const GptModelInputs& model_input) const {
+    if (target_sp_decode_model_ == nullptr || model_input.skip_run) {
+        return false;
+    }
+    // Bisect gate: wrapper creation vs routing. The wrapper is built when
+    // DSV4_COMMIT_AS_DECODE is set; the route additionally requires
+    // DSV4_COMMIT_AS_DECODE_ROUTE so a wrapper-only boot isolates capture-side
+    // from replay-side failures.
+    static const bool kRouteEnabled = getenv("DSV4_COMMIT_AS_DECODE_ROUTE") != nullptr;
+    if (!kRouteEnabled) {
+        return false;
+    }
+    if (!model_input.input_lengths.defined() || !model_input.combo_tokens.defined()) {
+        return false;
+    }
+    const int64_t bsz = model_input.input_lengths.size(0);
+    // The prefill gather packs combo_tokens as the concat of per-stream token
+    // runs, so numel == bsz iff every input_lengths[b] == 1 — exactly the
+    // commit-round geometry (real prefill chunks have T > 1 and fall through
+    // to the eager path). Fake/warmup streams mirror real stream geometry, so
+    // the condition is rank-invariant (the slice-1 deadlock lesson).
+    return bsz > 0 && model_input.combo_tokens.numel() == bsz;
+}
+
+void MtpExecutor::convertCommitRoundToDecodeInputs(GptModelInputs&                     model_input,
+                                                   const std::list<GenerateStreamPtr>& streams) {
+    // Decode dispatch at the model boundary is driven purely by tensor sizes
+    // (PyWrappedModel::buildPyAttentionInputs: is_prefill =
+    // !sequence_lengths.size(0), context_batch_size = prefix_lengths.size(0)).
+    // A T=1 commit round is a decode round in disguise: the query token is the
+    // last accepted token at position seqLength()-1 — the same convention
+    // processDecodeStreams uses — attending [0, seqLength()-1] right after
+    // appending its KV (the same slot verify already wrote; the overwrite is
+    // idempotent). Fill the decode fields, empty the context fields, and the
+    // python dispatch runs forward_decode — eagerly or as a decode-graph replay.
+    auto seq_lens = torch::empty({model_input.input_lengths.size(0)},
+                                 torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    auto* seq_ptr = seq_lens.data_ptr<int32_t>();
+    int64_t row   = 0;
+    for (const auto& stream : streams) {
+        const auto n = stream->currentBatchSize();
+        for (auto i = 0; i < n; ++i) {
+            seq_ptr[row++] = static_cast<int32_t>(stream->seqLength()) - 1;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(row == model_input.input_lengths.size(0),
+                            "commit-as-decode row mismatch: filled %ld, expected %ld",
+                            (long)row,
+                            (long)model_input.input_lengths.size(0));
+    model_input.sequence_lengths = seq_lens;
+    model_input.prefix_lengths   = torch::empty(
+        {0},
+        model_input.prefix_lengths.defined() ? model_input.prefix_lengths.options()
+                                             : torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    model_input.is_target_verify = false;
+}
+
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
@@ -860,9 +939,32 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
-        model_output                        = std::move(model_->forward(model_input));
+        const bool commit_as_decode         = useCommitDecodePath(model_input);
+        if (commit_as_decode) {
+            convertCommitRoundToDecodeInputs(model_input, streams);
+            fprintf(stderr,
+                    "[CAD] routed bsz=%lld seq0=%lld\n",
+                    (long long)model_input.input_lengths.size(0),
+                    (long long)model_input.sequence_lengths.size(0) > 0
+                        ? (long long)model_input.sequence_lengths.data_ptr<int32_t>()[0]
+                        : -1LL);
+            fflush(stderr);
+        }
+        ModelBase& target_ref = commit_as_decode ? *target_sp_decode_model_ : *model_;
+        if (commit_as_decode) {
+            try {
+                model_output = target_ref.forward(model_input);
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("[commit-as-decode] routed forward failed: %s", e.what());
+                throw;
+            }
+            fprintf(stderr, "[CAD] forward OK\n");
+            fflush(stderr);
+        } else {
+            model_output = target_ref.forward(model_input);
+        }
         maybeOverrideAllHiddenStatesWithMtpBuffer(
-            model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
+            model_output, target_ref, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

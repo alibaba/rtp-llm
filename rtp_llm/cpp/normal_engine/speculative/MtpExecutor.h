@@ -104,6 +104,13 @@ protected:
                              MtpMetricsCollector&                metrics_collector,
                              int64_t                             schedule_time_us);
 
+    // Variant B (DSV4_COMMIT_AS_DECODE): route the T=1 commit round (the
+    // decode-arm prefill) through the target decode wrapper's graphs instead
+    // of the eager 43-layer prefill path. See DSV4_DUALMODE_RUNNER_DESIGN.md.
+    bool useCommitDecodePath(const GptModelInputs& model_input) const;
+    void  convertCommitRoundToDecodeInputs(GptModelInputs&                model_input,
+                                           const std::list<GenerateStreamPtr>& streams);
+
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
@@ -230,6 +237,10 @@ private:
     // parameters to the same two slots.
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
+    // Variant B (DSV4_COMMIT_AS_DECODE): normal-decode wrapper over the TARGET
+    // model. Its decode graphs replay the T=1 commit round (the decode-arm
+    // prefill) that otherwise runs eagerly on `model_`'s rejected prefill path.
+    std::shared_ptr<ModelBase>                       target_sp_decode_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
 

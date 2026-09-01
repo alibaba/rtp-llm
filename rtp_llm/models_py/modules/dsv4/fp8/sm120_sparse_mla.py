@@ -3,7 +3,14 @@ from typing import Optional, Sequence
 import torch
 from rtp_llm.models_py.modules.dsv4.const_cache import cached_arange
 _WORKSPACES: dict[torch.device, torch.Tensor] = {}
+
+
 def workspace(device: torch.device) -> torch.Tensor:
+    # Capture-aware (P0 slice 2, Variant B): a workspace handed to a capture
+    # must never come from (nor enter) the cross-call cache — one runner's
+    # graph private pool must not be referenced by another runner's graph.
+    if torch.cuda.is_current_stream_capturing():
+        return torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
     result = _WORKSPACES.get(device)
     if result is None:
         result = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device=device)
