@@ -17,8 +17,16 @@ from stat import S_ISREG
 from threading import Event, Thread
 from time import monotonic
 
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+try:
+    from watchdog.events import FileSystemEventHandler
+    from watchdog.observers import Observer
+except ImportError:
+    # Polling in _sync_loop still detects changes. Keep remote cache usable in
+    # old images while the newly declared watchdog dependency rolls out.
+    class FileSystemEventHandler:
+        pass
+
+    Observer = None
 
 from rtp_llm.utils import jit_cache_store as store
 
@@ -276,6 +284,8 @@ class JitCacheManager(FileSystemEventHandler):
 
     def _start_watch(self) -> bool:
         try:
+            if Observer is None:
+                raise ImportError("watchdog is unavailable")
             self._observer = Observer()
             for item in self.scope.components:
                 item.local_dir.mkdir(parents=True, exist_ok=True)

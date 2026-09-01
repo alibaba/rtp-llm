@@ -1,7 +1,7 @@
 import os
-import sys
 import time
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -47,21 +47,14 @@ class ServerConfig:
 
     def __init__(self):
         self.frontend_server_count = 4
-        self.vit_server_count = 1
         self.start_port = DEFAULT_START_PORT
         self.timeout_keep_alive = 5
         self.frontend_server_id = 0
-        self.vit_server_id = 0
         self.rank_id = 0
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
         self.monitor_interval: int = 1  # Monitor interval in seconds
-        self.frontend_pre_stop_drain_seconds: float = 120.0
-        self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
-        self.pre_stop_drain_headroom_seconds: float = -1.0
-        self.pre_stop_drain_signal: bool = True
-        self.backend_post_frontend_drain_seconds: float = -1.0
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num
@@ -100,36 +93,19 @@ class ServerConfig:
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
 
-    def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
-        if dash_sc_enabled and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
-            raise ValueError(
-                "worker_info_port_num must be at least "
-                f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
-                f"got {self.worker_info_port_num}. DashSc uses port offset "
-                f"{DASH_SC_GRPC_SERVER_PORT_OFFSET}, which overlaps the next "
-                "rank's port block with a smaller stride."
-            )
-
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
 
     def to_string(self):
         return (
             f"frontend_server_count: {self.frontend_server_count}\n"
-            f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"
             f"timeout_keep_alive: {self.timeout_keep_alive}\n"
             f"frontend_server_id: {self.frontend_server_id}\n"
-            f"vit_server_id: {self.vit_server_id}\n"
             f"rank_id: {self.rank_id}\n"
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
             f"monitor_interval: {self.monitor_interval}\n"
-            f"frontend_pre_stop_drain_seconds: {self.frontend_pre_stop_drain_seconds}\n"
-            f"dash_sc_grpc_pre_stop_drain_seconds: {self.dash_sc_grpc_pre_stop_drain_seconds}\n"
-            f"pre_stop_drain_headroom_seconds: {self.pre_stop_drain_headroom_seconds}\n"
-            f"pre_stop_drain_signal: {self.pre_stop_drain_signal}\n"
-            f"backend_post_frontend_drain_seconds: {self.backend_post_frontend_drain_seconds}\n"
             f"server_port: {self.server_port}\n"
             f"rpc_server_port: {self.rpc_server_port}\n"
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
@@ -176,16 +152,9 @@ class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
-        self.loader_recycle_handles: bool = True
-        self.moe_pure_tp_preshard: bool = False
 
     def to_string(self):
-        return (
-            f"load_method: {self.load_method}\n"
-            f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
-            f"loader_recycle_handles: {self.loader_recycle_handles}\n"
-            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
-        )
+        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
 
 
 class RenderConfig:
@@ -276,61 +245,6 @@ class VitConfig:
         self.igraph_vipserver: int = 0
         self.igraph_table_name: str = ""
         self.default_key: Optional[str] = None
-        self.mm_preprocess_max_workers: int = 4
-        self.biencoder_preprocess: bool = False
-        self.extra_input_in_mm_embedding = ""
-        self.mm_timeout_ms: Optional[int] = None
-        self.extra_data_path: str = ""
-        self.local_extra_data_path: str = ""
-        self.disable_access_log: bool = False
-        self.use_local_preprocess: bool = False
-        self.vit_proxy_load_balance_strategy: str = "round_robin"
-        # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
-        # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
-        # compatible requests within gpu_batch_wait_ms. Default 1 keeps the old
-        # serial behavior (there is no separate on/off switch).
-        self.gpu_batch_wait_ms: int = 10
-        self.gpu_max_batch_size: int = 1
-        self.gpu_max_batch_images: int = 200
-        # Bound on the mm embedding scheduler's waiting queue. Caps memory when a
-        # forward stalls and requests pile up; over capacity, submit fails fast
-        # with an overload error instead of growing unbounded. Scheduler-level
-        # (like mm_timeout_ms): applies to serial and batch alike.
-        self.mm_max_queue_size: int = 1024
-
-    def embedding_scheduler_args(self) -> Dict[str, int]:
-        """Resolved MMScheduler kwargs, inferred from gpu_max_batch_size alone.
-
-        gpu_max_batch_size > 1 -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images then caps both the batch and (since a request is never
-        split) the single-request image count; gpu_batch_wait_ms is the collect
-        window.
-        gpu_max_batch_size == 1 -> serial: one request per forward, no wait window
-        (effective batch_wait_ms forced to 0 regardless of the configured value),
-        and no image cap (sys.maxsize) — matches the old serial path, which never
-        bounded a single request's image count.
-        max_queue_size bounds the waiting queue in both modes.
-        """
-        if self.gpu_max_batch_size <= 0:
-            raise ValueError(
-                f"gpu_max_batch_size must be > 0, got {self.gpu_max_batch_size}"
-            )
-        if self.gpu_batch_wait_ms < 0:
-            raise ValueError(
-                f"gpu_batch_wait_ms must be >= 0, got {self.gpu_batch_wait_ms}"
-            )
-
-        is_serial = self.gpu_max_batch_size == 1
-        return {
-            # Serial ignores the collect window: a single-request forward never
-            # waits, so the configured gpu_batch_wait_ms has no effect.
-            "batch_wait_ms": 0 if is_serial else self.gpu_batch_wait_ms,
-            "max_batch_size": self.gpu_max_batch_size,
-            "max_batch_images": (
-                sys.maxsize if is_serial else self.gpu_max_batch_images
-            ),
-            "max_queue_size": self.mm_max_queue_size,
-        }
 
     def to_string(self):
         return (
@@ -345,20 +259,7 @@ class VitConfig:
             f"igraph_search_dom: {self.igraph_search_dom}\n"
             f"igraph_vipserver: {self.igraph_vipserver}\n"
             f"igraph_table_name: {self.igraph_table_name}\n"
-            f"igraph_default_key: {self.default_key}\n"
-            f"mm_preprocess_max_workers: {self.mm_preprocess_max_workers}\n"
-            f"biencoder_preprocess: {self.biencoder_preprocess}\n"
-            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}\n"
-            f"mm_timeout_ms: {self.mm_timeout_ms}\n"
-            f"extra_data_path: {self.extra_data_path}\n"
-            f"local_extra_data_path: {self.local_extra_data_path}\n"
-            f"disable_access_log: {self.disable_access_log}\n"
-            f"use_local_preprocess: {self.use_local_preprocess}\n"
-            f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}\n"
-            f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
-            f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
-            f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"
-            f"mm_max_queue_size: {self.mm_max_queue_size}"
+            f"igraph_default_key: {self.default_key}"
         )
 
 
@@ -436,9 +337,13 @@ class QuantizationConfig:
 class EmbeddingConfig:
     def __init__(self):
         self.embedding_model: int = 0
+        self.extra_input_in_mm_embedding = ""
 
     def to_string(self):
-        return f"embedding_model: {self.embedding_model}"
+        return (
+            f"embedding_model: {self.embedding_model}\n"
+            f"extra_input_in_mm_embedding: {self.extra_input_in_mm_embedding}"
+        )
 
 
 class RoleConfig:
@@ -515,7 +420,7 @@ class JITConfig:
 
 class DeepEPConfig:
     """
-    Configuration for DeepEP / MoriEP settings.
+    Configuration for DeepEP settings.
     Used to track whether user has explicitly set these values.
     If all are None, auto_configure_deepep will be called.
     Otherwise, these values will be copied to moe_config.
@@ -525,14 +430,35 @@ class DeepEPConfig:
         self.use_deepep_moe: Optional[bool] = None
         self.use_deepep_internode: Optional[bool] = None
         self.use_deepep_low_latency: Optional[bool] = None
-        self.use_mori_ep: Optional[bool] = None
 
     def to_string(self):
         return (
             f"use_deepep_moe: {self.use_deepep_moe}\n"
             f"use_deepep_internode: {self.use_deepep_internode}\n"
-            f"use_deepep_low_latency: {self.use_deepep_low_latency}\n"
-            f"use_mori_ep: {self.use_mori_ep}"
+            f"use_deepep_low_latency: {self.use_deepep_low_latency}"
+        )
+
+
+@dataclass(slots=True)
+class GrammarAdmissionConfig:
+    """Dash-SC admission sandbox policy, separate from engine grammar settings."""
+
+    queue_timeout_s: float = 30.0
+    compile_timeout_s: float = 30.0
+    sandbox_pool_size: int = 0
+    sandbox_process_memory_limit_mb: int = 1024
+    compiler_cache_bytes: int = 1024 * 1024 * 1024
+    result_cache_max_entries: int = 2048
+
+    def to_string(self):
+        return (
+            f"queue_timeout_s: {self.queue_timeout_s}\n"
+            f"compile_timeout_s: {self.compile_timeout_s}\n"
+            f"sandbox_pool_size: {self.sandbox_pool_size}\n"
+            "sandbox_process_memory_limit_mb: "
+            f"{self.sandbox_process_memory_limit_mb}\n"
+            f"compiler_cache_bytes: {self.compiler_cache_bytes}\n"
+            f"result_cache_max_entries: {self.result_cache_max_entries}"
         )
 
 
@@ -579,6 +505,7 @@ class PyEnvConfigs:
         self.grpc_config = GrpcConfig()
         self.dash_sc_grpc_config = DashScGrpcConfig()
         self.grammar_config = GrammarConfig()
+        self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -634,6 +561,11 @@ class PyEnvConfigs:
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
             "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
-            "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
+            "[grammar_config]\n"
+            + self.grammar_config.to_string()
+            + "\n\n"
+            + "[grammar_admission_config]\n"
+            + self.grammar_admission_config.to_string()
+            + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

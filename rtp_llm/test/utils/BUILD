@@ -1,8 +1,7 @@
 package(default_visibility = ["//visibility:public"])
-load("@arch_config//:arch_select.bzl", "requirement")
+load("//bazel:arch_select.bzl", "requirement")
 
 requirement([
-    "filelock",
     "torch",
 ])
 
@@ -15,40 +14,29 @@ py_library(
         "port_util.py",
         "stream_util.py",
         "diff_util.py",
-        "coredump_util.py",
     ],
     deps = [],
 )
 
-py_library(
-    name = "coredump_util",
-    srcs = ["coredump_util.py"],
-    visibility = ["//visibility:public"],
-)
-
-py_library(
-    name = "jit_sys_path_setup",
-    srcs = ["jit_sys_path_setup.py"],
-    deps = [":filelock"],
-)
-
 py_binary(
     name = "gpu_lock",
-    deps = [":jit_sys_path_setup", ":filelock", ":torch"],
+    deps = [":torch"],
     main = "device_resource.py",
-    srcs = ["device_resource.py"],
+    srcs = [
+        "device_resource.py",
+        "jit_sys_path_setup.py",
+    ],
 )
 
 py_library(
     name = "device_resource",
-    deps = [":filelock"],
+    deps = [],
     srcs = ["device_resource.py"],
 )
 
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
-    deps = [":test_util"],
     visibility = ["//visibility:public"],
 )
 
@@ -57,14 +45,5 @@ py_test(
     srcs = ["port_util_test.py"],
     deps = [
         ":test_util",
-    ],
-)
-
-py_test(
-    name = "numeric_util_test",
-    srcs = ["numeric_util_test.py"],
-    deps = [
-        ":test_util",
-        ":torch",
     ],
 )
