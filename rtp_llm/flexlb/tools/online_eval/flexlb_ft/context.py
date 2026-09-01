@@ -153,6 +153,16 @@ RID_BASES = {
         "single-batch": 550_000,
         "window-nonbatch": 575_000,
     },
+    # KV-cache event/storm/capacity-conflict family (kv_cache_cases.py,
+    # task #84).  Fresh 600k window.  A parallel agent may add a "status"
+    # family alongside — on a push rejection fetch+rebase and re-push
+    # (no force-push, T0 discipline).
+    "kv": {
+        "batch-window": 600_000,
+        "single-nonbatch": 625_000,
+        "single-batch": 650_000,
+        "window-nonbatch": 675_000,
+    },
 }
 
 
