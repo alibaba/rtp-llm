@@ -5,6 +5,7 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
+from rtp_llm.config.generate_config import ReturnAllProbsMode
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -418,7 +419,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         self.assertTrue(config.return_logprobs)
         self.assertEqual(config.top_logprobs, 5)
-        self.assertFalse(config.return_all_probs)
+        self.assertEqual(config.return_all_probs, ReturnAllProbsMode.DEFAULT)
         self.assertTrue(config.is_streaming)
 
         default_top_config = self._extract_openai_generation_config(
