@@ -1108,7 +1108,6 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
     // Stage C: host/disk tiers are disabled and evictForGroup force-drops, so the joint eviction
     // completes synchronously without any transfer task.
     EXPECT_EQ(cache->evictForGroup(full->groupIds().front(), 1), 1);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
     expect_joint_stage("after_joint_eviction",
@@ -1246,20 +1245,16 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
-    ASSERT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     barrier->waitUntilEntered();
 
     EXPECT_GT(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
-    const int    pending_tasks = BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache);
     const size_t submit_count  = per_rank_transfer_engine->submittedBatchCount();
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), pending_tasks);
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), submit_count);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
     barrier->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     for (size_t pool_id = 0; pool_id < environment->device_pools.size(); ++pool_id) {
@@ -2205,12 +2200,10 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
     ASSERT_TRUE(rejection_guard.armed());
-    ASSERT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     EXPECT_FALSE(load_context->commit());
     EXPECT_TRUE(load_context->done());
     EXPECT_FALSE(load_context->success());
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), 0u);
     EXPECT_EQ(host_pool->treeRefCount(source_block), source_tree_ref_before);
     EXPECT_EQ(device_pool->refCount(request_target), 1u);

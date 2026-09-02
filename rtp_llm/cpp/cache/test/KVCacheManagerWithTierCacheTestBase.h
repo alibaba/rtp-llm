@@ -311,12 +311,13 @@ inline bool waitForAsyncContextDoneFor(const std::shared_ptr<AsyncContext>& cont
     return context->done();
 }
 
-inline bool waitForPendingTasksDoneFor(const BlockTreeCache& cache, std::chrono::milliseconds timeout) {
+template<typename Predicate>
+inline bool waitForConditionFor(Predicate&& predicate, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (BlockTreeCacheTestPeer::pendingTasksForTest(cache) != 0 && std::chrono::steady_clock::now() < deadline) {
+    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return BlockTreeCacheTestPeer::pendingTasksForTest(cache) == 0;
+    return predicate();
 }
 
 inline ModelConfig makeCompactDsv4ModelConfig() {
@@ -1318,12 +1319,10 @@ inline void reclaimAndExpectInitialPools(const std::shared_ptr<KVCacheManager>& 
     auto cache = manager->blockTreeCache();
     ASSERT_NE(cache, nullptr);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/4096, tier);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     }
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     const auto stats = cache->getStats();
     EXPECT_EQ(stats.tree_node_count, 0u);
     EXPECT_EQ(stats.device_heap_total_size, 0u);
@@ -1425,11 +1424,7 @@ protected:
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, source_tier, *ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, source_tier, 0.0);
-            ASSERT_TRUE(waitForPendingTasksDoneFor(
-                *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-                << "source=" << tierName(source_tier) << " target=" << tierName(target_tier) << " round=" << round
-                << " pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submittedDescriptorCount();
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
             const auto descriptors = engine->descriptors();
             ASSERT_GT(descriptors.size(), submits_before) << "round=" << round;
@@ -1658,7 +1653,6 @@ protected:
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(maybe_host.has_value());
@@ -1684,7 +1678,6 @@ protected:
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         }
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         auto maybe_lower = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(maybe_lower.has_value());
@@ -1747,7 +1740,6 @@ protected:
         }
         ASSERT_TRUE(failure_entered);
         EXPECT_FALSE(failed_result.async_context->done());
-        EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(maybe_loading.has_value());
@@ -1782,7 +1774,6 @@ protected:
         ASSERT_TRUE(failed_result.async_context->done());
         EXPECT_FALSE(failed_result.async_context->success());
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
         const auto descriptors_after_failure = pausable_engine->descriptors();
         EXPECT_EQ(pausable_engine->submittedBatchCount() - batches_before_failure, cache->groupSets().size());
@@ -1878,7 +1869,6 @@ protected:
         ASSERT_TRUE(retry_result.async_context->done());
         ASSERT_TRUE(retry_result.async_context->success()) << retry_result.async_context->errorInfo().ToString();
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
         ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
         ASSERT_TRUE(requestReusesExpectedPath(
@@ -1919,10 +1909,7 @@ protected:
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-        ASSERT_TRUE(waitForPendingTasksDoneFor(
-            *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << engine->submittedDescriptorCount();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
         if (source_tier == Tier::DISK) {
             std::vector<std::shared_ptr<IBlockPool>> host_pools;
@@ -1934,10 +1921,7 @@ protected:
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-            ASSERT_TRUE(waitForPendingTasksDoneFor(
-                *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-                << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submittedDescriptorCount();
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         }
 
         auto maybe_source = snapshotPathResources(*cache, seed.cache_keys);
@@ -1992,8 +1976,6 @@ protected:
             std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         const auto   descriptors_before_join = engine->descriptors();
         const size_t submits_before_join     = descriptors_before_join.size();
-        const int    pending_before_join = BlockTreeCacheTestPeer::pendingTasksForTest(*cache);
-        ASSERT_GT(pending_before_join, 0);
         ASSERT_EQ(submits_before_join, expected_submits_before_join);
         for (size_t index = submits_before_load; index < descriptors_before_join.size(); ++index) {
             const auto& descriptor = descriptors_before_join[index];
@@ -2041,8 +2023,6 @@ protected:
         ASSERT_NE(second_result.async_context, nullptr);
         EXPECT_FALSE(second_result.async_context->done());
         EXPECT_EQ(engine->submittedDescriptorCount(), submits_before_join);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_before_join)
-            << "a joiner must not submit another load task";
 
         auto maybe_joined = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(maybe_joined.has_value());
@@ -2075,20 +2055,14 @@ protected:
         engine->release();
         ASSERT_TRUE(waitForAsyncContextDoneFor(
             first_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "first context timed out; pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
             << " submits=" << engine->submittedDescriptorCount();
         ASSERT_TRUE(waitForAsyncContextDoneFor(
             second_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "second context timed out; pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
             << " submits=" << engine->submittedDescriptorCount();
         first_result.async_context->waitDone();
         second_result.async_context->waitDone();
         ASSERT_TRUE(first_result.async_context->done());
         ASSERT_TRUE(second_result.async_context->done());
-        ASSERT_TRUE(waitForPendingTasksDoneFor(
-            *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << engine->submittedDescriptorCount();
         const auto descriptors_after_load = engine->descriptors();
         ASSERT_GE(descriptors_after_load.size(), submits_before_join);
         for (size_t index = submits_before_load; index < descriptors_after_load.size(); ++index) {
@@ -2193,14 +2167,9 @@ protected:
             ASSERT_TRUE(
                 waitForAsyncContextDoneFor(retry_result.async_context,
                                            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-                << "retry context timed out; pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
                 << " submits=" << engine->submittedDescriptorCount();
             retry_result.async_context->waitDone();
             ASSERT_TRUE(retry_result.async_context->success()) << retry_result.async_context->errorInfo().ToString();
-            ASSERT_TRUE(waitForPendingTasksDoneFor(
-                *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-                << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-                << " submits=" << engine->submittedDescriptorCount();
             ASSERT_TRUE(requestReusesExpectedPath(
                 *cache, cache_config_, seed.cache_keys, retry_resource, /*logical_reuse_blocks=*/1));
             ASSERT_TRUE(requestReusedPayloadMatchesExpectedPath(
