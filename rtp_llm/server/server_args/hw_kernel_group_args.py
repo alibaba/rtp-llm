@@ -133,6 +133,7 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help=(
             "Decode CUDA Graph capture batch sizes configuration. "
             "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
+            "Draft/MTP prefill CUDA Graph derives its sequence lengths from these batch buckets. "
             "If not set, default logic will be used to generate batch sizes."
         ),
     )
