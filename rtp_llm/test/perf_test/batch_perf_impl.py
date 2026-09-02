@@ -216,28 +216,20 @@ class BatchPerfImpl(object):
             all_measure_responses.extend(responses)
 
         aggregate_results = analyze_results(all_measure_responses)
-        if aggregate_results.success_requests == 0:
-            raise RuntimeError(
-                "performance measurement failed: no requests succeeded "
-                f"({aggregate_results.fail_requests}/"
-                f"{aggregate_results.total_requests} failed)"
-            )
-
-        # Failed rounds have zero-valued latency fields and must not
-        # participate in min/max trimming.  Keep the aggregate object as the
-        # result so request counts still describe every submitted request.
-        successful_measurements = [
-            metric for metric in measurements if metric.success_requests > 0
-        ]
         results = aggregate_results
-        if len(successful_measurements) >= 3:
+        all_rounds_succeeded = all(
+            metric.total_requests > 0
+            and metric.success_requests == metric.total_requests
+            for metric in measurements
+        )
+        if len(measurements) >= 3 and all_rounds_succeeded:
             # Trim min and max, average the rest
-            successful_measurements.sort(key=lambda m: getattr(m, key))
-            values = [f"{getattr(m, key):.2f}" for m in successful_measurements]
-            trimmed = successful_measurements[1:-1]
+            measurements.sort(key=lambda m: getattr(m, key))
+            values = [f"{getattr(m, key):.2f}" for m in measurements]
+            trimmed = measurements[1:-1]
             avg_val = sum(getattr(m, key) for m in trimmed) / len(trimmed)
             logging.debug(
-                f"{len(successful_measurements)} successful runs {key}: {values}, "
+                f"{len(measurements)} fully successful runs {key}: {values}, "
                 f"trimmed [{values[0]}, {values[-1]}], avg={avg_val:.2f}"
             )
             setattr(results, key, avg_val)  # override with trimmed average
@@ -356,3 +348,18 @@ class BatchPerfImpl(object):
     def dump_results(self, results: List[Dict[str, Any]]):
         for result in results:
             logging.debug(json.dumps(result))
+
+
+def require_complete_measurement(
+    metric: TestResultMetrics,
+    *,
+    context: str,
+) -> TestResultMetrics:
+    """Reject incomplete measurements for result tables and golden data."""
+    if metric.total_requests <= 0 or metric.success_requests != metric.total_requests:
+        raise RuntimeError(
+            f"{context} requires every request to succeed: "
+            f"success={metric.success_requests}, failed={metric.fail_requests}, "
+            f"total={metric.total_requests}"
+        )
+    return metric

@@ -94,6 +94,31 @@ class AutoConfigureDeepepTest(TestCase):
     @patch(
         "rtp_llm.config.server_config_setup."
         "_auto_deepep_supported_on_visible_devices",
+        return_value=True,
+    )
+    def test_default_ep_size_is_resolved_before_decode_auto_selection(
+        self, mock_supported
+    ):
+        self._setup_parallel_info(
+            world_size=4, tp_size=1, ep_size=0, local_world_size=4
+        )
+        self.parallel_config.dp_size = 4
+        self.moe_config.use_all_gather = False
+
+        auto_configure_deepep(
+            moe_config=self.moe_config,
+            deep_ep_config=self.deep_ep_config,
+            parallelism_config=self.parallel_config,
+            role_type=RoleType.DECODE,
+        )
+
+        self.assertEqual(self.parallel_config.ep_size, 4)
+        mock_supported.assert_called_once_with(4)
+        self._assert_deepep_config(moe=True, low_latency=True, internode=False)
+
+    @patch(
+        "rtp_llm.config.server_config_setup."
+        "_auto_deepep_supported_on_visible_devices",
         side_effect=AssertionError("explicit config must bypass auto detection"),
     )
     def test_sm12x_explicit_deepep_is_preserved(self, _mock_supported):

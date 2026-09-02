@@ -1358,6 +1358,12 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency
     EXPECT_EQ(fallback_config.policyForGroup(hca_gid).memory_placement, CacheMemoryPlacement::HOST_PINNED);
     EXPECT_FALSE(fallback_config.policyForGroup(hca_gid).charge_to_paged_budget);
     EXPECT_EQ(fallback_config.explicitly_sized_pool_reserve_bytes, 0u);
+
+    // The C++ creator is also a public construction boundary.  Keep the
+    // tri-state contract enforced even when Python server-arg validation is
+    // bypassed by tests or an embedded caller.
+    EXPECT_THROW((void)make_config(64, std::nullopt, std::nullopt, true), std::exception);
+    EXPECT_THROW((void)make_config(-2, std::nullopt), std::exception);
 }
 
 TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKernelBlockSize) {

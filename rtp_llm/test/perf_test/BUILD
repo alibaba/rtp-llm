@@ -983,6 +983,7 @@ py_test(
     ],
     env = {
         "WORLD_SIZE": "4",
+        "GPU_COUNT": "4",
         "DG_JIT_CPP_STANDARD": "20",
         "GEN_TIMELINE_SYNC": "1",
         "PERF_PREARM_PROFILE": "1",
@@ -1009,7 +1010,10 @@ py_test(
         "NCCL_P2P_DISABLE": "1",
     },
     tags = ["manual", "SM120_X86"],
-    exec_properties = {"gpu": "SM120_X86"},
+    exec_properties = {
+        "gpu": "SM120_X86",
+        "gpu_count": "4",
+    },
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 
@@ -1055,6 +1059,7 @@ py_test(
     ],
     env = {
         "WORLD_SIZE": "4",
+        "GPU_COUNT": "4",
         "DG_JIT_CPP_STANDARD": "20",
         "GEN_TIMELINE_SYNC": "1",
         "PERF_PREARM_PROFILE": "1",
@@ -1080,7 +1085,10 @@ py_test(
         "NCCL_P2P_DISABLE": "1",
     },
     tags = ["manual", "SM120_X86"],
-    exec_properties = {"gpu": "SM120_X86"},
+    exec_properties = {
+        "gpu": "SM120_X86",
+        "gpu_count": "4",
+    },
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 

@@ -8,8 +8,11 @@ from rtp_llm.test.perf_test.batch_decode_test import (
     _engine_tp_size,
     _ensure_default_role_type,
 )
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
-from rtp_llm.test.perf_test.dataclass import ResponseInfo
+from rtp_llm.test.perf_test.batch_perf_impl import (
+    BatchPerfImpl,
+    require_complete_measurement,
+)
+from rtp_llm.test.perf_test.dataclass import ResponseInfo, TestResultMetrics
 
 
 class BatchDecodeTest(unittest.TestCase):
@@ -54,10 +57,12 @@ class BatchDecodeTest(unittest.TestCase):
         runner._curl_server_responses = MagicMock(return_value=responses)
         return runner
 
-    def test_batch_perf_rejects_all_failed_measurements(self):
+    def test_batch_perf_returns_all_failed_measurements_to_caller(self):
         runner = self._batch_perf([ResponseInfo({}, False), ResponseInfo({}, False)])
-        with self.assertRaisesRegex(RuntimeError, "no requests succeeded"):
-            runner.run()
+        result = runner.run()
+        self.assertEqual(result.total_requests, 2)
+        self.assertEqual(result.success_requests, 0)
+        self.assertEqual(result.fail_requests, 2)
 
     def test_batch_perf_accepts_partial_measurement_success(self):
         success = ResponseInfo(
@@ -75,7 +80,7 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(result.success_requests, 1)
         self.assertEqual(result.fail_requests, 1)
 
-    def test_multi_run_trimming_ignores_zero_success_rounds(self):
+    def test_multi_run_with_failed_round_returns_complete_aggregate(self):
         success = ResponseInfo(
             {
                 "aux_info": {
@@ -101,6 +106,15 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(result.success_requests, 1)
         self.assertEqual(result.fail_requests, 2)
         self.assertEqual(result.avg_decode_time, 1.0)
+
+    def test_result_table_contract_rejects_partial_measurement(self):
+        metric = TestResultMetrics(
+            total_requests=2,
+            success_requests=1,
+            fail_requests=1,
+        )
+        with self.assertRaisesRegex(RuntimeError, "grid.*success=1.*failed=1"):
+            require_complete_measurement(metric, context="grid")
 
     def test_main_stops_server_when_runner_raises(self):
         args = argparse.Namespace(

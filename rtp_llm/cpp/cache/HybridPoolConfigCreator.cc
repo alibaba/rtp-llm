@@ -315,6 +315,12 @@ void applyDsv4LegacyFixedPoolCapacity(LayerKVCacheSpecDescs& layer_descs, uint32
 }
 
 void applyDsv4HcaStatePoolCapacity(LayerKVCacheSpecDescs& layer_descs, int64_t block_num, bool clear) {
+    RTP_LLM_CHECK_WITH_INFO(
+        block_num >= -1, "dsv4_hca_state_pool_blocks must be -1, 0, or a positive value, got %ld", block_num);
+    RTP_LLM_CHECK_WITH_INFO(!(clear && block_num > 0),
+                            "dsv4_hca_state_pool_clear cannot be enabled together with "
+                            "dsv4_hca_state_pool_blocks=%ld",
+                            block_num);
     applyDsv4PoolCapacity(
         layer_descs,
         [](const std::string& tag) { return tag == DSV4_HCA_STATE_TAG; },

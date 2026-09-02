@@ -317,6 +317,21 @@ class DeepSeekV4Model(GptModelBase):
 
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config, max_generate_batch_size)
+        role_type = getattr(parallelism_config, "role_type", None)
+        is_prefill_only = role_type == RoleType.PREFILL or (
+            str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+        )
+        if args.fp8_kv_cache and not is_prefill_only and torch.cuda.is_available():
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+                validate_sm120_swa_topk_width,
+            )
+            from rtp_llm.models_py.utils.arch import is_sm120
+
+            if is_sm120():
+                validate_sm120_swa_topk_width(
+                    args.window_size,
+                    context="DeepSeek-V4 decode",
+                )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "

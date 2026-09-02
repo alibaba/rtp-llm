@@ -125,6 +125,24 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
         )
         self._v4_args.commit_only = self._commit_only_prefill
+        if (
+            self._v4_args.fp8_kv_cache
+            and not self._commit_only_prefill
+            and torch.cuda.is_available()
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+                validate_sm120_swa_topk_width,
+            )
+            from rtp_llm.models_py.utils.arch import is_sm120
+
+            if is_sm120():
+                window = int(self._v4_args.window_size)
+                gamma = int(self._gen_num_per_cycle)
+                dspark_topk_width = ((window + gamma + 127) // 128) * 128
+                validate_sm120_swa_topk_width(
+                    dspark_topk_width,
+                    context="DeepSeek-V4 DSpark decode",
+                )
         if self._commit_only_prefill:
             logging.info(
                 "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only "
