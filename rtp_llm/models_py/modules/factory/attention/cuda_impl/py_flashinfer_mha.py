@@ -23,6 +23,7 @@ from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOpQKVOut,
     FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     ParamsBase,
@@ -32,7 +33,7 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 256
 
 # FP8 KV cache uses a unit quantization scale: K/V are cast
 # directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
@@ -435,6 +436,7 @@ class PyFlashinferPrefillAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
         backend: str = "auto",
+        kv_dtype: Optional[torch.dtype] = None,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
@@ -450,7 +452,9 @@ class PyFlashinferPrefillAttnOp(object):
         )
         self.dtype = attn_configs.dtype
         self.q_dtype = attn_q_dtype(attn_configs)
-        self.kv_dtype = attn_kv_dtype(attn_configs)
+        self.kv_dtype = (
+            attn_kv_dtype(attn_configs) if kv_dtype is None else kv_dtype
+        )
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
@@ -937,6 +941,75 @@ class PyFlashinferMropePagedPrefillImpl(FMHAImplBase):
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
             )
+
+
+class PyFlashinferMropeRaggedPrefillImpl(PyFlashinferPrefillImplBase):
+    """MRoPE prefill with BF16 ragged attention and an FP8 cache write.
+
+    Native FlashInfer paged prefill silently produces incorrect results for
+    BF16-query / FP8-KV / head-dim 256 on SM100.  For requests without a
+    reusable prefix, use the fused MRoPE kernel only to produce BF16 Q/K/V,
+    then quantize and append K/V through FlashInfer's explicit cache writer.
+    Attention still consumes the BF16 Q/K/V through the native ragged kernel.
+    Keeping the cache write separate is required because the CUDA13
+    rtp-kernel QKV-output mode does not populate the paged cache.
+    """
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
+    ) -> None:
+        self.attn_configs = attn_configs
+        self.attn_inputs = attn_inputs
+        self.fmha_impl = PyFlashinferPrefillAttnOp(
+            attn_configs, kv_dtype=attn_configs.dtype
+        )
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.kv_cache_write_op = KVCacheWriteOp(
+            num_kv_heads=attn_configs.kv_head_num,
+            head_size=attn_configs.size_per_head,
+            token_per_block=attn_configs.kernel_tokens_per_block,
+        )
+        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.kv_cache_write_op.set_params(self.fmha_params)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return (
+            common.requires_native_bf16_fp8_prefill(attn_configs)
+            and attn_configs.rope_config.style == RopeStyle.Mrope
+            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        )
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
+    ) -> torch.Tensor:
+        # QKV-output mode and paged-cache writes are not composable in the
+        # CUDA13 rtp-kernel wheel.  Asking the fused op to do both returns the
+        # expected BF16 Q/K/V but leaves the cache untouched.  Rotate first,
+        # then use the same explicit writer as the regular FlashInfer path.
+        rotated_qkv = self.rope_kvcache_impl.forward(qkv, None, self.rope_params)
+        query, key, value = self._split_qkv(rotated_qkv)
+        kv_dtype = attn_kv_dtype(self.attn_configs)
+        cache_key = quantize_to_fp8_if_needed(key, kv_dtype)
+        cache_value = quantize_to_fp8_if_needed(value, kv_dtype)
+        self.kv_cache_write_op.forward(cache_key, cache_value, kv_cache)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return self.fmha_impl.forward(query, key, value, kv_cache)
+
+    def support_cuda_graph(self) -> bool:
+        return False
 
 
 class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):

@@ -56,6 +56,7 @@ elif device_type == DeviceType.Cuda:
         PyFlashinferDecodeImpl,
         PyFlashinferHybridPrefillImpl,
         PyFlashinferMropePagedPrefillImpl,
+        PyFlashinferMropeRaggedPrefillImpl,
         PyFlashinferPagedPrefillImpl,
         PyFlashinferPrefillImpl,
     )
@@ -80,6 +81,7 @@ elif device_type == DeviceType.Cuda:
             FlashInferTRTLLMSpecDecodeImpl,
             FlashInferTRTLLMPrefillImpl,
             FlashInferTRTLLMFMHAv2PrefillImpl,
+            PyFlashinferMropeRaggedPrefillImpl,
             PyFlashinferMropePagedPrefillImpl,
             PyFlashinferPrefillImpl,
             PyFlashinferHybridPrefillImpl,

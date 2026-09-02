@@ -5,7 +5,7 @@ import sys
 from types import SimpleNamespace
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import torch
 
@@ -27,7 +27,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferMropePagedPrefillImpl,
+    PyFlashinferMropeRaggedPrefillImpl,
     PyFlashinferPagedPrefillImpl,
+    PyFlashinferPrefillAttnOp,
     PyFlashinferPrefillPagedAttnOp,
 )
 from rtp_llm.models_py.utils.arch import is_sm10x
@@ -142,6 +144,87 @@ class FlashInferTRTLLMDispatchTest(TestCase):
             rope_op.forward.assert_called_once_with(qkv, kv_cache, rope_params)
             paged_op.forward.assert_called_once_with(query, kv_cache)
             apply_cache_store.assert_called_once_with(None, attn_inputs, kv_cache)
+
+    def test_mrope_no_prefix_uses_bf16_ragged_attention_with_fp8_cache(self):
+        config = self._config()
+        config.rope_config.style = RopeStyle.Mrope
+        config.head_num = 2
+        config.kv_head_num = 1
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            prefix_lengths=torch.zeros(1, dtype=torch.int32),
+        )
+        qkv = object()
+        kv_cache = object()
+        rotated_qkv = object()
+        query, key, value = object(), object(), object()
+        cache_key, cache_value = object(), object()
+        output = object()
+        rope_params = SimpleNamespace(kv_cache_offset=None)
+        fmha_params = object()
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+                "PyFlashinferPrefillAttnOp"
+            ) as ragged_op_cls,
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+                "FusedRopeKVCachePrefillOpQKVOut"
+            ) as rope_op_cls,
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+                "KVCacheWriteOp"
+            ) as cache_write_op_cls,
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+                "quantize_to_fp8_if_needed",
+                side_effect=(cache_key, cache_value),
+            ) as quantize,
+            patch.object(common, "create_write_cache_store_impl", return_value=None),
+            patch.object(common, "apply_write_cache_store") as apply_cache_store,
+        ):
+            ragged_op = ragged_op_cls.return_value
+            rope_op = rope_op_cls.return_value
+            cache_write_op = cache_write_op_cls.return_value
+            ragged_op.prepare.return_value = fmha_params
+            rope_op.prepare.return_value = rope_params
+            rope_op.forward.return_value = rotated_qkv
+            ragged_op.forward.return_value = output
+
+            impl = PyFlashinferMropeRaggedPrefillImpl(config, attn_inputs)
+            with patch.object(
+                impl, "_split_qkv", return_value=(query, key, value)
+            ) as split_qkv:
+                self.assertIs(impl.forward(qkv, kv_cache), output)
+
+            ragged_op_cls.assert_called_once_with(config, kv_dtype=torch.bfloat16)
+            ragged_op.prepare.assert_called_once_with(attn_inputs)
+            cache_write_op_cls.assert_called_once_with(
+                num_kv_heads=1,
+                head_size=256,
+                token_per_block=64,
+            )
+            cache_write_op.set_params.assert_called_once_with(fmha_params)
+            rope_op.forward.assert_called_once_with(qkv, None, rope_params)
+            split_qkv.assert_called_once_with(rotated_qkv)
+            self.assertEqual(
+                quantize.call_args_list,
+                [
+                    call(key, torch.float8_e4m3fn),
+                    call(value, torch.float8_e4m3fn),
+                ],
+            )
+            cache_write_op.forward.assert_called_once_with(
+                cache_key, cache_value, kv_cache
+            )
+            ragged_op.forward.assert_called_once_with(query, key, value, kv_cache)
+            apply_cache_store.assert_called_once_with(None, attn_inputs, kv_cache)
+
+        with patch.object(PyFlashinferPrefillAttnOp, "support", return_value=True):
+            self.assertTrue(
+                PyFlashinferMropeRaggedPrefillImpl.support(config, attn_inputs)
+            )
 
 
 class FlashInferPythonMHATest(TestCase):
