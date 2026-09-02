@@ -5,12 +5,14 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 @Component
 public final class SessionPlacementStore {
     private static final long DEFAULT_MAXIMUM_SIZE = 1_000_000L;
+    static final long MAX_IDLE_RETENTION_MS = TimeUnit.HOURS.toMillis(1L);
     private static final int MAX_SESSION_ID_LENGTH = 256;
 
     private final Cache<Key, State> placements;
@@ -18,11 +20,21 @@ public final class SessionPlacementStore {
     private final AtomicLong epochs = new AtomicLong();
 
     public SessionPlacementStore() {
-        this(DEFAULT_MAXIMUM_SIZE, System::currentTimeMillis);
+        this(DEFAULT_MAXIMUM_SIZE, System::currentTimeMillis, System::nanoTime);
     }
 
     SessionPlacementStore(long maximumSize, LongSupplier clock) {
-        this.placements = Caffeine.newBuilder().maximumSize(maximumSize).build();
+        this(maximumSize, clock,
+                () -> TimeUnit.MILLISECONDS.toNanos(clock.getAsLong()));
+    }
+
+    private SessionPlacementStore(long maximumSize, LongSupplier clock,
+                                  LongSupplier ticker) {
+        this.placements = Caffeine.newBuilder()
+                .maximumSize(maximumSize)
+                .expireAfterAccess(MAX_IDLE_RETENTION_MS, TimeUnit.MILLISECONDS)
+                .ticker(ticker::getAsLong)
+                .build();
         this.clock = clock;
     }
 

@@ -42,6 +42,20 @@ class SessionPlacementStoreTest {
     }
 
     @Test
+    void expiresIdleSessionMetadata() {
+        AtomicLong now = new AtomicLong(1_000L);
+        SessionPlacementStore store = new SessionPlacementStore(10, now::get);
+
+        store.currentEpoch("model", "session-1");
+        assertEquals(1L, store.estimatedSize());
+
+        now.addAndGet(SessionPlacementStore.MAX_IDLE_RETENTION_MS + 1L);
+        store.cleanUp();
+
+        assertEquals(0L, store.estimatedSize());
+    }
+
+    @Test
     void invalidationRemovesNewSessionPlacement() {
         SessionPlacementStore store = new SessionPlacementStore();
         record(store, "model", "session-1", "10.0.0.1:9000", 101L);
