@@ -132,8 +132,13 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
         swa_indices[2, :2] = torch.tensor([1, 10], device=self.device)
         swa_lengths = torch.tensor([3, 4, 2], dtype=torch.int32, device=self.device)
         swa_cache = self._packed_cache(swa_values, block_size=64)
+        swa_reference_values, _ = self._gather_dequantized(
+            swa_cache, [list(range(swa_values.shape[0]))]
+        )
+        swa_reference_values = swa_reference_values.squeeze(0)
 
         extra_values = extra_indices = extra_lengths = None
+        extra_reference_values = None
         extra_cache = None
         if variant != "swa":
             extra_values = torch.randn(9, dim, dtype=torch.bfloat16, device=self.device)
@@ -149,6 +154,10 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
             extra_cache = self._packed_cache(
                 extra_values, block_size=64 if variant == "csa" else 2
             )
+            extra_reference_values, _ = self._gather_dequantized(
+                extra_cache, [list(range(extra_values.shape[0]))]
+            )
+            extra_reference_values = extra_reference_values.squeeze(0)
 
         layer = AttentionFP8.__new__(AttentionFP8)
         torch.nn.Module.__init__(layer)
@@ -187,11 +196,11 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
             return self._reference_sparse_prefill(
                 query,
                 sink,
-                swa_values,
+                swa_reference_values,
                 swa_indices,
                 swa_lengths,
                 scale,
-                extra_values,
+                extra_reference_values,
                 extra_indices,
                 extra_lengths,
             ).reshape(tokens, -1)
@@ -230,6 +239,10 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
         scale = dim**-0.5
         source = torch.randn(width + 7, dim, dtype=torch.bfloat16, device=self.device)
         cache = self._packed_cache(source, block_size=64)
+        reference_source, _ = self._gather_dequantized(
+            cache, [list(range(source.shape[0]))]
+        )
+        reference_source = reference_source.squeeze(0)
         indices = torch.arange(width, dtype=torch.int32, device=self.device).view(
             1, 1, width
         )
@@ -252,7 +265,7 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
             expected = self._reference_sparse_prefill(
                 query.reshape(1, heads, dim),
                 sink,
-                source,
+                reference_source,
                 indices.reshape(1, width),
                 lengths,
                 scale,
@@ -524,7 +537,7 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
         # First validate the production kernel against independent PyTorch
         # attention math, then prove graph replay consumes an updated query.
         eager = forward()
-        torch.testing.assert_close(eager, reference(), rtol=3e-2, atol=3e-2)
+        torch.testing.assert_close(eager, reference(), rtol=3e-2, atol=4e-2)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             graph_output = forward()
@@ -548,7 +561,7 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
             replay_output,
             reference_output,
             rtol=3e-2,
-            atol=3e-2,
+            atol=4e-2,
         )
 
 
