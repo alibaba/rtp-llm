@@ -640,6 +640,83 @@ class TransientCapacityQueueContractTest {
         }
     }
 
+    @Test
+    @Timeout(20)
+    void sameVersionHeartbeatChargesEngineWorkAfterLocalTerminal()
+            throws Exception {
+        FlexlbConfig config = config();
+        DispatcherConfig dispatcher = DispatcherConfig.nonBatch();
+        dispatcher.setMaxInflightRequestsPerPrefillWorker(2);
+        config.setDispatcher(dispatcher);
+        config.queueScheduler().getCapacity()
+                .setMaxOutstandingRequestsGlobal(32);
+        config.queueScheduler().getCapacity()
+                .setMaxWaitingRequestsPerPrefillWorker(32);
+        config.getRouter().getRoles().getPrefill().getAvailability()
+                .setMaxPendingRequests(32L);
+        config.getRouter().getRoles().getDecode().getAvailability()
+                .setMaxEngineRequests(32L);
+
+        try (Fixture fixture = new Fixture(null, config)) {
+            List<CompletableFuture<Response>> admitted = new ArrayList<>();
+            for (long requestId = 800L; requestId < 802L; requestId++) {
+                admitted.add(fixture.runtime.scheduler().submit(
+                        fixture.context(requestId, 50, 128_000L)));
+            }
+
+            awaitCompletedResponses(admitted, 2, 2, TimeUnit.SECONDS);
+            assertEquals(2, completedResponses(admitted));
+
+            List<ScheduledRequest> delivered = List.of(
+                    fixture.runtime.activeItem(800L),
+                    fixture.runtime.activeItem(801L));
+            assertEquals(2, delivered.size());
+            for (ScheduledRequest item : delivered) {
+                assertTrue(item != null);
+                assertTrue(fixture.prefillEndpoint.releaseCommittedItem(item));
+            }
+
+            fixture.runtime.applyStatus(
+                    fixture.prefillStatus,
+                    prefillRunningStatus(1L, List.of(800L, 801L)));
+
+            List<CompletableFuture<Response>> waiting = new ArrayList<>();
+            for (long requestId = 802L; requestId < 806L; requestId++) {
+                waiting.add(fixture.runtime.scheduler().submit(
+                        fixture.context(requestId, 50, 128_000L)));
+            }
+
+            Thread.sleep(250L);
+            assertEquals(0, completedResponses(waiting),
+                    "a same-version heartbeat must charge work that the "
+                            + "Engine still owns after the Master locally "
+                            + "terminalized its route");
+
+            int attemptsBeforeHeartbeats =
+                    fixture.metrics.totalPlacementAttempts();
+            for (int update = 0;
+                    update < INCIDENT_WORKER_STATUS_UPDATES;
+                    update++) {
+                fixture.runtime.applyStatus(
+                        fixture.prefillStatus,
+                        prefillRunningStatus(1L, List.of(800L, 801L)));
+            }
+            Thread.sleep(100L);
+            assertEquals(attemptsBeforeHeartbeats,
+                    fixture.metrics.totalPlacementAttempts(),
+                    "unchanged same-version heartbeats must not replay "
+                            + "placement");
+
+            fixture.runtime.applyStatus(
+                    fixture.prefillStatus,
+                    prefillRunningStatus(1L, List.of(800L)));
+            awaitCompletedResponses(waiting, 1, 2, TimeUnit.SECONDS);
+            assertEquals(1, completedResponses(waiting),
+                    "one real same-version capacity release must wake one "
+                            + "waiting request");
+        }
+    }
+
     private static int completedResponses(
             List<CompletableFuture<Response>> responses) {
         return (int) responses.stream().filter(Future::isDone).count();
@@ -1247,6 +1324,23 @@ class TransientCapacityQueueContractTest {
         }
         response.setRunningTaskInfo(running);
         response.setRunningQueryLen((long) runningCount);
+        return response;
+    }
+
+    private static WorkerStatusResponse prefillRunningStatus(
+            long version, List<Long> requestIds) {
+        WorkerStatusResponse response =
+                statusResponse(RoleType.PREFILL, version, false);
+        Map<String, TaskInfo> running = new LinkedHashMap<>();
+        for (long requestId : requestIds) {
+            TaskInfo task = new TaskInfo();
+            task.setRequestId(requestId);
+            task.setPhase(TaskPhase.PENDING);
+            task.setInputLength(128_000L);
+            running.put(Long.toString(requestId), task);
+        }
+        response.setRunningTaskInfo(running);
+        response.setWaitingQueryLen((long) requestIds.size());
         return response;
     }
 

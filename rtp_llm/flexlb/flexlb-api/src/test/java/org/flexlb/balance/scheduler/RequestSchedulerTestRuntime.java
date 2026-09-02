@@ -117,6 +117,17 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return slot == null ? null : slot.future();
     }
 
+    /** Return the exact item currently owned by a fixture request slot. */
+    public ScheduledRequest activeItem(long requestId) {
+        RequestSlot slot = lifecycle.requestSlot(requestId);
+        if (slot == null) {
+            return null;
+        }
+        synchronized (slot) {
+            return slot.activeItem();
+        }
+    }
+
     /** Bind the fixture's router exactly once, after endpoints are published. */
     public void bindRouter(DefaultRouter exactRouter) {
         router.bind(exactRouter);
@@ -162,11 +173,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                 + committedVersion + ", response=" + responseVersion);
             }
             if (responseVersion == committedVersion) {
-                return;
+                projection = endpoint.observeStatusHeartbeat(
+                        status, observation);
+            } else {
+                WorkerStatus.PreparedStatus prepared =
+                        status.prepareNewStatus(observation);
+                projection = endpoint.applyPreparedStatus(status, prepared);
             }
-            WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(observation);
-            projection = endpoint.applyPreparedStatus(status, prepared);
         } finally {
             status.lock.unlock();
         }

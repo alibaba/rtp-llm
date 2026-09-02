@@ -1204,17 +1204,39 @@ public final class PrefillState {
             WorkerStatus.StatusObservation observation) {
         List<WorkerStatusFact> facts = new ArrayList<>(
                 observation.runningTasks().size());
+        boolean capacityReleased = false;
         lock.lock();
         try {
-            for (WorkerStatus.TaskObservation task
-                    : observation.runningTasks().values()) {
-                WorkerStatusFact fact = activeStatusFactUnderLock(task);
-                if (fact != null) {
-                    facts.add(fact);
-                }
-            }
+            long nowMs = clock.getAsLong();
+            WorkerStatus.EngineObservation engine = observation.engine();
+            IdentityHashMap<RequestEntry, Phase> individualPhases =
+                    new IdentityHashMap<>();
+            IdentityHashMap<BatchWork, Phase> batchPhases =
+                    new IdentityHashMap<>();
+            long nextUnknownEngineRequestCount =
+                    prepareActiveObservationsUnderLock(
+                            engine.runningTaskList(),
+                            Map.of(),
+                            saturatedAdd(
+                                    Math.max(0L, engine.waitingQueryLen()),
+                                    Math.max(0L, engine.runningQueryLen())),
+                            locallyOwnedCountUnderLock(),
+                            individualPhases,
+                            batchPhases,
+                            facts);
+            individualPhases.forEach(
+                    (entry, phase) -> entry.observeIndividualPhase(
+                            phase, nowMs));
+            batchPhases.forEach(
+                    (batch, phase) -> batch.observePhase(phase, nowMs));
+            long previousUnknownEngineRequestCount =
+                    unknownEngineRequestCount;
+            unknownEngineRequestCount = nextUnknownEngineRequestCount;
+            capacityReleased = unknownEngineRequestCount
+                    < previousUnknownEngineRequestCount;
         } finally {
             lock.unlock();
+            notifyCapacityAvailable(capacityReleased);
         }
         return List.copyOf(facts);
     }
@@ -1340,7 +1362,8 @@ public final class PrefillState {
             long reportedActive,
             long locallyOwnedAfterTerminals,
             IdentityHashMap<RequestEntry, Phase> individualPhases,
-            IdentityHashMap<BatchWork, Phase> batchPhases) {
+            IdentityHashMap<BatchWork, Phase> batchPhases,
+            List<WorkerStatusFact> activeFacts) {
         requireLock();
         Set<Long> unknownDetailed = new HashSet<>();
         for (WorkerStatus.TaskObservation task : activeTasks.values()) {
@@ -1352,6 +1375,9 @@ public final class PrefillState {
                     unknownDetailed.add(task.requestId());
                 }
                 continue;
+            }
+            if (activeFacts != null && !isPriorityCancelOverlayOnly(task)) {
+                activeFacts.add(WorkerStatusFact.active(entry.committedItem));
             }
             Phase observed = task.phase() == TaskPhase.RUNNING
                     ? Phase.ENGINE_RUNNING : Phase.ENGINE_QUEUED;
@@ -1428,7 +1454,7 @@ public final class PrefillState {
                     prepareActiveObservationsUnderLock(
                             activeTasks, terminals, reportedActive,
                             locallyOwnedAfterTerminals,
-                            individualPhases, batchPhases);
+                            individualPhases, batchPhases, null);
             outcome = prepareStatusReconciliationUnderLock(
                     engine.role(), terminals, activeTasks, reductions);
 
