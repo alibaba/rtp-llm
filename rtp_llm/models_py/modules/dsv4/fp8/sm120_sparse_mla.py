@@ -14,6 +14,37 @@ SM120_SWA_TOPK_WIDTHS = (128, 512, 1024)
 SM120_EXTRA_TOPK_WIDTHS = (2, 128, 512, 1024, 2048, 4096, 8192)
 
 
+def validate_sm120_swa_topk_width(
+    requested_width: int,
+    *,
+    context: str,
+) -> int:
+    """Return the decode-kernel width used for an SWA request.
+
+    FlashInfer precompiles the SM120 DSV4 decode launcher only for the widths
+    in ``SM120_SWA_TOPK_WIDTHS``.  Canonicalization may pad up to the next
+    instance, but it must never let an unsupported large window reach the
+    first live request.
+    """
+    requested_width = int(requested_width)
+    if requested_width <= 0:
+        raise ValueError(
+            f"{context} requires a positive SWA Top-K width, got {requested_width}"
+        )
+    kernel_width = next(
+        (width for width in SM120_SWA_TOPK_WIDTHS if width >= requested_width),
+        None,
+    )
+    if kernel_width is None:
+        raise RuntimeError(
+            f"{context} requires SWA Top-K width {requested_width}, which exceeds "
+            "the largest SM120 FlashInfer DSV4 decode instantiation "
+            f"({SM120_SWA_TOPK_WIDTHS[-1]}). Reduce sliding_window/DSpark "
+            "proposal width or use a backend with a matching kernel instance."
+        )
+    return kernel_width
+
+
 def workspace(device: torch.device) -> torch.Tensor:
     result = _WORKSPACES.get(device)
     if result is None:

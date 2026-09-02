@@ -1,13 +1,15 @@
 import os
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_default_args
 from rtp_llm.model_factory import ModelFactory
+from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.deepseek_v4 import (
     DeepSeekV4,
     DeepSeekV4DSpark,
@@ -44,8 +46,9 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
     RoleType,
+    TaskType,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 # CSA / HCA / SWA / SWA / CSA -- covers every routing branch plus a repeat.
 LAYER_COMPRESS_RATIOS = [4, 128, 0, 0, 4]
@@ -102,6 +105,54 @@ class Dsv4KvCacheSpecTest(TestCase):
                 W.v4_dspark_main_proj_w,
             ],
         )
+
+    def test_dspark_prefill_pruning_reaches_loader_checkpoint_key_map(self):
+        descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
+        descriptor.role_type = RoleType.PREFILL
+
+        def weight(name, checkpoint_name):
+            return AtomicWeight(name, [CkptWeightInfo(checkpoint_name)])
+
+        source = ModelWeightInfo(
+            layer_weights=[
+                [
+                    weight(W.v4_attn_wkv_w, "mtp.{i}.self_attn.wkv.weight"),
+                    weight(W.v4_attn_kv_norm, "mtp.{i}.self_attn.kv_norm.weight"),
+                    weight(W.v4_routed_w1_w, "mtp.{i}.mlp.experts.weight"),
+                ]
+            ],
+            weights=[
+                weight(W.embedding, "embed.weight"),
+                weight(W.lm_head, "lm_head.weight"),
+                weight(W.v4_dspark_main_norm, "mtp.main_norm.weight"),
+                weight(W.v4_dspark_main_proj_w, "mtp.main_proj.weight"),
+                weight(W.v4_dspark_markov_w1, "mtp.markov.weight"),
+            ],
+        )
+        with patch.object(DeepSeekV4Weight, "get_weight_info", return_value=source):
+            filtered = descriptor.get_weight_info()
+
+        loader = ModelLoader.__new__(ModelLoader)
+        loader._model_weights_info = filtered
+        loader._load_config = SimpleNamespace(num_layers=1, database=MagicMock())
+        loader._global_weight_aliases = {}
+        loader._task_type = TaskType.LANGUAGE_MODEL
+        loader._misc_weights_info = []
+        checkpoint_key_map, _ = loader._generate_weight_info()
+
+        self.assertEqual(
+            set(checkpoint_key_map),
+            {
+                "mtp.0.self_attn.wkv.weight",
+                "mtp.0.self_attn.kv_norm.weight",
+                "embed.weight",
+                "lm_head.weight",
+                "mtp.main_norm.weight",
+                "mtp.main_proj.weight",
+            },
+        )
+        self.assertNotIn("mtp.0.mlp.experts.weight", checkpoint_key_map)
+        self.assertNotIn("mtp.markov.weight", checkpoint_key_map)
 
     def test_dspark_model_type_routes_to_production_wrapper(self):
         self.assertIs(

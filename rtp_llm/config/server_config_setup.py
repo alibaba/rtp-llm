@@ -57,6 +57,38 @@ def _auto_deepep_supported_on_visible_devices(local_world_size: int = 0) -> bool
     return all(capability != (12, 0) for capability in capabilities)
 
 
+def _resolve_and_validate_ep_size(parallelism_config: ParallelismConfig) -> int:
+    """Resolve the public ``ep_size=0`` default before topology decisions.
+
+    ``set_parallelism_config`` historically performed this normalization, but
+    device-only startup paths call :func:`auto_configure_deepep` first.  Keep a
+    single normalization rule so every entry point observes the same topology.
+    """
+    tp_size = parallelism_config.tp_size
+    dp_size = parallelism_config.dp_size
+    ep_size = parallelism_config.ep_size
+    if ep_size == 1:
+        assert tp_size >= 1, (
+            "Pure TP mode (ep_size=1) requires tp_size >= 1, " f"got tp_size={tp_size}"
+        )
+        assert dp_size == 1, (
+            "Pure TP mode (ep_size=1) requires dp_size == 1, " f"got dp_size={dp_size}"
+        )
+    elif ep_size == 0:
+        ep_size = tp_size * dp_size
+        parallelism_config.ep_size = ep_size
+        logging.info(
+            "parallelism_config.ep_size == 0, auto set to tp_size * dp_size = %d",
+            ep_size,
+        )
+    else:
+        assert ep_size == tp_size * dp_size, (
+            "ep_size must be equal to 1 or tp_size * dp_size, "
+            f"got ep_size={ep_size}, tp_size={tp_size}, dp_size={dp_size}"
+        )
+    return ep_size
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
@@ -96,7 +128,7 @@ def auto_configure_deepep(
     # returns 1 when CP is enabled, which would incorrectly disable
     # use_all_gather for ep_size == tp_size configurations.
     tp_size = parallelism_config.tp_size
-    ep_size = parallelism_config.ep_size
+    ep_size = _resolve_and_validate_ep_size(parallelism_config)
     dp_size = parallelism_config.dp_size
     moe_config.ll_num_max_token = ll_num_max_token
 
@@ -330,29 +362,9 @@ def set_parallelism_config(
             n = world_size
         parallelism_config.local_world_size = max(n, 1)
 
-    # Resolve and validate parallelism configuration.
-    # ep_size default is 0, which triggers automatic derivation.
-    # Three supported modes:
-    # 1. Single GPU: tp_size == 1, dp_size == 1, ep_size == 0 (default) → ep_size set to 1
-    # 2. Pure TP:    ep_size explicitly set to 1, tp_size > 1, dp_size == 1
-    # 3. EP mode:    ep_size == 0 (default), ep_size auto-derived as tp_size * dp_size
-    if parallelism_config.ep_size == 1:
-        assert (
-            parallelism_config.tp_size >= 1
-        ), f"Pure TP mode (ep_size=1) requires tp_size >= 1, got tp_size={parallelism_config.tp_size}"
-        assert (
-            parallelism_config.dp_size == 1
-        ), f"Pure TP mode (ep_size=1) requires dp_size == 1, got dp_size={parallelism_config.dp_size}"
-    elif parallelism_config.ep_size == 0:
-        logging.info("parallelism_config.ep_size == 0, auto set to world size")
-        parallelism_config.ep_size = (
-            parallelism_config.tp_size * parallelism_config.dp_size
-        )
-    else:
-        assert (
-            parallelism_config.ep_size
-            == parallelism_config.tp_size * parallelism_config.dp_size
-        ), f"ep_size must be equal to 1 or tp_size * dp_size, got ep_size={parallelism_config.ep_size}, tp_size={parallelism_config.tp_size}, dp_size={parallelism_config.dp_size}"
+    # Resolve and validate parallelism configuration.  This helper is also
+    # called by auto_configure_deepep because that entry point may run first.
+    _resolve_and_validate_ep_size(parallelism_config)
 
     ffn_tp_size = parallelism_config.tp_size // parallelism_config.ffn_sp_size
     parallelism_config.ffn_tp_size = ffn_tp_size

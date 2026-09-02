@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import _decode_sched_meta
 from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
     SM120_EXTRA_TOPK_WIDTHS,
     canonical_topk,
+    validate_sm120_swa_topk_width,
 )
 
 
@@ -106,6 +107,25 @@ class Sm120SparseMlaCanonicalTest(unittest.TestCase):
     def test_width_overflow_fails_with_actionable_error(self):
         with self.assertRaisesRegex(RuntimeError, "exceeds the largest"):
             canonical_topk(torch.zeros(1, 9, dtype=torch.int32), None, (4, 8))
+
+    def test_normal_decode_width_is_validated_before_first_request(self):
+        self.assertEqual(
+            validate_sm120_swa_topk_width(513, context="DeepSeek-V4 decode"),
+            1024,
+        )
+        with self.assertRaisesRegex(RuntimeError, "DeepSeek-V4 decode.*1025"):
+            validate_sm120_swa_topk_width(1025, context="DeepSeek-V4 decode")
+
+    def test_dspark_gamma_is_included_in_startup_width_validation(self):
+        window = 1024
+        gamma = 3
+        dspark_width = ((window + gamma + 127) // 128) * 128
+        self.assertEqual(dspark_width, 1152)
+        with self.assertRaisesRegex(RuntimeError, "DSpark decode.*1152"):
+            validate_sm120_swa_topk_width(
+                dspark_width,
+                context="DeepSeek-V4 DSpark decode",
+            )
 
     def test_hca_long_context_widths_cover_one_million_tokens(self):
         for source_width, expected_width in (

@@ -16,6 +16,11 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def is_legacy_cutlass_fp4_available() -> bool:
+    """Whether the in-tree legacy CUTLASS FP4 GEMM symbol was compiled."""
+    return cutlass_scaled_fp4_mm is not None
+
+
 def cutlass_scaled_fp4_mm_wrapper(
     a: torch.Tensor,
     b: torch.Tensor,

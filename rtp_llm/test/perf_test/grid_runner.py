@@ -4,7 +4,10 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.batch_perf_impl import (
+    BatchPerfImpl,
+    require_complete_measurement,
+)
 from rtp_llm.test.perf_test.dataclass import (
     MetricState,
     TableType,
@@ -50,7 +53,7 @@ class GridRunner:
             f"batch_size: {1 * self._dp_size}, "
             f"input_len: {self._input_len_list[0]}, runs: {warmup_runs}"
         )
-        BatchPerfImpl(
+        metric = BatchPerfImpl(
             self._port,
             self._dp_size,
             1 * self._dp_size,
@@ -64,6 +67,7 @@ class GridRunner:
             measure_runs=warmup_runs,
             profile_runs=0,
         ).run()
+        require_complete_measurement(metric, context="grid warmup")
 
     def run(self) -> List[MetricState]:
         """Warmup then iterate batch_size x input_len, return metrics."""
@@ -97,6 +101,10 @@ class GridRunner:
                         self._generate_config,
                         trace_name,
                     ).run(num_measures=self._num_measures)
+                    require_complete_measurement(
+                        metric,
+                        context=f"grid batch_size={batch_size} input_len={input_len}",
+                    )
                     metrics_list.append(MetricState(input_len, batch_size, metric))
 
                     pbar.update(1)

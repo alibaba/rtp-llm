@@ -324,8 +324,11 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
 
 class Sm120CollectiveHardwareTest(unittest.TestCase):
     def test_two_rank_collective_eager_and_cuda_graph(self) -> None:
-        if torch.cuda.device_count() < 2:
-            self.skipTest("requires two SM120 GPUs")
+        self.assertGreaterEqual(
+            torch.cuda.device_count(),
+            2,
+            "dedicated SM120 collective target requires two visible GPUs",
+        )
         mp.spawn(
             _run_collective_rank,
             args=(2, _free_port()),
