@@ -34,11 +34,13 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if CutedslFp4Executor can handle the configuration"""
+        from rtp_llm.models_py.utils.arch import is_sm12x
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
 
         resolver = MoeConfigResolver()
+        checker.check(not is_sm12x())
         checker.check(resolver.is_bf16(config))
         # Check if quantization is enabled and uses FP4 (uint8 dtype)
         # FP4 weights are packed as uint8, so we check for quant_config with uint8 dtype
@@ -225,4 +227,3 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         )
 
         return CombineForwardPayload(fused_expert_output=output)
-

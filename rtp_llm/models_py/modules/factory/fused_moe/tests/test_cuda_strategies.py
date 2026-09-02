@@ -1210,6 +1210,24 @@ class TestCudaFp4StrategySelection(unittest.TestCase):
                     config = self._make_config("ep_normal", fp4_moe_op)
                     self.assertEqual(self._candidates(config), self.NONE_SELECTED)
 
+    def test_sm12x_legacy_fp4_executors_reject_direct_selection(self) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
+            CutedslFp4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
+            TrtllmFp4Executor,
+        )
+
+        with self._arch(sm12x=True):
+            config = self._make_config("no_dp", "auto")
+            for executor in (CutedslFp4Executor, TrtllmFp4Executor):
+                with self.subTest(executor=executor.__name__):
+                    checker = ConditionChecker(
+                        f"{executor.__name__}.check_conditions()"
+                    )
+                    executor.check_conditions(checker, config)
+                    self.assertFalse(checker.all_passed())
+
     # ---- sm100 ----
 
     def test_sm100_no_dp_auto_selects_trtllm(self) -> None:
@@ -1250,6 +1268,24 @@ class TestCudaFp4StrategySelection(unittest.TestCase):
             self.assertEqual(
                 self._candidates(config), {**self.NONE_SELECTED, "ep_normal": True}
             )
+
+    def test_sm100_legacy_fp4_executors_remain_available(self) -> None:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
+            CutedslFp4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
+            TrtllmFp4Executor,
+        )
+
+        with self._arch(sm12x=False):
+            config = self._make_config("no_dp", "auto")
+            for executor in (CutedslFp4Executor, TrtllmFp4Executor):
+                with self.subTest(executor=executor.__name__):
+                    checker = ConditionChecker(
+                        f"{executor.__name__}.check_conditions()"
+                    )
+                    executor.check_conditions(checker, config)
+                    self.assertTrue(checker.all_passed())
 
 
 if __name__ == "__main__":
