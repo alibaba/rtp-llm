@@ -4,8 +4,8 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.balance.scheduler.RequestState;
+
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -13,7 +13,7 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -55,13 +55,13 @@ class FlexlbServiceCancelTest {
                 mock(ConfigService.class),
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
-                mock(PrioritySchedulerReporter.class));
+                mock(RequestSchedulerReporter.class));
     }
 
     @Test
     void localCancelReturnsAuthoritativePendingLifecycle() {
-        RequestLifecycleSnapshot pending = snapshot(
-                101L, RequestLifecycleState.CANCEL_REQUESTED, 301L);
+        RequestState.Snapshot pending = snapshot(
+                101L, RequestState.Phase.CANCEL_REQUESTED, 301L);
         when(routeService.cancelRequest(
                 101L, 301L, CancelReason.DEADLINE_EXCEEDED))
                 .thenReturn(pending);
@@ -90,8 +90,8 @@ class FlexlbServiceCancelTest {
 
     @Test
     void localCancelPreservesExistingTerminalLifecycle() {
-        RequestLifecycleSnapshot completed = snapshot(
-                102L, RequestLifecycleState.COMPLETED, 0);
+        RequestState.Snapshot completed = snapshot(
+                102L, RequestState.Phase.COMPLETED, 0);
         when(routeService.cancelRequest(
                 102L, 0, CancelReason.CLIENT_CANCELLED))
                 .thenReturn(completed);
@@ -206,7 +206,7 @@ class FlexlbServiceCancelTest {
                         FlexlbGrpcForwarder.CancelForwardResult.noMaster()));
         when(routeService.cancelRequest(
                 106L, 0, CancelReason.CLIENT_CANCELLED))
-                .thenReturn(snapshot(106L, RequestLifecycleState.CANCELLED, 0));
+                .thenReturn(snapshot(106L, RequestState.Phase.CANCELLED, 0));
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer =
                 mock(StreamObserver.class);
 
@@ -272,11 +272,11 @@ class FlexlbServiceCancelTest {
                 .build();
     }
 
-    private static RequestLifecycleSnapshot snapshot(
+    private static RequestState.Snapshot snapshot(
             long requestId,
-            RequestLifecycleState state,
+            RequestState.Phase state,
             long batchId) {
-        return new RequestLifecycleSnapshot(
+        return new RequestState.Snapshot(
                 requestId, state,
                 batchId > 0 ? DeliveryClaimKind.BATCH_ENQUEUE : DeliveryClaimKind.NONE,
                 batchId, 1L, 2L, state.name());

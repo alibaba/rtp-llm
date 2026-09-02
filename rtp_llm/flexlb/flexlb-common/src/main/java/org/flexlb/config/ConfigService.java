@@ -47,7 +47,9 @@ public class ConfigService {
         try {
             JsonNode tree = STRICT_MAPPER.readTree(document);
             rejectJsonNull(tree, "$");
-            FlexlbConfig config = STRICT_MAPPER.treeToValue(tree, FlexlbConfig.class);
+            FlexlbConfigValidator.validateDocumentShape(tree);
+            FlexlbConfig config = STRICT_MAPPER.treeToValue(
+                    tree, FlexlbConfig.class);
             FlexlbConfigValidator.validate(config);
             return config;
         } catch (ConfigValidationException error) {
@@ -93,10 +95,13 @@ public class ConfigService {
         String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
         String ordering = config.isDirect() ? "N/A"
                 : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
-        String dispatcher = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
-        log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, dispatcher={}, "
+        String decision = config.isDirect() ? "N/A"
+                : config.isFixedWindowDecision() ? "FIXED_WINDOW" : "SINGLE";
+        String dispatcher = config.getDispatcher().typeName();
+        log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, decision={}, "
+                        + "dispatcher={}, "
                         + "prefillSelector={}, decodeSelector={}, groupRules={}",
-                config.getSchemaVersion(), scheduler, ordering, dispatcher,
+                config.getSchemaVersion(), scheduler, ordering, decision, dispatcher,
                 config.getRouter().getRoles().getPrefill().getSelector().getClass().getSimpleName(),
                 config.getRouter().getRoles().getDecode().getSelector().getClass().getSimpleName(),
                 config.getRouter().getGroupSelector() == null ? 0

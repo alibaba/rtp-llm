@@ -94,6 +94,10 @@ public class JsonUtils {
         }
     }
 
+    /**
+     * Deserialize optional JSON, returning {@code null} when it is malformed.
+     * Callers use the null result to fall back to default configuration.
+     */
     public static <T> T toObjectOrNull(String text, Class<T> clazz) {
         ObjectReader reader = MAPPER.readerFor(clazz);
         try {

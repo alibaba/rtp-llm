@@ -1,6 +1,7 @@
 package org.flexlb.config;
 
-import org.flexlb.balance.strategy.PrefillTimeFormula;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.RoutingConfig.BestOnlyConfig;
 import org.flexlb.config.RoutingConfig.CacheAffinityConfig;
 import org.flexlb.config.RoutingConfig.DecodeAvailabilityConfig;
@@ -17,6 +18,71 @@ import org.flexlb.config.RoutingConfig.RatioCandidatePoolConfig;
 /** Cross-field validation for the public configuration contract. */
 final class FlexlbConfigValidator {
 
+    static void validateDocumentShape(JsonNode document) {
+        JsonNode scheduler = document.path("scheduler");
+        if (scheduler.isObject()) {
+            String type = scheduler.path("type").asText("QUEUE");
+            if ("DIRECT".equals(type)) {
+                rejectFieldsExcept(scheduler, "scheduler", "type");
+            } else if ("QUEUE".equals(type)) {
+                validateOrderingShape(scheduler.path("ordering"));
+                validateDecisionShape(scheduler.path("decision"));
+            }
+        }
+
+        JsonNode dispatcher = document.path("dispatcher");
+        if (dispatcher.isObject()) {
+            String type = dispatcher.path("type").asText("BATCH");
+            if ("BATCH".equals(type)) {
+                rejectFieldsExcept(dispatcher, "dispatcher", "type",
+                        "maxInflightBatchesPerPrefillWorker",
+                        "enqueueRpcTimeoutMs");
+            } else if ("NON_BATCH".equals(type)) {
+                rejectFieldsExcept(dispatcher, "dispatcher", "type",
+                        "maxInflightRequestsPerPrefillWorker");
+            }
+        }
+    }
+
+    private static void validateOrderingShape(JsonNode ordering) {
+        if (!ordering.isObject()) {
+            return;
+        }
+        String type = ordering.path("type").asText("FIFO");
+        if ("FIFO".equals(type)) {
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type");
+        } else if ("PRIORITY".equals(type)) {
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type",
+                    "defaultPriority", "preemption");
+        }
+    }
+
+    private static void validateDecisionShape(JsonNode decision) {
+        if (!decision.isObject()) {
+            return;
+        }
+        String type = decision.path("type").asText("FIXED_WINDOW");
+        if ("SINGLE".equals(type)) {
+            rejectFieldsExcept(decision, "scheduler.decision", "type");
+        } else if ("FIXED_WINDOW".equals(type)) {
+            rejectFieldsExcept(decision, "scheduler.decision", "type",
+                    "maxRequests", "maxCollectionWaitMs",
+                    "maxPredictedExecutionMs");
+        }
+    }
+
+    private static void rejectFieldsExcept(
+            JsonNode object, String path, String... allowed) {
+        java.util.Set<String> names = java.util.Set.of(allowed);
+        object.fieldNames().forEachRemaining(field -> {
+            if (!names.contains(field)) {
+                throw new ConfigValidationException(
+                        path + "." + field,
+                        "is not supported by the active mode");
+            }
+        });
+    }
+
     static void validate(FlexlbConfig config) {
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
@@ -26,35 +92,54 @@ final class FlexlbConfigValidator {
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
         require(config.getObservability() != null, "observability", "is required");
 
-        if (config.isDirect()) {
-            require(config.getDispatcher() instanceof NonBatchDispatcherConfig,
-                    "dispatcher.type", "DIRECT requires NON_BATCH");
-        } else {
-            validateQueue(config, config.queueScheduler());
+        if (!config.isDirect()) {
+            validateQueue(config.queueScheduler());
         }
-        validateDispatcher(config);
+        config.getDispatcher().validateFor(config.getScheduler());
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
     }
 
-    private static void validateQueue(FlexlbConfig config, QueueSchedulerConfig queue) {
+    private static void validateQueue(SchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
+        require(queue.getDecision() != null, "scheduler.decision", "is required for QUEUE");
         require(queue.getCapacity() != null, "scheduler.capacity", "is required for QUEUE");
         require(queue.getLifecycle() != null, "scheduler.lifecycle", "is required for QUEUE");
         positive(queue.getCapacity().getMaxOutstandingRequestsGlobal(),
                 "scheduler.capacity.maxOutstandingRequestsGlobal");
+        positive(queue.getCapacity().getMaxWaitingRequestsPerPrefillWorker(),
+                "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
+        DecisionPolicyConfig decision = queue.getDecision();
+        if (decision.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
+            range(decision.getMaxRequests(), 1,
+                    DecisionPolicyConfig.MAX_REQUESTS,
+                    "scheduler.decision.maxRequests");
+            nonNegative(decision.getMaxCollectionWaitMs(),
+                    "scheduler.decision.maxCollectionWaitMs");
+            if (decision.getMaxPredictedExecutionMs() != null) {
+                positive(decision.getMaxPredictedExecutionMs(),
+                        "scheduler.decision.maxPredictedExecutionMs");
+            }
+        } else {
+            require(decision.getMaxRequests() == 8
+                            && decision.getMaxCollectionWaitMs() == 300
+                            && decision.getMaxPredictedExecutionMs() == null,
+                    "scheduler.decision",
+                    "fixed-window fields are supported only with FIXED_WINDOW");
+        }
         positive(queue.getLifecycle().getStaleInflightTimeoutMs(),
                 "scheduler.lifecycle.staleInflightTimeoutMs");
         positive(queue.getLifecycle().getDeliveredNotAcceptedTimeoutMs(),
                 "scheduler.lifecycle.deliveredNotAcceptedTimeoutMs");
         positive(queue.getLifecycle().getMaxDeliveredNotAcceptedRequestsGlobal(),
                 "scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal");
-        if (queue.getOrdering() instanceof PriorityOrderingConfig priority) {
-            range(priority.getDefaultPriority(), 1, 100,
+        QueueOrderingConfig ordering = queue.getOrdering();
+        if (ordering.getType() == QueueOrderingConfig.Type.PRIORITY) {
+            range(ordering.getDefaultPriority(), 1, 100,
                     "scheduler.ordering.defaultPriority");
-            PreemptionConfig preemption = priority.getPreemption();
+            PreemptionConfig preemption = ordering.getPreemption();
             if (preemption != null) {
                 require(preemption.getAllowedVictimStages() != null
                                 && !preemption.getAllowedVictimStages().isEmpty(),
@@ -77,34 +162,10 @@ final class FlexlbConfigValidator {
                             "is allowed only when DECODE_ENGINE_OWNED is allowed");
                 }
             }
-        }
-    }
-
-    private static void validateDispatcher(FlexlbConfig config) {
-        DispatcherConfig dispatcher = config.getDispatcher();
-        if (dispatcher instanceof BatchDispatcherConfig batch) {
-            positive(batch.getMaxRequests(), "dispatcher.maxRequests");
-            nonNegative(batch.getMaxCollectionWaitMs(), "dispatcher.maxCollectionWaitMs");
-            positive(batch.getMaxWaitingRequestsPerPrefillWorker(),
-                    "dispatcher.maxWaitingRequestsPerPrefillWorker");
-            positive(batch.getEnqueueRpcTimeoutMs(), "dispatcher.enqueueRpcTimeoutMs");
-            if (batch.getEarlyDispatchPredictedExecutionMs() != null) {
-                positive(batch.getEarlyDispatchPredictedExecutionMs(),
-                        "dispatcher.earlyDispatchPredictedExecutionMs");
-            }
-            if (batch.getMaxInflightBatchesPerPrefillWorker() != null) {
-                positive(batch.getMaxInflightBatchesPerPrefillWorker(),
-                        "dispatcher.maxInflightBatchesPerPrefillWorker");
-            }
         } else {
-            Integer maximum = ((NonBatchDispatcherConfig) dispatcher)
-                    .getMaxInflightRequestsPerPrefillWorker();
-            if (maximum != null) {
-                require(config.isQueue(),
-                        "dispatcher.maxInflightRequestsPerPrefillWorker",
-                        "is supported only with QUEUE");
-                positive(maximum, "dispatcher.maxInflightRequestsPerPrefillWorker");
-            }
+            require(ordering.getPreemption() == null,
+                    "scheduler.ordering.preemption",
+                    "is supported only with PRIORITY");
         }
     }
 
@@ -218,9 +279,9 @@ final class FlexlbConfigValidator {
         positive(outlierRejection.getMaxPendingVsAverageMultiplier(),
                 "router.roles.prefill.selector.candidateChoice.outlierRejection"
                         + ".maxPendingVsAverageMultiplier");
-        positive(outlierRejection.getMaxWaitVsAverageMultiplier(),
+        positive(outlierRejection.getMaxProjectedDrainVsAverageMultiplier(),
                 "router.roles.prefill.selector.candidateChoice.outlierRejection"
-                        + ".maxWaitVsAverageMultiplier");
+                        + ".maxProjectedDrainVsAverageMultiplier");
     }
 
     private static void validateWorkerRegistry(WorkerRegistryConfig workers) {

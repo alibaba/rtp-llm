@@ -28,9 +28,7 @@ public final class RoleTypeProtoConverter {
         };
     }
 
-    /**
-     * Convert domain {@link RoleType} to proto enum.
-     */
+    /** Convert a domain role to the current protocol enum. */
     public static EngineRpcService.RoleTypePB toProto(RoleType role) {
         return switch (role) {
             case PDFUSION -> EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;

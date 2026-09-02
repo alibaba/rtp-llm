@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
     "queueTimeoutMs": 3600000,
@@ -18,8 +18,15 @@
         }
       }
     },
+    "decision": {
+      "type": "FIXED_WINDOW",
+      "maxRequests": 32,
+      "maxCollectionWaitMs": 120,
+      "maxPredictedExecutionMs": 350
+    },
     "capacity": {
-      "maxOutstandingRequestsGlobal": 500000
+      "maxOutstandingRequestsGlobal": 500000,
+      "maxWaitingRequestsPerPrefillWorker": 102400
     },
     "lifecycle": {
       "staleInflightTimeoutMs": 300000,
@@ -29,10 +36,6 @@
   },
   "dispatcher": {
     "type": "BATCH",
-    "maxRequests": 32,
-    "maxCollectionWaitMs": 120,
-    "maxWaitingRequestsPerPrefillWorker": 102400,
-    "earlyDispatchPredictedExecutionMs": 350,
     "maxInflightBatchesPerPrefillWorker": 2,
     "enqueueRpcTimeoutMs": 100000
   },
@@ -55,7 +58,7 @@
             "minimumToleranceMs": 20,
             "outlierRejection": {
               "maxPendingVsAverageMultiplier": 3.0,
-              "maxWaitVsAverageMultiplier": 3.0
+              "maxProjectedDrainVsAverageMultiplier": 3.0
             }
           }
         },

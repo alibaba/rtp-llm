@@ -119,6 +119,18 @@ public class KvCacheManager {
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }
 
+    /** Remove both local and global cache-index state for one engine. */
+    public void removeEngineCache(String engineIpPort) {
+        if (engineIpPort == null) {
+            return;
+        }
+        engineLocalView.removeAllCacheBlockOfEngine(engineIpPort);
+        globalCacheIndex.removeAllCacheBlockOfEngine(engineIpPort);
+        cacheMetricsReporter.reportGlobalCacheMetrics(
+                globalCacheIndex.totalBlocks(),
+                globalCacheIndex.totalMappings());
+    }
+
     /**
      * Clear all data
      */

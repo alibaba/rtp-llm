@@ -3,8 +3,6 @@ package org.flexlb.mock.grpc;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.InflightAssertions;
@@ -43,11 +41,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>The mock returns a {@code WorkerStatusPB} with configurable
  *       {@code available_concurrency}, {@code available_kv_cache}, {@code total_kv_cache},
  *       {@code alive}, {@code status_version}, etc.</li>
- *   <li>{@link EngineStatusConverter#convertToWorkerStatusResponse} converts the PB
- *       to a {@link WorkerStatusResponse}</li>
- *   <li>{@link WorkerStatus#updateFromResponse} updates the in-memory status</li>
- *   <li>{@link PrefillEndpoint#onWorkerStatusUpdate} replaces the endpoint's status
- *       reference and calls {@code calibrate()} for inflight reconciliation</li>
+ *   <li>{@link EngineStatusConverter#convertToStatusObservation} converts the PB
+ *       directly to an immutable observation</li>
+ *   <li>The prepared observation updates the committed in-memory status</li>
+ *   <li>The prepared-status transaction atomically commits the WorkerStatus
+ *       observation and projects endpoint-owned reconciliation facts</li>
  * </ul>
  *
  * <p>Note: In production, {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} performs
@@ -97,7 +95,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
         assertNotNull(ws, "PrefillEndpoint should have a WorkerStatus");
         assertEquals(10L, ws.getAvailableConcurrency(),
                 "WorkerStatus should reflect concurrency=10 after sync");
-        assertTrue(ws.isAlive(), "Worker should be alive after sync");
+        assertTrue(ws.isActiveGeneration(),
+                "Worker generation should remain active after an alive status sync");
 
         // 6. Verify mock received the GetWorkerStatus gRPC call
         assertEquals(statusCallCountBefore + 1, mockPrefillWorker.getWorkerStatusCallCount(),
@@ -138,6 +137,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      */
     private EngineRpcService.WorkerStatusPB fetchWorkerStatus() throws Exception {
         EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
+                .setLatestCacheVersion(getPrefillEndpoint().getStatus()
+                        .appliedStatusCursor().statusVersion())
                 .setLatestFinishedVersion(0)
                 .build();
         return grpcClient.getWorkerStatusAsync(prefillIp, prefillGrpcPort, request, SYNC_TIMEOUT_MS)
@@ -149,19 +150,20 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
      * PrefillEndpoint, simulating what {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner}
      * does in production:
      * <ol>
-     *   <li>Convert {@code WorkerStatusPB} → {@code WorkerStatusResponse}</li>
-     *   <li>Update {@code WorkerStatus} via {@code updateFromResponse}</li>
-     *   <li>Notify {@code PrefillEndpoint} via {@code onWorkerStatusUpdate}</li>
+     *   <li>Convert {@code WorkerStatusPB} directly to an immutable observation</li>
+     *   <li>Atomically publish {@code WorkerStatus} and reconcile the
+     *       {@code PrefillEndpoint}</li>
      * </ol>
      */
     private void applyWorkerStatus(EngineRpcService.WorkerStatusPB pb) {
-        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(pb);
-        // Ensure correct role (mock returns the role from MockWorkerBehavior, which
-        // MockPrefillWorker sets to ROLE_TYPE_PREFILL)
-        response.setRole(RoleType.PREFILL);
-
+        EngineRpcService.WorkerStatusPB prefillStatus = pb.toBuilder()
+                .setRole("PREFILL")
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .build();
         WorkerStatus ws = getPrefillEndpoint().getStatus();
-        ws.updateFromResponse(response);
-        getPrefillEndpoint().onWorkerStatusUpdate(ws, response);
+        applyWorkerStatusObservation(
+                ws,
+                EngineStatusConverter.convertToStatusObservation(
+                        ws, prefillStatus));
     }
 }

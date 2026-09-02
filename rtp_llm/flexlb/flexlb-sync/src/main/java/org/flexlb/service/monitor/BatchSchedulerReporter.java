@@ -49,8 +49,14 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 public class BatchSchedulerReporter {
 
     private static final String[] FIXED_WINDOW_DISPATCH_REASONS = {
-            "batch_full", "fixed_window_timeout", "predict_threshold"
+            "batch_full", "fixed_window_timeout", "predicted_execution_cap"
     };
+
+    /** role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers). */
+    public static final String SCHEDULER_ROLE = "SCHEDULER";
+
+    /** engineIp tag value for scheduler-ledger series (no real engine behind them). */
+    public static final String SCHEDULER_ENGINE_IP = "scheduler";
 
     private final FlexMonitor monitor;
 
@@ -260,16 +266,64 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report the count of inflight requests expired and cleaned up by the TTL task
-     * via {@code app.flexlb.inflight.ttl.expired.qps}.
-     * <p>Scheduler-level metric tagged by role only (no engineIp), because the TTL
-     * cleanup is a scheduler-wide operation not tied to a specific engine.
+     * Report the count of inflight entries evicted from the scheduler's own
+     * request-slot ledger by the TTL maintenance sweep via
+     * {@code app.flexlb.inflight.ttl.expired.qps}.
+     * <p>Tagged role=SCHEDULER + engineIp="scheduler" — the ledger that
+     * evicted — plus a reason bucket. The former method tagged these
+     * scheduler-level evictions with a hardcoded role=PREFILL and no reason,
+     * mislabelling them as an endpoint series; one tag schema with the
+     * endpoint series lets a single role='*' grouping compare scheduler and
+     * endpoint ledgers.
      *
-     * @param count number of inflight entries expired in this cleanup cycle
+     * @param reason eviction reason bucket ({@code ttl} for the scheduler
+     *               stale-inflight sweep)
+     * @param count  number of entries evicted in this maintenance cycle
      */
-    public void reportInflightTtlExpired(int count) {
-        FlexMetricTags tags = FlexMetricTags.of("role", RoleType.PREFILL.name());
+    public void reportSchedulerInflightTtlExpired(String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                "role", SCHEDULER_ROLE,
+                "reason", reason);
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report inflight entries evicted from an endpoint ledger (prefill/decode
+     * orphan sweeps via {@link org.flexlb.balance.endpoint.EndpointRegistry}
+     * and friends) via the same {@code app.flexlb.inflight.ttl.expired.qps}
+     * series family.
+     * <p>Endpoint-side evictions were previously log-only
+     * (event=endpoint_inflight_ttl_eviction); this closes the gap with the
+     * shared {role, engineIp, reason} tag schema. On this architecture the
+     * endpoint ledgers have a single stale-unobserved exit, so the reason
+     * bucket is {@code ttl}; only non-zero counts are reported, keeping the
+     * series sparse.
+     */
+    public void reportEndpointInflightTtlExpired(String role, String engineIp,
+                                                 String reason, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role,
+                "reason", reason);
+        monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report the age (ms) of the oldest entry in the scheduler's own
+     * request-slot ledger via the unified {@code flexlb.inflight.max.age.ms}
+     * series with role=SCHEDULER + engineIp="scheduler" — same metric name
+     * and tag schema as the per-worker {@link #reportInflightMaxAgeMs}, so a
+     * single role='*' grouping compares the scheduler ledger against the
+     * PREFILL/DECODE endpoint ledgers. Immune to per-endpoint ledger
+     * releases, it exposes master-side leaks (fenced or unobserved entries)
+     * that keep the scheduler ledger pinned: max age approaching the TTL
+     * window is the leak signature.
+     *
+     * @param ageMs age of the oldest scheduler inflight entry, 0 when empty
+     */
+    public void reportSchedulerInflightMaxAgeMs(long ageMs) {
+        monitor.report(INFLIGHT_MAX_AGE_MS,
+                FlexMetricTags.ofEngine(SCHEDULER_ENGINE_IP,
+                        "role", SCHEDULER_ROLE), ageMs);
     }
 
     // ==================== Decode inflight metrics ====================

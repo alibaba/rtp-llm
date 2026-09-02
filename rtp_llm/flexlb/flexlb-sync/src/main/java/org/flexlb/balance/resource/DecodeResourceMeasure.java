@@ -1,150 +1,43 @@
 package org.flexlb.balance.resource;
 
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-
-/**
- * Decode role resource measure
- * Availability criteria: KV cache usage percentage below threshold and decode concurrency below limit
- *
- * @author saichen.sm
- * @since 2025/12/23
- */
+/** Canonical Decode KV and engine-concurrency capacity predicate. */
 @Component
-public class DecodeResourceMeasure implements ResourceMeasure {
+public class DecodeResourceMeasure {
     private final long availableThreshold;
-    private final long hysteresisBiasPercent;
-    private final long fullSpeedThreshold;
-    private final long stopThreshold;
     private final long concurrencyLimit;
 
     public DecodeResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.availableThreshold = config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxKvUsagePercent();
-        this.hysteresisBiasPercent = config.getRouter().getAvailabilityHysteresisPercent();
-        this.fullSpeedThreshold = config.getInternalRuntime()
-                .getDecodeFullSpeedBelowKvUsagePercent();
-        this.stopThreshold = config.getInternalRuntime()
-                .getDecodeSaturatedAtKvUsagePercent();
         Long configuredLimit = config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests();
         this.concurrencyLimit = configuredLimit == null ? 0 : configuredLimit;
     }
 
-    @Override
-    public boolean isResourceAvailable(WorkerEndpoint endpoint) {
-        if (endpoint instanceof DecodeEndpoint) {
-            return isResourceAvailable((DecodeEndpoint) endpoint);
-        }
-        return ResourceMeasure.super.isResourceAvailable(endpoint);
+    public boolean isResourceAvailable(DecodeEndpoint.DecodeRoutingView view) {
+        return view != null && isAvailable(
+                view.engineLoad(), view.realKvUsed(), view.totalKv());
     }
 
-    public boolean isResourceAvailable(DecodeEndpoint endpoint) {
-        if (endpoint == null || !endpoint.getStatus().isAlive()) {
-            return false;
-        }
-        // Gate on the engine-facing load — reservations parked in a prefill
-        // queue guard KV only and must not saturate this limit (root cause C
-        // of the 8400 storm: shadow saturation on an idle engine).
-        long engineLoad = endpoint.getEngineLoad();
+    public boolean isEngineDispatchAvailable(
+            DecodeEndpoint.DecodeRoutingView view) {
+        return view != null && isAvailable(
+                view.engineCapacityUsed(),
+                view.engineFacingKvUsed(),
+                view.totalKv());
+    }
+
+    private boolean isAvailable(long engineLoad, long used, long total) {
         if (concurrencyLimit > 0 && engineLoad >= concurrencyLimit) {
-            Logger.debug("Decode worker {} resource unavailable: engineLoad={}, totalLoad={}, limit={}",
-                    endpoint.ipPort(), engineLoad, endpoint.getTotalLoad(), concurrencyLimit);
             return false;
         }
-        long used = endpoint.realKvUsed();
-        long total = endpoint.realKvTotal();
-        if (total == 0) {
-            endpoint.getStatus().getResourceAvailable().set(true);
-            return true;
-        }
-        long usagePercentage = (long) ((used * 100.0) / total);
-        boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(usagePercentage, availableThreshold, hysteresisBiasPercent);
-        if (!available) {
-            Logger.debug("Decode worker {} resource unavailable: kvUsage={}%, threshold={}%, used={}, total={}",
-                    endpoint.ipPort(), usagePercentage, availableThreshold, used, total);
-        }
-        return available;
-    }
-
-    @Override
-    public ResourceMeasureIndicatorEnum getResourceMeasureIndicator() {
-        return ResourceMeasureIndicatorEnum.REMAINING_KV_CACHE;
-    }
-
-    @Override
-    public double calculateAverageWaterLevel(Map<String, WorkerStatus> workerStatusMap) {
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            return 0.0;
-        }
-
-        double totalWaterLevel = 0;
-        int count = 0;
-
-        for (WorkerStatus worker : workerStatusMap.values()) {
-            double waterLevel = calculateWaterLevel(worker);
-            totalWaterLevel += waterLevel;
-            count++;
-        }
-
-        return count > 0 ? totalWaterLevel / count : 0.0;
-    }
-
-    private double calculateWaterLevel(WorkerStatus workerStatus) {
-        if (workerStatus == null) {
-            return 0.0;
-        }
-
-        return Math.max(calculateKvCacheWaterLevel(workerStatus), calculateConcurrencyWaterLevel(workerStatus));
-    }
-
-    private double calculateKvCacheWaterLevel(WorkerStatus workerStatus) {
-        long total = workerStatus.getTotalKvCacheTokens().get();
-        long available = workerStatus.getAvailableKvCacheTokens().get();
-        long used = total - available;
-
-        if (total == 0) {
-            return 0.0;
-        }
-
-        double usedPercentage = (used * 100.0) / total;
-
-        if (usedPercentage <= fullSpeedThreshold) {
-            return 0.0;
-        } else if (usedPercentage >= stopThreshold) {
-            return 100.0;
-        } else {
-            return (usedPercentage - fullSpeedThreshold) /
-                    (stopThreshold - fullSpeedThreshold) * 100.0;
-        }
-    }
-
-    private double calculateConcurrencyWaterLevel(WorkerStatus workerStatus) {
-        if (concurrencyLimit <= 0) {
-            return 0.0;
-        }
-
-        long currentConcurrency = calculateDecodeConcurrency(workerStatus);
-        if (currentConcurrency <= 0) {
-            return 0.0;
-        }
-        return Math.min(100.0, currentConcurrency * 100.0 / concurrencyLimit);
-    }
-
-    private long calculateDecodeConcurrency(WorkerStatus workerStatus) {
-        if (MapUtils.isNotEmpty(workerStatus.getRunningTaskList())) {
-            return workerStatus.getRunningTaskList().size();
-        }
-        return 0;
+        return total == 0
+                || used * 100.0 / total < availableThreshold;
     }
 }

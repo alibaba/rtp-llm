@@ -1,30 +1,38 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillState;
+
+import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.endpoint.EndpointEventSink;
+import org.flexlb.balance.delivery.DeliveryMetadata;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.config.BatchDispatcherConfig;
+import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.InvalidPrefillPredictionException;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.projection.QueueSnapshot;
+import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
+import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.util.PriorityOrdering;
+import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.PriorityQueue;
-import java.util.concurrent.CancellationException;
+import java.util.OptionalLong;
 import java.util.concurrent.PriorityBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
  *
- * <p>Passed to {@link BatcherAlgorithm} methods so algorithms can
+ * <p>Passed to {@link GroupPolicy} methods so policies can
  * inspect and mutate the queue, read config, and invoke callbacks
  * without directly depending on WorkerBatcher internals.
  *
@@ -32,118 +40,73 @@ import java.util.concurrent.locks.ReentrantLock;
  * the queue version, keeping the priority scheduling invariant "version unchanged ⇒
  * queue content unchanged" (optimistic plan validation).
  */
-public class BatcherContext {
+class BatcherContext {
+
+    /** Compute and KV limits derived from one WorkerStatus publication. */
+    record BatchCapacitySnapshot(
+            long batchTokenCapacity,
+            long batchKvCapacity) {
+    }
+
+    /*
+     * Queue ownership state machine:
+     *
+     * ACTIVE (queue)
+     *   -> CALLBACK_OWNED (one nested delivery owner after capacity reservation)
+     *   -> terminal endpoint lifecycle (no batcher container)
+     *
+     * Capacity failure leaves the ordered head ACTIVE. A capacity-feasible
+     * prefix moves directly to callback ownership as the final logical
+     * decision; callback failure is terminal.
+     */
 
     private final String key;
     private final PrefillEndpoint prefillEp;
-    private final FlexlbConfig cfg;
-    private final DecisionGroupHandler decisionHandler;
-    private final PriorityBlockingQueue<BatchItem> queue;
-    private final AtomicInteger queueDepth;
+    private final FlexlbConfig config;
+    private final DecisionPolicyConfig fixedWindowDecision;
+    private final EndpointEventSink deliveryLifecycle;
+    private final PriorityBlockingQueue<ScheduledRequest> queue;
     private final AtomicLong queueVersion;
+    private final AtomicLong schedulingInputVersion = new AtomicLong();
     private final ReentrantLock queueLock;
-    private final Comparator<BatchItem> queueOrder;
-    private final BatchSchedulerReporter reporter;
+    private final Comparator<ScheduledRequest> queueOrder;
+    private final Comparator<GroupPlanner.Item> projectionOrder;
+    private final boolean queueScheduling;
+    private final DeliveryCoordinator delivery;
+    private final PrefillState prefillState;
 
-    /**
-     * Route decisions whose logical dispatch group is already ready, but
-     * whose delivery is waiting for a request-mode inflight slot.
-     *
-     * <p>The backlog is guarded by the existing per-worker {@link #queueLock}
-     * and shares {@link #queueDepth} with the active decision queue. It cannot
-     * grow beyond requests already admitted into that bounded queue and does
-     * not allocate a second per-request wrapper.
-     */
-    private final PriorityQueue<BatchItem> readyDeliveryQueue;
-    private volatile int readyDeliveryCount;
-
-    /**
-     * Items removed from the priority queue for a delivery callback but not
-     * yet classified as delivered, restored, or terminal. Guarded by
-     * {@link #queueLock}. Their queue slots remain charged in
-     * {@link #queueDepth} until the callback resolves ownership.
-     */
-    private final Map<BatchItem, PendingDelivery> pendingDeliveries = new IdentityHashMap<>();
     private boolean stopped;
 
-    /**
-     * Compact ownership state stored directly as the identity-map value.
-     * Enum singletons avoid allocating a wrapper every time an item is staged.
-     */
-    private enum PendingDelivery {
-        STAGED_ACTIVE(false, false),
-        CLAIMED_ACTIVE(true, false),
-        STAGED_READY(false, true),
-        CLAIMED_READY(true, true);
-
-        private final boolean claimed;
-        private final boolean restoreToReadyQueue;
-
-        PendingDelivery(boolean claimed, boolean restoreToReadyQueue) {
-            this.claimed = claimed;
-            this.restoreToReadyQueue = restoreToReadyQueue;
-        }
-
-        boolean isStaged() {
-            return !claimed;
-        }
-
-        boolean isClaimed() {
-            return claimed;
-        }
-
-        boolean restoresToReadyQueue() {
-            return restoreToReadyQueue;
-        }
-
-        PendingDelivery claimedState() {
-            return restoreToReadyQueue ? CLAIMED_READY : CLAIMED_ACTIVE;
-        }
-    }
-
-    enum PendingRestoreResult { RESTORED, STOPPED, NOT_PENDING }
-    enum PendingClaimResult { CLAIMED, STOPPED, NOT_PENDING }
-    enum ReadyDeliveryResult { EMPTY, CAPACITY_BLOCKED, DELIVERED }
-
-    /** Decision-interval sliding average for the queue wait estimate. */
-    private volatile long lastDecisionAtMs;
-    private volatile double decisionIntervalEmaMs;
-
-    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   DecisionGroupHandler decisionHandler,
-                   PriorityBlockingQueue<BatchItem> queue,
-                   BatchSchedulerReporter reporter) {
-        this(key, prefillEp, cfg, decisionHandler, queue, new AtomicInteger(queue.size()), reporter);
-    }
-
-    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   DecisionGroupHandler decisionHandler,
-                   PriorityBlockingQueue<BatchItem> queue,
-                   AtomicInteger queueDepth,
-                   BatchSchedulerReporter reporter) {
-        this(key, prefillEp, cfg, decisionHandler, queue, queueDepth, new AtomicLong(),
-                new ReentrantLock(), WorkerBatcher.FIFO_QUEUE_ORDER, reporter);
-    }
-
-    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   DecisionGroupHandler decisionHandler,
-                   PriorityBlockingQueue<BatchItem> queue,
-                   AtomicInteger queueDepth,
+    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig config,
+                   EndpointEventSink deliveryLifecycle,
+                   PriorityBlockingQueue<ScheduledRequest> queue,
                    AtomicLong queueVersion,
                    ReentrantLock queueLock,
-                   Comparator<BatchItem> queueOrder,
-                   BatchSchedulerReporter reporter) {
+                   Comparator<ScheduledRequest> queueOrder,
+                   Comparator<GroupPlanner.Item> projectionOrder,
+                   boolean queueScheduling,
+                   DeliveryStrategy deliveryStrategy,
+                   PrefillState prefillState) {
         this.key = key;
         this.prefillEp = prefillEp;
-        this.cfg = cfg;
-        this.decisionHandler = decisionHandler;
+        this.config = config;
+        DecisionPolicyConfig resolvedDecision = config.isQueue()
+                ? config.decisionPolicy() : null;
+        this.fixedWindowDecision = resolvedDecision != null
+                && resolvedDecision.getType()
+                == DecisionPolicyConfig.Type.FIXED_WINDOW
+                ? resolvedDecision : null;
+        this.deliveryLifecycle = Objects.requireNonNull(
+                deliveryLifecycle, "deliveryLifecycle");
         this.queue = queue;
-        this.queueDepth = queueDepth;
         this.queueVersion = queueVersion;
         this.queueLock = queueLock;
         this.queueOrder = queueOrder;
-        this.reporter = reporter;
-        this.readyDeliveryQueue = new PriorityQueue<>(11, queueOrder);
+        this.projectionOrder = Objects.requireNonNull(
+                projectionOrder, "projectionOrder");
+        this.queueScheduling = queueScheduling;
+        this.delivery = new DeliveryCoordinator(key, deliveryStrategy);
+        this.prefillState = Objects.requireNonNull(prefillState, "prefillState");
     }
 
     // ---- accessors ----
@@ -156,25 +119,41 @@ public class BatcherContext {
         return prefillEp;
     }
 
-    FlexlbConfig cfg() {
-        return cfg;
-    }
-
     int maxQueueCapacity() {
-        if (cfg.getDispatcher() instanceof BatchDispatcherConfig batch) {
-            return batch.getMaxWaitingRequestsPerPrefillWorker();
-        }
-        return cfg.getInternalRuntime().getNonBatchWaitingRequestsPerPrefillWorker();
+        return config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker();
     }
 
+    /**
+     * Largest group the queue's decision policy may release at once. Delivery
+     * ownership is deliberately not consulted here.
+     */
     int maxDecisionRequests() {
-        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
-                ? Math.max(1, batch.getMaxRequests())
-                : 1;
+        return fixedWindowDecision == null
+                ? 1 : Math.max(1, fixedWindowDecision.getMaxRequests());
     }
 
-    BatchSchedulerReporter reporter() {
-        return reporter;
+    /**
+     * How long an incomplete group may wait for the arrivals that would
+     * complete it. A single-request group is never incomplete, so it has no
+     * window to spend.
+     */
+    long collectionWindowMs() {
+        return fixedWindowDecision == null
+                ? 0L : Math.max(0L, fixedWindowDecision.getMaxCollectionWaitMs());
+    }
+
+    /**
+     * Predicted-execution budget capping group growth, or {@code 0} when no
+     * budget applies. The SINGLE policy has no prediction budget; a FIXED_WINDOW
+     * singleton remains indivisible but reaching the budget still releases it.
+     */
+    long predictedExecutionBudgetMs() {
+        if (fixedWindowDecision == null) {
+            return 0L;
+        }
+        Long configured = fixedWindowDecision.getMaxPredictedExecutionMs();
+        return configured == null ? 0L : configured;
     }
 
     long now() {
@@ -185,731 +164,613 @@ public class BatcherContext {
         return queueLock;
     }
 
-    long queueVersionValue() {
-        return queueVersion.get();
+    long schedulingInputVersionValue() {
+        return schedulingInputVersion.get();
     }
 
-    Comparator<BatchItem> queueOrder() {
-        return queueOrder;
+    /** Caller holds the shared queue lock. */
+    void incrementSchedulingInputVersion() {
+        schedulingInputVersion.incrementAndGet();
     }
 
     // ---- queue inspection ----
 
-    BatchItem peek() {
+    ScheduledRequest peek() {
         return queue.peek();
     }
 
-    /** Whether the active queue still has work requiring a logical decision. */
+    /**
+     * Whether the active queue still has work requiring a logical decision.
+     * A zero charged depth already implies a physically empty queue, so the
+     * container is only consulted once something is charged.
+     */
     boolean isActiveEmpty() {
         return queue.isEmpty();
     }
 
-    boolean isEmpty() {
-        return queueDepth.get() == 0;
-    }
-
-    /**
-     * Active decision-queue depth. The common no-backlog path preserves the
-     * existing charged-depth read exactly; only a live ready backlog needs the
-     * physical queue size to exclude already-decided requests.
-     */
-    int activeSize() {
-        return readyDeliveryCount == 0 ? queueDepth.get() : queue.size();
-    }
-
     int size() {
-        return queueDepth.get();
-    }
-
-    int readyDeliveryCount() {
-        return readyDeliveryCount;
+        return queue.size();
     }
 
     boolean hasProcessableWork() {
-        return !queue.isEmpty() || readyDeliveryCount > 0;
+        return !queue.isEmpty();
     }
 
     // ---- queue mutation ----
 
-    boolean remove(BatchItem item) {
-        queueLock.lock();
-        try {
-            boolean removed = queue.remove(item);
-            if (!removed && readyDeliveryQueue.remove(item)) {
-                readyDeliveryCount--;
-                item.clearRouteDecisionReady();
-                removed = true;
-            }
-            if (removed) {
-                item.clearParkTrace();
-                queueDepth.decrementAndGet();
-                queueVersion.incrementAndGet();
-            }
-            return removed;
-        } finally {
-            queueLock.unlock();
+    /** Caller owns one previously reserved queue-depth unit and holds queueLock. */
+    boolean publishActiveIndexUnderLock(ScheduledRequest item) {
+        boolean published = prefillState.enqueueActiveUnderLock(item);
+        if (published) {
+            queueVersion.incrementAndGet();
         }
+        return published;
     }
 
-    void drainTo(List<BatchItem> dst) {
-        queueLock.lock();
-        try {
-            int drained = queue.drainTo(dst);
-            for (int i = dst.size() - drained; i < dst.size(); i++) {
-                dst.get(i).clearParkTrace();
-            }
-            while (!readyDeliveryQueue.isEmpty()) {
-                BatchItem ready = readyDeliveryQueue.poll();
-                ready.clearRouteDecisionReady();
-                ready.clearParkTrace();
-                dst.add(ready);
-                drained++;
-            }
-            readyDeliveryCount = 0;
-            if (drained > 0) {
-                queueDepth.addAndGet(-drained);
-                queueVersion.incrementAndGet();
-            }
-        } finally {
-            queueLock.unlock();
-        }
+    /** Claim one ACTIVE request for a terminal reducer. */
+    private boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
+        return prefillState.terminalizeActiveUnderLock(item);
     }
 
     /**
-     * Items in active queue order (FIFO: {@link BatchItem#enqueueSeq()};
+     * Close this generation's ACTIVE admission gate before shutdown starts
+     * claiming exact queue identities. Caller holds {@code queueLock}.
+     */
+    void stopAcceptingUnderLock() {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "queue mutation requires queueLock");
+        }
+        stopped = true;
+    }
+
+    /** Detach one exact queue head while retaining its stop-terminal owner. */
+    ScheduledRequest detachNextStopTerminalUnderLock() {
+        ScheduledRequest item = prefillState.detachNextActiveForStopUnderLock();
+        if (item != null) {
+            queueVersion.incrementAndGet();
+        }
+        return item;
+    }
+
+    /** Acknowledge only the exact retained owner whose callback completed. */
+    boolean acknowledgeStopTerminalUnderLock(ScheduledRequest item) {
+        return prefillState.acknowledgeStopTerminalUnderLock(item);
+    }
+
+    /** Caller holds queueLock. */
+    boolean removeUnderLock(ScheduledRequest item) {
+        boolean removed = removeTerminalActiveUnderLock(item);
+        if (removed) {
+            queueVersion.incrementAndGet();
+        }
+        return removed;
+    }
+
+    /**
+     * Items in active queue order (FIFO: {@link ScheduledRequest#enqueueSeq()};
      * PRIORITY: {@link WorkerBatcher#PRIORITY_QUEUE_ORDER}, which delegates
      * to {@link PriorityOrdering#STRICT}), suitable for greedy-fill iteration
      * in grouping algorithms.
      */
-    List<BatchItem> sortedItems() {
-        List<BatchItem> candidates = new ArrayList<>(queue);
+    List<ScheduledRequest> activeItemsInSchedulingOrder() {
+        List<ScheduledRequest> candidates = new ArrayList<>(queue);
         candidates.sort(queueOrder);
         return candidates;
     }
 
     /**
-     * All removable, not-yet-delivered requests in priority order. Used by
-     * admission snapshots so a ready route decision remains preemptible and
-     * capacity-charged until its delivery actually claims ownership.
-     * Caller holds {@link #queueLock}.
+     * Capture the active-queue head and its versions for a single-request
+     * decision. The queue already exposes its least element, so this needs
+     * neither a copy nor a sort.
      */
-    List<BatchItem> sortedQueuedItems() {
-        if (readyDeliveryCount == 0) {
-            return sortedItems();
-        }
-        List<BatchItem> candidates = new ArrayList<>(queue.size() + readyDeliveryCount);
-        candidates.addAll(queue);
-        candidates.addAll(readyDeliveryQueue);
-        candidates.sort(queueOrder);
-        return candidates;
-    }
-
-    BatchItem findQueued(long requestId) {
-        for (BatchItem item : queue) {
-            if (item.requestId() == requestId) {
-                return item;
-            }
-        }
-        for (BatchItem item : readyDeliveryQueue) {
-            if (item.requestId() == requestId) {
-                return item;
-            }
-        }
-        return null;
-    }
-
-    void addReadyQueueSizeByPriority(Map<Integer, Integer> sizeByPriority) {
-        if (readyDeliveryCount == 0) {
-            return;
-        }
+    ActiveQueueSnapshot snapshotActiveQueueHead() {
         queueLock.lock();
         try {
-            for (BatchItem item : readyDeliveryQueue) {
-                sizeByPriority.merge(item.priority(), 1, Integer::sum);
-            }
+            long version = queueVersion.get();
+            long inputVersion = schedulingInputVersion.get();
+            ScheduledRequest head = queue.peek();
+            return new ActiveQueueSnapshot(
+                    version, inputVersion,
+                    head == null ? List.of() : List.of(head));
         } finally {
             queueLock.unlock();
         }
     }
 
     /**
-     * Effective strict padded-token limit for combining requests in one FlexLB batch.
+     * Capture one stable, fully ordered active-queue snapshot for a batching
+     * decision. The version and identities are linearized under the same lock;
+     * prediction intentionally runs after the lock is released.
+     */
+    ActiveQueueSnapshot snapshotActiveQueue() {
+        long version;
+        long inputVersion;
+        List<ScheduledRequest> items;
+        queueLock.lock();
+        try {
+            version = queueVersion.get();
+            inputVersion = schedulingInputVersion.get();
+            if (queue.isEmpty()) {
+                return new ActiveQueueSnapshot(version, inputVersion, List.of());
+            }
+            items = new ArrayList<>(queue);
+        } finally {
+            queueLock.unlock();
+        }
+        // Ordering keys are immutable after offer. Sorting the frozen identity
+        // copy outside queueLock preserves the snapshot while keeping O(N logN)
+        // comparator work out of the offer/remove critical section.
+        items.sort(queueOrder);
+        return new ActiveQueueSnapshot(version, inputVersion, items);
+    }
+
+    record ActiveQueueSnapshot(long queueVersion,
+                               long schedulingInputVersion,
+                               List<ScheduledRequest> items) {
+        ScheduledRequest head() {
+            return items.isEmpty() ? null : items.get(0);
+        }
+    }
+
+    /** Capture queue, committed work and pending count under the ownership lock. */
+    RouteProjection.Inputs captureRouteProjectionInputs(
+            Supplier<AdmissionBlock> admissionBlockSnapshot) {
+        queueLock.lock();
+        try {
+            BatchCapacitySnapshot capacity = batchCapacitySnapshot();
+            PrefillState.Snapshot ownership =
+                    prefillState.snapshotUnderLock(queueOrder);
+            List<GroupPlanner.Item> items =
+                    ownership.activeItems().stream()
+                            .map(BatcherContext::projectionItem)
+                            .toList();
+            QueueSnapshot queueSnapshot = new QueueSnapshot(
+                    ownership.capturedAtMs(),
+                    queueScheduling,
+                    projectionOrder,
+                    new GroupPlanner.Constraints(
+                            maxDecisionRequests(),
+                            capacity.batchTokenCapacity(),
+                            capacity.batchKvCapacity(),
+                            predictedExecutionBudgetMs(),
+                            collectionWindowMs()),
+                    items,
+                    items.isEmpty() ? null : admissionBlockSnapshot.get());
+            return new RouteProjection.Inputs(
+                    queueSnapshot,
+                    ownership.committedWork(),
+                    ownership.pendingRequestCount());
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    private static GroupPlanner.Item projectionItem(ScheduledRequest item) {
+        return new GroupPlanner.Item(
+                item.requestId(),
+                item.priority(),
+                item.enqueueSeq(),
+                item.enqueuedAtMs(),
+                item.expiresAtMs(),
+                item.seqLen(),
+                item.hitCache());
+    }
+
+    /** Stable low-cost state used before a full ordered group snapshot is needed. */
+    ActiveQueueState activeQueueState() {
+        queueLock.lock();
+        try {
+            ScheduledRequest head = queue.peek();
+            long oldestEnqueuedAtMs = Long.MAX_VALUE;
+            for (ScheduledRequest item : queue) {
+                oldestEnqueuedAtMs = Math.min(
+                        oldestEnqueuedAtMs, item.enqueuedAtMs());
+            }
+            return new ActiveQueueState(
+                    queueVersion.get(), schedulingInputVersion.get(),
+                    head, queue.size(), oldestEnqueuedAtMs);
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
+    record ActiveQueueState(long queueVersion,
+                            long schedulingInputVersion,
+                            ScheduledRequest head,
+                            int activeSize,
+                            long oldestEnqueuedAtMs) {
+    }
+
+    BatcherCycleResult awaitingSchedulingChange(
+            ScheduledRequest head,
+            long observedQueueVersion,
+            long observedSchedulingInputVersion,
+            long wakeAtMs,
+            BatcherCycleResult.SchedulingWaitReason reason) {
+        return BatcherCycleResult.awaitingSchedulingChange(
+                head, observedQueueVersion, observedSchedulingInputVersion,
+                wakeAtMs, reason);
+    }
+
+    /**
+     * Compute and KV limits from one atomically published worker status.
      *
-     * <p>After admitting the first request as a standalone candidate, the Engine's
-     * FIFO scheduler rejects additions whose padded context shape
+     * <p>After admitting the first request as an indivisible candidate, the
+     * Engine's FIFO scheduler rejects additions whose padded context shape
      * ({@code maxSeqLen * batchSize}) is greater than or equal to
      * {@code max_batch_tokens_size}. Prefer that exact worker-reported limit;
      * {@code max_seq_len} is a conservative fallback for workers that have not
-     * populated the newer field yet. An internal safety ceiling covers the interval
-     * before either value arrives. This limit must not reject the singleton head;
-     * its standalone validity is governed by the Engine's max-sequence and KV checks.
+     * populated the newer field yet. An internal safety ceiling covers the
+     * interval before either value arrives.
+     * A zero KV total means the worker has not published that capacity yet, so
+     * the returned KV limit is unbounded.
      */
-    long batchTokenCapacity() {
+    BatchCapacitySnapshot batchCapacitySnapshot() {
         long capacity = positiveOrUnlimited(
-                cfg.getInternalRuntime().getFallbackBatchTokenCapacity());
+                config.getInternalRuntime().getFallbackBatchTokenCapacity());
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         if (status == null) {
-            return capacity;
+            return new BatchCapacitySnapshot(capacity, Long.MAX_VALUE);
         }
 
-        long engineCapacity = status.getMaxBatchTokensSize();
+        WorkerStatus.EngineObservation engineStatus =
+                status.committedEngineObservation();
+        long engineCapacity = engineStatus.maxBatchTokensSize();
         if (engineCapacity <= 0) {
-            engineCapacity = status.getMaxSeqLen();
+            engineCapacity = engineStatus.maxSeqLen();
         }
-        return Math.min(capacity, positiveOrUnlimited(engineCapacity));
-    }
+        long batchTokenCapacity = Math.min(
+                capacity, positiveOrUnlimited(engineCapacity));
 
-    /**
-     * Latest worker-reported KV budget. A zero total means the worker has not
-     * published KV capacity yet, so batching remains compute-bound only.
-     */
-    long batchKvCapacity() {
-        WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
-        long total = status == null ? 0 : status.getTotalKvCacheTokens().get();
+        // A zero total means the worker has not published KV capacity yet, so
+        // batching remains compute-bound only.
+        long total = engineStatus.totalKvCacheTokens();
         if (total <= 0) {
-            return Long.MAX_VALUE;
+            return new BatchCapacitySnapshot(
+                    batchTokenCapacity, Long.MAX_VALUE);
         }
-        long available = Math.max(0, status.getAvailableKvCacheTokens().get());
-        return Math.min(total, available);
-    }
-
-    /**
-     * Request-mode capacity visible to the current decision.
-     *
-     * <p>This value must not be used as the logical batch target: priority scheduling
-     * still decides <em>when</em> work is ready with the existing batch policy.
-     * The request cap only limits the subset delivered to the caller after that
-     * decision has been made. {@link PrefillEndpoint#tryCommitRequest} remains
-     * the authoritative concurrent hard gate.
-     */
-    int availableDeliverySlots() {
-        if (prefillEp == null) {
-            return Integer.MAX_VALUE;
-        }
-        Integer maximum = cfg.getDispatcher() instanceof NonBatchDispatcherConfig nonBatch
-                ? nonBatch.getMaxInflightRequestsPerPrefillWorker()
-                : null;
-        return prefillEp.availableRequestSlots(maximum == null ? 0 : maximum);
-    }
-
-    /** Delivery-unit inflight count used only for decision diagnostics. */
-    int deliveryInflightCount(BatchItem head) {
-        return head != null && head.deliveryMode() == DeliveryMode.ROUTE_DECISION
-                ? prefillEp.getInflightRouteRequestCount()
-                : prefillEp.getInflightBatchCount();
-    }
-
-    void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
-        if (remove(item)) {
-            decisionHandler.onOfferFailure(item, new BatchTokenCapacityExceededException(
-                    "request seq_len=" + item.seqLen()
-                            + " cannot fit strict padded batch token capacity=" + capacity));
-        }
+        long available = Math.max(0, engineStatus.availableKvCacheTokens());
+        return new BatchCapacitySnapshot(
+                batchTokenCapacity, Math.min(total, available));
     }
 
     private static long positiveOrUnlimited(long value) {
         return value > 0 ? value : Long.MAX_VALUE;
     }
 
-    // ---- delivery staging (shared infrastructure) ----
+    // ---- capacity-aware decision publication ----
 
     /**
-     * Remove items from the queue and notify the decision handler.
-     * Caller is responsible for algorithm-specific logging and state cleanup
-     * before calling this.
-     */
-    void stageForDelivery(List<BatchItem> items, DecisionGroupMetadata metadata) {
-        // The decision-interval EMA only feeds the PRIORITY queue-wait
-        // estimate (PrefillQueueManager.estimateWaitMs); FIFO does not need
-        // this synchronized bookkeeping.
-        if (cfg.isPriorityOrdering()) {
-            recordDecisionInterval(now());
-        }
-        deliverStaged(stageRequests(items), metadata);
-    }
-
-    /**
-     * Publish one logical dispatch group.
+     * Reserve capacity for the largest ordered prefix and publish exactly that
+     * prefix as the final logical decision. If the head cannot reserve capacity,
+     * it remains ACTIVE and the worker waits on the rejecting resource event.
      *
-     * <p>The batch-only fast path is the established delivery protocol. If a
-     * route-decision member is present, every such member becomes delivery
-     * ready atomically: the available prefix is staged for the callback and
-     * the remainder moves to {@link #readyDeliveryQueue}. Request capacity never
-     * feeds back into the logical batching decision.
+     * <p>The ordered snapshot is the selection linearization point. Offers that
+     * arrive after that snapshot belong to the next decision and do not revoke
+     * this one. Removal or expiration of a selected member does revoke it, and
+     * every provisional reservation is then released. The immutable evaluator
+     * captured for this decision remains valid if online learning publishes a
+     * replacement concurrently.
      */
-    void stageDecisionGroup(List<BatchItem> logicalGroup, DecisionGroupMetadata metadata) {
-        if (logicalGroup == null || logicalGroup.isEmpty()) {
-            return;
+    BatcherCycleResult admitAndDeliverCapacityFeasiblePrefix(
+            List<ScheduledRequest> candidates,
+            DeliveryMetadata metadata,
+            PrefillTimePredictor.Evaluator evaluator,
+            OptionalLong plannedCommittedPredictionMs) {
+        if (candidates.isEmpty()) {
+            return BatcherCycleResult.NO_ACTION;
         }
-        boolean containsRouteDecision = false;
-        for (BatchItem item : logicalGroup) {
-            if (item.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
-                containsRouteDecision = true;
-                break;
-            }
-        }
-        if (!containsRouteDecision) {
-            stageForDelivery(logicalGroup, metadata);
-            return;
-        }
-
-        if (cfg.isPriorityOrdering()) {
-            recordDecisionInterval(now());
-        }
-        List<BatchItem> staged = stageDecisionGroup(
-                logicalGroup, availableDeliverySlots(), metadata.reason());
-        deliverStaged(staged,
-                new DecisionGroupMetadata(metadata.reason(), liveQueuedDepth()));
+        return delivery.deliver(
+                this, candidates, metadata, evaluator,
+                plannedCommittedPredictionMs);
     }
 
-    /** Drain a previously-decided route backlog before making a new decision. */
-    ReadyDeliveryResult deliverReadyRequests() {
-        if (readyDeliveryCount == 0) {
-            return ReadyDeliveryResult.EMPTY;
-        }
-        int availableSlots = availableDeliverySlots();
-        if (availableSlots == 0) {
-            return ReadyDeliveryResult.CAPACITY_BLOCKED;
-        }
-        int maxDelivery = 1;
-        int deliveryLimit = availableSlots == Integer.MAX_VALUE
-                ? maxDelivery : Math.min(maxDelivery, availableSlots);
-        ReadyStage readyStage = stageReadyRequests(deliveryLimit);
-        if (readyStage.items().isEmpty()) {
-            return readyDeliveryCount == 0
-                    ? ReadyDeliveryResult.EMPTY : ReadyDeliveryResult.CAPACITY_BLOCKED;
-        }
-        deliverStaged(readyStage.items(),
-                new DecisionGroupMetadata(readyStage.reason(), readyStage.queueDepth()));
-        return ReadyDeliveryResult.DELIVERED;
+    double projectGroupDurationMs(
+            List<ScheduledRequest> items,
+            PrefillTimePredictor.Evaluator evaluator) {
+        return delivery.projectGroupDurationMs(items, evaluator);
     }
 
-    private void deliverStaged(List<BatchItem> staged, DecisionGroupMetadata metadata) {
-        if (staged.isEmpty()) {
-            return;
-        }
-        Throwable callbackFailure = null;
+    RouteProjection.DeliveryProjection deliveryProjection() {
+        return delivery.projectionPolicy();
+    }
+
+    /**
+     * Reduce an invalid prediction at the exact ACTIVE request that anchored
+     * the prediction. The operation owns all prediction work for one policy
+     * pass, so malformed model output cannot escape into the worker-loop
+     * failure path and drain unrelated requests.
+     */
+    BatcherCycleResult runPredictionBound(
+            ScheduledRequest exactHead,
+            Supplier<BatcherCycleResult> operation) {
         try {
-            decisionHandler.onDecisionGroupReady(staged, metadata);
-        } catch (Throwable t) {
-            callbackFailure = t;
+            return operation.get();
+        } catch (InvalidPrefillPredictionException failure) {
+            return commitBoundary(
+                    exactHead, CapacityBoundary.failed(failure));
+        }
+    }
+
+    boolean selectionStillOwned(List<ScheduledRequest> candidates) {
+        return candidateSelectionStillOwned(candidates);
+    }
+
+    BatcherCycleResult commitPreparedSelection(
+            DeliveryStrategy.Transaction transaction,
+            String decisionReason) {
+        List<ScheduledRequest> items = batchItems(transaction.items());
+        if (items.isEmpty()) {
+            throw new IllegalStateException(
+                    "prepared selection commit requires a non-empty selection");
+        }
+        BatcherCycleResult admittedResult = null;
+        RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
+        Throwable postCommitFailure = null;
+
+        queueLock.lock();
+        try {
+            if (stopped) {
+                return null;
+            }
+            long nowMs = now();
+            for (ScheduledRequest item : items) {
+                if (!containsIdentity(item) || item.requestExpired(nowMs)) {
+                    return null;
+                }
+            }
+            transaction.commitUnderLock();
+            try {
+                removedBoundary = removeSelectionBoundaryUnderLock(
+                        transaction.blockedItem(),
+                        transaction.blockedResult(),
+                        nowMs);
+                queueVersion.incrementAndGet();
+                String committedReason = transaction.blockedResult() != null
+                        && transaction.blockedResult().unavailable()
+                        ? "delivery_capacity_prefix" : decisionReason;
+                admittedResult = BatcherCycleResult.admitted(
+                        items,
+                        new DeliveryMetadata(
+                                committedReason, queue.size()));
+            } catch (Throwable failure) {
+                postCommitFailure = failure;
+            }
         } finally {
-            // Preserve the original DecisionGroupHandler contract: a normal
-            // return consumes every member the handler did not explicitly
-            // resolve. Only a failed callback restores still-STAGED members.
-            // CLAIMED ownership is never safe to restore, even on failure.
-            Map<BatchItem, Throwable> failedItems = null;
-            for (BatchItem item : staged) {
-                boolean stagedResolved;
-                if (callbackFailure == null) {
-                    stagedResolved = completeStagedPendingDelivery(item);
-                } else {
-                    PendingRestoreResult restore = restoreStagedPendingDelivery(item);
-                    stagedResolved = restore != PendingRestoreResult.NOT_PENDING;
-                    if (restore == PendingRestoreResult.STOPPED) {
-                        if (failedItems == null) {
-                            failedItems = new java.util.LinkedHashMap<>();
-                        }
-                        failedItems.put(item,
-                                new CancellationException(
-                                        "FlexLB worker scheduling queue stopped: " + key));
-                    }
-                }
-                if (!stagedResolved && completeClaimedPendingDelivery(item)) {
-                    // A callback which claimed ownership but escaped without
-                    // resolving the item must not leave a charged orphan. It
-                    // is no longer safe to requeue (Decode may be visible), so
-                    // hand it to the terminal failure callback exactly once.
-                    if (failedItems == null) {
-                        failedItems = new java.util.LinkedHashMap<>();
-                    }
-                    failedItems.put(item, callbackFailure != null
-                            ? callbackFailure
-                            : new IllegalStateException(
-                                    "delivery callback left claimed item unresolved"));
-                }
-            }
-            if (failedItems != null) {
-                for (Map.Entry<BatchItem, Throwable> failure : failedItems.entrySet()) {
-                    try {
-                        decisionHandler.onDeliveryFailure(failure.getKey(), failure.getValue());
-                    } catch (Throwable ignored) {
-                        // The queue slot and pending ownership are already
-                        // resolved. Preserve the original callback failure.
-                    }
-                }
-            }
+            queueLock.unlock();
         }
-        if (callbackFailure instanceof RuntimeException runtimeException) {
-            throw runtimeException;
+
+        if (postCommitFailure != null) {
+            Throwable failure = postCommitFailure;
+            try {
+                notifyTerminalAdmissionFailure(removedBoundary);
+            } catch (Throwable notificationFailure) {
+                failure = appendFailure(failure, notificationFailure);
+            }
+            try {
+                transaction.abort(failure);
+            } catch (Throwable ownerFailure) {
+                failure = appendFailure(failure, ownerFailure);
+            }
+            throw propagateCommitFailure(failure);
         }
-        if (callbackFailure instanceof Error error) {
+        notifyTerminalAdmissionFailure(removedBoundary);
+        return Objects.requireNonNull(admittedResult);
+    }
+
+    private static Throwable appendFailure(
+            Throwable first,
+            Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (first != next) {
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    private static RuntimeException propagateCommitFailure(Throwable failure) {
+        if (failure instanceof RuntimeException runtimeFailure) {
+            return runtimeFailure;
+        }
+        if (failure instanceof Error error) {
             throw error;
         }
-        if (callbackFailure != null) {
-            throw new IllegalStateException("decision-group callback failed", callbackFailure);
-        }
+        return new IllegalStateException(
+                "delivery selection failed after ownership commit", failure);
     }
 
-    private List<BatchItem> stageRequests(List<BatchItem> items) {
-        queueLock.lock();
-        try {
-            List<BatchItem> staged = new ArrayList<>(items.size());
-            for (BatchItem item : items) {
-                if (!queue.remove(item)) {
-                    continue;
-                }
-                PendingDelivery previous = pendingDeliveries.putIfAbsent(
-                        item, PendingDelivery.STAGED_ACTIVE);
-                if (previous != null) {
-                    // Defensive only: request IDs are unique in one batcher.
-                    queue.add(item);
-                    throw new IllegalStateException(
-                            "duplicate pending-delivery item request_id=" + item.requestId());
-                }
-                // Removing the item invalidates queue snapshots even though
-                // its capacity slot remains charged until resolution.
-                queueVersion.incrementAndGet();
-                staged.add(item);
-            }
-            return staged;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    private List<BatchItem> stageDecisionGroup(List<BatchItem> logicalGroup,
-                                               int availableRouteSlots,
-                                               String reason) {
-        int routeSlots = Math.max(0, availableRouteSlots);
-        queueLock.lock();
-        try {
-            int initialCapacity = routeSlots == Integer.MAX_VALUE
-                    ? logicalGroup.size()
-                    : Math.min(logicalGroup.size(), routeSlots + 1);
-            List<BatchItem> staged = new ArrayList<>(initialCapacity);
-            for (BatchItem item : logicalGroup) {
-                if (!queue.remove(item)) {
-                    continue;
-                }
-
-                boolean restoreToReadyQueue = false;
-                boolean stageNow = true;
-                if (item.deliveryMode() == DeliveryMode.ROUTE_DECISION) {
-                    item.markRouteDecisionReady(reason);
-                    restoreToReadyQueue = true;
-                    stageNow = routeSlots > 0;
-                    if (stageNow && routeSlots != Integer.MAX_VALUE) {
-                        routeSlots--;
-                    }
-                }
-
-                if (stageNow) {
-                    PendingDelivery previous = pendingDeliveries.putIfAbsent(
-                            item, restoreToReadyQueue
-                                    ? PendingDelivery.STAGED_READY
-                                    : PendingDelivery.STAGED_ACTIVE);
-                    if (previous != null) {
-                        restoreAfterDuplicatePending(item, restoreToReadyQueue);
-                        throw new IllegalStateException(
-                                "duplicate pending-delivery item request_id=" + item.requestId());
-                    }
-                    staged.add(item);
-                } else {
-                    readyDeliveryQueue.add(item);
-                    readyDeliveryCount++;
-                }
-                // Active -> ready/pending changes the actionable queue state,
-                // but the original capacity charge remains held.
-                queueVersion.incrementAndGet();
-            }
-            return staged;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    private ReadyStage stageReadyRequests(int deliveryLimit) {
-        queueLock.lock();
-        try {
-            if (stopped || readyDeliveryCount == 0 || deliveryLimit <= 0) {
-                return ReadyStage.EMPTY;
-            }
-            int count = Math.min(deliveryLimit, readyDeliveryCount);
-            List<BatchItem> staged = new ArrayList<>(count);
-            String reason = null;
-            while (staged.size() < count) {
-                BatchItem item = readyDeliveryQueue.peek();
-                if (item == null) {
-                    readyDeliveryCount = 0;
-                    break;
-                }
-                String itemReason = item.readyDeliveryReason();
-                if (reason != null && !Objects.equals(reason, itemReason)) {
-                    break;
-                }
-                if (reason == null) {
-                    reason = itemReason;
-                }
-                readyDeliveryQueue.poll();
-                readyDeliveryCount--;
-                PendingDelivery previous = pendingDeliveries.putIfAbsent(
-                        item, PendingDelivery.STAGED_READY);
-                if (previous != null) {
-                    readyDeliveryQueue.add(item);
-                    readyDeliveryCount++;
-                    throw new IllegalStateException(
-                            "duplicate ready pending-delivery item request_id=" + item.requestId());
-                }
-                queueVersion.incrementAndGet();
-                staged.add(item);
-            }
-            return staged.isEmpty()
-                    ? ReadyStage.EMPTY
-                    : new ReadyStage(staged,
-                            reason == null ? "route_decision_ready" : reason,
-                            liveQueuedDepth());
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    private void restoreAfterDuplicatePending(BatchItem item,
-                                              boolean restoreToReadyQueue) {
-        if (restoreToReadyQueue) {
-            readyDeliveryQueue.add(item);
-            readyDeliveryCount++;
-        } else {
-            queue.add(item);
-        }
-    }
-
-    private int liveQueuedDepth() {
-        return queue.size() + readyDeliveryCount;
-    }
-
-    private record ReadyStage(List<BatchItem> items, String reason, int queueDepth) {
-        private static final ReadyStage EMPTY =
-                new ReadyStage(List.of(), "route_decision_ready", 0);
-    }
-
-    /** Claim a staged item for the scheduler callback, fenced against shutdown. */
-    PendingClaimResult claimPendingDelivery(BatchItem item) {
+    BatcherCycleResult commitBoundary(
+            ScheduledRequest blockedItem,
+            CapacityBoundary blockedResult) {
+        BatcherCycleResult result = BatcherCycleResult.NO_ACTION;
+        RemovedTerminalBoundary removedBoundary = RemovedTerminalBoundary.NONE;
         queueLock.lock();
         try {
             if (stopped) {
-                return PendingClaimResult.STOPPED;
+                return result;
             }
-            PendingDelivery pending = pendingDeliveries.get(item);
-            if (pending == null || !pending.isStaged()) {
-                return PendingClaimResult.NOT_PENDING;
-            }
-            pendingDeliveries.put(item, pending.claimedState());
-            // Fence the queue-to-delivery ownership transition so a concurrent
-            // queue-side admission cannot commit across it.
-            queueVersion.incrementAndGet();
-            return PendingClaimResult.CLAIMED;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    /** Resolve a staged/claimed item as delivered or terminal, releasing its queue slot. */
-    boolean completePendingDelivery(BatchItem item) {
-        queueLock.lock();
-        try {
-            PendingDelivery pending = pendingDeliveries.get(item);
-            if (pending == null) {
-                return false;
-            }
-            pendingDeliveries.remove(item);
-            if (pending.restoresToReadyQueue()) {
-                item.clearRouteDecisionReady();
-            }
-            queueDepth.decrementAndGet();
-            queueVersion.incrementAndGet();
-            return true;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    /** Consume an unclaimed member after a successful legacy callback. */
-    private boolean completeStagedPendingDelivery(BatchItem item) {
-        queueLock.lock();
-        try {
-            PendingDelivery pending = pendingDeliveries.get(item);
-            if (pending == null || !pending.isStaged()) {
-                return false;
-            }
-            pendingDeliveries.remove(item);
-            if (pending.restoresToReadyQueue()) {
-                item.clearRouteDecisionReady();
-            }
-            queueDepth.decrementAndGet();
-            queueVersion.incrementAndGet();
-            return true;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    /** Terminal fallback for a callback that escaped while owning CLAIMED. */
-    private boolean completeClaimedPendingDelivery(BatchItem item) {
-        queueLock.lock();
-        try {
-            PendingDelivery pending = pendingDeliveries.get(item);
-            if (pending == null || !pending.isClaimed()) {
-                return false;
-            }
-            pendingDeliveries.remove(item);
-            if (pending.restoresToReadyQueue()) {
-                item.clearRouteDecisionReady();
-            }
-            queueDepth.decrementAndGet();
-            queueVersion.incrementAndGet();
-            return true;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    /**
-     * Put a capacity-blocked staged item back into the same priority queue.
-     * The original sort key, enqueue timestamp, priority, and charged queue
-     * slot are retained; no offer statistics are recorded a second time.
-     */
-    PendingRestoreResult restorePendingDelivery(BatchItem item) {
-        return restorePendingDelivery(item, false);
-    }
-
-    /** Callback-finally fallback: never restore a request already claimed by the scheduler. */
-    private PendingRestoreResult restoreStagedPendingDelivery(BatchItem item) {
-        return restorePendingDelivery(item, true);
-    }
-
-    private PendingRestoreResult restorePendingDelivery(BatchItem item,
-                                                         boolean stagedOnly) {
-        queueLock.lock();
-        try {
-            PendingDelivery pending = pendingDeliveries.get(item);
-            if (pending == null || (stagedOnly && !pending.isStaged())) {
-                return PendingRestoreResult.NOT_PENDING;
-            }
-            pendingDeliveries.remove(item);
-            if (stopped) {
-                if (pending.restoresToReadyQueue()) {
-                    item.clearRouteDecisionReady();
-                }
-                queueDepth.decrementAndGet();
-                queueVersion.incrementAndGet();
-                return PendingRestoreResult.STOPPED;
-            }
-            if (pending.restoresToReadyQueue()) {
-                readyDeliveryQueue.add(item);
-                readyDeliveryCount++;
+            long nowMs = now();
+            if (blockedResult != null && blockedResult.unavailable()) {
+                result = resolveEmptyCapacityUnderLock(
+                        blockedItem, blockedResult, nowMs);
             } else {
-                queue.add(item);
-            }
-            queueVersion.incrementAndGet();
-            return PendingRestoreResult.RESTORED;
-        } finally {
-            queueLock.unlock();
-        }
-    }
-
-    /**
-     * Linearize shutdown with queue and pending-delivery ownership. Staged
-     * items remain engine-unseen and are drained; a callback that already
-     * claimed an item owns finishing or restoring it.
-     */
-    void stopAndDrainTo(List<BatchItem> dst) {
-        queueLock.lock();
-        try {
-            stopped = true;
-            int drained = queue.drainTo(dst);
-            for (int i = dst.size() - drained; i < dst.size(); i++) {
-                dst.get(i).clearParkTrace();
-            }
-            while (!readyDeliveryQueue.isEmpty()) {
-                BatchItem ready = readyDeliveryQueue.poll();
-                ready.clearRouteDecisionReady();
-                ready.clearParkTrace();
-                dst.add(ready);
-                drained++;
-            }
-            readyDeliveryCount = 0;
-            if (drained > 0) {
-                queueDepth.addAndGet(-drained);
-            }
-            boolean stagedDrained = false;
-            java.util.Iterator<Map.Entry<BatchItem, PendingDelivery>> iterator =
-                    pendingDeliveries.entrySet().iterator();
-            while (iterator.hasNext()) {
-                Map.Entry<BatchItem, PendingDelivery> entry = iterator.next();
-                BatchItem item = entry.getKey();
-                PendingDelivery pending = entry.getValue();
-                if (pending.isStaged()) {
-                    if (pending.restoresToReadyQueue()) {
-                        item.clearRouteDecisionReady();
-                    }
-                    item.clearParkTrace();
-                    dst.add(item);
-                    iterator.remove();
-                    queueDepth.decrementAndGet();
-                    stagedDrained = true;
+                removedBoundary = removeSelectionBoundaryUnderLock(
+                        blockedItem, blockedResult, nowMs);
+                if (removedBoundary.wasRemoved()) {
+                    queueVersion.incrementAndGet();
+                    result = BatcherCycleResult.QUEUE_CHANGED;
                 }
             }
-            if (drained > 0 || stagedDrained) {
-                queueVersion.incrementAndGet();
-            }
         } finally {
             queueLock.unlock();
         }
+        notifyTerminalAdmissionFailure(removedBoundary);
+        return result;
     }
 
-    int pendingDeliveryCount() {
+    /** Caller holds queueLock. */
+    private BatcherCycleResult resolveEmptyCapacityUnderLock(
+            ScheduledRequest item,
+            CapacityBoundary unavailable,
+            long nowMs) {
+        if (queue.peek() != item
+                || item.requestExpired(nowMs)
+                || !containsIdentity(item)) {
+            return BatcherCycleResult.NO_ACTION;
+        }
+        return BatcherCycleResult.capacityBlocked(item, unavailable);
+    }
+
+    /** Caller holds queueLock. */
+    private RemovedTerminalBoundary removeSelectionBoundaryUnderLock(
+            ScheduledRequest blockedItem,
+            CapacityBoundary blockedResult,
+            long nowMs) {
+        // OwnershipLost is not a terminal fact. In particular, the request's
+        // admission mutation may still be closing after publishing the exact
+        // queue item. Removing it here would leave RequestState QUEUED
+        // without either a queue owner or a terminal callback.
+        if (blockedItem == null
+                || blockedResult.unavailable()
+                || blockedResult == CapacityBoundary.OWNERSHIP_LOST) {
+            return RemovedTerminalBoundary.NONE;
+        }
+        ScheduledRequest item = blockedItem;
+        if (!containsIdentity(item)
+                || item.requestExpired(nowMs)
+                || !removeTerminalActiveUnderLock(item)) {
+            return RemovedTerminalBoundary.NONE;
+        }
+        Throwable failure = blockedResult.status()
+                == CapacityBoundary.Status.FAILED
+                ? blockedResult.cause() : null;
+        return new RemovedTerminalBoundary(item, failure);
+    }
+
+    private void notifyTerminalAdmissionFailure(
+            RemovedTerminalBoundary removedTerminalBoundary) {
+        if (removedTerminalBoundary.failure() != null) {
+            notifyAdmissionFailure(
+                    removedTerminalBoundary.item(),
+                    removedTerminalBoundary.failure());
+        }
+    }
+
+    private record RemovedTerminalBoundary(ScheduledRequest item, Throwable failure) {
+        private static final RemovedTerminalBoundary NONE =
+                new RemovedTerminalBoundary(null, null);
+
+        boolean wasRemoved() {
+            return item != null;
+        }
+    }
+
+    /** Delivery items are the scheduler-owned ScheduledRequest identities. */
+    @SuppressWarnings("unchecked")
+    private static List<ScheduledRequest> batchItems(List<ScheduledRequest> items) {
+        return (List<ScheduledRequest>) (List<?>) items;
+    }
+
+    private boolean candidateSelectionStillOwned(List<ScheduledRequest> candidates) {
         queueLock.lock();
         try {
-            return pendingDeliveries.size();
+            if (stopped) {
+                return false;
+            }
+            long nowMs = now();
+            for (ScheduledRequest item : candidates) {
+                if (!containsIdentity(item) || item.requestExpired(nowMs)) {
+                    return false;
+                }
+            }
+            return true;
         } finally {
             queueLock.unlock();
         }
     }
 
-    /**
-     * Remove the head from the queue and notify the decision handler that the
-     * request's absolute expiration has been reached.
-     * Caller is responsible for algorithm-specific logging and state cleanup.
-     */
-    void dropHead(BatchItem head) {
-        remove(head);
-        decisionHandler.onExpired(head);
-    }
-
-    // ---- decision interval estimation (design doc 8.4) ----
-
-    private synchronized void recordDecisionInterval(long nowMs) {
-        if (lastDecisionAtMs > 0 && nowMs > lastDecisionAtMs) {
-            long intervalMs = nowMs - lastDecisionAtMs;
-            decisionIntervalEmaMs = decisionIntervalEmaMs <= 0
-                    ? intervalMs
-                    : 0.3 * intervalMs + 0.7 * decisionIntervalEmaMs;
+    /** Identity membership avoids conflating different request generations. */
+    private boolean containsIdentity(ScheduledRequest expected) {
+        for (ScheduledRequest item : queue) {
+            if (item == expected) {
+                return true;
+            }
         }
-        lastDecisionAtMs = nowMs;
+        return false;
+    }
+
+    private void notifyAdmissionFailure(ScheduledRequest item, Throwable cause) {
+        try {
+            deliveryLifecycle.onPreparedDeliveryFailure(item, cause);
+        } catch (Throwable callbackFailure) {
+            Logger.error("WorkerBatcher[{}] delivery-failure callback failed "
+                            + "request_id={}",
+                    key, item.requestId(), callbackFailure);
+        }
+    }
+
+    /** Terminate the head whose absolute request expiration has been reached. */
+    void dropHead(ScheduledRequest head) {
+        terminateActiveItem(head, ActiveQueueExpired.INSTANCE);
     }
 
     /**
-     * Sliding-average interval between logical decision releases; before any
-     * release is observed, falls back to the fixed grouping window.
+     * Single reducer for normal terminal exits from ACTIVE. Queue removal is
+     * the ownership claim; only the winner invokes the item-scoped terminal
+     * callback. Callback failure is logged and never retried or promoted to a
+     * worker-wide invariant failure.
      */
-    long avgDecisionIntervalMs() {
-        double ema = decisionIntervalEmaMs;
-        if (ema > 0) {
-            return Math.max(1, Math.round(ema));
+    private void terminateActiveItem(
+            ScheduledRequest item,
+            ActiveQueueTermination termination) {
+        boolean removed;
+        queueLock.lock();
+        try {
+            removed = removeUnderLock(item);
+        } finally {
+            queueLock.unlock();
         }
-        return cfg.getDispatcher() instanceof BatchDispatcherConfig batch
-                ? Math.max(1, batch.getMaxCollectionWaitMs())
-                : 1;
+        if (!removed) {
+            return;
+        }
+        try {
+            if (termination == ActiveQueueExpired.INSTANCE) {
+                deliveryLifecycle.onQueuedItemExpired(item);
+            } else {
+                ActiveQueueRejected rejected = (ActiveQueueRejected) termination;
+                deliveryLifecycle.onQueueOfferFailure(
+                        item, rejected.cause());
+            }
+        } catch (Throwable callbackFailure) {
+            Logger.error("WorkerBatcher[{}] ACTIVE terminal callback failed "
+                            + "request_id={} reason={}",
+                    key, item.requestId(), termination.reason(), callbackFailure);
+        }
     }
+
+    private sealed interface ActiveQueueTermination
+            permits ActiveQueueExpired, ActiveQueueRejected {
+        String reason();
+    }
+
+    private enum ActiveQueueExpired implements ActiveQueueTermination {
+        INSTANCE;
+
+        @Override
+        public String reason() {
+            return "request_expired";
+        }
+    }
+
+    private record ActiveQueueRejected(Throwable cause)
+            implements ActiveQueueTermination {
+        @Override
+        public String reason() {
+            return "batch_token_capacity_exceeded";
+        }
+    }
+
 }
