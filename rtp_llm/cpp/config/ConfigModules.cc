@@ -386,15 +386,6 @@ std::string FIFOSchedulerConfig::to_string() const {
 }
 
 // GrammarConfig
-bool GrammarConfig::hasPretokenizedChatConstraints() const {
-    return !reasoning_prompt_tail_token_ids.empty() || !response_prompt_tail_token_ids.empty()
-           || !reasoning_structural_tag.empty() || !response_structural_tag.empty()
-           || !reasoning_completion_boundary_token_ids.empty() || !response_completion_boundary_token_ids.empty()
-           || !completion_think_close_token_ids.empty() || !completion_response_open_token_ids.empty()
-           || !completion_response_close_token_ids.empty() || !completion_tools_open_token_ids.empty()
-           || !completion_tools_close_token_ids.empty() || !completion_whitespace_token_ids.empty();
-}
-
 std::string GrammarConfig::to_string() const {
     std::ostringstream oss;
     oss << "grammar_backend: " << grammar_backend << "\n"
@@ -402,20 +393,6 @@ std::string GrammarConfig::to_string() const {
         << "num_workers: " << num_workers << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
         << "override_stop_tokens_size: " << override_stop_tokens.size();
-    if (hasPretokenizedChatConstraints()) {
-        oss << "\nreasoning_prompt_tail_token_ids_size: " << reasoning_prompt_tail_token_ids.size()
-            << "\nresponse_prompt_tail_token_ids_size: " << response_prompt_tail_token_ids.size()
-            << "\nreasoning_structural_tag_size: " << reasoning_structural_tag.size()
-            << "\nresponse_structural_tag_size: " << response_structural_tag.size()
-            << "\nreasoning_completion_boundary_token_ids_size: " << reasoning_completion_boundary_token_ids.size()
-            << "\nresponse_completion_boundary_token_ids_size: " << response_completion_boundary_token_ids.size()
-            << "\ncompletion_think_close_token_ids_size: " << completion_think_close_token_ids.size()
-            << "\ncompletion_response_open_token_ids_size: " << completion_response_open_token_ids.size()
-            << "\ncompletion_response_close_token_ids_size: " << completion_response_close_token_ids.size()
-            << "\ncompletion_tools_open_token_ids_size: " << completion_tools_open_token_ids.size()
-            << "\ncompletion_tools_close_token_ids_size: " << completion_tools_close_token_ids.size()
-            << "\ncompletion_whitespace_token_ids_size: " << completion_whitespace_token_ids.size();
-    }
     return oss.str();
 }
 

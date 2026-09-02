@@ -49,20 +49,6 @@ std::vector<size_t> buildKmpFailureTable(const std::vector<int>& pattern) {
     return lps;
 }
 
-void clearStopTokenBits(DLTensor* bitmask, int32_t idx, int32_t vocab_size, const std::vector<int>& stop_token_ids) {
-    if (bitmask == nullptr || bitmask->data == nullptr || stop_token_ids.empty()) {
-        return;
-    }
-    const size_t buffer_size = (static_cast<size_t>(vocab_size) + 31) / 32;
-    auto*        row         = reinterpret_cast<int32_t*>(bitmask->data) + static_cast<size_t>(idx) * buffer_size;
-    for (int token_id : stop_token_ids) {
-        if (token_id < 0 || token_id >= vocab_size) {
-            continue;
-        }
-        row[token_id / 32] &= ~(1u << (token_id % 32));
-    }
-}
-
 }  // namespace
 
 RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
@@ -70,13 +56,10 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
                                      std::optional<std::vector<int>>            think_end_token_ids,
                                      std::optional<std::vector<int>>            override_stop_tokens,
                                      bool                                       terminate_without_stop_token,
-                                     bool                                       mask_stop_tokens_before_completion,
                                      int                                        max_rollback_tokens):
     compiled_(std::move(compiled)),
     think_end_token_ids_(normalizeThinkEndTokenIds(think_end_token_ids.value_or(std::vector<int>{}))),
-    require_reasoning_(require_reasoning && !think_end_token_ids_.empty()),
-    terminate_without_stop_token_(terminate_without_stop_token),
-    mask_stop_tokens_before_completion_(mask_stop_tokens_before_completion) {
+    require_reasoning_(require_reasoning && !think_end_token_ids_.empty()) {
     if (require_reasoning && think_end_token_ids_.empty()) {
         RTP_LLM_LOG_WARNING("grammar reasoning requested but think_end_token_ids is missing; using plain grammar mode");
     }
@@ -126,13 +109,7 @@ bool RtpGrammarMatcher::fillBitmask(DLTensor* bitmask, int32_t idx) {
     if (isPassthroughForMask()) {
         return false;
     }
-    const bool filled = matcher_->FillNextTokenBitmask(bitmask, idx);
-    // xgrammar adds stop tokens to the mask when IsCompleted(), but its accepted-index store
-    // keeps a grammar-allowed stop token visible before that; AcceptToken rejects it there.
-    if (filled && mask_stop_tokens_before_completion_ && (terminate_without_stop_token_ || !matcher_->IsCompleted())) {
-        clearStopTokenBits(bitmask, idx, compiled_->GetTokenizerInfo().GetVocabSize(), matcher_->GetStopTokenIds());
-    }
-    return filled;
+    return matcher_->FillNextTokenBitmask(bitmask, idx);
 }
 
 bool RtpGrammarMatcher::isTerminated() const {

@@ -15,10 +15,9 @@ public:
     RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                       bool                                       require_reasoning,
                       std::optional<std::vector<int>>            think_end_token_ids,
-                      std::optional<std::vector<int>>            override_stop_tokens               = std::nullopt,
-                      bool                                       terminate_without_stop_token       = false,
-                      bool                                       mask_stop_tokens_before_completion = false,
-                      int                                        max_rollback_tokens                = 200);
+                      std::optional<std::vector<int>>            override_stop_tokens         = std::nullopt,
+                      bool                                       terminate_without_stop_token = false,
+                      int                                        max_rollback_tokens          = 200);
 
     RtpGrammarMatcher(const RtpGrammarMatcher&)            = delete;
     RtpGrammarMatcher& operator=(const RtpGrammarMatcher&) = delete;
@@ -58,8 +57,6 @@ private:
 
     const std::vector<int> think_end_token_ids_;
     const bool             require_reasoning_;
-    const bool             terminate_without_stop_token_       = false;
-    const bool             mask_stop_tokens_before_completion_ = false;
     std::vector<size_t>    think_end_lps_;
 
     // < 0: inside thinking body, parser frozen. >= 0: grammar is active.

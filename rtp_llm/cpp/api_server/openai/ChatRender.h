@@ -34,8 +34,6 @@ public:
     virtual std::vector<std::vector<int>>  tokenize_words(const std::vector<std::string>& words);
     virtual std::vector<std::vector<int>>  get_all_extra_stop_word_ids_list();
     virtual RenderedInputs                 render_chat_request(const std::string& req);
-    virtual void apply_chat_completion_constraints(const std::string&                     req,
-                                                   const std::shared_ptr<GenerateConfig>& config);
     py::object                             getRender();
     virtual std::shared_ptr<RenderContext> getRenderContext();
     std::string                            toString();

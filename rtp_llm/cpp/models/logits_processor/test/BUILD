@@ -31,18 +31,6 @@ test_deps = [
 ] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
-    name = "completion_boundary_logits_processor_test",
-    srcs = [
-        "CompletionBoundaryLogitsProcessorTest.cc",
-    ],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CPU",
-    },
-)
-
-cc_test(
     name = "think_mode_logits_processor_test",
     srcs = [
         "ThinkModeLogitsProcessorTest.cc",

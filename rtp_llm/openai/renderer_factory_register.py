@@ -82,14 +82,6 @@ def ensure_renderer_registered(renderer_type: Optional[str]) -> bool:
         return renderer_type in _renderer_factory
 
 
-def get_renderer_class(renderer_type: Optional[str]) -> Optional[Type[Any]]:
-    """Return a registered renderer class without constructing a request handler."""
-    if not ensure_renderer_registered(renderer_type):
-        return None
-    with _renderer_registry_lock:
-        return _renderer_factory.get(renderer_type)
-
-
 def ensure_all_renderers_registered() -> None:
     _load_internal_lazy_renderers()
     _lazy_renderer_registry.import_all_modules()

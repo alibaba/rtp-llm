@@ -1306,66 +1306,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
-        .def_readwrite("reasoning_prompt_tail_token_ids", &GrammarConfig::reasoning_prompt_tail_token_ids)
-        .def_readwrite("response_prompt_tail_token_ids", &GrammarConfig::response_prompt_tail_token_ids)
-        .def_readwrite("reasoning_structural_tag", &GrammarConfig::reasoning_structural_tag)
-        .def_readwrite("response_structural_tag", &GrammarConfig::response_structural_tag)
-        .def_readwrite("reasoning_completion_boundary_token_ids",
-                       &GrammarConfig::reasoning_completion_boundary_token_ids)
-        .def_readwrite("response_completion_boundary_token_ids", &GrammarConfig::response_completion_boundary_token_ids)
-        .def_readwrite("completion_think_close_token_ids", &GrammarConfig::completion_think_close_token_ids)
-        .def_readwrite("completion_response_open_token_ids", &GrammarConfig::completion_response_open_token_ids)
-        .def_readwrite("completion_response_close_token_ids", &GrammarConfig::completion_response_close_token_ids)
-        .def_readwrite("completion_tools_open_token_ids", &GrammarConfig::completion_tools_open_token_ids)
-        .def_readwrite("completion_tools_close_token_ids", &GrammarConfig::completion_tools_close_token_ids)
-        .def_readwrite("completion_whitespace_token_ids", &GrammarConfig::completion_whitespace_token_ids)
         .def("to_string", &GrammarConfig::to_string)
         .def(py::pickle(
             [](const GrammarConfig& self) {
-                if (!self.hasPretokenizedChatConstraints()) {
-                    // Preserve the legacy pickle shape for models that do not
-                    // opt in to pre-tokenized chat constraints.
-                    return py::make_tuple(self.grammar_backend,
-                                          self.constrained_json_disable_any_whitespace,
-                                          self.num_workers,
-                                          self.tokenizer_info_json,
-                                          self.override_stop_tokens);
-                }
-                if (self.completion_think_close_token_ids.empty() && self.completion_response_open_token_ids.empty()
-                    && self.completion_response_close_token_ids.empty() && self.completion_tools_open_token_ids.empty()
-                    && self.completion_tools_close_token_ids.empty() && self.completion_whitespace_token_ids.empty()) {
-                    return py::make_tuple(self.grammar_backend,
-                                          self.constrained_json_disable_any_whitespace,
-                                          self.num_workers,
-                                          self.tokenizer_info_json,
-                                          self.override_stop_tokens,
-                                          self.reasoning_prompt_tail_token_ids,
-                                          self.response_prompt_tail_token_ids,
-                                          self.reasoning_structural_tag,
-                                          self.response_structural_tag,
-                                          self.reasoning_completion_boundary_token_ids,
-                                          self.response_completion_boundary_token_ids);
-                }
                 return py::make_tuple(self.grammar_backend,
                                       self.constrained_json_disable_any_whitespace,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens,
-                                      self.reasoning_prompt_tail_token_ids,
-                                      self.response_prompt_tail_token_ids,
-                                      self.reasoning_structural_tag,
-                                      self.response_structural_tag,
-                                      self.reasoning_completion_boundary_token_ids,
-                                      self.response_completion_boundary_token_ids,
-                                      self.completion_think_close_token_ids,
-                                      self.completion_response_open_token_ids,
-                                      self.completion_response_close_token_ids,
-                                      self.completion_tools_open_token_ids,
-                                      self.completion_tools_close_token_ids,
-                                      self.completion_whitespace_token_ids);
+                                      self.override_stop_tokens);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 9 && t.size() != 11 && t.size() != 17)
+                if (t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1374,24 +1325,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.num_workers                             = t[2].cast<int>();
                     c.tokenizer_info_json                     = t[3].cast<std::string>();
                     c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
-                    if (t.size() >= 9) {
-                        c.reasoning_prompt_tail_token_ids = t[5].cast<std::vector<int32_t>>();
-                        c.response_prompt_tail_token_ids  = t[6].cast<std::vector<int32_t>>();
-                        c.reasoning_structural_tag        = t[7].cast<std::string>();
-                        c.response_structural_tag         = t[8].cast<std::string>();
-                    }
-                    if (t.size() >= 11) {
-                        c.reasoning_completion_boundary_token_ids = t[9].cast<std::vector<int32_t>>();
-                        c.response_completion_boundary_token_ids  = t[10].cast<std::vector<int32_t>>();
-                    }
-                    if (t.size() == 17) {
-                        c.completion_think_close_token_ids    = t[11].cast<std::vector<int32_t>>();
-                        c.completion_response_open_token_ids  = t[12].cast<std::vector<int32_t>>();
-                        c.completion_response_close_token_ids = t[13].cast<std::vector<int32_t>>();
-                        c.completion_tools_open_token_ids     = t[14].cast<std::vector<int32_t>>();
-                        c.completion_tools_close_token_ids    = t[15].cast<std::vector<int32_t>>();
-                        c.completion_whitespace_token_ids     = t[16].cast<std::vector<int32_t>>();
-                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }

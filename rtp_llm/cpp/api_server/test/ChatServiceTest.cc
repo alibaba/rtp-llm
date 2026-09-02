@@ -147,20 +147,10 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
 
     RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>(), std::string()};
     EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
-    EXPECT_CALL(*mock_render_, apply_chat_completion_constraints)
-        .WillOnce(Invoke([generate_config](const std::string& body, const std::shared_ptr<GenerateConfig>& config) {
-            EXPECT_NE(body.find("who are you?"), std::string::npos);
-            EXPECT_EQ(config, generate_config);
-            config->structural_tag = R"({"type":"structural_tag"})";
-        }));
 
     auto mock_stream = CreateMockGenerateStream();
     auto stream      = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
-    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_)))
-        .WillOnce(Invoke([stream](const std::shared_ptr<GenerateInput>& input) {
-            EXPECT_EQ(input->generate_config->structural_tag, R"({"type":"structural_tag"})");
-            return stream;
-        }));
+    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
 
     auto mock_ctx = std::make_shared<MockRenderContext>();
     auto ctx      = std::dynamic_pointer_cast<RenderContext>(mock_ctx);

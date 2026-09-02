@@ -63,12 +63,10 @@ public:
     void setCache(const GrammarKeyCpp& key, std::shared_ptr<xgrammar::CompiledGrammar> compiled);
     void setCacheInvalid(const GrammarKeyCpp& key, const std::string& error_message);
 
-    std::shared_ptr<RtpGrammarMatcher>
-    createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                  bool                                       require_reasoning,
-                  std::optional<std::vector<int>>            think_end_token_ids,
-                  bool                                       terminate_without_stop_token = false,
-                  std::optional<std::vector<int>>            request_stop_tokens          = std::nullopt);
+    std::shared_ptr<RtpGrammarMatcher> createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
+                                                     bool                                       require_reasoning,
+                                                     std::optional<std::vector<int>>            think_end_token_ids,
+                                                     bool terminate_without_stop_token = false);
 
     void clear();
 

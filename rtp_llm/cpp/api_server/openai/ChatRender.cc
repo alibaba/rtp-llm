@@ -1,30 +1,6 @@
 #include "rtp_llm/cpp/api_server/openai/ChatRender.h"
 
-#include <stdexcept>
-
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-
 namespace rtp_llm {
-
-namespace {
-
-void clearOptionalGenerateConfigField(GenerateConfig& config, const std::string& field) {
-    if (field == "json_schema") {
-        config.json_schema.reset();
-    } else if (field == "regex") {
-        config.regex.reset();
-    } else if (field == "ebnf") {
-        config.ebnf.reset();
-    } else if (field == "structural_tag") {
-        config.structural_tag.reset();
-    } else if (field == "response_format") {
-        config.response_format.reset();
-    } else {
-        throw std::invalid_argument("renderer cannot clear unsupported GenerateConfig field: " + field);
-    }
-}
-
-}  // namespace
 
 RenderContext::~RenderContext() {
     py::gil_scoped_acquire acquire;
@@ -215,26 +191,6 @@ RenderedInputs ChatRender::render_chat_request(const std::string& reqBody) {
     auto rendered_prompt = py::cast<std::string>(rendered_input.attr("rendered_prompt"));
 
     return RenderedInputs(input_ids, mm_inputs, rendered_prompt);
-}
-
-void ChatRender::apply_chat_completion_constraints(const std::string&                     req,
-                                                   const std::shared_ptr<GenerateConfig>& config) {
-    py::gil_scoped_acquire acquire;
-    RTP_LLM_CHECK_WITH_INFO(config != nullptr, "generate config is null");
-    if (!render_.attr("cpp_http_constraints_enabled").cast<bool>()) {
-        return;
-    }
-
-    const auto config_json = autil::legacy::ToJsonString(*config, true);
-    const auto patch = render_.attr("apply_chat_completion_constraints_from_json")(req, config_json).cast<py::tuple>();
-    RTP_LLM_CHECK_WITH_INFO(patch.size() == 2, "renderer constraint patch must contain updates and cleared fields");
-
-    const auto updates_json = patch[0].cast<std::string>();
-    const auto cleared      = patch[1].cast<std::vector<std::string>>();
-    autil::legacy::FromJsonString(*config, updates_json);
-    for (const auto& field : cleared) {
-        clearOptionalGenerateConfigField(*config, field);
-    }
 }
 
 std::string ChatRender::toString() {

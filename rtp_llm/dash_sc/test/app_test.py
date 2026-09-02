@@ -21,7 +21,6 @@ from rtp_llm.dash_sc.app import (
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
     _pre_stop_drain_seconds,
-    _resolve_pretokenized_chat_constraint_applier,
 )
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
 
@@ -78,23 +77,6 @@ class DeriveEchoPrefixIdsTest(TestCase):
             _EnvCfg(), _BaseTok(_FakeTokenizer(raise_exc=True))
         )
         self.assertEqual(ids, [])
-
-
-class PretokenizedConstraintResolverTest(TestCase):
-    def test_kimi_k3_opts_into_request_aware_constraint(self) -> None:
-        applier = _resolve_pretokenized_chat_constraint_applier("kimi_k3")
-
-        self.assertIsNotNone(applier)
-        self.assertEqual(
-            applier.__name__, "apply_pretokenized_chat_request_constraints"
-        )
-
-    def test_unregistered_model_is_unchanged(self) -> None:
-        self.assertIsNone(
-            _resolve_pretokenized_chat_constraint_applier(
-                "model_without_pretokenized_constraint_hook"
-            )
-        )
 
 
 class CreateProxyServicerOnLoopTest(TestCase):

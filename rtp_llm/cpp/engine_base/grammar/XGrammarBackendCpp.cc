@@ -207,35 +207,12 @@ std::shared_ptr<RtpGrammarMatcher>
 XGrammarBackendCpp::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
                                   bool                                       require_reasoning,
                                   std::optional<std::vector<int>>            think_end_token_ids,
-                                  bool                                       terminate_without_stop_token,
-                                  std::optional<std::vector<int>>            request_stop_tokens) {
-    const bool mask_stop_tokens_before_completion = request_stop_tokens.has_value();
-    // Single-token request stop words must join the matcher stop set, otherwise
-    // they bypass the grammar mask and can finish the stream before the grammar
-    // completes (e.g. EOS sampled mid-think on Kimi K3). xgrammar replaces the
-    // TokenizerInfo stop tokens with an override, so keep the base set intact.
-    std::optional<std::vector<int>> override_stop_tokens = options_.override_stop_tokens;
-    if (request_stop_tokens.has_value() && !request_stop_tokens->empty()) {
-        std::vector<int> merged;
-        if (override_stop_tokens.has_value()) {
-            merged = std::move(*override_stop_tokens);
-        } else {
-            const auto& info_stops = tokenizer_info_.GetStopTokenIds();
-            merged.assign(info_stops.begin(), info_stops.end());
-        }
-        for (int token_id : *request_stop_tokens) {
-            if (std::find(merged.begin(), merged.end(), token_id) == merged.end()) {
-                merged.push_back(token_id);
-            }
-        }
-        override_stop_tokens = std::move(merged);
-    }
+                                  bool                                       terminate_without_stop_token) {
     return std::make_shared<RtpGrammarMatcher>(std::move(compiled),
                                                require_reasoning,
                                                std::move(think_end_token_ids),
-                                               std::move(override_stop_tokens),
+                                               options_.override_stop_tokens,
                                                terminate_without_stop_token,
-                                               mask_stop_tokens_before_completion,
                                                /*max_rollback_tokens=*/200);
 }
 

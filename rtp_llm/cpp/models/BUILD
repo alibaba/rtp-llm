@@ -48,7 +48,6 @@ cc_library(
     name = "logits_processor",
     hdrs = [
         "logits_processor/BaseLogitsProcessor.h",
-        "logits_processor/CompletionBoundaryLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/GrammarLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
@@ -61,7 +60,6 @@ cc_library(
     ],
     srcs = [
         "logits_processor/BaseLogitsProcessor.cc",
-        "logits_processor/CompletionBoundaryLogitsProcessor.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/GrammarLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",

@@ -190,7 +190,6 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
     const auto rendered_input = chat_render->render_chat_request(body);
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
-    chat_render->apply_chat_completion_constraints(body, input->generate_config);
     auto stream = engine_->enqueue(input);
 
     if (chat_request.stream.value_or(false) == false) {
