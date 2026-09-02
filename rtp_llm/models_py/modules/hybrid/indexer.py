@@ -147,8 +147,18 @@ class Indexer(nn.Module):
             "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
         ).strip().lower() in ("1", "true", "yes", "on")
 
+    @staticmethod
+    def _is_multi_token_decode(attention_inputs: Any) -> bool:
+        return bool(getattr(attention_inputs, "is_target_verify", False)) or bool(
+            getattr(attention_inputs, "is_draft_extend", False)
+        )
+
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
-        return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
+        return (
+            bool(attention_inputs.is_prefill)
+            and not self._is_multi_token_decode(attention_inputs)
+            and self._prefill_cp_enabled()
+        )
 
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
@@ -252,6 +262,7 @@ class Indexer(nn.Module):
         q_lora: torch.Tensor,
         x: torch.Tensor,
         flashmla_params: Any,
+        attention_inputs: Any,
         cp_params: Optional[Any],
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
@@ -270,7 +281,7 @@ class Indexer(nn.Module):
             k = self.wk(x)
         k = self.k_norm(k)
 
-        if self._prefill_cp_enabled():
+        if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
                 q,
@@ -326,9 +337,7 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
-        is_multi_token_decode = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        ) or bool(getattr(attention_inputs, "is_draft_extend", False))
+        is_multi_token_decode = self._is_multi_token_decode(attention_inputs)
         if not attention_inputs.is_prefill or is_multi_token_decode:
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
@@ -408,7 +417,10 @@ class Indexer(nn.Module):
             )
         elif (
             self._fuse_logits_head_gate
-            and not attention_inputs.is_prefill
+            and (
+                not attention_inputs.is_prefill
+                or self._is_multi_token_decode(attention_inputs)
+            )
             and cp_params is None
         ):
             q_fp8, q_scale = self._fused_forward_decode(
@@ -426,6 +438,7 @@ class Indexer(nn.Module):
                 q_lora,
                 hidden_states,
                 fmha_params,
+                attention_inputs,
                 cp_params,
                 x_fp8,
                 x_scale,

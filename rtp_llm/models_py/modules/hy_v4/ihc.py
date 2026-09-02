@@ -12,6 +12,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.hy_v4.ihc_triton import (
+    maybe_fused_ihc_head,
+    maybe_fused_ihc_post,
+    maybe_fused_ihc_pre,
+    maybe_fused_ihc_pre_normed,
+    maybe_fused_ihc_pre_normed_grouped,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -107,7 +114,22 @@ class Hy4IHCUnit(nn.Module):
         reads = []
         post_gates = []
         for chunk in channels.split(self.chunk_size, dim=0):
+            fused = maybe_fused_ihc_pre(
+                chunk,
+                self.fn_weight,
+                self.scale,
+                self.base,
+                magnitude=self.magnitude,
+                hc_eps=self.hc_eps,
+                norm_eps=self.norm_eps,
+            )
+            if fused is not None:
+                read, post_gate = fused
+                reads.append(read)
+                post_gates.append(post_gate)
+                continue
             flat = chunk.flatten(1).float()
+            chunk_fp32 = flat.view(-1, self.hc_mult, self.hidden_size)
             rstd = torch.rsqrt(
                 flat.square().mean(dim=-1, keepdim=True) + self.norm_eps
             )
@@ -126,9 +148,11 @@ class Hy4IHCUnit(nn.Module):
                 )
                 + self.hc_eps
             )
-            read = torch.sum(pre_gate.unsqueeze(-1) * chunk.float(), dim=1)
+            read = torch.sum(pre_gate.unsqueeze(-1) * chunk_fp32, dim=1)
             reads.append(read.to(dtype=channels.dtype))
             post_gates.append(post_gate)
+        if len(reads) == 1:
+            return reads[0], post_gates[0]
         return torch.cat(reads, dim=0), torch.cat(post_gates, dim=0)
 
     def post(
@@ -148,10 +172,64 @@ class Hy4IHCUnit(nn.Module):
                 f"HY V4 iHC post gate shape must be "
                 f"{(channels.size(0), self.hc_mult)}, got {tuple(post_gate.shape)}"
             )
+        fused = maybe_fused_ihc_post(block_output, channels, post_gate)
+        if fused is not None:
+            return fused
         output = channels.float() + post_gate.float().unsqueeze(-1) * (
             block_output.float().unsqueeze(1)
         )
         return output.to(dtype=block_output.dtype)
+
+    def pre_normed(
+        self, channels: torch.Tensor, norm: nn.Module
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Fuse iHC pre with its immediately following RMSNorm when supported."""
+        channels = self.prepare_input(channels)
+        if channels.size(0) == 0:
+            return self.pre(channels)
+
+        norm_weight = norm.weight.data
+        # Coalesce chunks only when their DeepGEMM split-K signature matches.
+        # The short tail stays separate to preserve the existing reduction
+        # order, while both groups write directly into the final output.
+        fused = maybe_fused_ihc_pre_normed_grouped(
+            channels,
+            self.fn_weight,
+            self.scale,
+            self.base,
+            norm_weight,
+            magnitude=self.magnitude,
+            hc_eps=self.hc_eps,
+            ihc_norm_eps=self.norm_eps,
+            read_norm_eps=norm.variance_epsilon,
+            chunk_size=self.chunk_size,
+        )
+        if fused is not None:
+            return fused
+
+        reads = []
+        post_gates = []
+        for chunk in channels.split(self.chunk_size, dim=0):
+            fused = maybe_fused_ihc_pre_normed(
+                chunk,
+                self.fn_weight,
+                self.scale,
+                self.base,
+                norm_weight,
+                magnitude=self.magnitude,
+                hc_eps=self.hc_eps,
+                ihc_norm_eps=self.norm_eps,
+                read_norm_eps=norm.variance_epsilon,
+            )
+            if fused is None:
+                read, post_gate = self.pre(channels)
+                return norm(read), post_gate
+            read, post_gate = fused
+            reads.append(read)
+            post_gates.append(post_gate)
+        if len(reads) == 1:
+            return reads[0], post_gates[0]
+        return torch.cat(reads, dim=0), torch.cat(post_gates, dim=0)
 
 
 class Hy4IHCHead(nn.Module):
@@ -202,12 +280,26 @@ class Hy4IHCHead(nn.Module):
 
         outputs = []
         for chunk in channels.split(self.chunk_size, dim=0):
+            fused = maybe_fused_ihc_head(
+                chunk,
+                self.fn_weight,
+                self.scale,
+                self.base,
+                hc_eps=self.hc_eps,
+                norm_eps=self.norm_eps,
+            )
+            if fused is not None:
+                outputs.append(fused)
+                continue
             flat = chunk.flatten(1).float()
+            chunk_fp32 = flat.view(-1, self.hc_mult, self.hidden_size)
             rstd = torch.rsqrt(
                 flat.square().mean(dim=-1, keepdim=True) + self.norm_eps
             )
             mixes = F.linear(flat, self.fn_weight) * rstd
             gates = torch.sigmoid(mixes * self.scale + self.base) + self.hc_eps
-            output = torch.sum(gates.unsqueeze(-1) * chunk.float(), dim=1)
+            output = torch.sum(gates.unsqueeze(-1) * chunk_fp32, dim=1)
             outputs.append(output.to(dtype=channels.dtype))
+        if len(outputs) == 1:
+            return outputs[0]
         return torch.cat(outputs, dim=0)

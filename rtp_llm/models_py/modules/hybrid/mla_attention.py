@@ -21,12 +21,20 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+        CudaMxfp8Linear,
+    )
+    from rtp_llm.models_py.triton_kernels.common.attn_output_gate import (
+        sigmoid_mul_fp8_quant_fwd,
+    )
     from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
         fused_strided_rmsnorm,
         fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
+    CudaMxfp8Linear = None  # type: ignore
+    sigmoid_mul_fp8_quant_fwd = None  # type: ignore
     fused_strided_rmsnorm = None  # type: ignore
     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
 
@@ -218,6 +226,41 @@ class MlaAttention(nn.Module):
             elif fused_strided_rmsnorm is not None:
                 self._fuse_q_a_norm_mode = "bf16"
 
+        # HY4 Gated MLA epilogue: fuse elementwise sigmoid, multiply, and the
+        # activation quantization consumed by the quantized output projection.
+        self._fuse_gated_mla_quant = False
+        self._gated_mla_quant_group_size = 128
+        self._gated_mla_scale_ue8m0 = False
+        self._gated_mla_round_scale_to_pow2 = False
+        if (
+            _fuse_on
+            and self.gating_type == "elementwise"
+            and sigmoid_mul_fp8_quant_fwd is not None
+        ):
+            if CudaMxfp8Linear is not None and isinstance(
+                self.o_proj, CudaMxfp8Linear
+            ):
+                self._fuse_gated_mla_quant = True
+                self._gated_mla_quant_group_size = (
+                    self.o_proj.input_quant_group_size
+                )
+                # Request DeepGEMM's packed UE8M0/TMA layout directly so the
+                # output projection skips its standalone scale-pack kernel.
+                self._gated_mla_scale_ue8m0 = (
+                    self.o_proj.input_quant_scale_ue8m0
+                )
+                self._gated_mla_round_scale_to_pow2 = (
+                    self.o_proj.input_quant_round_to_pow2
+                )
+            elif CudaFp8GEMMLinear is not None and isinstance(
+                self.o_proj, CudaFp8GEMMLinear
+            ):
+                self._gated_mla_scale_ue8m0 = self.o_proj.scale_ue8m0
+                self._fuse_gated_mla_quant = self.o_proj.K % 128 == 0 and (
+                    not self._gated_mla_scale_ue8m0
+                    or (self.o_proj.K // 128) % 4 == 0
+                )
+
     def _run_sparse_indexer(
         self,
         hidden_states: torch.Tensor,
@@ -390,19 +433,37 @@ class MlaAttention(nn.Module):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
+        output = None
         if self.gate_proj is not None:
-            gate = torch.sigmoid(self.gate_proj(hidden_states))
-            if self.gating_type == "headwise":
-                attn_output = attn_output.reshape(
-                    *input_shape, self.num_heads, self.v_head_dim
+            gate = self.gate_proj(hidden_states)
+            if (
+                self._fuse_gated_mla_quant
+                and self.gating_type == "elementwise"
+                and attn_output.dim() == 2
+            ):
+                fp8_output, fp8_scale = sigmoid_mul_fp8_quant_fwd(
+                    attn_output,
+                    gate,
+                    quant_group_size=self._gated_mla_quant_group_size,
+                    scale_ue8m0=self._gated_mla_scale_ue8m0,
+                    round_scale_to_pow2=self._gated_mla_round_scale_to_pow2,
+                    column_major_scales=True,
                 )
-                attn_output = attn_output * gate.unsqueeze(-1)
-                attn_output = attn_output.reshape(*input_shape, -1)
+                output = self.o_proj(fp8_output, input_scales=fp8_scale)
             else:
-                attn_output = attn_output * gate
-        attn_output = self.o_proj(attn_output)
+                gate = torch.sigmoid(gate)
+                if self.gating_type == "headwise":
+                    attn_output = attn_output.reshape(
+                        *input_shape, self.num_heads, self.v_head_dim
+                    )
+                    attn_output = attn_output * gate.unsqueeze(-1)
+                    attn_output = attn_output.reshape(*input_shape, -1)
+                else:
+                    attn_output = attn_output * gate
+        if output is None:
+            output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
+            output = all_reduce(output, group=Group.TP)
         if return_topk:
-            return attn_output, topk_indices
-        return attn_output
+            return output, topk_indices
+        return output

@@ -89,8 +89,13 @@ def get_mla_impl(
             )
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
+        # Prefill CP capability filtering applies only to real prefill. Normal
+        # decode and prefill-shaped multi-token decode do not run prefill CP.
+        if (
+            not use_fast_path
+            and attn_inputs.is_prefill
+            and not use_decode_mla
+            and not impl.support_parallelism_config(parallelism_config)
         ):
             continue
 

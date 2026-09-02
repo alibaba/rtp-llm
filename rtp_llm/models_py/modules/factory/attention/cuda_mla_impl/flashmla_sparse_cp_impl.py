@@ -349,6 +349,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
         use_cuda_graph: bool = False,
+        bf16_prefill_num_heads: Optional[int] = None,
     ):
         super().__init__(
             num_heads=num_heads,
@@ -359,6 +360,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             softmax_extra_scale=softmax_extra_scale,
             top_k=top_k,
             use_cuda_graph=use_cuda_graph,
+            bf16_prefill_num_heads=bf16_prefill_num_heads,
         )
         self.attn_inputs = None
         self.cp_info = None
@@ -973,7 +975,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the only CP-specific bit is using
         precomputed_req_ids (req id per global q token) for the offset lookup."""
-        q0, attn_sink, actual_heads = self._pad_query_and_sink(q0, attn_sink)
+        q0, attn_sink, actual_heads = self._pad_query_and_sink(
+            q0,
+            attn_sink,
+            self.bf16_num_heads,
+        )
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
         fused_kv = self._allocate_fused_kv()

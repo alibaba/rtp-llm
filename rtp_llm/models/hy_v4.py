@@ -543,6 +543,10 @@ class Hy4Mtp(Hy4):
                 f"HY V4 RTP draft currently supports one MTP layer, got {config.num_layers}"
             )
         config.enable_ihc = False
+        # HY V4 applies hc_head in the target model before handing hidden states
+        # to MTP.  Its draft therefore consumes one hidden-size stream, unlike
+        # DeepSeek V4 MTP which consumes the pre-hc_head hc_mult streams.
+        config.hc_mult = 1
         config.mlp_layer_types = ["sparse"]
         config.moe_layer_index = [0]
         config.indexer_types = ["full"]

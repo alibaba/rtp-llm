@@ -44,6 +44,9 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.pad_query_heads import (
+    maybe_pad_query_heads,
+)
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -85,6 +88,28 @@ def _allocate_prefill_fused_kv(
 ) -> torch.Tensor:
     """Allocate the layer-local BF16 gather destination after Indexer."""
     return torch.empty((total_kv_len, width), dtype=torch.bfloat16, device=device)
+
+
+def _fp8_sparse_padded_heads(num_heads: int) -> int:
+    """Return the 64/128-head envelope accepted by FP8 sparse FlashMLA."""
+    return 64 if num_heads <= 64 else 128
+
+
+def _is_sm100_or_newer(device: Optional[torch.device] = None) -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return torch.cuda.get_device_capability(device)[0] >= 10
+    except (AssertionError, RuntimeError):
+        return False
+
+
+def _bf16_sparse_padded_heads(
+    num_heads: int, device: Optional[torch.device] = None
+) -> int:
+    """Return the head envelope required by BF16 sparse FlashMLA prefill."""
+    padding_multiple = 128 if _is_sm100_or_newer(device) else 64
+    return (num_heads + padding_multiple - 1) // padding_multiple * padding_multiple
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +189,7 @@ class SparseMlaOp(object):
         self,
         q: torch.Tensor,
         attn_sink: Optional[torch.Tensor],
+        kernel_heads: Optional[int] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor], int]:
         """Pad HY V4 TP-local heads to FlashMLA's 64/128-head ABI.
 
@@ -171,10 +197,11 @@ class SparseMlaOp(object):
         denominator. A zero sink would incorrectly create an extra exp(0).
         """
         actual_heads = q.size(1)
-        if actual_heads > self.num_heads:
+        kernel_heads = self.num_heads if kernel_heads is None else kernel_heads
+        if actual_heads > kernel_heads:
             raise ValueError(
                 f"query has {actual_heads} heads but FlashMLA was planned for "
-                f"{self.num_heads}"
+                f"{kernel_heads}"
             )
         if attn_sink is not None and attn_sink.numel() != actual_heads:
             raise ValueError(
@@ -185,13 +212,19 @@ class SparseMlaOp(object):
                 "attention sink and query must be on the same device, got "
                 f"{attn_sink.device} and {q.device}"
             )
-        if actual_heads == self.num_heads:
+        if actual_heads == kernel_heads:
             return q, attn_sink, actual_heads
-        q_padded = q.new_zeros((q.size(0), self.num_heads, q.size(2)))
-        q_padded[:, :actual_heads].copy_(q)
+        q_padded = (
+            maybe_pad_query_heads(q, kernel_heads)
+            if fuse_kernels_enabled()
+            else None
+        )
+        if q_padded is None:
+            q_padded = q.new_zeros((q.size(0), kernel_heads, q.size(2)))
+            q_padded[:, :actual_heads].copy_(q)
         if attn_sink is not None:
             sink_padded = torch.full(
-                (self.num_heads,),
+                (kernel_heads,),
                 -torch.inf,
                 dtype=torch.float32,
                 device=attn_sink.device,
@@ -266,7 +299,13 @@ class SparseMlaFp8Op(SparseMlaOp):
 
     def __init__(self, *args, **kwargs):
         self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
+        bf16_prefill_num_heads = kwargs.pop("bf16_prefill_num_heads", None)
         super().__init__(*args, **kwargs)
+        self.bf16_num_heads = (
+            _bf16_sparse_padded_heads(self.num_heads)
+            if bf16_prefill_num_heads is None
+            else int(bf16_prefill_num_heads)
+        )
         # In CUDA graph mode the captured kernels keep the scheduler storage
         # address. Replacing this object during replay leaves the graph with a
         # dangling/stale pointer, so plan() must refresh it in place.
@@ -377,7 +416,11 @@ class SparseMlaFp8Op(SparseMlaOp):
         attn_sink: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """gather + flash_mla_sparse_fwd (prefill fast path)."""
-        q, attn_sink, actual_heads = self._pad_query_and_sink(q, attn_sink)
+        q, attn_sink, actual_heads = self._pad_query_and_sink(
+            q,
+            attn_sink,
+            self.bf16_num_heads,
+        )
         ws = self._gather
         assert (
             ws is not None
@@ -527,19 +570,12 @@ class SparseMlaImpl(MlaImplBase):
         has_hy4_sink = any(W.hy4_attn_sink in layer for layer in weights)
         kernel_num_heads = attn_configs.head_num
         if has_hy4_sink:
-            # Hopper accepts a 64-head multiple; Blackwell's sparse prefill
-            # kernel requires a 128-head multiple. The checkpoint sink remains
-            # local/unpadded and _pad_query_and_sink adds no-op lanes.
-            padding_multiple = 64
-            if torch.cuda.is_available():
-                try:
-                    if torch.cuda.get_device_capability()[0] >= 10:
-                        padding_multiple = 128
-                except (AssertionError, RuntimeError):
-                    pass
-            kernel_num_heads = (
-                (kernel_num_heads + padding_multiple - 1) // padding_multiple
-            ) * padding_multiple
+            # HY4's SM100 FlashMLA wheel has native h64/d576/sink kernels.
+            # Avoid the compatibility h128 lanes; the h64 specialization is
+            # mathematically equivalent within BF16 rounding error.
+            kernel_num_heads = _fp8_sparse_padded_heads(kernel_num_heads)
+            if issubclass(op_cls, SparseMlaFp8Op):
+                op_kwargs["bf16_prefill_num_heads"] = kernel_num_heads
         self.fmha_impl: SparseMlaOp = op_cls(
             kernel_num_heads,
             attn_configs.kv_lora_rank,
