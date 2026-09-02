@@ -79,7 +79,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         pausable_engine->release();
     }
     ASSERT_TRUE(demotion_entered);
-    EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_demoting.has_value());
@@ -105,7 +104,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
 
     pausable_engine->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
     std::vector<BlockIdxType> host_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
@@ -177,7 +175,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     }
     ASSERT_TRUE(load_entered);
     EXPECT_FALSE(load_result.async_context->done());
-    EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_loading.has_value());
@@ -214,7 +211,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     ASSERT_TRUE(load_result.async_context->done());
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     const auto all_descriptors = pausable_engine->descriptors();
     ASSERT_EQ(all_descriptors.size(), 2 * cache->groupSets().size());
@@ -316,7 +312,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         pausable_engine->release();
     }
     ASSERT_TRUE(device_demotion_entered);
-    EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_device_demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_device_demoting.has_value());
@@ -334,7 +329,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
 
     pausable_engine->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
     std::vector<BlockIdxType> host_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
@@ -390,7 +384,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         pausable_engine->release();
     }
     ASSERT_TRUE(host_demotion_entered);
-    EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_host_demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host_demoting.has_value());
@@ -408,7 +401,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
 
     pausable_engine->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     auto maybe_disk = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_disk.has_value());
     std::vector<BlockIdxType> disk_sources(cache->groupSets().size(), NULL_BLOCK_IDX);
@@ -464,7 +456,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     }
     ASSERT_TRUE(disk_load_entered);
     EXPECT_FALSE(load_result.async_context->done());
-    EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_loading.has_value());
@@ -494,7 +485,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_TRUE(load_result.async_context->done());
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     descriptors = pausable_engine->descriptors();
     ASSERT_EQ(descriptors.size(), 3 * cache->groupSets().size());
@@ -591,10 +581,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << recording_engine->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     const auto after_device_failure = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(after_device_failure.has_value());
@@ -646,10 +633,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << recording_engine->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
@@ -682,10 +666,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-        ASSERT_TRUE(waitForPendingTasksDoneFor(
-            *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submittedDescriptorCount();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
         const auto descriptors_after_host_failure = recording_engine->descriptors();
         ASSERT_GT(descriptors_after_host_failure.size(), submits_before_host_failure);
@@ -741,10 +722,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
                                        std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
         host_hit_result.async_context->waitDone();
         ASSERT_TRUE(host_hit_result.async_context->success()) << host_hit_result.async_context->errorInfo().ToString();
-        ASSERT_TRUE(waitForPendingTasksDoneFor(
-            *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submittedDescriptorCount();
 
         const auto descriptors_after_host_hit = recording_engine->descriptors();
         ASSERT_EQ(descriptors_after_host_hit.size(), submits_before_host_hit + cache->groupSets().size());
@@ -770,10 +747,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-        ASSERT_TRUE(waitForPendingTasksDoneFor(
-            *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submittedDescriptorCount();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         auto rebuilt_host = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(rebuilt_host.has_value());
         ASSERT_EQ(rebuilt_host->size(), 1u);
@@ -789,10 +763,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-        ASSERT_TRUE(waitForPendingTasksDoneFor(
-            *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-            << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-            << " submits=" << recording_engine->submittedDescriptorCount();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
         auto after_host_retry = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(after_host_retry.has_value());
@@ -825,10 +796,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         load_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << recording_engine->submittedDescriptorCount();
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     ASSERT_TRUE(
         requestReusesExpectedPath(*cache, cache_config_, seed.cache_keys, load_resource, /*logical_reuse_blocks=*/1));
@@ -863,9 +830,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    const size_t pending_tasks = static_cast<size_t>(BlockTreeCacheTestPeer::pendingTasksForTest(*cache));
-    const size_t worker_count  = static_cast<size_t>(cache->config().task_pool_size);
-    const size_t expected_entered_count = std::min(pending_tasks, worker_count);
+    const size_t expected_entered_count = cache->groupSets().size();
     ASSERT_GT(expected_entered_count, 0u);
     ASSERT_TRUE(engine->waitUntilEnteredCountFor(
         expected_entered_count, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
@@ -903,7 +868,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     EXPECT_EQ(result.reuse_len, 0);
     EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     auto still_demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(still_demoting.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -920,10 +884,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     engine->release();
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     auto settled_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(settled_host.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {

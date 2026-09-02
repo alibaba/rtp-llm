@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <stdexcept>
@@ -29,6 +30,27 @@ TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
 
     EXPECT_EQ(completed.load(), 2);
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
+}
+
+TEST(BlockTreeTaskPoolTest, WaitForIdleOnlyTracksTaskBodyNotExternalAsyncCompletion) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    std::atomic<bool>     transfer_done{false};
+    std::function<void()> finish_transfer;
+    ASSERT_TRUE(pool.submit([&] {
+        // Model a task that starts an external asynchronous transfer and
+        // returns after registering its eventual completion callback.
+        finish_transfer = [&transfer_done] { transfer_done.store(true); };
+    }));
+
+    pool.waitForIdle();
+    ASSERT_TRUE(finish_transfer);
+    EXPECT_EQ(pool.pending_tasks_.load(), 0);
+    EXPECT_FALSE(transfer_done.load());
+
+    finish_transfer();
+    EXPECT_TRUE(transfer_done.load());
 }
 
 TEST(BlockTreeTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
