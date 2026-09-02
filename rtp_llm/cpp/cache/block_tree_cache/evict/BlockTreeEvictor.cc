@@ -1,13 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <string>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -34,7 +34,8 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     is_tier_enabled_(std::move(is_tier_enabled)),
     settled_(std::move(settled)),
     task_runner_(std::make_unique<EvictionTaskRunner>(
-        tree->groupSets(), transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)) {
+        tree->groupSets(), transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)),
+    disk_timeout_ms_(disk_timeout_ms) {
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group resource, tier).
     heaps_.resize(tree_->groupSets().size());
@@ -229,14 +230,17 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
     }
 
     auto task_ptr = std::make_shared<EvictionTransferTask>(std::move(*task));
-    if (!task_pool_->acquireBusinessCredit()) {
-        rollbackTransferLocked(task_ptr->desc);
-        return false;
-    }
     updatePendingRelease(task_ptr->desc, true);
-    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); });
+    auto on_timeout = [this, task_ptr]() {
+        RTP_LLM_LOG_WARNING("eviction expired in business queue, source=%s target=%s",
+                            tierName(task_ptr->desc.source_tier),
+                            tierName(task_ptr->desc.target_tier));
+        scheduleEvictionSettlement(task_ptr, false);
+    };
+    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); },
+                                              BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                                              std::move(on_timeout));
     if (!submitted) {
-        task_pool_->releaseBusinessCredit();
         updatePendingRelease(task_ptr->desc, false);
         rollbackTransferLocked(task_ptr->desc);
         return false;
@@ -261,9 +265,8 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
     auto settle = [this, task = std::move(task), success]() noexcept {
-        block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseBusinessCredit(); });
-        bool                                   tree_data_mutated   = false;
-        Tier                                   settled_target_tier = Tier::NONE;
+        bool tree_data_mutated   = false;
+        Tier settled_target_tier = Tier::NONE;
         {
             std::lock_guard<std::mutex> lock(*mutex_);
             const auto&                 resource = task->desc.node->group_set_resources[task->desc.group_set_id];
@@ -295,7 +298,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
         RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement with unknown exception");
     }
     if (!submitted) {
-        settle();
+        RTP_LLM_LOG_WARNING("eviction completion queue is closed; dropping settlement during shutdown");
     }
 }
 

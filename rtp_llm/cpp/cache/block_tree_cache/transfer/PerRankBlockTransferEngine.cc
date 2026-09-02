@@ -18,8 +18,6 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kTransferQueueSize = 10000;
-
 ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     switch (status) {
         case TransferStatus::OK:
@@ -53,8 +51,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(max_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
-    transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockTransferEngine");
+    transfer_task_pool_ = std::make_unique<BlockTreeTaskPool>(
+        transfer_worker_count, BlockTreeTaskPool::kDefaultQueueSize, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
 
     const bool any_disk_pool = std::any_of(group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group_set) {
@@ -133,36 +131,43 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vect
         (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
     const size_t batch_limit =
         device_host_direction ? max_device_host_descriptors_per_batch_ : max_non_device_host_descriptors_per_batch_;
-    auto       context  = std::make_shared<TransferBatchAsyncContext>();
-    const bool accepted = transfer_task_pool_->submit([this, descriptors, group_sets, hosts, context, batch_limit] {
-        try {
-            for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
-                const size_t                          end = std::min(begin + batch_limit, descriptors.size());
-                const std::vector<HostBufferView>     sub_hosts(hosts.begin() + begin, hosts.begin() + end);
-                const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
-                                                                      descriptors.begin() + end);
-                const std::vector<const GroupSet*> sub_group_sets(group_sets.begin() + begin, group_sets.begin() + end);
-                const TransferStatus               status = execute(sub_hosts, sub_descriptors, sub_group_sets);
-                if (status != TransferStatus::OK) {
-                    for (size_t index = begin; index < end; ++index) {
-                        RTP_LLM_LOG_WARNING("transfer batch item failed, index=%zu %s",
-                                            index,
-                                            descriptors[index].debugString().c_str());
+    auto context    = std::make_shared<TransferBatchAsyncContext>();
+    auto on_timeout = [context]() {
+        context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"));
+    };
+    const bool accepted = transfer_task_pool_->submit(
+        [this, descriptors, group_sets, hosts, context, batch_limit] {
+            try {
+                for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
+                    const size_t                          end = std::min(begin + batch_limit, descriptors.size());
+                    const std::vector<HostBufferView>     sub_hosts(hosts.begin() + begin, hosts.begin() + end);
+                    const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
+                                                                          descriptors.begin() + end);
+                    const std::vector<const GroupSet*>    sub_group_sets(group_sets.begin() + begin,
+                                                                      group_sets.begin() + end);
+                    const TransferStatus                  status = execute(sub_hosts, sub_descriptors, sub_group_sets);
+                    if (status != TransferStatus::OK) {
+                        for (size_t index = begin; index < end; ++index) {
+                            RTP_LLM_LOG_WARNING("transfer batch item failed, index=%zu %s",
+                                                index,
+                                                descriptors[index].debugString().c_str());
+                        }
+                        const auto error = transferStatusToErrorInfo(status);
+                        context->complete(ErrorInfo(error.code(),
+                                                    error.ToString() + ", descriptor_range=[" + std::to_string(begin)
+                                                        + "," + std::to_string(end) + ")"));
+                        return;
                     }
-                    const auto error = transferStatusToErrorInfo(status);
-                    context->complete(ErrorInfo(error.code(),
-                                                error.ToString() + ", descriptor_range=[" + std::to_string(begin) + ","
-                                                    + std::to_string(end) + ")"));
-                    return;
                 }
+                context->complete(ErrorInfo::OkStatus());
+            } catch (const std::exception& error) {
+                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+            } catch (...) {
+                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
             }
-            context->complete(ErrorInfo::OkStatus());
-        } catch (const std::exception& error) {
-            context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-        } catch (...) {
-            context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
-        }
-    });
+        },
+        BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+        std::move(on_timeout));
     if (!accepted) {
         context->complete(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: transfer queue is full or stopped"));

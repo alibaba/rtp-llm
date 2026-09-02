@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
-#include <cassert>
 #include <utility>
 
 #include "autil/LambdaWorkItem.h"
@@ -17,7 +16,7 @@ BlockTreeTaskPool::~BlockTreeTaskPool() {
 
 bool BlockTreeTaskPool::start() {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    if (started_ || shutdown_ || thread_count_ == 0 || queue_size_ == 0) {
+    if (started_ || shutdown_ || thread_count_ == 0) {
         return false;
     }
 
@@ -44,16 +43,31 @@ bool BlockTreeTaskPool::start() {
     return true;
 }
 
-bool BlockTreeTaskPool::submit(std::function<void()> task) {
+bool BlockTreeTaskPool::submit(std::function<void()>     task,
+                               std::chrono::milliseconds max_queue_wait,
+                               std::function<void()>     on_timeout) {
     if (!task) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (!started_ || admission_stopped_ || shutdown_ || normal_queue_.size() >= queue_size_) {
+    std::optional<std::chrono::steady_clock::time_point> deadline;
+    if (max_queue_wait < std::chrono::milliseconds::zero()) {
         return false;
     }
-    normal_queue_.push_back(std::move(task));
+    if (max_queue_wait > std::chrono::milliseconds::zero()) {
+        if (!on_timeout) {
+            return false;
+        }
+        deadline = std::chrono::steady_clock::now() + max_queue_wait;
+    } else {
+        on_timeout = {};
+    }
+
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (!started_ || admission_stopped_ || shutdown_ || (queue_size_ != 0 && normal_queue_.size() >= queue_size_)) {
+        return false;
+    }
+    normal_queue_.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
     taskStarted();
     queue_cv_.notify_one();
     return true;
@@ -73,23 +87,6 @@ bool BlockTreeTaskPool::submitCompletion(std::function<void()> task) {
     return true;
 }
 
-bool BlockTreeTaskPool::acquireBusinessCredit() {
-    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (!started_ || admission_stopped_ || shutdown_ || business_credits_.load() >= queue_size_) {
-        return false;
-    }
-    business_credits_.fetch_add(1);
-    return true;
-}
-
-void BlockTreeTaskPool::releaseBusinessCredit() {
-    const size_t previous = business_credits_.fetch_sub(1);
-    assert(previous > 0);
-    (void)previous;
-    std::lock_guard<std::mutex> lock(wait_mutex_);
-    wait_cv_.notify_all();
-}
-
 void BlockTreeTaskPool::stopAdmission() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     admission_stopped_ = true;
@@ -105,8 +102,13 @@ void BlockTreeTaskPool::workerLoop() {
                 task = std::move(completion_queue_.front());
                 completion_queue_.pop_front();
             } else if (!normal_queue_.empty()) {
-                task = std::move(normal_queue_.front());
+                QueuedTask queued_task = std::move(normal_queue_.front());
                 normal_queue_.pop_front();
+                if (queued_task.deadline && std::chrono::steady_clock::now() >= *queued_task.deadline) {
+                    task = std::move(queued_task.on_timeout);
+                } else {
+                    task = std::move(queued_task.run);
+                }
             } else if (shutdown_) {
                 return;
             }
@@ -127,20 +129,21 @@ void BlockTreeTaskPool::waitForIdle() {
     bool                         wait_observer_invoked = false;
     wait_cv_.wait(lock, [this, &wait_observer_invoked] {
         const int pending_tasks = pending_tasks_.load();
-        if ((pending_tasks > 0 || business_credits_.load() > 0) && !wait_observer_invoked) {
+        if (pending_tasks > 0 && !wait_observer_invoked) {
             wait_observer_invoked = true;
             const auto observer   = pending_task_wait_observer_for_test_;
             if (observer) {
                 observer();
             }
         }
-        return pending_tasks <= 0 && business_credits_.load() == 0;
+        return pending_tasks <= 0;
     });
 }
 
 void BlockTreeTaskPool::shutdown() {
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool;
-    bool                                       was_started = false;
+    bool                                       was_started   = false;
+    size_t                                     dropped_tasks = 0;
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         if (shutdown_) {
@@ -148,9 +151,21 @@ void BlockTreeTaskPool::shutdown() {
         }
         admission_stopped_ = true;
         shutdown_          = true;
-        thread_pool        = thread_pool_;
-        was_started        = started_;
+        dropped_tasks      = normal_queue_.size() + completion_queue_.size();
+        normal_queue_.clear();
+        completion_queue_.clear();
+        thread_pool = thread_pool_;
+        was_started = started_;
         queue_cv_.notify_all();
+    }
+
+    if (dropped_tasks > 0) {
+        const int dropped   = static_cast<int>(dropped_tasks);
+        const int remaining = pending_tasks_.fetch_sub(dropped) - dropped;
+        if (remaining <= 0) {
+            std::lock_guard<std::mutex> lock(wait_mutex_);
+            wait_cv_.notify_all();
+        }
     }
 
     if (thread_pool != nullptr && was_started) {
