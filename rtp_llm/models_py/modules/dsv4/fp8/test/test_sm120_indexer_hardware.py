@@ -124,7 +124,7 @@ class Sm120IndexerHardwareTest(unittest.TestCase):
             )
             quantize_indexer_k(source, slots, pool)
             dequantized.append(
-                dequantize_indexer_k(pool, slots, out_dtype=torch.bfloat16)
+                dequantize_indexer_k(pool, slots, out_dtype=torch.float32)
             )
 
         live_lengths = torch.tensor(
@@ -197,7 +197,11 @@ class Sm120IndexerHardwareTest(unittest.TestCase):
             [8, 9, 11, 13, 17, 21, 23], dtype=torch.int32, device=self.device
         )
 
-        dequantized_key = key_fp8.float() * key_scale.unsqueeze(-1)
+        # The SM120 fallback intentionally feeds BF16 tensor cores.  Build the
+        # oracle from the same post-FP8, post-scale BF16 values instead of the
+        # higher-precision intermediate that the production kernel never sees.
+        dequantized_key = (key_fp8.float() * key_scale.unsqueeze(-1)).to(torch.bfloat16)
+        dequantized_query = query_fp8.to(torch.bfloat16)
 
         def forward() -> torch.Tensor:
             return fp8_mqa_indexer_score(
@@ -213,8 +217,8 @@ class Sm120IndexerHardwareTest(unittest.TestCase):
         def reference() -> torch.Tensor:
             result = torch.einsum(
                 "mhd,td->mht",
-                query_fp8.float().view(query_tokens, heads, INDEXER_HEAD_DIM),
-                dequantized_key,
+                dequantized_query.float().view(query_tokens, heads, INDEXER_HEAD_DIM),
+                dequantized_key.float(),
             )
             result = (
                 torch.relu(result)
