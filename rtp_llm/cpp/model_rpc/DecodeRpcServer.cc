@@ -1433,7 +1433,12 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     int  retry_interval_ms    = maga_init_params_.pd_sep_config.decode_retry_interval_ms;
 
     try {
-        EXECUTE_STAGE_FUNC(prepareGenerateContext, decode_context);
+        // The first Read establishes the request protocol and owns its failure diagnostics. Do not let the generic
+        // pre-stage cancellation check bypass it: a cancelled synchronous gRPC stream makes Read return false, and
+        // prepareGenerateContext then classifies and logs the failure consistently.
+        decode_context.stat_info.nextStage();
+        prepareGenerateContext(decode_context);
+        CHECK_ERROR_STATUS(decode_context);
         if (decode_context.trace_span_guard) {
             // request_id becomes known only after the first ALLOCATE message;
             // `request_id` (string) is the Bailian Unitrace index key
