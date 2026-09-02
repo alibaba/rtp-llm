@@ -38,6 +38,23 @@ _DEEPEP_REAL_MAX_TOKENS = int(os.environ.get("DSV4_DEEPEP_MAX_TOKENS", "8192"))
 # dispatch a2a then launches while the aux-stream shared expert (1.8 ms/layer)
 # is still executing instead of behind the host stall. Off = stock order.
 _C2_PREPARE = int(os.environ.get("DSV4_C2_PREPARE_DISPATCH", "0"))
+# Design A (Sep 3, master doc §Q4.2): micro-batch the a2a by TOKEN HALVES.
+# Each half is a COMPLETE all_to_all exchange (uniform [Th]*world splits), so
+# the pipeline dispatch(h0) -> [GEMM(h0) || dispatch(h1)] -> [combine(h0) ||
+# GEMM(h1)] -> combine(h1) hides ~min(GEMM_half, a2a_half) per layer on a comm
+# stream while every round stays rank-invariant (counts uniform-checked).
+# NOTE: chunking the combine ALONE inside one exchange is structurally
+# impossible (a token's partials live in every peer's section; the a2a contract
+# + the dequant world-sum need the full exchange) — hence halves, not chunks.
+# 0 = stock single-shot. Numerically row-identical (fp32 accumulate per row).
+_A2_HALVES = int(os.environ.get("DSV4_MOE_HALVES", "0"))
+# Halves pay a fixed per-layer pipeline overhead (~0.26 ms: extra rounds,
+# event waits) that wins big at 32K-class T but regressed 8K by +11 ms — so
+# arm only at/below-noise-for-32K sizes. Default keeps 8K (T=2048/rank) on
+# the C2 stock path and 32K (T=8192/rank) on the pipeline. The gate reads
+# the count-AG result (rank-identical), so it stays rank-invariant.
+_A2_MIN_TOKENS = int(os.environ.get("DSV4_MOE_HALVES_MIN_TOKENS", "8192"))
+_A2_STREAMS: dict[int, torch.cuda.Stream] = {}
 # Lever 1b (Sep 2): overlap variant of the real deep_ep path. The raw DeepEP
 # pair (dispatch ~3 ms + combine ~6 ms/layer) is SLOWER than the NCCL pair
 # it replaces (6.64 ms exposed — boot #3 measured +16% @32K synchronous), so
@@ -73,6 +90,7 @@ _DIAG_ATA = [0]
 _SERVE_PATH_CT = {"__total": 0}
 _DIAG_FE = [0]
 _C2_PREP_CT = [0]  # C2 engagement proof (DSV4_DIAG, first 3 fires)
+_A2_CT = [0]  # Design A halves engagement proof (DSV4_DIAG, first 3 fires)
 def _stream_is_capturing() -> bool:
     # Driver-level capture check: raw C++ cudaStreamBeginCapture does not update
     # torch's per-stream capture cache, so torch.cuda.is_current_stream_capturing()
@@ -823,6 +841,69 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             # run_dispatch_prepared routes it to the fixed_ep path.
             return {"mode": "fixed_ep", "x": x, "weights": weights,
                     "indices": indices}
+        # Per-peer destination rank for every token slot (needed by both the
+        # halves and the stock packing below).
+        destination = torch.div(indices, experts_per_rank,
+                                rounding_mode="floor").clamp_(0, world - 1)
+        # Design A halves decision — rank-invariant by construction: it reads
+        # only the count-AG result (identical on every rank) and boot env.
+        # Non-uniform or odd counts fall back to the stock single-shot on ALL
+        # ranks together (decode commits, warmup placeholders).
+        _halves = (
+            _A2_HALVES >= 2
+            and world >= 2
+            and len(set(recv_counts)) == 1
+            and recv_counts[0] % 2 == 0
+            and recv_counts[0] > 0
+            and recv_counts[0] >= _A2_MIN_TOKENS
+        )
+        if _halves:
+            _th = recv_counts[0] // 2
+            send_by_peer_h = []
+            for _h in (0, 1):
+                _buf = torch.empty((world, _th, payload_cols),
+                                   dtype=torch.uint8, device=x.device)
+                send_by_peer_h.append(_buf)
+            # Packing reuses the stock torch.where pattern per half; the
+            # per-peer blocks stay [world, Th, cols] so each half's a2a sees
+            # the same peer-grouped layout as the stock single shot.
+            for _h, _buf in enumerate(send_by_peer_h):
+                _sw = _buf[:, :, scale_end:weight_end].view(torch.float32)
+                _si = _buf[:, :, weight_end:].view(torch.int32)
+                _tok0 = _h * _th
+                _w_h = weights[_tok0:_tok0 + _th]
+                _i_h = indices_i32[_tok0:_tok0 + _th]
+                _dst_h = destination[_tok0:_tok0 + _th]
+                for dst in range(world):
+                    owned = (_dst_h == dst) & (_i_h >= 0)
+                    torch.where(owned, _w_h, torch.zeros_like(_w_h), out=_sw[dst])
+                    torch.where(owned, _i_h, torch.full_like(_i_h, -1), out=_si[dst])
+                _buf[:, :, :x_end].copy_(
+                    x_fp8.view(torch.uint8)[_tok0:_tok0 + _th])
+                _buf[:, :, x_end:scale_end].copy_(x_scale[_tok0:_tok0 + _th])
+            del x_fp8, x_scale  # copied into the half payloads; free pre-a2a
+            if os.environ.get("DSV4_DIAG") and _A2_CT[0] < 3:
+                _A2_CT[0] += 1
+                import sys
+                print("[A2-HALVES] rank=%d th=%d world=%d x0=%d" % (
+                    torch.distributed.get_rank(torch.distributed.group.WORLD)
+                    if torch.distributed.is_initialized() else -1,
+                    _th, world, int(x.size(0))), file=sys.stderr, flush=True)
+            return {
+                "mode": "a2a",
+                "halves": True,
+                "th": _th,
+                "send_halves": tuple(s.view(world * _th, payload_cols)
+                                     for s in send_by_peer_h),
+                "x": x,
+                "recv_counts": recv_counts,
+                "send_counts": send_counts,
+                "payload_cols": payload_cols,
+                "x_end": x_end,
+                "scale_end": scale_end,
+                "weight_end": weight_end,
+                "scale_cols": scale_cols,
+            }
         try:
             _sz = int(x.size(0))
         except Exception:
@@ -841,8 +922,6 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 print("[DIAG2] print-fail %r" % (_e3,), file=sys.stderr, flush=True)
         recv_payload = torch.empty((sum(recv_counts), payload_cols),
                                    dtype=torch.uint8, device=x.device)
-        destination = torch.div(indices, experts_per_rank,
-                                rounding_mode="floor").clamp_(0, world - 1)
         send_payload_by_peer = torch.empty((world, int(x.size(0)), payload_cols),
                                            dtype=torch.uint8, device=x.device)
         send_payload_by_peer[:, :, :x_end].copy_(x_fp8.view(torch.uint8))
@@ -874,20 +953,23 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         dist = torch.distributed
         group = dist.group.WORLD; world = dist.get_world_size(group)
         cfg = self.cfg
-        # The quantize import lived at the top of the pre-split single body;
-        # the run half needs it for the combine quantize (function-local
-        # imports do not cross the split boundary).
-        from flashinfer import mxfp8_quantize
         x = prep["x"]
         recv_counts = prep.pop("recv_counts")
         send_counts = prep.pop("send_counts")
         payload_cols = prep.pop("payload_cols")
-        send_payload = prep.pop("send_payload")
-        recv_payload = prep.pop("recv_payload")
         x_end = prep.pop("x_end")
         scale_end = prep.pop("scale_end")
         weight_end = prep.pop("weight_end")
         scale_cols = prep.pop("scale_cols")
+        if prep.pop("halves", False):
+            s0, s1 = prep.pop("send_halves")
+            th = prep.pop("th")
+            prep.clear()
+            return self._run_sm120_a2a_halves(
+                group, world, cfg, x, payload_cols, s0, s1, th,
+                x_end, scale_end, weight_end, scale_cols)
+        send_payload = prep.pop("send_payload")
+        recv_payload = prep.pop("recv_payload")
         prep.clear()  # the locals above now own the refs (see the del below)
         dist.all_to_all_single(recv_payload, send_payload,
             output_split_sizes=recv_counts, input_split_sizes=send_counts, group=group)
@@ -895,35 +977,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # GiB at 32K ISL) — release it before the local GEMM allocations.
         # The by-peer base dies with its last view ref (prep was cleared).
         del send_payload
-        recv_tokens = sum(recv_counts)
-        recv_x = recv_payload[:, :x_end].contiguous().view(torch.float8_e4m3fn)
-        recv_scale = recv_payload[:, x_end:scale_end].contiguous()
-        recv_w = recv_payload[:, scale_end:weight_end].contiguous().view(torch.float32)
-        recv_i = recv_payload[:, weight_end:].contiguous().view(torch.int32).to(torch.int64)
-        del recv_payload  # recv_* hold contiguous copies
-        local_i = recv_i - cfg.local_expert_start
-        valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
-        local_w = recv_w * valid.to(recv_w.dtype)
-        local_i = torch.where(valid, local_i, 0)
-        if self._sm120_grouped is not None:
-            chunk_tokens = int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "4096"))
-            # Preallocate the full output instead of cat(output_parts): the
-            # cat held both the parts list and the result simultaneously.
-            recv_output = torch.empty((recv_tokens, int(x.size(1))),
-                                      dtype=x.dtype, device=x.device)
-            for begin in range(0, recv_tokens, chunk_tokens):
-                end = min(begin + chunk_tokens, recv_tokens)
-                recv_output[begin:end] = self._sm120_grouped._forward_sm120(
-                    recv_x[begin:end], local_w[begin:end], local_i[begin:end],
-                    input_scale=recv_scale[begin:end]).to(x.dtype)
-            del recv_x, recv_scale, recv_w, recv_i, local_w, local_i, valid
-        else:
-            raise RuntimeError("SM120 MXFP8 dispatch requires grouped FP4 MoE")
-        combine_q, combine_scale = mxfp8_quantize(
-            recv_output.contiguous(), is_sf_swizzled_layout=False)
-        combine_scale = combine_scale.reshape(recv_tokens, scale_cols)
-        combine_payload = torch.cat([combine_q.view(torch.uint8), combine_scale], dim=1).contiguous()
-        del recv_output, combine_q, combine_scale  # folded into combine_payload
+        combine_payload = self._half_compute(
+            recv_payload, sum(recv_counts), cfg, x, x_end, scale_end,
+            weight_end, scale_cols)
+        del recv_payload
         returned_payload = torch.empty((world * int(x.size(0)), int(combine_payload.size(1))),
             dtype=torch.uint8, device=x.device)
         dist.all_to_all_single(returned_payload, combine_payload,
@@ -935,6 +992,124 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # (512 -> 256 MiB at 32K rows).
         result = mxfp8_dequant_peer_sum(returned_payload, x.size(0), x.size(1), world,
                                         out_dtype=x.dtype)
+        return result
+
+    def _half_compute(self, recv_buf, n_rows, cfg, x, x_end, scale_end,
+                      weight_end, scale_cols):
+        """Unpack a dispatch payload ([n_rows, payload_cols] uint8, peer-
+        grouped), run the grouped-GEMM tiles and quantize into the combine
+        payload. Main-stream only; row-identical to the pre-split body."""
+        from flashinfer import mxfp8_quantize
+        recv_x = recv_buf[:, :x_end].contiguous().view(torch.float8_e4m3fn)
+        recv_scale = recv_buf[:, x_end:scale_end].contiguous()
+        recv_w = recv_buf[:, scale_end:weight_end].contiguous().view(torch.float32)
+        recv_i = recv_buf[:, weight_end:].contiguous().view(torch.int32).to(torch.int64)
+        local_i = recv_i - cfg.local_expert_start
+        valid = (local_i >= 0) & (local_i < cfg.n_local_experts)
+        local_w = recv_w * valid.to(recv_w.dtype)
+        local_i = torch.where(valid, local_i, 0)
+        if self._sm120_grouped is None:
+            raise RuntimeError("SM120 MXFP8 dispatch requires grouped FP4 MoE")
+        chunk_tokens = int(os.environ.get("DSV4_MOE_CHUNK_TOKENS", "4096"))
+        out = torch.empty((n_rows, int(x.size(1))), dtype=x.dtype, device=x.device)
+        for begin in range(0, n_rows, chunk_tokens):
+            end = min(begin + chunk_tokens, n_rows)
+            out[begin:end] = self._sm120_grouped._forward_sm120(
+                recv_x[begin:end], local_w[begin:end], local_i[begin:end],
+                input_scale=recv_scale[begin:end]).to(x.dtype)
+        del recv_x, recv_scale, recv_w, recv_i, local_w, local_i, valid
+        combine_q, combine_scale = mxfp8_quantize(
+            out.contiguous(), is_sf_swizzled_layout=False)
+        combine_scale = combine_scale.reshape(n_rows, scale_cols)
+        payload = torch.cat(
+            [combine_q.view(torch.uint8), combine_scale], dim=1).contiguous()
+        return payload
+
+    def _run_sm120_a2a_halves(self, group, world, cfg, x, payload_cols,
+                              s0, s1, th, x_end, scale_end, weight_end,
+                              scale_cols):
+        """Design A two-half pipeline (see ``_A2_HALVES``).
+
+        Every round is a COMPLETE uniform a2a exchange, so the split is
+        rank-invariant. NCCL issue order = host-enqueue order =
+        dispatch(h0), dispatch(h1), combine(h0), combine(h1) — identical on
+        every rank. GPU timeline: dispatch(h1) and combine(h0) run on the
+        comm stream UNDER the h0/h1 GEMM stretches on the main stream.
+        """
+        dist = torch.distributed
+        dev = x.device
+        main = torch.cuda.current_stream(dev)
+        comm = _A2_STREAMS.get(dev.index)
+        if comm is None:
+            comm = _A2_STREAMS.setdefault(dev.index, torch.cuda.Stream(device=dev))
+        th_list = [th] * world
+        n_th = th * world
+        dim = int(x.size(1))
+        recv0 = torch.empty((n_th, payload_cols), dtype=torch.uint8, device=dev)
+        recv1 = torch.empty((n_th, payload_cols), dtype=torch.uint8, device=dev)
+        ev_pack = torch.cuda.Event()
+        ev_pack.record(main)  # payload packing ran on main in prepare
+        # ALL FOUR collectives run on the single comm stream (host-enqueue
+        # order d0, d1, c0, c1) — the ProcessGroup is never driven from two
+        # streams, and the main stream only computes against event waits.
+        # 1) dispatch h0 on comm
+        with torch.cuda.stream(comm):
+            comm.wait_event(ev_pack)
+            dist.all_to_all_single(recv0, s0, output_split_sizes=th_list,
+                                   input_split_sizes=th_list, group=group)
+            s0.record_stream(comm)
+            recv0.record_stream(comm)  # written on comm, alloc'd on main
+            ev_d0 = torch.cuda.Event(); ev_d0.record(comm)
+        # 2) dispatch h1 on comm (enqueued after h0 — NCCL order kept)
+        with torch.cuda.stream(comm):
+            comm.wait_event(ev_pack)
+            dist.all_to_all_single(recv1, s1, output_split_sizes=th_list,
+                                   input_split_sizes=th_list, group=group)
+            s1.record_stream(comm)
+            recv1.record_stream(comm)  # written on comm, alloc'd on main
+            ev_d1 = torch.cuda.Event(); ev_d1.record(comm)
+        # 3) main: unpack + GEMM + quantize h0 (after d0 completes)
+        main.wait_event(ev_d0)
+        recv0.record_stream(main)
+        comb0 = self._half_compute(
+            recv0, n_th, cfg, x, x_end, scale_end, weight_end, scale_cols)
+        ev_g0 = torch.cuda.Event(); ev_g0.record(main)
+        cols_c = int(comb0.size(1))
+        ret0 = torch.empty((n_th, cols_c), dtype=torch.uint8, device=dev)
+        # 4) comm: combine h0 — overlaps the h1 GEMM on main
+        with torch.cuda.stream(comm):
+            comm.wait_event(ev_g0)
+            dist.all_to_all_single(ret0, comb0, output_split_sizes=th_list,
+                                   input_split_sizes=th_list, group=group)
+            comb0.record_stream(comm)
+            ret0.record_stream(comm)  # written on comm, alloc'd on main
+            ev_c0 = torch.cuda.Event(); ev_c0.record(comm)
+        # 5) main: unpack + GEMM + quantize h1 — overlaps combine h0
+        main.wait_event(ev_d1)
+        recv1.record_stream(main)
+        comb1 = self._half_compute(
+            recv1, n_th, cfg, x, x_end, scale_end, weight_end, scale_cols)
+        ev_g1 = torch.cuda.Event(); ev_g1.record(main)
+        ret1 = torch.empty((n_th, cols_c), dtype=torch.uint8, device=dev)
+        # 6) comm: combine h1
+        with torch.cuda.stream(comm):
+            comm.wait_event(ev_g1)
+            dist.all_to_all_single(ret1, comb1, output_split_sizes=th_list,
+                                   input_split_sizes=th_list, group=group)
+            comb1.record_stream(comm)
+            ret1.record_stream(comm)  # written on comm, alloc'd on main
+            ev_c1 = torch.cuda.Event(); ev_c1.record(comm)
+        # 7) main: dequant both halves into the result rows
+        from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
+        main.wait_event(ev_c0)
+        ret0.record_stream(main)
+        main.wait_event(ev_c1)
+        ret1.record_stream(main)
+        result = torch.empty((int(x.size(0)), dim), dtype=x.dtype, device=dev)
+        result[:th] = mxfp8_dequant_peer_sum(
+            ret0, th, dim, world, out_dtype=x.dtype)
+        result[th:] = mxfp8_dequant_peer_sum(
+            ret1, th, dim, world, out_dtype=x.dtype)
         return result
 
     def _forward_sm120_collective(self, x, weights, indices) -> torch.Tensor:
