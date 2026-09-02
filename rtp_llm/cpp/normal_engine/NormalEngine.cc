@@ -602,11 +602,9 @@ absl::Status NormalEngine::startLoop() {
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_ = true;
-    if (parallelism_config.pp_size > 1) {
-        loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::pp_loop, this), "normal_engine_pp_loop");
-    } else {
-        loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
-    }
+
+    loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
+
     return absl::OkStatus();
 }
 
@@ -624,25 +622,10 @@ void NormalEngine::loop() {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     while (running_) {
-        auto status = step();
+        auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
-        }
-    }
-}
-
-void NormalEngine::pp_loop() {
-    RTP_LLM_PROFILE_FUNCTION();
-    RTP_LLM_LOG_INFO("PP loop begin");
-    c10::InferenceMode inference_guard(true);
-    setCurrentThreadDevice(getDeviceId());
-    while (running_) {
-        auto status = pp_step();
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("PP step running error: %s", status.ToString().c_str());
-            running_ = false;
-            break;
         }
     }
 }

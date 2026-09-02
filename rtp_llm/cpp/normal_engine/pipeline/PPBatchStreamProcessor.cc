@@ -190,36 +190,30 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     if (plan.output_config.return_all_probs != ReturnAllProbsMode::NONE) {
         result.all_probs = sampler_output.all_probs.to(torch::kCPU).contiguous();
     }
+    /** need_all_logits makes hidden_states token-major; select one output row per request. */
     if (plan.output_config.return_hidden_states) {
-        result.hidden_states = model_output.hidden_states.to(torch::kCPU).contiguous();
+        auto hidden_states = model_output.hidden_states;
+        if (plan.model_input.need_all_logits) {
+            auto indexes  = plan.model_input.lm_output_indexes.to(hidden_states.device(), torch::kLong);
+            hidden_states = torch::index_select(hidden_states, 0, indexes);
+        }
+        result.hidden_states = hidden_states.to(torch::kCPU).contiguous();
     }
     if (plan.output_config.return_all_hidden_states) {
         result.all_hidden_states = model_output.all_hidden_states.to(torch::kCPU).contiguous();
     }
     /**
-     * lm_output_indexes contains the final token-major row of each request, so it also defines the existing
-     * per-request boundaries for all_logits and combo_tokens.
+     * Each lm_output_indexes entry is the last token row of one request. Use it as the exclusive end offset when
+     * computing per-request loss.
      */
-
     if (plan.output_config.calculate_loss) {
-        if (!model_output.all_logits.defined() || !plan.model_input.combo_tokens.defined()
-            || !plan.model_input.lm_output_indexes.defined()) {
-            return absl::InternalError("model inputs or outputs required for PP loss are undefined");
-        }
-        const auto lm_output_indexes = plan.model_input.lm_output_indexes.to(torch::kCPU, torch::kInt64).contiguous();
-        if (lm_output_indexes.dim() != 1 || lm_output_indexes.numel() != batch_size) {
-            return absl::InternalError("PP lm_output_indexes does not match the sampling batch");
-        }
-
-        const auto*                indexes = lm_output_indexes.data_ptr<int64_t>();
+        const auto  lm_output_indexes = plan.model_input.lm_output_indexes.to(torch::kCPU, torch::kInt64).contiguous();
+        const auto* indexes           = lm_output_indexes.data_ptr<int64_t>();
         std::vector<torch::Tensor> losses;
         losses.reserve(batch_size);
         int64_t start = 0;
         for (int64_t index = 0; index < batch_size; ++index) {
-            const int64_t end = indexes[index] + 1;
-            if (end < start || end > plan.model_input.combo_tokens.numel() || end > model_output.all_logits.size(0)) {
-                return absl::InternalError("PP lm_output_indexes contains an invalid token boundary");
-            }
+            const int64_t end       = indexes[index] + 1;
             const int64_t loss_size = end - start - 1;
             if (loss_size > 0) {
                 auto labels = plan.model_input.combo_tokens.narrow(0, start + 1, loss_size)
@@ -242,61 +236,66 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     return result;
 }
 
-absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&      stream_groups,
-                                                             const PPExecutionResult& result) const {
-    const auto all_streams = stream_groups.allStreams();
-    if (!result.request_ids.defined() || result.request_ids.dim() != 1
-        || result.request_ids.size(0) != static_cast<int64_t>(all_streams.size())) {
-        return absl::InternalError("PP execution result batch size does not match the inflight stream count");
-    }
-    const auto batch_size       = result.request_ids.size(0);
-    int64_t    total_token_size = 0;
-    int64_t    total_loss_size  = 0;
+void PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStreamPtr>& all_streams,
+                                                     const PPOutputConfig&               output_config,
+                                                     const PPExecutionResult&            result) const {
+    const auto batch_size = static_cast<int64_t>(all_streams.size());
+    RTP_LLM_CHECK_WITH_INFO(result.request_ids.defined() && result.request_ids.dim() == 1
+                                && result.request_ids.size(0) == batch_size,
+                            "PP execution result batch size does not match the inflight stream count");
+
+    int64_t     total_token_size = 0;
+    int64_t     total_loss_size  = 0;
+    const auto* request_ids      = result.request_ids.data_ptr<int64_t>();
+    int64_t     index            = 0;
     for (const auto& stream : all_streams) {
         const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
         total_token_size += token_size;
         total_loss_size += std::max<int64_t>(token_size - 1, 0);
-    }
-
-    const auto output_config      = gatherOutputConfig(stream_groups);
-    const auto valid_batch_matrix = [batch_size](bool requested, const torch::Tensor& tensor) {
-        return !requested || (tensor.defined() && tensor.dim() == 2 && tensor.size(0) == batch_size);
-    };
-    if (!result.new_token_ids.defined() || result.new_token_ids.dim() != 2 || result.new_token_ids.size(0) != batch_size
-        || result.new_token_ids.size(1) != 1 || !result.sample_success.defined() || result.sample_success.dim() != 1
-        || result.sample_success.size(0) != batch_size
-        || !valid_batch_matrix(output_config.return_hidden_states, result.hidden_states)
-        || !valid_batch_matrix(output_config.return_logits, result.logits)
-        || !valid_batch_matrix(output_config.return_all_probs != ReturnAllProbsMode::NONE, result.all_probs)
-        || (output_config.return_softmax_probs
-            && (!result.softmax_probs.defined() || result.softmax_probs.dim() != 2
-                || result.softmax_probs.size(0) != batch_size || result.softmax_probs.size(1) != 1))
-        || (output_config.return_cum_log_probs
-            && (!result.cum_log_probs.defined() || result.cum_log_probs.dim() != 1
-                || result.cum_log_probs.size(0) != batch_size))
-        || (output_config.return_all_hidden_states
-            && (!result.all_hidden_states.defined() || result.all_hidden_states.dim() != 2
-                || result.all_hidden_states.size(0) != total_token_size))
-        || (output_config.calculate_loss && total_loss_size > 0
-            && (!result.loss.defined() || result.loss.dim() != 1 || result.loss.numel() != total_loss_size))) {
-        return absl::InternalError("PP execution result is missing a requested tensor or has invalid tensor shapes");
-    }
-    const auto* request_ids = result.request_ids.data_ptr<int64_t>();
-    int64_t     index       = 0;
-    for (const auto& stream : all_streams) {
-        if (request_ids[index] != stream->streamId()) {
-            return absl::InternalError("PP execution result request order does not match the inflight stream order");
-        }
+        RTP_LLM_CHECK_WITH_INFO(request_ids[index] == stream->streamId(),
+                                "PP execution result request order does not match the inflight stream order");
         ++index;
     }
 
-    index                = 0;
+    const auto valid_batch_matrix = [batch_size](bool requested, const torch::Tensor& tensor) {
+        return !requested || (tensor.defined() && tensor.dim() == 2 && tensor.size(0) == batch_size);
+    };
+    const bool valid_shapes =
+        result.new_token_ids.defined() && result.new_token_ids.dim() == 2 && result.new_token_ids.size(0) == batch_size
+        && result.new_token_ids.size(1) == 1 && result.sample_success.defined() && result.sample_success.dim() == 1
+        && result.sample_success.size(0) == batch_size
+        && valid_batch_matrix(output_config.return_hidden_states, result.hidden_states)
+        && valid_batch_matrix(output_config.return_logits, result.logits)
+        && valid_batch_matrix(output_config.return_all_probs != ReturnAllProbsMode::NONE, result.all_probs)
+        && (!output_config.return_softmax_probs
+            || (result.softmax_probs.defined() && result.softmax_probs.dim() == 2
+                && result.softmax_probs.size(0) == batch_size && result.softmax_probs.size(1) == 1))
+        && (!output_config.return_cum_log_probs
+            || (result.cum_log_probs.defined() && result.cum_log_probs.dim() == 1
+                && result.cum_log_probs.size(0) == batch_size))
+        && (!output_config.return_all_hidden_states
+            || (result.all_hidden_states.defined() && result.all_hidden_states.dim() == 2
+                && result.all_hidden_states.size(0) == total_token_size))
+        && (!output_config.calculate_loss || total_loss_size == 0
+            || (result.loss.defined() && result.loss.dim() == 1 && result.loss.numel() == total_loss_size));
+    RTP_LLM_CHECK_WITH_INFO(valid_shapes,
+                            "PP execution result is missing a requested tensor or has invalid tensor shapes");
+}
+
+absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&      stream_groups,
+                                                             const PPExecutionResult& result) const {
+    const auto all_streams   = stream_groups.allStreams();
+    const auto output_config = gatherOutputConfig(stream_groups);
+    validateExecutionResult(all_streams, output_config, result);
+
+    int64_t index        = 0;
     int64_t token_offset = 0;
     int64_t loss_offset  = 0;
     for (const auto& stream : all_streams) {
         const auto token_size = static_cast<int64_t>(stream->currentExecuteTokenSize());
         auto       error_info = collectStreamSamplerError(result.processor_errors, result.sample_success, index, 1);
         dispatchSingleStream(stream, result, index, token_offset, loss_offset, std::move(error_info));
+        stream->clearPPInflight();
         token_offset += token_size;
         loss_offset += std::max<int64_t>(token_size - 1, 0);
         ++index;
