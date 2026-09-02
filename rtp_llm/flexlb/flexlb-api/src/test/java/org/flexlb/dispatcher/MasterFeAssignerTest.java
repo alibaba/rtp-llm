@@ -1,6 +1,7 @@
 package org.flexlb.dispatcher;
 
 import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.junit.jupiter.api.Test;
 
@@ -28,15 +29,27 @@ class MasterFeAssignerTest {
         return new BatchScheduleTarget(ip, 23840, 23841);
     }
 
+    private static BatchScheduleRequest request(boolean assignFe) {
+        BatchScheduleRequest request = new BatchScheduleRequest();
+        request.setAssignFe(assignFe);
+        return request;
+    }
+
+    private static BatchScheduleResponse response(
+            List<BatchScheduleTarget> targets, boolean resolvedLocally) {
+        BatchScheduleResponse response = BatchScheduleResponse.success(targets);
+        response.setResolvedLocally(resolvedLocally);
+        return response;
+    }
+
     @Test
     void assignFeFalseDoesNotAdvanceMasterPool() {
         FePool pool = mock(FePool.class);
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
-        BatchScheduleRequest request = new BatchScheduleRequest();
-        request.setAssignFe(false);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
+        BatchScheduleRequest request = request(false);
         BatchScheduleTarget target = target("10.0.0.1");
 
-        assigner.assign(request, List.of(target));
+        assigner.assign(request, response(List.of(target), true));
 
         assertNull(target.getFeUrl());
         verifyNoInteractions(pool);
@@ -47,16 +60,16 @@ class MasterFeAssignerTest {
         // Early return before any consistency/pool interaction. Mutation guard: drop the null check
         // and assign(null) NPEs on targets.isEmpty()/the for-loop.
         FePool pool = mock(FePool.class);
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, false, false);
-        assertDoesNotThrow(() -> assigner.assign(null));
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
+        assertDoesNotThrow(() -> assigner.assign(request(true), null));
         verifyNoInteractions(pool);
     }
 
     @Test
     void emptyTargetsIsNoOpAndNeverTouchesPool() {
         FePool pool = mock(FePool.class);
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, false, false);
-        assertDoesNotThrow(() -> assigner.assign(List.of()));
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
+        assertDoesNotThrow(() -> assigner.assign(request(true), response(List.of(), true)));
         verifyNoInteractions(pool);
     }
 
@@ -69,7 +82,8 @@ class MasterFeAssignerTest {
         // `pool == null` check and this NPEs on pool.next().
         MasterFeAssigner assigner = DispatcherTestSupport.noopFeAssigner();
         BatchScheduleTarget t = target("10.0.0.1");
-        assertDoesNotThrow(() -> assigner.assign(List.of(t)));
+        assertDoesNotThrow(() -> assigner.assign(
+                request(true), response(List.of(t), true)));
         assertNull(t.getFeUrl(), "no FePool bean → fe_url must stay null (chunk fails CHUNK_NO_FE)");
     }
 
@@ -80,10 +94,10 @@ class MasterFeAssignerTest {
         // Mutation guard: drop the resolvedLocally guard and the pool gets touched + the master's
         // fe_url is overwritten.
         FePool pool = mock(FePool.class);
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, false);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         BatchScheduleTarget t = target("10.0.0.1");
         t.setFeUrl("http://master-fe");
-        assigner.assign(List.of(t));
+        assigner.assign(request(true), response(List.of(t), false));
         assertEquals("http://master-fe", t.getFeUrl(), "a slave must preserve the master's fe_url");
         verifyNoInteractions(pool);
     }
@@ -94,10 +108,10 @@ class MasterFeAssignerTest {
         // guard: zip the urls in reverse (or off by one) and the fe_url assignments swap.
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(2)).thenReturn(List.of("http://fe-1", "http://fe-2"));
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         BatchScheduleTarget a = target("10.0.0.1");
         BatchScheduleTarget b = target("10.0.0.2");
-        assigner.assign(List.of(a, b));
+        assigner.assign(request(true), response(List.of(a, b), true));
         assertEquals("http://fe-1", a.getFeUrl());
         assertEquals("http://fe-2", b.getFeUrl());
     }
@@ -110,9 +124,10 @@ class MasterFeAssignerTest {
         // remove the IllegalStateException catch and the exception aborts the whole schedule.
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(1)).thenThrow(new IllegalStateException("no FE endpoints available"));
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         BatchScheduleTarget t = target("10.0.0.1");
-        assertDoesNotThrow(() -> assigner.assign(List.of(t)));
+        assertDoesNotThrow(() -> assigner.assign(
+                request(true), response(List.of(t), true)));
         assertNull(t.getFeUrl());
     }
 
@@ -124,10 +139,11 @@ class MasterFeAssignerTest {
         // target would come back partially stamped.
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(2)).thenThrow(new IllegalStateException("no FE endpoints available"));
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         BatchScheduleTarget a = target("10.0.0.1");
         BatchScheduleTarget b = target("10.0.0.2");
-        assertDoesNotThrow(() -> assigner.assign(List.of(a, b)));
+        assertDoesNotThrow(() -> assigner.assign(
+                request(true), response(List.of(a, b), true)));
         assertNull(a.getFeUrl(), "empty pool must stamp nothing (chunk fails CHUNK_NO_FE)");
         assertNull(b.getFeUrl(), "empty pool must stamp nothing (chunk fails CHUNK_NO_FE)");
     }
@@ -140,9 +156,10 @@ class MasterFeAssignerTest {
         // guard: narrow the second catch away and this propagates out of assign().
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(1)).thenThrow(new IllegalArgumentException("unexpected"));
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         BatchScheduleTarget t = target("10.0.0.1");
-        assertDoesNotThrow(() -> assigner.assign(List.of(t)));
+        assertDoesNotThrow(() -> assigner.assign(
+                request(true), response(List.of(t), true)));
         assertNull(t.getFeUrl());
     }
 }

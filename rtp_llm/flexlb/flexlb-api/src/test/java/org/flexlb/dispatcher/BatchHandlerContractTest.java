@@ -316,9 +316,8 @@ class BatchHandlerContractTest {
 
     @Test
     void nonObjectGenerateConfigIsRejectedWith400NotMaskedAs500() {
-        // Chunk assembly copies generate_config per chunk; a string value would throw a
-        // JSONException there and the catch-all would report it as a 500 dispatch failure —
-        // but the client sent a deterministically bad request, so it must get a 400.
+        // Chunk assembly requires an object; reject a deterministic caller error at the HTTP
+        // boundary instead of letting a downstream conversion masquerade as a 500.
         BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
         stubBody("{\"prompt_batch\":[\"a\",\"b\"],\"generate_config\":\"oops\"}");
 
@@ -327,6 +326,46 @@ class BatchHandlerContractTest {
         assertNotNull(out);
         assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
         verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void callerSuppliedRoleAddrsIsRejectedBeforeScheduling() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\"],\"generate_config\":{"
+                + "\"role_addrs\":[{\"role\":\"PDFUSION\",\"ip\":\"1.2.3.4\"}]}}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
+        assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void callerSuppliedRoleAddrsIsRejectedBeforeWholeBodyPassthrough() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\"],\"images\":[[\"https://example/image.png\"]],"
+                + "\"generate_config\":{\"role_addrs\":[{\"role\":\"PDFUSION\","
+                + "\"ip\":\"1.2.3.4\"}]}}");
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.BAD_REQUEST, out.statusCode());
+        assertTrue(parseBody(out).get("message").asText().contains("role_addrs"));
+        verifyNoInteractions(fanoutService, batchScheduleClient, passthroughClient);
+    }
+
+    @Test
+    void aggregateFanoutLimitMapsToStable413() {
+        BatchEndpointSpec spec = BatchEndpointSpec.BY_PATH.get("/batch_infer");
+        stubBody("{\"prompt_batch\":[\"a\"]}");
+        when(fanoutService.dispatchChunks(anyString(), anyList(), anyList(), any(), any(), any()))
+                .thenReturn(Mono.error(new AggregateResponseTooLargeException(8)));
+
+        ServerResponse out = handler.handle(serverRequest, spec).block();
+
+        assertEquals(HttpStatus.PAYLOAD_TOO_LARGE, out.statusCode());
+        assertEquals("batch_response_too_large", parseBody(out).get("error").asText());
     }
 
     @Test

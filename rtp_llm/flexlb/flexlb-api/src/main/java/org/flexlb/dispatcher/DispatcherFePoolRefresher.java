@@ -11,10 +11,12 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -60,6 +62,9 @@ public class DispatcherFePoolRefresher {
      */
     private static final long DISCOVERY_TIMEOUT_MS = 3_000;
 
+    /** Hard cap on discovery workers that may remain wedged after ignoring interruption. */
+    private static final int MAX_RETIRED_DISCOVERY_EXECUTORS = 2;
+
     /**
      * Fallback for the empty-discovery grace window when the configured value is absent or
      * non-positive. Matches {@code FlexlbConfig#discoveryFailureGraceMs}'s own default so an
@@ -100,6 +105,8 @@ public class DispatcherFePoolRefresher {
      */
     private final AtomicReference<ExecutorService> discoveryExecutor =
             new AtomicReference<>(newDiscoveryExecutor());
+    private final Object executorLock = new Object();
+    private final List<ExecutorService> retiredExecutors = new ArrayList<>();
 
     @Autowired
     public DispatcherFePoolRefresher(ServiceDiscovery serviceDiscovery, DispatchConfig cfg,
@@ -252,14 +259,31 @@ public class DispatcherFePoolRefresher {
      * caller degrades to a warn (the retained snapshot is kept by {@link #applyUrls}).
      */
     private List<WorkerHost> boundedGetHosts() throws Exception {
-        ExecutorService executor = discoveryExecutor.get();
+        ExecutorService executor = acquireDiscoveryExecutor();
         Future<List<WorkerHost>> future = executor.submit(() -> serviceDiscovery.getHosts(serviceId));
         try {
             return future.get(discoveryTimeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             future.cancel(true);
-            replaceTimedOutExecutor(executor);
+            retireTimedOutExecutor(executor);
             throw e;
+        }
+    }
+
+    private ExecutorService acquireDiscoveryExecutor() {
+        synchronized (executorLock) {
+            reapRetiredExecutors();
+            ExecutorService current = discoveryExecutor.get();
+            if (current != null) {
+                return current;
+            }
+            if (retiredExecutors.size() >= MAX_RETIRED_DISCOVERY_EXECUTORS) {
+                throw new RejectedExecutionException(
+                        "discovery lookup circuit open: too many uninterruptible calls");
+            }
+            ExecutorService replacement = newDiscoveryExecutor();
+            discoveryExecutor.set(replacement);
+            return replacement;
         }
     }
 
@@ -267,13 +291,22 @@ public class DispatcherFePoolRefresher {
      * Interrupting a native/socket-backed lookup is advisory. Retire the executor after a timeout
      * so the next poll can run instead of queueing forever behind the wedged call.
      */
-    private void replaceTimedOutExecutor(ExecutorService timedOut) {
-        ExecutorService replacement = newDiscoveryExecutor();
-        if (discoveryExecutor.compareAndSet(timedOut, replacement)) {
+    private void retireTimedOutExecutor(ExecutorService timedOut) {
+        synchronized (executorLock) {
+            if (!discoveryExecutor.compareAndSet(timedOut, null)) {
+                return;
+            }
             timedOut.shutdownNow();
-        } else {
-            replacement.shutdownNow();
+            retiredExecutors.add(timedOut);
+            reapRetiredExecutors();
+            if (retiredExecutors.size() < MAX_RETIRED_DISCOVERY_EXECUTORS) {
+                discoveryExecutor.set(newDiscoveryExecutor());
+            }
         }
+    }
+
+    private void reapRetiredExecutors() {
+        retiredExecutors.removeIf(ExecutorService::isTerminated);
     }
 
     private static ExecutorService newDiscoveryExecutor() {
@@ -287,7 +320,14 @@ public class DispatcherFePoolRefresher {
 
     @PreDestroy
     void shutdown() {
-        discoveryExecutor.get().shutdownNow();
+        synchronized (executorLock) {
+            ExecutorService current = discoveryExecutor.getAndSet(null);
+            if (current != null) {
+                current.shutdownNow();
+            }
+            retiredExecutors.forEach(ExecutorService::shutdownNow);
+            retiredExecutors.clear();
+        }
     }
 
     private static List<String> toUrls(List<WorkerHost> hosts) {

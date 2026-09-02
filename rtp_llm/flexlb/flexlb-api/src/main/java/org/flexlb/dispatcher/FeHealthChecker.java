@@ -1,6 +1,7 @@
 package org.flexlb.dispatcher;
 
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -13,6 +14,7 @@ import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -48,6 +50,7 @@ public class FeHealthChecker {
     private final WebClient webClient;
     private final String probePath;
     private final DispatcherMetricsReporter metricsReporter;
+    private final Supplier<ScheduledExecutorService> schedulerFactory;
     private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
     // Single-flight guard for the probe loop: probeOnce() only hands work off to reactor, so
     // scheduleAtFixedRate's "runs never overlap" guarantee does not bound the async probes. Without
@@ -57,14 +60,25 @@ public class FeHealthChecker {
     private final AtomicBoolean roundInFlight = new AtomicBoolean(false);
     private ScheduledExecutorService scheduler;
 
+    @Autowired
     public FeHealthChecker(DispatcherFePoolRefresher refresher,
                            @Qualifier("dispatcherProbeWebClient") WebClient webClient,
                            DispatchConfig cfg,
                            DispatcherMetricsReporter metricsReporter) {
+        this(refresher, webClient, cfg, metricsReporter, FeHealthChecker::newScheduler);
+    }
+
+    /** Test seam for driving the scheduled lifecycle without wall-clock sleeps. */
+    FeHealthChecker(DispatcherFePoolRefresher refresher,
+                    WebClient webClient,
+                    DispatchConfig cfg,
+                    DispatcherMetricsReporter metricsReporter,
+                    Supplier<ScheduledExecutorService> schedulerFactory) {
         this.urlSupplier = refresher.source();
         this.webClient = webClient;
         this.probePath = cfg.getProbePath();
         this.metricsReporter = metricsReporter;
+        this.schedulerFactory = Objects.requireNonNull(schedulerFactory);
     }
 
     /**
@@ -99,6 +113,9 @@ public class FeHealthChecker {
     public Mono<Void> probeOnce() {
         List<String> urls = urlSupplier.get();
         if (urls == null || urls.isEmpty()) {
+            // No host remains authoritative. Clear stale failures so a URL reintroduced after a
+            // scale-to-zero interval starts from the documented optimistic default.
+            consecFails.clear();
             metricsReporter.reportFePool(0, 0);
             return Mono.empty();
         }
@@ -158,14 +175,7 @@ public class FeHealthChecker {
         if (scheduler != null) {
             return;
         }
-        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "fe-health-checker");
-            t.setDaemon(true);
-            return t;
-        });
-        // Catch synchronous throws so a future urlSupplier that can throw doesn't make
-        // ScheduledExecutorService silently cancel the task — once the loop dies all hosts
-        // stay optimistically isAlive=true and dead-host filtering quietly stops working.
+        scheduler = schedulerFactory.get();
         scheduler.scheduleAtFixedRate(() -> {
             // Skip this tick if the previous round has not finished; overlapping rounds can let a
             // late reply from the older round clobber the newer round's counter update.
@@ -182,6 +192,14 @@ public class FeHealthChecker {
                         t.getClass().getSimpleName(), t.getMessage());
             }
         }, 0, PROBE_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private static ScheduledExecutorService newScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "fe-health-checker");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     @PreDestroy

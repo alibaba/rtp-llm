@@ -1809,7 +1809,9 @@ class BatchAddressSelectionTest(TestCase):
     def test_role_addr_target_skips_an_empty_ip_placeholder(self):
         client = self._client(["10.0.0.1:100"])
         self.assertIsNone(
-            client._role_addr_target(self._input(12, [self._addr("", RoleType.PDFUSION)]))
+            client._role_addr_target(
+                self._input(12, [self._addr("", RoleType.PDFUSION)])
+            )
         )
 
     def test_java_dispatcher_role_addr_json_deserializes_and_routes(self):
@@ -1829,9 +1831,7 @@ class BatchAddressSelectionTest(TestCase):
         self.assertEqual(RoleType.PDFUSION, config.role_addrs[0].role)
         self.assertEqual(
             "10.0.0.7:8089",
-            self._client([])._role_addr_target(
-                SimpleNamespace(generate_config=config)
-            ),
+            self._client([])._role_addr_target(SimpleNamespace(generate_config=config)),
         )
 
 
@@ -1851,7 +1851,6 @@ class EnqueueTargetSelectionTest(TestCase):
         client = ModelRpcClient.__new__(ModelRpcClient)
         client._addresses = addresses
         client._decode_entrance = False
-        client._compute_grpc_timeout = lambda timeout_ms: 1.0
         return client
 
     @staticmethod
@@ -1901,7 +1900,9 @@ class EnqueueTargetSelectionTest(TestCase):
         client = self._client(["10.0.0.1:100"])
         calls = []
         self._capture_target(client, self._input(0), calls=calls)
-        self.assertEqual(1, len(calls), "enqueue must build the request PB exactly once")
+        self.assertEqual(
+            1, len(calls), "enqueue must build the request PB exactly once"
+        )
 
     def test_enqueue_sends_to_the_pre_assigned_backend(self):
         client = self._client(["10.9.9.9:1"])
@@ -1913,6 +1914,24 @@ class EnqueueTargetSelectionTest(TestCase):
         # request_id=1 -> index 1 in the static list, proving the fallback both selects the
         # static list and keeps the request_id modulo indexing.
         self.assertEqual("10.0.0.2:100", self._capture_target(client, self._input(1)))
+
+    def test_input_conversion_failure_does_not_open_client_span(self):
+        client = self._client(["10.0.0.1:100"])
+
+        async def drive():
+            async for _ in client.enqueue(self._input(0)):
+                pass
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            side_effect=ValueError("invalid generate config"),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span"
+        ) as start_span:
+            with self.assertRaisesRegex(ValueError, "invalid generate config"):
+                asyncio.run(drive())
+
+        start_span.assert_not_called()
 
 
 class BatchEnqueueDecodeSemanticsTest(TestCase):
@@ -1945,7 +1964,9 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         return SimpleNamespace(
             request_id=request_id,
             prompt_length=4,
-            generate_config=SimpleNamespace(timeout_ms=1000, role_addrs=list(role_addrs)),
+            generate_config=SimpleNamespace(
+                timeout_ms=1000, role_addrs=list(role_addrs)
+            ),
         )
 
     @staticmethod
@@ -1958,9 +1979,11 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
             def __init__(self, channel):
                 pass
 
-            async def BatchGenerateCall(self, batch_input_pb, timeout=None):
+            async def BatchGenerateCall(self, batch_input_pb, **kwargs):
                 if seen_call is not None:
-                    seen_call.append((batch_input_pb, timeout))
+                    seen_call.append(
+                        (batch_input_pb, kwargs.get("timeout"), "timeout" in kwargs)
+                    )
                 if error is not None:
                     raise error
                 return response
@@ -2084,12 +2107,74 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
         self.assertEqual(0, defaulted.generate_config.timeout_ms)
         self.assertEqual(1000, explicit.generate_config.timeout_ms)
-        batch_pb, rpc_timeout = seen_call[0]
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
         self.assertEqual(
             [30000, 1000],
             [item.generate_config.timeout_ms for item in batch_pb.inputs],
         )
         self.assertEqual(30.0, rpc_timeout)
+        self.assertTrue(has_timeout_kwarg)
+
+    def test_nonpositive_batch_timeout_is_unbounded_when_server_default_is_disabled(
+        self,
+    ):
+        client = self._client()
+        client._max_rpc_timeout_ms = 0
+        item = self._input(0)
+        item.generate_config.timeout_ms = 0
+        response = BatchGenerateOutputsPB()
+        response.results.add()
+        seen_call = []
+
+        self._run(client, [item], response=response, seen_call=seen_call)
+
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(0, batch_pb.inputs[0].generate_config.timeout_ms)
+        self.assertIsNone(rpc_timeout)
+        self.assertFalse(has_timeout_kwarg)
+
+    def test_one_unbounded_item_keeps_shared_batch_call_unbounded(self):
+        client = self._client()
+        client._max_rpc_timeout_ms = 0
+        unbounded = self._input(0)
+        unbounded.generate_config.timeout_ms = 0
+        finite = self._input(1)
+        finite.generate_config.timeout_ms = 1000
+        response = BatchGenerateOutputsPB()
+        response.results.add()
+        response.results.add()
+        seen_call = []
+
+        self._run(client, [unbounded, finite], response=response, seen_call=seen_call)
+
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(
+            [0, 1000],
+            [item.generate_config.timeout_ms for item in batch_pb.inputs],
+        )
+        self.assertIsNone(rpc_timeout)
+        self.assertFalse(has_timeout_kwarg)
+
+    def test_finite_batch_timeout_preserves_millisecond_precision(self):
+        client = self._client()
+        first = self._input(0)
+        first.generate_config.timeout_ms = 1001
+        second = self._input(1)
+        second.generate_config.timeout_ms = 1003
+        response = BatchGenerateOutputsPB()
+        response.results.add()
+        response.results.add()
+        seen_call = []
+
+        self._run(client, [first, second], response=response, seen_call=seen_call)
+
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(
+            [1001, 1003],
+            [item.generate_config.timeout_ms for item in batch_pb.inputs],
+        )
+        self.assertEqual(1.003, rpc_timeout)
+        self.assertTrue(has_timeout_kwarg)
 
     def test_batch_item_error_preserves_typed_rpc_error_code(self):
         resp = BatchGenerateOutputsPB()
@@ -2100,14 +2185,10 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         with self.assertRaises(FtRuntimeException) as ctx:
             self._run(self._client(), [self._input(0)], response=resp)
 
-        self.assertEqual(
-            ExceptionType.LOAD_CACHE_TIMEOUT, ctx.exception.exception_type
-        )
+        self.assertEqual(ExceptionType.LOAD_CACHE_TIMEOUT, ctx.exception.exception_type)
 
     def test_error_info_present_but_empty_message_is_treated_as_success(self):
-        # The decode guard is `HasField("error_info") AND error_info.error_message`: an error_info
-        # sub-message that is set but carries no message must NOT abort the chunk. Mutation guard:
-        # drop the second conjunct (raise on any error_info present) and item 0 wrongly raises.
+        # An explicitly present but entirely empty error_info retains protobuf success semantics.
         resp = BatchGenerateOutputsPB()
         r0 = resp.results.add()
         r0.error_info.SetInParent()  # error_info present (HasField True) but error_message == ""
@@ -2119,6 +2200,17 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
         self.assertEqual([("OUT", 0), ("OUT", 1)], out)
         self.assertIs(inputs[0], seen[0])
+
+    def test_nonzero_error_code_with_empty_message_still_fails(self):
+        resp = BatchGenerateOutputsPB()
+        failed = resp.results.add()
+        failed.error_info.error_code = ErrorCodePB.LOAD_CACHE_TIMEOUT
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), [self._input(0)], response=resp)
+
+        self.assertEqual(ExceptionType.LOAD_CACHE_TIMEOUT, ctx.exception.exception_type)
+        self.assertIn("LOAD_CACHE_TIMEOUT", str(ctx.exception))
 
     def test_result_count_mismatch_fails_loudly_instead_of_silently_truncating(self):
         # The C++ contract is 1:1 (one result per input). A short result vector must fail typed,

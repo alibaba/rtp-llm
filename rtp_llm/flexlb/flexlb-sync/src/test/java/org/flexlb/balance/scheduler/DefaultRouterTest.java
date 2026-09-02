@@ -574,6 +574,34 @@ class DefaultRouterTest {
     }
 
     @Test
+    void emptyConfiguredRouteTableIsRetryableNoAvailableWorker() {
+        when(modelMetaConfig.getConfiguredRoleTypes()).thenReturn(List.of());
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(2);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(),
+                "an unready/empty route table is operational state, not an invalid request");
+    }
+
+    @Test
+    void noWorkerResponseDoesNotExposeConfiguredDiscoveryAddresses() {
+        String internalAddress = "vipserver://secret-internal-fe-pool";
+        when(modelMetaConfig.getConfiguredDiscoveryAddresses())
+                .thenReturn(List.of(internalAddress));
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(1);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertFalse(response.getErrorMessage().contains(internalAddress),
+                "discovery topology belongs in server logs only");
+    }
+
+    @Test
     void should_reject_batch_schedule_when_multiple_roles_registered() {
         // Setup - two role maps populated (multi-role deployment)
         org.flexlb.dao.master.WorkerStatus prefillWorker = new org.flexlb.dao.master.WorkerStatus();

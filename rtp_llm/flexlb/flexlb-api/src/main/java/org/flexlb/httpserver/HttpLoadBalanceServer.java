@@ -139,8 +139,7 @@ public class HttpLoadBalanceServer {
                     if (response.isSuccess()) {
                         // The same singleton cursor also serves the master's in-process dispatcher,
                         // so locally handled and forwarded requests share one FE allocation order.
-                        masterFeAssigner.assign(
-                                context.getBatchRequest(), response.getServerStatus());
+                        masterFeAssigner.assign(context.getBatchRequest(), response);
                     } else {
                         Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
                     }

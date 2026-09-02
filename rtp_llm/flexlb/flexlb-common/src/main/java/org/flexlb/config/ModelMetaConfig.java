@@ -1,6 +1,5 @@
 package org.flexlb.config;
 
-import lombok.Getter;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
@@ -23,9 +22,8 @@ public class ModelMetaConfig {
      */
     private static final ConcurrentHashMap<String/*serviceId*/, ServiceRoute> modelServiceRoute = new ConcurrentHashMap<>();
 
-    /** Concurrent: mutated through the route-table entry points while readers iterate it. */
-    @Getter
-    private static final Set<String> loadBalanceSyncModels = ConcurrentHashMap.newKeySet();
+    /** Immutable snapshot rebuilt atomically with every route-table mutation. */
+    private static volatile Set<String> loadBalanceSyncModels = Set.of();
 
     /**
      * Memoized {@link #getConfiguredRoleTypes()} result, tagged with the route-table version it
@@ -43,32 +41,32 @@ public class ModelMetaConfig {
     private record VersionedRoleTypes(long version, List<RoleType> roleTypes) {
     }
 
-    public static void putServiceRoute(String serviceId, ServiceRoute serviceRoute) {
+    public static synchronized void putServiceRoute(String serviceId, ServiceRoute serviceRoute) {
         modelServiceRoute.put(serviceId, serviceRoute);
         routeTableVersion.incrementAndGet();
-        if (Boolean.TRUE.equals(serviceRoute.getLoadBalance())) {
-            String modelName = IdUtils.getModelNameByServiceId(serviceRoute.getServiceId());
-            loadBalanceSyncModels.add(modelName);
-        }
+        rebuildLoadBalanceSyncModels();
     }
 
     /** Removes a registered route. Lets tests undo a {@link #putServiceRoute} so the
      *  process-wide route table stays free of cross-test residue. */
-    public static void removeServiceRoute(String serviceId) {
-        ServiceRoute removed = modelServiceRoute.remove(serviceId);
+    public static synchronized void removeServiceRoute(String serviceId) {
+        modelServiceRoute.remove(serviceId);
         routeTableVersion.incrementAndGet();
-        if (removed != null && Boolean.TRUE.equals(removed.getLoadBalance())) {
-            String modelName = IdUtils.getModelNameByServiceId(removed.getServiceId());
-            // Several serviceIds can map to one modelName, so the model stays in the sync set until
-            // the last load-balanced route referencing it is gone — dropping it on the first removal
-            // would stop syncing a model other live routes still serve.
-            boolean stillReferenced = modelServiceRoute.values().stream()
-                    .filter(route -> Boolean.TRUE.equals(route.getLoadBalance()))
-                    .anyMatch(route -> modelName.equals(IdUtils.getModelNameByServiceId(route.getServiceId())));
-            if (!stillReferenced) {
-                loadBalanceSyncModels.remove(modelName);
-            }
-        }
+        rebuildLoadBalanceSyncModels();
+    }
+
+    public static Set<String> getLoadBalanceSyncModels() {
+        return loadBalanceSyncModels;
+    }
+
+    private static void rebuildLoadBalanceSyncModels() {
+        Set<String> rebuilt = new HashSet<>();
+        modelServiceRoute.values().stream()
+                .filter(route -> Boolean.TRUE.equals(route.getLoadBalance()))
+                .map(ServiceRoute::getServiceId)
+                .map(IdUtils::getModelNameByServiceId)
+                .forEach(rebuilt::add);
+        loadBalanceSyncModels = Set.copyOf(rebuilt);
     }
 
     public ServiceRoute getServiceRoute(String serviceId) {

@@ -46,6 +46,17 @@ This project includes Maven Wrapper, so you don't need to install Maven separate
 ./mvnw clean package -DskipTests
 ```
 
+Before submitting a change that touches FlexLB, run the same public test gate used by pull
+requests (the explicit profile keeps local internal-source checkouts from changing coverage):
+
+```bash
+./mvnw -q -P '!internal' -pl flexlb-api -am \
+  -DexcludedGroups=performance-regression test
+```
+
+Host-capacity-tagged throughput benchmarks are intentionally separate from this functional gate;
+they are compiled here but should run on controlled performance hardware.
+
 **Windows:**
 ```bash
 mvnw.cmd clean package -DskipTests
@@ -168,14 +179,20 @@ export DISPATCH_FE_POOL_SERVICE_ID='frontend.service'
 export DISPATCH_CONFIG='{
     "subBatch":"count:5",
     "feAllocation":"master",
-    "preAssignBe":false
+    "preAssignBe":false,
+    "maxAggregateResponseBytes":134217728,
+    "maxDryRunResponseBytes":67108864
 }'
 ```
 
 `feAllocation=master` (default) coordinates FE assignment through the elected master's single
 cursor. `local` is the availability mode and uses each dispatcher's health-filtered local pool.
 `preAssignBe` defaults to `false` for rolling-upgrade safety; enable it only after every FE can
-deserialize dispatcher-provided `role_addrs`. Per-field `DISPATCH_*` variables override the JSON,
+deserialize dispatcher-provided `role_addrs`. Registered dispatcher batch paths reject
+caller-supplied `generate_config.role_addrs` at their HTTP boundary because dispatcher placement
+is authoritative, including when the request shape would otherwise be forwarded whole. The two
+byte limits cap the retained fanout response and diagnostic dry-run response per request.
+Per-field `DISPATCH_*` variables override the JSON,
 for example `DISPATCH_FE_ALLOCATION=local` and `DISPATCH_PRE_ASSIGN_BE=true`. See
 [`docs/fe-allocation-via-master.md`](docs/fe-allocation-via-master.md) for the allocation matrix,
 failure semantics, and deployment guidance.

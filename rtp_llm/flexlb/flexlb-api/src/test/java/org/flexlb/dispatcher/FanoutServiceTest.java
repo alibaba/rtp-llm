@@ -11,6 +11,7 @@ import reactor.test.StepVerifier;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -408,6 +409,29 @@ class FanoutServiceTest {
                 BATCH_INFER, new HttpHeaders(), null).block();
         assertFalse(new String(payload.getValue(), StandardCharsets.UTF_8).contains("\"user\""),
                 "fanoutWriteNulls=false must drop the explicit null");
+    }
+
+    @Test
+    void aggregateResponseWatermarkAbortsAndCancelsSiblingCalls() {
+        FeClient feClient = mock(FeClient.class);
+        AtomicBoolean siblingCancelled = new AtomicBoolean();
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.just(responseBatchBytes("response-over-limit")));
+        when(feClient.postBytes(eq("http://b"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.<byte[]>never().doOnCancel(() -> siblingCancelled.set(true)));
+        FanoutService svc = new FanoutService(
+                feClient, DispatcherTestSupport.noopMetrics(), null,
+                FeAllocationMode.MASTER, 1);
+
+        StepVerifier.create(svc.dispatchChunks(
+                        "/batch_infer", List.of(chunk("p0"), chunk("p1")),
+                        List.of("http://a", "http://b"), BATCH_INFER,
+                        new HttpHeaders(), null))
+                .expectError(AggregateResponseTooLargeException.class)
+                .verify();
+
+        assertTrue(siblingCancelled.get(),
+                "crossing the aggregate watermark must cancel still-running sibling calls");
     }
 
     private static JSONObject chunk(String... prompts) {

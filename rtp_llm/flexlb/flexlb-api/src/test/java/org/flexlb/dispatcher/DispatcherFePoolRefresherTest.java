@@ -2,14 +2,18 @@ package org.flexlb.dispatcher;
 
 import org.flexlb.dao.master.WorkerHost;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.dispatcher.DispatcherTestSupport.StubServiceDiscovery;
 import static org.flexlb.dispatcher.DispatcherTestSupport.refresher;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
@@ -71,20 +75,73 @@ class DispatcherFePoolRefresherTest {
     }
 
     @Test
+    @Timeout(10)
     void timeoutRetiresWedgedExecutorSoNextPollCanRecover() {
         AtomicInteger calls = new AtomicInteger();
+        AtomicBoolean safetyDeadlineExpired = new AtomicBoolean();
         CountDownLatch releaseWedgedCall = new CountDownLatch(1);
         org.flexlb.discovery.ServiceDiscovery discovery = new org.flexlb.discovery.ServiceDiscovery() {
             @Override
             public List<WorkerHost> getHosts(String address) {
                 if (calls.incrementAndGet() == 1) {
-                    while (true) {
-                        try {
-                            releaseWedgedCall.await();
-                            return List.of();
-                        } catch (InterruptedException ignored) {
-                            // Deliberately model a discovery implementation that ignores cancel.
+                    if (!awaitIgnoringInterrupts(releaseWedgedCall, 5, TimeUnit.SECONDS)) {
+                        safetyDeadlineExpired.set(true);
+                    }
+                    return List.of();
+                }
+                return List.of(WorkerHost.of("10.0.0.9", 8088));
+            }
+
+            @Override
+            public void listen(String address, org.flexlb.discovery.ServiceHostListener listener) {
+            }
+
+            @Override
+            public void shutdown() {
+            }
+        };
+        DispatchConfig cfg = new DispatchConfig();
+        cfg.setFePoolServiceId("svc.fe");
+        DispatcherFePoolRefresher refresher = new DispatcherFePoolRefresher(
+                discovery, cfg, 60_000, System::nanoTime, 500);
+        try {
+            assertEquals(0, refresher.currentSize());
+            refresher.refresh();
+            assertEquals(1, refresher.currentSize(),
+                    "the next poll must not queue behind the timed-out lookup");
+            assertEquals(2, calls.get());
+            assertFalse(safetyDeadlineExpired.get(),
+                    "the production timeout, not the test safety deadline, must release the caller");
+        } finally {
+            releaseWedgedCall.countDown();
+            refresher.shutdown();
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void repeatedUninterruptibleTimeoutsOpenBoundedCircuitAndRecover() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicInteger active = new AtomicInteger();
+        AtomicInteger maxActive = new AtomicInteger();
+        AtomicBoolean safetyDeadlineExpired = new AtomicBoolean();
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch retiredFinished = new CountDownLatch(2);
+        org.flexlb.discovery.ServiceDiscovery discovery = new org.flexlb.discovery.ServiceDiscovery() {
+            @Override
+            public List<WorkerHost> getHosts(String address) {
+                int call = calls.incrementAndGet();
+                if (call <= 2) {
+                    int now = active.incrementAndGet();
+                    maxActive.accumulateAndGet(now, Math::max);
+                    try {
+                        if (!awaitIgnoringInterrupts(release, 5, TimeUnit.SECONDS)) {
+                            safetyDeadlineExpired.set(true);
                         }
+                        return List.of();
+                    } finally {
+                        active.decrementAndGet();
+                        retiredFinished.countDown();
                     }
                 }
                 return List.of(WorkerHost.of("10.0.0.9", 8088));
@@ -101,17 +158,53 @@ class DispatcherFePoolRefresherTest {
         DispatchConfig cfg = new DispatchConfig();
         cfg.setFePoolServiceId("svc.fe");
         DispatcherFePoolRefresher refresher = new DispatcherFePoolRefresher(
-                discovery, cfg, 60_000, System::nanoTime, 50);
+                discovery, cfg, 60_000, System::nanoTime, 250);
         try {
-            assertEquals(0, refresher.currentSize());
-            refresher.refresh();
-            assertEquals(1, refresher.currentSize(),
-                    "the next poll must not queue behind the timed-out lookup");
+            refresher.refresh(); // second worker wedges and reaches the cap
+            refresher.refresh(); // circuit open: no third thread/call is created
             assertEquals(2, calls.get());
+            assertEquals(2, maxActive.get(), "uninterruptible discovery threads must be bounded");
+
+            release.countDown();
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    retiredFinished.await(5, TimeUnit.SECONDS));
+            // The task's finally block runs just before ThreadPoolExecutor publishes TERMINATED.
+            // Poll the real recovery entry point until that final state transition is visible.
+            long recoveryDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (calls.get() < 3 && System.nanoTime() < recoveryDeadline) {
+                refresher.refresh();
+                if (calls.get() < 3) {
+                    Thread.sleep(5);
+                }
+            }
+            assertEquals(3, calls.get(), "a terminated retired worker must close the circuit");
+            assertEquals(1, refresher.currentSize());
+            assertFalse(safetyDeadlineExpired.get(),
+                    "the test safety deadline must never substitute for the production timeout");
         } finally {
-            releaseWedgedCall.countDown();
+            release.countDown();
             refresher.shutdown();
         }
+    }
+
+    /** A last-resort guard: model interruption resistance without making a failed test immortal. */
+    private static boolean awaitIgnoringInterrupts(
+            CountDownLatch latch, long timeout, TimeUnit unit) {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        while (latch.getCount() != 0) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return false;
+            }
+            try {
+                if (latch.await(remaining, TimeUnit.NANOSECONDS)) {
+                    return true;
+                }
+            } catch (InterruptedException ignored) {
+                // Deliberately emulate a discovery client that ignores cancellation.
+            }
+        }
+        return true;
     }
 
     @Test

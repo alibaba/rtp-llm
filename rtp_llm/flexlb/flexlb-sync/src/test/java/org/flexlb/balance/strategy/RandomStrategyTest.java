@@ -41,6 +41,7 @@ class RandomStrategyTest {
     private RandomStrategy randomStrategy;
     private ResourceMeasure resourceMeasure;
     private EndpointRegistry endpointRegistry;
+    private EngineWorkerStatus engineWorkerStatus;
 
     @BeforeEach
     void setUp() {
@@ -52,8 +53,9 @@ class RandomStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
         randomStrategy = new RandomStrategy(
-                new EngineWorkerStatus(endpointRegistry),
+                engineWorkerStatus,
                 configService,
                 resourceMeasureFactory);
     }
@@ -326,10 +328,16 @@ class RandomStrategyTest {
         WorkerStatus deadWorker1 = createWorkerStatus("127.0.0.1");
         deadWorker1.setAlive(false);
         prefillStatusMap.put("127.0.0.1:8080", deadWorker1);
+        registerPrefill("127.0.0.1:8080", deadWorker1);
 
         WorkerStatus deadWorker2 = createWorkerStatus("127.0.0.2");
         deadWorker2.setAlive(false);
         prefillStatusMap.put("127.0.0.2:8080", deadWorker2);
+        registerPrefill("127.0.0.2:8080", deadWorker2);
+
+        assertEquals(2,
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null).size(),
+                "the test must reach the populated all-dead branch, not the empty-map branch");
 
         Request req = new Request();
 

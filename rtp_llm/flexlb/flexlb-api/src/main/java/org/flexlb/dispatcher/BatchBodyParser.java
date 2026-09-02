@@ -56,16 +56,12 @@ public final class BatchBodyParser {
         return value instanceof JSONArray arr ? arr : null;
     }
 
-    static JSONObject deepCopy(JSONObject source) {
-        return JSON.parseObject(JSON.toJSONBytes(source));
-    }
-
     /**
      * WriteNulls preserves explicit nulls on the wire (e.g. {@code embedding: null} from
      * {@link BatchEndpointSpec.FailedItemFactory#EMBEDDING_NULL}); fastjson2 strips null
      * entries by default.
      */
-    static byte[] serialize(JSONObject body) {
-        return JSON.toJSONBytes(body, JSONWriter.Feature.WriteNulls);
+    static byte[] serialize(Object value) {
+        return JSON.toJSONBytes(value, JSONWriter.Feature.WriteNulls);
     }
 }

@@ -8,6 +8,7 @@ import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.reactive.function.server.MockServerRequest;
@@ -453,6 +454,80 @@ class DispatcherInspectionHandlerTest {
                         "the upstream exception text must stay in the log, not the client body");
             });
         }
+
+        @Test
+        void chunkLimitIsEnforcedBeforeDryRunMaterializesChunks() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatchConfig cfg = config("size:1");
+            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(
+                    cfg, refresher(), mock(FeHealthChecker.class), client, 2);
+            MockServerRequest req = dryRunRequest(
+                    "{\"prompt_batch\":[\"a\",\"b\",\"c\"]}");
+
+            assertResponse(handler.dryRun(req), HttpStatus.PAYLOAD_TOO_LARGE, out ->
+                    assertEquals("too_many_sub_batches", out.get("error").asText()));
+            verifyNoInteractions(client);
+        }
+
+        @Test
+        void dryRunResponseBudgetRejectsAmplificationBeforeTargetResolution() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatchConfig cfg = config("size:1");
+            cfg.setMaxDryRunResponseBytes(1500);
+            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(
+                    cfg, refresher(), mock(FeHealthChecker.class), client, 1000);
+            MockServerRequest req = MockServerRequest.builder()
+                    .method(HttpMethod.POST)
+                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
+                    .queryParam("pre_assign", "true")
+                    .body(Mono.just(("{\"model\":\"" + "x".repeat(600)
+                            + "\",\"prompt_batch\":[\"a\",\"b\",\"c\"]}")
+                            .getBytes(StandardCharsets.UTF_8)));
+
+            assertResponse(handler.dryRun(req), HttpStatus.PAYLOAD_TOO_LARGE, out ->
+                    assertEquals("dryrun_response_too_large", out.get("error").asText()));
+            verifyNoInteractions(client);
+        }
+
+        @Test
+        void smallDryRunFitsAOneKiBConfiguredBudget() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatchConfig cfg = config("size:1");
+            cfg.setMaxDryRunResponseBytes(1024);
+            DispatcherInspectionHandler handler = new DispatcherInspectionHandler(
+                    cfg, refresher(), mock(FeHealthChecker.class), client, 1000);
+
+            assertResponse(handler.dryRun(dryRunRequest(
+                    "{\"prompt_batch\":[\"a\"]}")), HttpStatus.OK, out ->
+                    assertEquals(1, out.get("chunkCount").asInt()));
+            verifyNoInteractions(client);
+        }
+
+        @Test
+        void callerRoleAddrsIsRejectedLikeProductionPath() {
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatcherInspectionHandler handler = handlerWith(true, client);
+            MockServerRequest req = dryRunRequest("{\"prompt_batch\":[\"a\"],"
+                    + "\"images\":[[\"https://example/image.png\"]],"
+                    + "\"generate_config\":{\"role_addrs\":[]}}");
+
+            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, out ->
+                    assertTrue(out.get("message").asText().contains("role_addrs")));
+            verifyNoInteractions(client);
+        }
+
+        @Test
+        void oversizedRequestBodyMapsTo413() {
+            DispatcherInspectionHandler handler = handlerWith(
+                    false, mock(BatchScheduleClient.class));
+            MockServerRequest req = MockServerRequest.builder()
+                    .method(HttpMethod.POST)
+                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
+                    .body(Mono.error(new DataBufferLimitException("too large")));
+
+            assertResponse(handler.dryRun(req), HttpStatus.PAYLOAD_TOO_LARGE, out ->
+                    assertEquals("request_body_too_large", out.get("error").asText()));
+        }
     }
 
     // ───────────────────────── helpers ───────────────────────
@@ -484,15 +559,31 @@ class DispatcherInspectionHandlerTest {
     }
 
     private DispatcherInspectionHandler handlerWith(boolean preAssignBeDefault, BatchScheduleClient client) {
+        DispatchConfig cfg = config("size:2");
+        cfg.setPreAssignBe(preAssignBeDefault);
+        return new DispatcherInspectionHandler(
+                cfg, refresher(), mock(FeHealthChecker.class), client);
+    }
+
+    private DispatchConfig config(String subBatch) {
         DispatchConfig cfg = new DispatchConfig();
         cfg.setFePoolServiceId("test.fe.publish");
-        cfg.setSubBatch("size:2");
-        cfg.setSubBatchSpec(SubBatchSpec.parse("size:2"));
-        cfg.setPreAssignBe(preAssignBeDefault);
+        cfg.setSubBatch(subBatch);
+        cfg.setSubBatchSpec(SubBatchSpec.parse(subBatch));
+        return cfg;
+    }
+
+    private DispatcherFePoolRefresher refresher() {
         DispatcherFePoolRefresher refresher = mock(DispatcherFePoolRefresher.class);
         when(refresher.source()).thenReturn(() -> List.<String>of());
-        FeHealthChecker hc = mock(FeHealthChecker.class);
-        return new DispatcherInspectionHandler(cfg, refresher, hc, client);
+        return refresher;
+    }
+
+    private MockServerRequest dryRunRequest(String body) {
+        return MockServerRequest.builder()
+                .method(HttpMethod.POST)
+                .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
+                .body(Mono.just(body.getBytes(StandardCharsets.UTF_8)));
     }
 
     private ObjectNode invokeDryRun(DispatcherInspectionHandler handler, String preAssignParam,

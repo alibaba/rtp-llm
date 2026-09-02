@@ -2,6 +2,8 @@ py_library(
     name = "access_logger",
     srcs = glob([
         "*.py"
+    ], exclude = [
+        "*_test.py",
     ]),
     visibility = ["//visibility:public"]
 )

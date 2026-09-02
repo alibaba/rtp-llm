@@ -71,7 +71,7 @@ class HttpLoadBalanceServerTest {
         // Real assigner over the mocked pool provider + consistency view: the stamping tests drive
         // fePoolProvider.getIfAvailable() / isMaster() / isNeedConsistency() exactly as before, now
         // through the shared MasterFeAssigner bean instead of a private method.
-        masterFeAssigner = new MasterFeAssigner(fePoolProvider, lbStatusConsistencyService);
+        masterFeAssigner = new MasterFeAssigner(fePoolProvider);
         server = new HttpLoadBalanceServer(
                 lbStatusConsistencyService,
                 queueManager,
@@ -104,6 +104,7 @@ class HttpLoadBalanceServerTest {
                 org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(
                         new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051),
                         new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.2", 8088, 50051)));
+        success.setResolvedLocally(true);
         when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
 
         org.springframework.web.reactive.function.server.ServerResponse out =
@@ -131,14 +132,12 @@ class HttpLoadBalanceServerTest {
                 org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(
                         new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051),
                         new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.2", 8088, 50051)));
+        success.setResolvedLocally(true);
         when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
 
         FePool pool = org.mockito.Mockito.mock(FePool.class);
         when(pool.nextBatch(2)).thenReturn(java.util.List.of("http://fe-1", "http://fe-2"));
         when(fePoolProvider.getIfAvailable()).thenReturn(pool);
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
-        when(lbStatusConsistencyService.isMaster()).thenReturn(true);
-
         server.batchScheduleRequest(serverRequest).block();
 
         assertEquals("http://fe-1", success.getServerStatus().get(0).getFeUrl());
@@ -149,7 +148,8 @@ class HttpLoadBalanceServerTest {
     void slave_forwarding_does_not_restamp_the_master_fe_url() {
         // A slave that forwarded to the master already holds the master's fe_url in the response;
         // it must NOT overwrite it with its own cursor (that would reintroduce the collision the
-        // feature removes). Guard: isMaster()==false → assignFeUrls returns before the pool.
+        // feature removes). The forwarded response keeps resolvedLocally=false, so the pool is
+        // never consulted even if this node's role changes before the async response arrives.
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(1);
         when(serverRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(batchRequest));
@@ -161,9 +161,6 @@ class HttpLoadBalanceServerTest {
         org.flexlb.dao.loadbalance.BatchScheduleResponse forwarded =
                 org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(fromMaster));
         when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(forwarded));
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
-        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-
         server.batchScheduleRequest(serverRequest).block();
 
         assertEquals("http://master-picked-fe", forwarded.getServerStatus().get(0).getFeUrl(),
@@ -184,14 +181,12 @@ class HttpLoadBalanceServerTest {
         org.flexlb.dao.loadbalance.BatchScheduleResponse success =
                 org.flexlb.dao.loadbalance.BatchScheduleResponse.success(java.util.List.of(
                         new org.flexlb.dao.loadbalance.BatchScheduleTarget("10.0.0.1", 8088, 50051)));
+        success.setResolvedLocally(true);
         when(batchScheduleCoordinator.schedule(batchRequest)).thenReturn(Mono.just(success));
 
         FePool pool = org.mockito.Mockito.mock(FePool.class);
         when(pool.nextBatch(1)).thenThrow(new IllegalStateException("no FE endpoints available"));
         when(fePoolProvider.getIfAvailable()).thenReturn(pool);
-        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
-        when(lbStatusConsistencyService.isMaster()).thenReturn(true);
-
         org.springframework.web.reactive.function.server.ServerResponse out =
                 server.batchScheduleRequest(serverRequest).block();
 

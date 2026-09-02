@@ -1,6 +1,7 @@
 package org.flexlb.mock.grpc;
 
 import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -16,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.flexlb.mock.InflightAssertions.assertResourcesReleasedWithin;
 
 /**
  * gRPC batchEnqueue timeout: mock prefill worker delays response beyond the
@@ -47,6 +49,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class GrpcTimeoutTest extends FlexLBMockTestBase {
 
+    private final CompletableFuture<EngineCancelChannel.CancelOutcome> dispatchFence =
+            new CompletableFuture<>();
+
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
         return MockWorkerBehavior.builder()
@@ -66,6 +71,22 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         return cfg;
     }
 
+    @Override
+    protected EngineCancelChannel createEngineCancelChannel() {
+        return new EngineCancelChannel() {
+            @Override
+            public boolean isSupported(org.flexlb.balance.endpoint.DecodeEndpoint endpoint) {
+                return true;
+            }
+
+            @Override
+            public CompletableFuture<CancelOutcome> cancel(
+                    CancelTarget target, long requestId, long timeoutMs) {
+                return dispatchFence;
+            }
+        };
+    }
+
     @Test
     @Timeout(15)
     void grpcTimeout_retainsOwnershipUntilFenceAndChannelRecovers() throws Exception {
@@ -79,12 +100,22 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertFalse(future.isDone(), "dispatch must remain fenced while ownership is unresolved");
         assertEquals(RequestLifecycleState.DISPATCHING,
                 scheduler.getRequestState(10001L, 0).state());
+        assertEquals(1, getPrefillEndpoint().getInflightBatchCount(),
+                "ambiguous dispatch must retain its Prefill batch ledger");
+        assertEquals(1, getDecodeEndpoint().getInflightCount(),
+                "ambiguous dispatch must retain its Decode reservation");
 
         // 2. The mock records the request before sleeping, proving the ambiguity is real.
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,
                 "Prefill worker should have received at least 1 EnqueueBatch call");
 
-        // 3. A separate request can still use the same channel after the per-call deadline.
+        // 3. A controlled engine tombstone proves non-ownership and settles both ledgers together.
+        dispatchFence.complete(EngineCancelChannel.CancelOutcome.tombstoned());
+        Response timedOut = future.get(5, TimeUnit.SECONDS);
+        assertFalse(timedOut.isSuccess());
+        assertResourcesReleasedWithin(getPrefillEndpoint(), getDecodeEndpoint(), 5_000);
+
+        // 4. A separate request can still use the same channel after the per-call deadline.
         mockPrefillWorker.setBehavior(MockWorkerBehavior.builder().build());
         CompletableFuture<Response> future2 = submitRequest(10002);
         Response response2 = future2.get(5, TimeUnit.SECONDS);

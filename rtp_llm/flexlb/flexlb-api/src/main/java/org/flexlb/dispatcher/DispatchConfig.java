@@ -11,7 +11,8 @@ import lombok.Setter;
  * {@code FlexlbConfig}. Every timeout/safety knob that "no one actually tunes" lives as a
  * constant inside {@code DispatcherConfiguration} / {@code PassthroughClient} / {@code FeClient}
  * (see those classes for FE_CONNECT_TIMEOUT_MS / FE_PENDING_ACQUIRE_TIMEOUT_MS /
- * STREAM_TIMEOUT_MS / MAX_RESPONSE_BYTES).
+ * STREAM_TIMEOUT_MS / the per-FE MAX_RESPONSE_BYTES). Request-level aggregate response budgets
+ * remain operator-configurable here because they scale with the deployment's batch shape.
  *
  * <p>Loading order: defaults → JSON from {@code DISPATCH_CONFIG} env → per-field env overrides
  * (e.g. {@code DISPATCH_BATCH_TIMEOUT_MS}, {@code DISPATCH_PROBE_PATH}). The per-field env wins,
@@ -89,8 +90,8 @@ public class DispatchConfig {
 
     /**
      * BE pre-assignment toggle. When {@code true}, the dispatcher resolves N BE targets via
-     * master's {@code /rtp_llm/batch_schedule} before fanout and appends each target into
-     * the chunk's {@code generate_config.role_addrs} (matching Python
+     * master's {@code /rtp_llm/batch_schedule} before fanout and writes each target as the sole
+     * entry in the chunk's {@code generate_config.role_addrs} (matching Python
      * {@code rtp_llm.config.generate_config.RoleAddr}: {@code {role, ip, http_port, grpc_port}})
      * so the receiving FE skips its own master round-trip.
      *
@@ -114,6 +115,20 @@ public class DispatchConfig {
      * FE-only, so no unused BE target is selected and no BE round-robin cursor is advanced.
      */
     private boolean preAssignBe = false;
+
+    /**
+     * Maximum bytes retained across all successful FE responses for one fanout request. The
+     * dispatcher merges non-streaming responses in memory, so the per-FE response cap alone is
+     * insufficient when a request produces many chunks.
+     */
+    private long maxAggregateResponseBytes = 128L * 1024 * 1024;
+
+    /**
+     * Maximum serialized response size for {@code /dispatcher/_dryrun/**}. Dry-run repeats the
+     * request envelope once per chunk, so a small input can otherwise amplify into a very large
+     * diagnostic response without contacting an FE.
+     */
+    private long maxDryRunResponseBytes = 64L * 1024 * 1024;
 
     /**
      * Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading.

@@ -251,6 +251,20 @@ class ConfigServiceTest {
     }
 
     @Test
+    void invalid_engine_type_env_aborts_startup() {
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of("ENGINE_TYPE", "not-an-engine")));
+    }
+
+    @Test
+    void null_engine_type_in_json_aborts_startup() {
+        ConfigValidationException error = assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        "FLEXLB_CONFIG", "{\"engineType\":null}")));
+        assertTrue(error.getMessage().contains("engineType"));
+    }
+
+    @Test
     void invalid_slo_length_buckets_abort_startup_with_invalid_fragment() {
         ConfigValidationException e = assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of(

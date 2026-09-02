@@ -53,8 +53,8 @@ class PyAccessLog:
         request: RequestLog,
         response: ResponseLog,
         id: int,
-        path: Optional[str] = None,
         log_time: Optional[str] = None,
+        path: Optional[str] = None,
     ):
         self.request = request
         self.response = response

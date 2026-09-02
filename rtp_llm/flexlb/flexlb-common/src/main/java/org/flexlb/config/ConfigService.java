@@ -15,6 +15,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
 @Getter
 @Slf4j
 @Component
@@ -45,6 +46,7 @@ public class ConfigService {
             "flexlbBatchSloMaxInflightBatches",
             "costFormula",
             "prefillPredictorType",
+            "engineType",
             "autoTpmEnabled",
             "flexlbBatchQueueMaxSize",
             "autoTpmSloLengthBuckets",
@@ -95,6 +97,10 @@ public class ConfigService {
         // ignores parse errors, so it is not called here. getDefaultScheduleModeEnum()
         // throws IllegalArgumentException for invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
+        if (config.getEngineType() == null) {
+            throw new ConfigValidationException(
+                    "engineType", "must not be null; expected LLM or EMBEDDING");
+        }
         validateSloPolicySpecs(config);
 
         dumpEffectiveConfig(config);

@@ -4,6 +4,7 @@ from enum import IntEnum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+
 # Mock the ops module to avoid CUDA dependency in this unit test.
 # This MUST be at the very top, before any other rtp_llm import.
 class _FakeRoleType(IntEnum):
@@ -59,7 +60,8 @@ class BatchEnqueueRoutingTest(TestCase):
     @staticmethod
     def _visitor(master_rotation):
         """Visitor stub whose route_ips simulates a round-robin master: each call stamps the
-        next address from master_rotation, exactly what a real multi-worker master may do."""
+        next address from master_rotation, exactly what a real multi-worker master may do.
+        """
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.max_seq_len = 1024
         visitor.sp_config = None
@@ -81,11 +83,11 @@ class BatchEnqueueRoutingTest(TestCase):
         visitor.model_rpc_client = model_rpc_client
         route_calls = []
 
-        async def fake_route_ips(inp, seq_len_hint=None):
+        async def fake_route_ips(inp, seq_len_hint=None, placement_only=False):
             inp.generate_config.role_addrs = [
                 master_rotation[len(route_calls) % len(master_rotation)]
             ]
-            route_calls.append((inp, seq_len_hint))
+            route_calls.append((inp, seq_len_hint, placement_only))
 
         visitor.route_ips = fake_route_ips
         return visitor, route_calls, sent
@@ -123,8 +125,10 @@ class BatchEnqueueRoutingTest(TestCase):
         )
         # The single routing call must carry the batch's aggregate weight — otherwise
         # the master accounts one request's load while N inputs land on the worker.
-        self.assertEqual(
-            sum(inp.prompt_length for inp in inputs), route_calls[0][1]
+        self.assertEqual(sum(inp.prompt_length for inp in inputs), route_calls[0][1])
+        self.assertTrue(
+            route_calls[0][2],
+            "batch routing must request placement only, never enqueue the first item",
         )
         # Every input carries the first routing decision, and the whole batch resolves to a
         # single target through the real _select_batch_address — the exact seam that a
@@ -196,7 +200,9 @@ class BatchEnqueueRoutingTest(TestCase):
         asyncio.run(visitor.batch_enqueue(inputs))
 
         self.assertEqual(
-            0, len(route_calls), "no master round-trip when the local service is not ready"
+            0,
+            len(route_calls),
+            "no master round-trip when the local service is not ready",
         )
         self.assertIs(
             inputs, sent["inputs"], "the batch is still dispatched, just unrouted"
@@ -207,7 +213,9 @@ class BatchEnqueueRoutingTest(TestCase):
         # before the master is contacted or anything reaches the model rpc client.
         visitor, route_calls, sent = self._visitor([self._addr("10.0.0.1")])
         bad = self._input(0)
-        bad.prompt_length = 0  # empty prompt -> _validate_input raises LONG_PROMPT_ERROR
+        bad.prompt_length = (
+            0  # empty prompt -> _validate_input raises LONG_PROMPT_ERROR
+        )
 
         with self.assertRaises(FtRuntimeException):
             asyncio.run(visitor.batch_enqueue([bad, self._input(1)]))
@@ -340,6 +348,7 @@ class RouteIpsSeqLenHintTest(TestCase):
             seq_len_hint=None,
         ):
             seen["seq_len_hint"] = seq_len_hint
+            seen["input_pb"] = input_pb
             return SimpleNamespace(
                 is_ok=True,
                 role_addrs=[
@@ -385,6 +394,15 @@ class RouteIpsSeqLenHintTest(TestCase):
         asyncio.run(visitor.route_ips(self._input()))
 
         self.assertIsNone(seen["seq_len_hint"])
+
+    def test_batch_placement_omits_generate_input_and_cannot_enqueue_first_item(self):
+        visitor, seen = self._visitor()
+        request = self._input()
+
+        asyncio.run(visitor.route_ips(request, seq_len_hint=210, placement_only=True))
+
+        self.assertIsNone(seen["input_pb"])
+        self.assertFalse(request.enqueued_by_master)
 
 
 if __name__ == "__main__":

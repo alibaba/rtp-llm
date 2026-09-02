@@ -48,7 +48,6 @@ from rtp_llm.utils.grpc_util import (
     trans_tensor,
 )
 
-MAX_GRPC_TIMEOUT_SECONDS = 3600
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
 RPC_SETTLE_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
@@ -884,15 +883,13 @@ class ModelRpcClient(object):
     async def close(self) -> None:
         await self._channel_pool.close()
 
-    def _compute_grpc_timeout(self, timeout_ms) -> float:
-        rpc_timeout_ms = (
-            self._max_rpc_timeout_ms
-            if self._max_rpc_timeout_ms > 0
-            else MAX_GRPC_TIMEOUT_SECONDS * 1000
-        )
-        if timeout_ms is None or timeout_ms <= 0:
-            return rpc_timeout_ms / 1000
-        return timeout_ms / 1000
+    def _effective_timeout_ms(self, timeout_ms) -> Optional[int]:
+        """Return the effective deadline in milliseconds, or None when unbounded."""
+        if timeout_ms is not None and timeout_ms > 0:
+            return int(timeout_ms)
+        if self._max_rpc_timeout_ms > 0:
+            return self._max_rpc_timeout_ms
+        return None
 
     def _handle_grpc_error(
         self, e: grpc.RpcError, request_desc: str, target_address: str = ""
@@ -919,9 +916,7 @@ class ModelRpcClient(object):
                 f"{e.code()}, {e.details()}, detail error code is "
                 f"{error_code_name}"
             )
-            raise FtRuntimeException(
-                exception_type, error_details.error_message
-            ) from e
+            raise FtRuntimeException(exception_type, error_details.error_message) from e
         else:
             logging.error(
                 f"{request_desc} RPC{peer_desc} failed: "
@@ -988,9 +983,7 @@ class ModelRpcClient(object):
             if selected_addr is None:
                 address_list = self._addresses
             else:
-                address_list = [
-                    selected_addr.ip + ":" + str(selected_addr.grpc_port)
-                ]
+                address_list = [selected_addr.ip + ":" + str(selected_addr.grpc_port)]
                 selected_role = selected_addr.role
 
         if not address_list:
@@ -1013,6 +1006,15 @@ class ModelRpcClient(object):
         if pd_separation is not None and trace_state is not None:
             trace_state.set_attribute(trace_attrs.RTP_LLM_PD_SEP, pd_separation)
 
+        # Build once after routing and before opening a CLIENT span. A local validation/conversion
+        # failure performs no RPC and therefore must not leave a network span open.
+        input_pb = trans_input(input_py)
+        if effective_ms > 0:
+            # Keep the caller-owned GenerateInput immutable while giving the backend the
+            # same effective timeout as the gRPC deadline. Retries and request logging must
+            # continue to observe the value the caller supplied.
+            input_pb.generate_config.timeout_ms = int(effective_ms)
+
         # gRPC CLIENT span: child of the HTTP SERVER span
         # published via CURRENT_TRACE_STATE; W3C traceparent goes into gRPC
         # metadata. Both are no-ops when telemetry is disabled.
@@ -1027,15 +1029,6 @@ class ModelRpcClient(object):
                 trace_attrs.RTP_LLM_REQUEST_ID, input_py.request_id
             )
         last_output = None
-
-        # Build once after routing. trans_input validates and copies the full
-        # generate_config, so a pre-routing build would double a hot-path cost.
-        input_pb = trans_input(input_py)
-        if effective_ms > 0:
-            # Keep the caller-owned GenerateInput immutable while giving the backend the
-            # same effective timeout as the gRPC deadline. Retries and request logging must
-            # continue to observe the value the caller supplied.
-            input_pb.generate_config.timeout_ms = int(effective_ms)
 
         try:
             # Get channel from pool
@@ -1237,10 +1230,7 @@ class ModelRpcClient(object):
             if (
                 (self._decode_entrance and role_addr.role == RoleType.DECODE)
                 or role_addr.role == RoleType.PDFUSION
-                or (
-                    not self._decode_entrance
-                    and role_addr.role == RoleType.PREFILL
-                )
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
             ) and role_addr.ip:
                 return role_addr
         return None
@@ -1322,17 +1312,27 @@ class ModelRpcClient(object):
             return []
 
         effective_timeout_ms = [
-            int(self._compute_grpc_timeout(inp.generate_config.timeout_ms) * 1000)
-            for inp in inputs
+            self._effective_timeout_ms(inp.generate_config.timeout_ms) for inp in inputs
         ]
-        grpc_timeout_seconds = max(effective_timeout_ms) / 1000
+        # One unbounded item makes the shared outer call unbounded; finite siblings still carry
+        # their own timeout_ms in the protobuf and are enforced by the backend.
+        grpc_timeout_seconds = (
+            None
+            if any(timeout_ms is None for timeout_ms in effective_timeout_ms)
+            else max(
+                timeout_ms
+                for timeout_ms in effective_timeout_ms
+                if timeout_ms is not None
+            )
+            / 1000.0
+        )
 
         batch_input_pb = BatchGenerateInputPB()
         for inp, timeout_ms in zip(inputs, effective_timeout_ms):
             input_pb = trans_input(inp)
             # A batch has one outer deadline, but every backend item keeps its own effective
             # timeout. Do not normalize by mutating the caller's GenerateInput.
-            input_pb.generate_config.timeout_ms = timeout_ms
+            input_pb.generate_config.timeout_ms = timeout_ms or 0
             batch_input_pb.inputs.append(input_pb)
 
         target_address = self._select_batch_address(inputs)
@@ -1343,9 +1343,10 @@ class ModelRpcClient(object):
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {}
+            if grpc_timeout_seconds is not None:
+                grpc_kwargs["timeout"] = grpc_timeout_seconds
+            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
 
             if len(response.results) != len(inputs):
                 # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
@@ -1360,15 +1361,24 @@ class ModelRpcClient(object):
 
             results = []
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                    or result_pb.error_info.error_message
                 ):
+                    error_message = result_pb.error_info.error_message
+                    if not error_message:
+                        try:
+                            error_name = ErrorCodePB.Name(
+                                result_pb.error_info.error_code
+                            )
+                        except ValueError:
+                            error_name = "UNKNOWN_MODEL_RPC_ERROR"
+                        error_message = f"model RPC error: {error_name}"
                     raise FtRuntimeException(
                         self._exception_type_from_rpc_error_code(
                             result_pb.error_info.error_code
                         ),
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
+                        f"batch item {i} failed: {error_message}",
                     )
                 stream_state = StreamState()
                 output = trans_output(inputs[i], result_pb.final_output, stream_state)

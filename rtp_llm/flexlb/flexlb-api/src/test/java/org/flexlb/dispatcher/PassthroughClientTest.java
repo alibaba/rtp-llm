@@ -23,6 +23,7 @@ import org.springframework.web.reactive.function.server.EntityResponse;
 import org.springframework.web.reactive.function.server.HandlerStrategies;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.reactive.result.view.ViewResolver;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
@@ -446,24 +447,53 @@ class PassthroughClientTest {
 
     @Test
     void cancellingForwardDoesNotThrowAndReleasesUpstream() throws Exception {
-        server.enqueue(new MockResponse().setBody("first"));
+        server.enqueue(new MockResponse()
+                .setBody("first")
+                .setBodyDelay(2, TimeUnit.SECONDS));
         server.enqueue(new MockResponse().setBody("second"));
         String base = "http://" + server.getHostName() + ":" + server.getPort();
         FePool pool = DispatcherTestSupport.fePool(() -> List.of(base), url -> true);
-        PassthroughClient client =
-                new PassthroughClient(WebClient.builder().build(), pool, DispatcherTestSupport.noopMetrics(), new DispatchConfig());
+        reactor.netty.resources.ConnectionProvider provider =
+                reactor.netty.resources.ConnectionProvider.builder("passthrough-cancel-release")
+                        .maxConnections(1)
+                        .pendingAcquireTimeout(Duration.ofSeconds(3))
+                        .build();
+        try {
+            WebClient webClient = WebClient.builder()
+                    .clientConnector(new ReactorClientHttpConnector(HttpClient.create(provider)))
+                    .build();
+            PassthroughClient client = new PassthroughClient(
+                    webClient, pool, DispatcherTestSupport.noopMetrics(), new DispatchConfig());
 
-        MockServerRequest first = MockServerRequest.builder()
-                .method(HttpMethod.GET).uri(URI.create("/a")).body(Flux.empty());
-        // Subscribe and immediately cancel — doOnCancel must release the FE channel without throwing.
-        StepVerifier.create(client.forward(first)).thenCancel().verify();
+            MockServerRequest first = MockServerRequest.builder()
+                    .method(HttpMethod.GET).uri(URI.create("/a")).body(Flux.empty());
+            ServerResponse firstResponse = client.forward(first).block(Duration.ofSeconds(5));
+            Assertions.assertNotNull(firstResponse, "first response headers were never received");
+            Assertions.assertEquals("/a", takeRequestWithin(server).getPath());
 
-        // A follow-up request must still complete successfully through the same pool.
-        MockServerRequest second = MockServerRequest.builder()
-                .method(HttpMethod.GET).uri(URI.create("/b")).body(Flux.empty());
-        StepVerifier.create(client.forward(second))
-                .assertNext(r -> Assertions.assertEquals(200, r.statusCode().value()))
-                .verifyComplete();
+            // Subscribe the delayed response body, then cancel that real upstream subscription.
+            // Cancelling only client.forward() before it emits a ServerResponse never exercises
+            // the body-release path and can leave the first queued response for the next request.
+            MockServerWebExchange firstExchange = MockServerWebExchange.from(
+                    MockServerHttpRequest.get("http://x/a"));
+            Disposable firstBody = firstResponse.writeTo(firstExchange, responseContext()).subscribe();
+            firstBody.dispose();
+
+            // maxConnections=1 proves cancellation released the pool slot. Consume and assert the
+            // second body so accidentally reading the first queued response cannot pass the test.
+            MockServerRequest second = MockServerRequest.builder()
+                    .method(HttpMethod.GET).uri(URI.create("/b")).body(Flux.empty());
+            MockServerWebExchange secondExchange = MockServerWebExchange.from(
+                    MockServerHttpRequest.get("http://x/b"));
+            client.forward(second)
+                    .flatMap(response -> response.writeTo(secondExchange, responseContext()))
+                    .block(Duration.ofSeconds(5));
+            Assertions.assertEquals("second",
+                    secondExchange.getResponse().getBodyAsString().block(Duration.ofSeconds(5)));
+            Assertions.assertEquals("/b", takeRequestWithin(server).getPath());
+        } finally {
+            provider.disposeLater().block(Duration.ofSeconds(5));
+        }
     }
 
     /** Production wiring must not impose a response timeout on a valid quiet SSE stream. */
@@ -540,7 +570,11 @@ class PassthroughClientTest {
                 .body(Flux.empty());
         MockServerWebExchange exchange = MockServerWebExchange.from(
                 MockServerHttpRequest.post("http://x/dispatcher/v1/chat/completions"));
-        ServerResponse.Context context = new ServerResponse.Context() {
+        return client.forward(request).flatMap(resp -> resp.writeTo(exchange, responseContext()));
+    }
+
+    private static ServerResponse.Context responseContext() {
+        return new ServerResponse.Context() {
             @Override
             public List<HttpMessageWriter<?>> messageWriters() {
                 return HandlerStrategies.withDefaults().messageWriters();
@@ -551,7 +585,6 @@ class PassthroughClientTest {
                 return Collections.emptyList();
             }
         };
-        return client.forward(request).flatMap(resp -> resp.writeTo(exchange, context));
     }
 
     private static boolean hasCause(Throwable t, Class<? extends Throwable> type) {

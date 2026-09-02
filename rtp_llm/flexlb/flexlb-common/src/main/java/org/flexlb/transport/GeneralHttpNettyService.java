@@ -50,12 +50,16 @@ import java.util.function.Supplier;
 @Component
 public class GeneralHttpNettyService {
 
+    static final long DEFAULT_MAX_RESPONSE_BYTES = 16L * 1024 * 1024;
+
     private final HttpNettyClientHandler nettyClient;
     private final Scheduler httpRequestScheduler;
     private final ThreadPoolExecutor httpRequestExecutor;
+    private final long maxResponseBytes;
 
     public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
+        this.maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES;
         FlexlbConfig config = configService.loadBalanceConfig();
         httpRequestExecutor = new ThreadPoolExecutor(
                 config.getHttpRequestExecutorCoreSize(),
@@ -70,9 +74,18 @@ public class GeneralHttpNettyService {
 
     /** Test seam that keeps {@code EmbeddedChannel} access on the test thread. */
     GeneralHttpNettyService(HttpNettyClientHandler nettyClient, Scheduler httpRequestScheduler) {
+        this(nettyClient, httpRequestScheduler, DEFAULT_MAX_RESPONSE_BYTES);
+    }
+
+    GeneralHttpNettyService(HttpNettyClientHandler nettyClient, Scheduler httpRequestScheduler,
+                            long maxResponseBytes) {
+        if (maxResponseBytes <= 0) {
+            throw new IllegalArgumentException("maxResponseBytes must be > 0");
+        }
         this.nettyClient = Objects.requireNonNull(nettyClient);
         this.httpRequestScheduler = Objects.requireNonNull(httpRequestScheduler);
         this.httpRequestExecutor = null;
+        this.maxResponseBytes = maxResponseBytes;
     }
 
     @PreDestroy
@@ -253,6 +266,16 @@ public class GeneralHttpNettyService {
 
     private <Result> void handleNettyChunk(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
                                            Class<Result> responseClz) {
+
+        HttpContent content = (HttpContent) obj;
+        long retained = nettyCtx.getByteDataSize().sum();
+        int incoming = content.content().readableBytes();
+        if (retained > maxResponseBytes - incoming) {
+            failSink(nettyCtx, () -> StatusEnum.INTERNAL_ERROR.toException(
+                    "upstream HTTP response exceeds " + maxResponseBytes + " bytes"));
+            nettyCtx.getChannel().close();
+            return;
+        }
 
         // Check if current HTTP response status is 200; if not 200, indicates abnormal situation, parse chunk and return error
         int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);

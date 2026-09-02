@@ -241,7 +241,10 @@ class BackendRPCServerVisitor:
         return role_list
 
     async def get_master_route_addrs(
-        self, input: GenerateInput, seq_len_hint: Optional[int] = None
+        self,
+        input: GenerateInput,
+        seq_len_hint: Optional[int] = None,
+        placement_only: bool = False,
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
@@ -261,7 +264,10 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
-        input_pb = trans_input(input)
+        # BatchGenerateCall itself carries every item to the chosen backend. Supplying the first
+        # item here would let a BATCH-mode master enqueue it as a separate GenerateStreamCall,
+        # duplicating work. Omitting generate_input asks master for placement/accounting only.
+        input_pb = None if placement_only else trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -283,7 +289,9 @@ class BackendRPCServerVisitor:
 
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
-            input.enqueued_by_master = route_result.enqueued_by_master
+            input.enqueued_by_master = (
+                False if placement_only else route_result.enqueued_by_master
+            )
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -365,7 +373,10 @@ class BackendRPCServerVisitor:
             )
 
     async def route_ips(
-        self, input: GenerateInput, seq_len_hint: Optional[int] = None
+        self,
+        input: GenerateInput,
+        seq_len_hint: Optional[int] = None,
+        placement_only: bool = False,
     ):
         # PD node selection span: master routing is a real RPC round-trip that
         # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
@@ -423,9 +434,14 @@ class BackendRPCServerVisitor:
                 master_route_succeeded = False
                 if not role_addrs_specified and master_addr and not input_token_batched:
                     with Timer() as master_route_timer:
-                        master_route_result = await self.get_master_route_addrs(
-                            input, seq_len_hint
-                        )
+                        if placement_only:
+                            master_route_result = await self.get_master_route_addrs(
+                                input, seq_len_hint, placement_only=True
+                            )
+                        else:
+                            master_route_result = await self.get_master_route_addrs(
+                                input, seq_len_hint
+                            )
                     kmonitor.report(
                         GaugeMetrics.MASTER_ROUTE_RT_METRIC,
                         master_route_timer.cost_ms(),
@@ -748,6 +764,7 @@ class BackendRPCServerVisitor:
                 await self.route_ips(
                     inputs[0],
                     seq_len_hint=sum(inp.prompt_length for inp in inputs),
+                    placement_only=True,
                 )
                 for inp in inputs[1:]:
                     inp.generate_config.role_addrs = copy.deepcopy(

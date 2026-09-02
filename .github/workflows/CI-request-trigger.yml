@@ -2,7 +2,8 @@
 # │ CI Architecture — Request Trigger                               │
 # │                                                                 │
 # │ pull_request (opened/synchronize/reopened) — this workflow      │
-# │   → native "build" check run created on PR HEAD SHA             │
+# │   → GitHub-hosted FlexLB tests run on the exact PR HEAD SHA     │
+# │   → native "build" check run depends on those tests            │
 # │   → resolve-context: check for fresh LGTM review/comment       │
 # │   → no fresh LGTM                                              │
 # │       → resolve-context exit 1                                  │
@@ -65,15 +66,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  flexlb-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # PR code runs only on an ephemeral GitHub-hosted runner. The self-hosted build job below
+      # continues to check out trusted main and handles review/internal-CI orchestration.
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: rtp_llm/flexlb/pom.xml
+
+      - name: Run FlexLB tests
+        working-directory: rtp_llm/flexlb
+        # Throughput benchmarks have explicit host-capacity floors and remain a dedicated perf
+        # signal; a shared two-core runner is the wrong merge gate for them. Their sources still
+        # compile during testCompile, while every functional JUnit runs here.
+        run: >-
+          ./mvnw -q -P '!internal' -pl flexlb-api -am
+          -DexcludedGroups=performance-regression test
+
   build:
+    needs: [flexlb-tests]
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'pull_request'
+      always() && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'pull_request'
+      )
     runs-on: [self-hosted, Linux]
     defaults:
       run:
         working-directory: .github/scripts
     steps:
+      - name: Require FlexLB test gate
+        if: github.event_name == 'pull_request' && needs.flexlb-tests.result != 'success'
+        working-directory: ${{ github.workspace }}
+        run: |
+          echo "FlexLB tests did not pass: ${{ needs.flexlb-tests.result }}"
+          exit 1
+
       - name: Checkout repository (attempt 1)
         id: checkout1
         continue-on-error: true

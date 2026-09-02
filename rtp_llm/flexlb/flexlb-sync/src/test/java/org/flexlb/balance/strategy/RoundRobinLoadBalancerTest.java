@@ -3,6 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.dao.loadbalance.Request;
@@ -45,7 +46,9 @@ class RoundRobinLoadBalancerTest {
     void setUp() {
         LoadBalanceStrategyFactory.resetForTesting();
         clearWorkerMaps();
-        configService = new ConfigService();
+        FlexlbConfig config = new FlexlbConfig();
+        configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
         endpointRegistry = new EndpointRegistry(
                 configService,
                 () -> null,
@@ -302,9 +305,9 @@ class RoundRobinLoadBalancerTest {
 
     @Test
     void select_and_rollback_are_stateless() {
-        WorkerEndpoint endpoint = endpointRegistry.get(
-                RoleType.PDFUSION, "10.0.0.0:8080");
-        long before = endpoint.getLoadMetric();
+        Map<String, Long> before = new HashMap<>();
+        endpointRegistry.getEndpoints(RoleType.PDFUSION)
+                .forEach((address, endpoint) -> before.put(address, endpoint.getLoadMetric()));
         BalanceContext ctx = newSingleContext(5000L);
         ServerStatus assigned = rr.select(ctx, RoleType.PDFUSION, null);
         Assertions.assertTrue(assigned.isSuccess());
@@ -313,8 +316,9 @@ class RoundRobinLoadBalancerTest {
         WorkerEndpoint selected = endpointRegistry.get(RoleType.PDFUSION, ipPort);
         rr.rollBack(selected, 5000L);
 
-        Assertions.assertEquals(before, endpoint.getLoadMetric(),
-                "stateless strategy must neither reserve nor release endpoint load");
+        endpointRegistry.getEndpoints(RoleType.PDFUSION).forEach((address, endpoint) ->
+                Assertions.assertEquals(before.get(address), endpoint.getLoadMetric(),
+                        "stateless strategy must not change endpoint load: " + address));
     }
 
     @SuppressWarnings("unchecked")

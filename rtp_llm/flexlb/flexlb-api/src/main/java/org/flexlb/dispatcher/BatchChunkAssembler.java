@@ -17,9 +17,9 @@ import java.util.List;
  * <p>Per-chunk isolation strategy: every chunk gets a shallow-copy of the top-level envelope
  * (so {@code model} and other non-mutated fields share references) and a per-chunk copy of
  * {@code generate_config} (so the per-chunk {@code force_batch} / {@code role_addrs} writes
- * land on private objects). The gc copy is shallow by default — isolating the top-level scalars
- * that get written — and deep only when the source carries {@code role_addrs}, whose per-chunk
- * append targets a nested array. Copying only the small {@code generate_config} sub-object keeps
+ * land on private objects). Caller-supplied {@code role_addrs} is reserved and removed at this
+ * defense-in-depth boundary; the handler rejects it before assembly. Copying only the small
+ * {@code generate_config} sub-object keeps
  * assembly O(chunk_count) instead of O(envelope_size × chunk_count) on the whole tree.
  */
 public final class BatchChunkAssembler {
@@ -37,6 +37,24 @@ public final class BatchChunkAssembler {
         };
     }
 
+    /** Returns the number of chunks without allocating them. */
+    public static int chunkCount(int total, SubBatchSpec spec) {
+        if (total < 0) {
+            throw new IllegalArgumentException("total must be >= 0, got " + total);
+        }
+        if (spec == null || spec.value() < 1) {
+            throw new IllegalArgumentException("subBatch spec value must be >= 1");
+        }
+        if (total == 0) {
+            return 0;
+        }
+        return switch (spec.mode()) {
+            // 1 + (n - 1) / size is mathematically ceil(n / size) without int overflow.
+            case SIZE -> 1 + (total - 1) / spec.value();
+            case COUNT -> Math.min(total, spec.value());
+        };
+    }
+
     /**
      * Splits into ordered chunks of at most {@code chunkSize}. Last chunk may be shorter.
      * Items are shared by reference with the source array — callers must not mutate them.
@@ -51,11 +69,11 @@ public final class BatchChunkAssembler {
         if (n == 0) {
             return List.of();
         }
-        int chunks = (n + chunkSize - 1) / chunkSize;
+        int chunks = 1 + (n - 1) / chunkSize;
         List<JSONArray> out = new ArrayList<>(chunks);
         for (int c = 0; c < chunks; c++) {
             int start = c * chunkSize;
-            int end = Math.min(start + chunkSize, n);
+            int end = start + Math.min(chunkSize, n - start);
             JSONArray chunk = new JSONArray(end - start);
             for (int i = start; i < end; i++) {
                 chunk.add(arr.get(i));
@@ -107,26 +125,24 @@ public final class BatchChunkAssembler {
      * {@code generate_config} of their own.
      *
      * <p>{@code generate_config} is copied per chunk because it's the one sub-tree that per-chunk
-     * writes ({@code force_batch}, {@code role_addrs} append) mutate. A shallow {@code new
-     * JSONObject(sourceGc)} isolates only the top-level scalars that get written; when the source
-     * carries {@code role_addrs} the per-chunk append targets a nested array, so that case is
-     * deep-cloned instead. Every other top-level envelope field is either replaced wholesale
-     * ({@code requestArrayField}) or never written per chunk ({@code model}, etc.), so sharing
-     * references is safe and cheap.
+     * writes ({@code force_batch}, dispatcher-owned {@code role_addrs}) mutate. A shallow {@code new
+     * JSONObject(sourceGc)} isolates the top-level scalars that get written, and the reserved
+     * caller {@code role_addrs} field is removed. Every other top-level envelope field is either
+     * replaced wholesale ({@code requestArrayField}) or never written per chunk ({@code model},
+     * etc.), so sharing references is safe and cheap.
      */
     public static List<JSONObject> buildChunkBodies(JSONObject envelope, List<JSONArray> chunks,
                                                     String requestArrayField) {
         JSONObject sourceGc = envelope.getJSONObject("generate_config");
-        boolean gcNeedsDeepCopy = sourceGc != null && sourceGc.containsKey("role_addrs");
         boolean stampForceBatch = BatchEndpointSpec.PROMPT_BATCH_FIELD.equals(requestArrayField);
         List<JSONObject> chunkBodies = new ArrayList<>(chunks.size());
         for (JSONArray chunk : chunks) {
             JSONObject copy = new JSONObject(envelope);
             copy.put(requestArrayField, chunk);
             if (sourceGc != null) {
-                copy.put("generate_config", gcNeedsDeepCopy
-                        ? BatchBodyParser.deepCopy(sourceGc)
-                        : new JSONObject(sourceGc));
+                JSONObject gc = new JSONObject(sourceGc);
+                gc.remove("role_addrs");
+                copy.put("generate_config", gc);
             }
             if (stampForceBatch) {
                 injectForceBatch(copy);
@@ -158,14 +174,14 @@ public final class BatchChunkAssembler {
     }
 
     /**
-     * Appends each chunk's pre-resolved BE target into {@code generate_config.role_addrs}.
+     * Replaces {@code generate_config.role_addrs} with each chunk's pre-resolved BE target.
      * Per-addr wire shape matches Python {@code rtp_llm.config.generate_config.RoleAddr}:
      * {@code {role, ip, http_port, grpc_port}}. Note {@code ip} (not {@code server_ip} from
      * {@link BatchScheduleTarget}'s wire shape) — the rename matches the FE-side schema.
      *
      * <p>Tolerates a short target list: only the first {@code min(chunkBodies, targets)}
-     * chunks get stamped. User-supplied {@code role_addrs} entries are preserved; the
-     * dispatcher's resolved target is appended after them.
+     * chunks get stamped. Replacement is intentional: the dispatcher assignment is
+     * authoritative, and an external address must never win by appearing first in the array.
      */
     public static void stampPreAssignedBe(List<JSONObject> chunkBodies,
                                           List<BatchScheduleTarget> targets) {
@@ -183,18 +199,35 @@ public final class BatchChunkAssembler {
             }
             JSONObject chunkBody = chunkBodies.get(i);
             JSONObject gc = ensureGenerateConfig(chunkBody);
-            JSONArray roleAddrs = gc.getJSONArray("role_addrs");
-            if (roleAddrs == null) {
-                roleAddrs = new JSONArray();
-                gc.put("role_addrs", roleAddrs);
-            }
-            JSONObject addr = new JSONObject();
-            addr.put("role", target.getRole().name());
-            addr.put("ip", target.getServerIp());
-            addr.put("http_port", target.getHttpPort());
-            addr.put("grpc_port", target.getGrpcPort());
-            roleAddrs.add(addr);
+            gc.put("role_addrs", preAssignedRoleAddrs(target));
         }
+    }
+
+    /** Builds the exact FE-side wire value used for one authoritative BE assignment. */
+    static JSONArray preAssignedRoleAddrs(BatchScheduleTarget target) {
+        JSONArray roleAddrs = new JSONArray(1);
+        JSONObject addr = new JSONObject();
+        addr.put("role", target.getRole().name());
+        addr.put("ip", target.getServerIp());
+        addr.put("http_port", target.getHttpPort());
+        addr.put("grpc_port", target.getGrpcPort());
+        roleAddrs.add(addr);
+        return roleAddrs;
+    }
+
+    /** Validates the generate-config shape shared by production and dry-run handlers. */
+    public static String validateGenerateConfig(JSONObject body) {
+        Object value = body.get("generate_config");
+        if (value == null) {
+            return null;
+        }
+        if (!(value instanceof JSONObject gc)) {
+            return "generate_config must be a JSON object";
+        }
+        if (gc.containsKey("role_addrs")) {
+            return "generate_config.role_addrs is reserved for dispatcher pre-assignment";
+        }
+        return null;
     }
 
     private static JSONObject ensureGenerateConfig(JSONObject chunkBody) {

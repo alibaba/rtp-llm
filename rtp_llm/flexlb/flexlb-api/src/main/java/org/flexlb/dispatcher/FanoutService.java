@@ -16,6 +16,7 @@ import reactor.core.scheduler.Schedulers;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Per-chunk fanout on the dispatcher batch path. Serializes each chunk via fastjson2's
@@ -43,9 +44,8 @@ public class FanoutService {
      * {@code collectList()}s every chunk response and parses each into a JSONObject tree before
      * {@code ResponseMerger} assembles them, peak heap per request ≈ Σ(chunk response bytes) plus the
      * parsed-tree expansion multiple, and cluster peak ≈ that × concurrent in-flight requests. Each
-     * chunk body is bounded by {@code FeClient.MAX_RESPONSE_BYTES} (16MB) but there is no
-     * aggregate-level byte watermark, so JVM heap must be provisioned for the largest expected
-     * (batch size × response size × concurrency), not just for a single chunk.
+     * chunk body is bounded by {@code FeClient.MAX_RESPONSE_BYTES} (16MB), and the request-level
+     * aggregate is additionally bounded by {@link DispatchConfig#getMaxAggregateResponseBytes()}.
      */
     private static final int FANOUT_MAX_CONCURRENCY = 64;
 
@@ -53,27 +53,41 @@ public class FanoutService {
     private final DispatcherMetricsReporter metricsReporter;
     private final FePool fePool;
     private final FeAllocationMode feAllocationMode;
+    private final long maxAggregateResponseBytes;
     /** During an FE outage the fanout path fails per chunk; cap the WARN stream at 1/s. */
     private final RateLimitedWarn failureWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
     @Autowired
     public FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
                          FePool fePool, DispatchConfig config) {
-        this(feClient, metricsReporter, fePool, FeAllocationMode.parse(config.getFeAllocation()));
+        this(feClient, metricsReporter, fePool, FeAllocationMode.parse(config.getFeAllocation()),
+                config.getMaxAggregateResponseBytes());
     }
 
     /** Focused-test constructor preserving the default master-authoritative behavior. */
     FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter) {
-        this(feClient, metricsReporter, null, FeAllocationMode.MASTER);
+        this(feClient, metricsReporter, null, FeAllocationMode.MASTER, 128L * 1024 * 1024);
     }
 
     /** Test seam for exercising both allocation modes with a controlled pool. */
     FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
                   FePool fePool, FeAllocationMode feAllocationMode) {
+        this(feClient, metricsReporter, fePool, feAllocationMode, 128L * 1024 * 1024);
+    }
+
+    /** Test seam for exercising the aggregate response watermark. */
+    FanoutService(FeClient feClient, DispatcherMetricsReporter metricsReporter,
+                  FePool fePool, FeAllocationMode feAllocationMode,
+                  long maxAggregateResponseBytes) {
+        if (maxAggregateResponseBytes <= 0) {
+            throw new IllegalArgumentException("maxAggregateResponseBytes must be > 0, got "
+                    + maxAggregateResponseBytes);
+        }
         this.feClient = feClient;
         this.metricsReporter = metricsReporter;
         this.fePool = fePool;
         this.feAllocationMode = feAllocationMode;
+        this.maxAggregateResponseBytes = maxAggregateResponseBytes;
     }
 
     public Mono<List<SubBatchResult>> dispatchChunks(String fePath,
@@ -94,10 +108,16 @@ public class FanoutService {
             plans.add(new ChunkPlan(body, start, chunkSize, preAssignedFe));
             start += chunkSize;
         }
-        return Flux.fromIterable(plans)
-                .flatMapSequential(plan -> dispatchOne(fePath, plan, features, spec, inboundHeaders, rawQuery),
-                        FANOUT_MAX_CONCURRENCY)
-                .collectList()
+        return Mono.defer(() -> {
+            // Per-subscription state: a retry/resubscription must start with a fresh budget rather
+            // than inheriting bytes retained by an earlier attempt.
+            AtomicLong aggregateResponseBytes = new AtomicLong();
+            return Flux.fromIterable(plans)
+                    .flatMapSequential(plan -> dispatchOne(fePath, plan, features, spec, inboundHeaders,
+                                    rawQuery, aggregateResponseBytes),
+                            FANOUT_MAX_CONCURRENCY)
+                    .collectList();
+        })
                 .publishOn(Schedulers.parallel());
     }
 
@@ -135,7 +155,8 @@ public class FanoutService {
      * parse and downstream merge are offloaded.
      */
     private Mono<SubBatchResult> dispatchOne(String fePath, ChunkPlan plan, JSONWriter.Feature[] features,
-                                             BatchEndpointSpec spec, HttpHeaders inboundHeaders, String rawQuery) {
+                                             BatchEndpointSpec spec, HttpHeaders inboundHeaders, String rawQuery,
+                                             AtomicLong aggregateResponseBytes) {
         if (plan.feUrl() == null || plan.feUrl().isBlank()) {
             metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_NO_FE, 0);
             failureWarn.warn("chunk has no {} FE assignment: size={}",
@@ -149,6 +170,10 @@ public class FanoutService {
                     return feClient.postBytes(pick.feUrl(), fePath, pick.payload(), inboundHeaders, rawQuery)
                             .publishOn(Schedulers.parallel())
                             .map(bytes -> {
+                                if (reserveResponseBytes(aggregateResponseBytes, bytes.length)
+                                        > maxAggregateResponseBytes) {
+                                    throw new AggregateResponseTooLargeException(maxAggregateResponseBytes);
+                                }
                                 // Parse before reporting: a 200 with a non-JSON body must count
                                 // once as failed, not once as ok and again as failed.
                                 JSONObject parsed;
@@ -191,6 +216,9 @@ public class FanoutService {
                                         "empty FE response body");
                             }))
                             .onErrorResume(e -> {
+                                if (e instanceof AggregateResponseTooLargeException) {
+                                    return Mono.error(e);
+                                }
                                 String reason = DispatcherResponses.briefReason(e);
                                 int feStatus = DispatcherResponses.httpStatusOf(e);
                                 metricsReporter.reportChunk(reasonCategory(feStatus),
@@ -202,12 +230,26 @@ public class FanoutService {
                             });
                 })
                 .onErrorResume(e -> {
+                    if (e instanceof AggregateResponseTooLargeException) {
+                        return Mono.error(e);
+                    }
                     String reason = DispatcherResponses.briefReason(e);
                     metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_PICK_FAILED, 0);
                     failureWarn.warn("FE pick failed for chunk size={}, err={}",
                             plan.chunkSize(), reason);
                     return Mono.just(SubBatchResult.failed(plan.chunkSize(), plan.startIndex(), reason));
                 });
+    }
+
+    /** Atomic saturating addition keeps the concurrent watermark overflow-safe. */
+    private static long reserveResponseBytes(AtomicLong total, int bytes) {
+        while (true) {
+            long current = total.get();
+            long next = current > Long.MAX_VALUE - bytes ? Long.MAX_VALUE : current + bytes;
+            if (total.compareAndSet(current, next)) {
+                return next;
+            }
+        }
     }
 
     /** Bounded failure-reason category for the {@code reason} metric tag (keeps cardinality low). */

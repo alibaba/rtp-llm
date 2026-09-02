@@ -6,15 +6,19 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultHttpContent;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.DefaultHttpResponse;
 import io.netty.handler.codec.http.DefaultLastHttpContent;
+import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpVersion;
 import org.flexlb.exception.EngineAbnormalDisconnectException;
+import org.flexlb.exception.FlexLBException;
 import org.flexlb.exception.HttpErrorResponseException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.net.URI;
@@ -46,6 +50,7 @@ class GeneralHttpNettyServiceTest {
     }
 
     private EmbeddedChannel channel;
+    private HttpNettyClientHandler handler;
     private GeneralHttpNettyService service;
 
     /** When set, {@code connect()} hands back this promise instead of an already-succeeded one. */
@@ -53,7 +58,7 @@ class GeneralHttpNettyServiceTest {
 
     @BeforeEach
     void setUp() {
-        HttpNettyClientHandler handler = new HttpNettyClientHandler(new Bootstrap()) {
+        handler = new HttpNettyClientHandler(new Bootstrap()) {
             @Override
             public ChannelFuture connect(String host, int port) {
                 return pendingConnect != null ? pendingConnect : channel.newSucceededFuture();
@@ -78,6 +83,30 @@ class GeneralHttpNettyServiceTest {
 
     private DefaultHttpContent content(String text) {
         return new DefaultHttpContent(Unpooled.copiedBuffer(text, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void headersOverloadIsColdSendsOnceAndPreservesHeaders() throws Exception {
+        DefaultHttpHeaders headers = new DefaultHttpHeaders();
+        headers.set("X-Request-Context", "tenant-a");
+        Mono<EchoResponse> request = service.request(
+                Map.of("k", "v"), URI.create("http://backend:8080"), "/path",
+                headers, EchoResponse.class);
+
+        assertTrue(channel.outboundMessages().isEmpty(),
+                "assembling the five-argument request must not connect or write");
+        CompletableFuture<EchoResponse> result = request.toFuture();
+        assertEquals(1, channel.outboundMessages().size(),
+                "one subscription must produce exactly one outbound request");
+        FullHttpRequest outbound = assertInstanceOf(
+                FullHttpRequest.class, channel.outboundMessages().peek());
+        assertEquals("tenant-a", outbound.headers().get("X-Request-Context"));
+
+        channel.writeInbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+        channel.writeInbound(new DefaultLastHttpContent(
+                Unpooled.copiedBuffer("{\"message\":\"ok\"}", StandardCharsets.UTF_8)));
+
+        assertEquals("ok", result.get(5, TimeUnit.SECONDS).message);
     }
 
     @Test
@@ -110,6 +139,39 @@ class GeneralHttpNettyServiceTest {
         EchoResponse response = result.get(5, TimeUnit.SECONDS);
         assertNotNull(response);
         assertEquals("hello", response.message);
+    }
+
+    @Test
+    void oversizedNon200ResponseFailsBeforeCachingTheWholeBody() throws Exception {
+        service = new GeneralHttpNettyService(handler, Schedulers.immediate(), 8);
+        CompletableFuture<EchoResponse> result = sendRequest();
+
+        channel.writeInbound(new DefaultHttpResponse(
+                HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_GATEWAY));
+        channel.writeInbound(content("12345"));
+        channel.writeInbound(new DefaultLastHttpContent(
+                Unpooled.copiedBuffer("6789", StandardCharsets.UTF_8)));
+
+        ExecutionException error = assertThrows(
+                ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+        assertInstanceOf(FlexLBException.class, error.getCause());
+        assertFalse(channel.isOpen());
+    }
+
+    @Test
+    void oversized200ResponseUsesTheSameAggregateLimit() throws Exception {
+        service = new GeneralHttpNettyService(handler, Schedulers.immediate(), 12);
+        CompletableFuture<EchoResponse> result = sendRequest();
+
+        channel.writeInbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK));
+        channel.writeInbound(content("{\"message\":"));
+        channel.writeInbound(new DefaultLastHttpContent(
+                Unpooled.copiedBuffer("\"hello\"}", StandardCharsets.UTF_8)));
+
+        ExecutionException error = assertThrows(
+                ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+        assertInstanceOf(FlexLBException.class, error.getCause());
+        assertFalse(channel.isOpen());
     }
 
     @Test

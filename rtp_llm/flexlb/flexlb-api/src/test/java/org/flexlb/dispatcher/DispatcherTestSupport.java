@@ -1,6 +1,5 @@
 package org.flexlb.dispatcher;
 
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
@@ -85,22 +84,15 @@ final class DispatcherTestSupport {
     static MasterFeAssigner noopFeAssigner() {
         ObjectProvider<FePool> provider = mock(ObjectProvider.class);
         // getIfAvailable() returns null by default → assign() short-circuits without stamping.
-        return new MasterFeAssigner(provider, mock(LBStatusConsistencyService.class));
+        return new MasterFeAssigner(provider);
     }
 
-    /**
-     * A {@link MasterFeAssigner} backed by a specific {@link FePool} and consistency view, for
-     * stamping assertions: {@code needConsistency}/{@code isMaster} drive the "resolved locally"
-     * guard, and {@code pool} is the cursor whose {@code next()} the stamp reads.
-     */
+    /** A {@link MasterFeAssigner} backed by the cursor used in stamping assertions. */
     @SuppressWarnings("unchecked")
-    static MasterFeAssigner masterFeAssigner(FePool pool, boolean needConsistency, boolean isMaster) {
+    static MasterFeAssigner masterFeAssigner(FePool pool) {
         ObjectProvider<FePool> provider = mock(ObjectProvider.class);
         when(provider.getIfAvailable()).thenReturn(pool);
-        LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
-        when(consistency.isNeedConsistency()).thenReturn(needConsistency);
-        when(consistency.isMaster()).thenReturn(isMaster);
-        return new MasterFeAssigner(provider, consistency);
+        return new MasterFeAssigner(provider);
     }
 
     /**

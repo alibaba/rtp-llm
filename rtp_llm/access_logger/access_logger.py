@@ -1,12 +1,16 @@
+from __future__ import annotations
+
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from rtp_llm.access_logger.json_util import dump_json
 from rtp_llm.access_logger.log_utils import get_handler
 from rtp_llm.access_logger.py_access_log import PyAccessLog, RequestLog, ResponseLog
-from rtp_llm.ops import MultimodalInput
 from rtp_llm.structure.request_constants import request_id_field_name
+
+if TYPE_CHECKING:
+    from rtp_llm.ops import MultimodalInput
 
 ACCESS_LOGGER_NAME = "access_logger"
 QUERY_ACCESS_LOGGER_NAME = "query_access_logger"

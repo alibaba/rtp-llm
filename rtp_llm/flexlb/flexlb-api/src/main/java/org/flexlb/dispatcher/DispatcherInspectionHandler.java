@@ -2,9 +2,12 @@ package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.loadbalance.BatchScheduleTarget;
 import org.flexlb.util.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
@@ -43,15 +46,41 @@ public class DispatcherInspectionHandler {
     private final DispatcherFePoolRefresher refresher;
     private final FeHealthChecker healthChecker;
     private final BatchScheduleClient batchScheduleClient;
+    private final int maxChunkCount;
+    private final long maxResponseBytes;
 
+    @Autowired
     public DispatcherInspectionHandler(DispatchConfig cfg,
                                        DispatcherFePoolRefresher refresher,
                                        FeHealthChecker healthChecker,
-                                       BatchScheduleClient batchScheduleClient) {
+                                       BatchScheduleClient batchScheduleClient,
+                                       ConfigService configService) {
+        this(cfg, refresher, healthChecker, batchScheduleClient,
+                configService.loadBalanceConfig().getBatchScheduleMaxCount());
+    }
+
+    /** Package-private convenience for focused tests; mirrors the production default. */
+    DispatcherInspectionHandler(DispatchConfig cfg,
+                                DispatcherFePoolRefresher refresher,
+                                FeHealthChecker healthChecker,
+                                BatchScheduleClient batchScheduleClient) {
+        this(cfg, refresher, healthChecker, batchScheduleClient, 1000);
+    }
+
+    DispatcherInspectionHandler(DispatchConfig cfg,
+                                DispatcherFePoolRefresher refresher,
+                                FeHealthChecker healthChecker,
+                                BatchScheduleClient batchScheduleClient,
+                                int maxChunkCount) {
+        if (maxChunkCount < 1) {
+            throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
+        }
         this.cfg = cfg;
         this.refresher = refresher;
         this.healthChecker = healthChecker;
         this.batchScheduleClient = batchScheduleClient;
+        this.maxChunkCount = maxChunkCount;
+        this.maxResponseBytes = cfg.getMaxDryRunResponseBytes();
     }
 
     // ───────────────────────── snapshot ─────────────────────────
@@ -90,6 +119,10 @@ public class DispatcherInspectionHandler {
             if (body == null) {
                 return badRequest("expected a JSON object body");
             }
+            String generateConfigError = BatchChunkAssembler.validateGenerateConfig(body);
+            if (generateConfigError != null) {
+                return badRequest(generateConfigError);
+            }
             JSONArray arr = BatchBodyParser.findArrayField(body, spec.getRequestArrayField());
             // Same disposition production uses (BatchEndpointSpec#isSplittableBatch), so dry-run
             // cannot drift from what BatchHandler actually does.
@@ -100,20 +133,29 @@ public class DispatcherInspectionHandler {
             if (validationError != null) {
                 return badRequest(validationError);
             }
-            // Mirror BatchHandler's guard: a non-object generate_config is a deterministic client
-            // error. Without this the JSONException from chunk assembly falls into the catch-all and
-            // is reported as a 500 — the exact production/dry-run drift this diagnostic must not have.
-            Object generateConfig = body.get("generate_config");
-            if (generateConfig != null && !(generateConfig instanceof JSONObject)) {
-                return badRequest("generate_config must be a JSON object");
+            int chunkCount = BatchChunkAssembler.chunkCount(arr.size(), cfg.getSubBatchSpec());
+            if (chunkCount > maxChunkCount) {
+                return DispatcherResponses.error(413, "too_many_sub_batches",
+                        "batch produces " + chunkCount + " sub-batches; maximum is "
+                                + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
             }
-            return buildDryRunResponse(spec, body, arr, effectivePreAssign);
+            // Reject request-controlled envelope amplification before target resolution (which can
+            // advance master's BE cursor) and before allocating any chunk arrays/bodies.
+            if (projectedResponseBytes(
+                    spec, body, arr, chunkCount, effectivePreAssign, List.of()) > maxResponseBytes) {
+                return responseTooLarge();
+            }
+            return buildDryRunResponse(spec, body, arr, chunkCount, effectivePreAssign);
         }).onErrorResume(this::handleDryRunException);
     }
 
     private Mono<ServerResponse> handleDryRunException(Throwable e) {
         // Detail to the log only — the exception text can name internal hosts.
         Logger.warn("dispatcher dry-run unexpected error: {}", DispatcherResponses.briefReason(e));
+        if (e instanceof DataBufferLimitException) {
+            return DispatcherResponses.error(413, "request_body_too_large",
+                    "dry-run body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
+        }
         return DispatcherResponses.error(500, "dryrun_internal_error", "dry-run failed");
     }
 
@@ -137,44 +179,129 @@ public class DispatcherInspectionHandler {
     }
 
     private Mono<ServerResponse> buildDryRunResponse(BatchEndpointSpec spec, JSONObject envelope,
-                                                     JSONArray arr, boolean effectivePreAssign) {
-        List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.getSubBatchSpec());
-        List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
-                envelope, chunks, spec.getRequestArrayField());
-        spec.prepareChunkBodies(envelope, chunkBodies);
-        boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && !chunks.isEmpty();
+                                                     JSONArray arr, int chunkCount,
+                                                     boolean effectivePreAssign) {
+        boolean shouldResolveTargets = effectivePreAssign && spec.isPreAssignable() && chunkCount > 0;
         Mono<List<BatchScheduleTarget>> targetsMono = shouldResolveTargets
                 // A dry-run only renders BE role_addrs. Never consume the FE cursor for a request
                 // that deliberately sends no chunk to the selected FE.
-                ? batchScheduleClient.requestTargets(chunks.size(), true, false)
+                ? batchScheduleClient.requestTargets(chunkCount, true, false)
                 : Mono.just(List.of());
-        return targetsMono.map(targets -> {
-            BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
-            JSONObject out = new JSONObject();
-            out.put("path", spec.getPath());
-            out.put("splitMode", cfg.getSubBatch());
-            out.put("totalItems", arr.size());
-            out.put("chunkCount", chunks.size());
-            out.put("preAssignConfigDefault", cfg.isPreAssignBe());
-            out.put("preAssignSupported", spec.isPreAssignable());
-            out.put("preAssignEffective", effectivePreAssign && spec.isPreAssignable());
-            JSONArray targetsOut = new JSONArray();
-            for (BatchScheduleTarget t : targets) {
-                JSONObject addr = new JSONObject();
-                addr.put("role", t.getRole() == null ? null : t.getRole().name());
-                addr.put("ip", t.getServerIp());
-                addr.put("httpPort", t.getHttpPort());
-                addr.put("grpcPort", t.getGrpcPort());
-                addr.put("arpcPort", t.getArpcPort());
-                addr.put("preAssignable", BatchChunkAssembler.isPreAssignable(t));
-                targetsOut.add(addr);
+        return targetsMono.flatMap(targets -> {
+            // Target strings come from trusted discovery rather than the caller, but they are not
+            // length-bounded by the wire type. Account for them before materializing repeated
+            // envelopes as well; the final serialization check remains the authoritative backstop.
+            if (!targets.isEmpty() && projectedResponseBytes(
+                    spec, envelope, arr, chunkCount, effectivePreAssign, targets)
+                    > maxResponseBytes) {
+                return responseTooLarge();
             }
-            out.put("preAssignTargets", targetsOut);
+            List<JSONArray> chunks = BatchChunkAssembler.split(arr, cfg.getSubBatchSpec());
+            List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
+                    envelope, chunks, spec.getRequestArrayField());
+            spec.prepareChunkBodies(envelope, chunkBodies);
+            BatchChunkAssembler.stampPreAssignedBe(chunkBodies, targets);
             JSONArray chunksOut = new JSONArray();
             chunksOut.addAll(chunkBodies);
-            out.put("chunks", chunksOut);
-            return out;
-        }).flatMap(out -> DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(out)));
+            JSONObject out = dryRunEnvelope(
+                    spec, arr.size(), chunkCount, effectivePreAssign, targets, chunksOut);
+            byte[] response = BatchBodyParser.serialize(out);
+            if (response.length > maxResponseBytes) {
+                return responseTooLarge();
+            }
+            return DispatcherResponses.jsonBytes(200, response);
+        });
+    }
+
+    /**
+     * Exact size projection before chunk materialization. Each chunk differs from one transformed
+     * empty-array template only by its slice and, optionally, one dispatcher role-address field.
+     * Summing those deltas avoids serializing the repeated envelope {@code chunkCount} times while
+     * still counting explicit JSON nulls exactly as the final dry-run serializer does.
+     */
+    private long projectedResponseBytes(BatchEndpointSpec spec, JSONObject envelope,
+                                        JSONArray arr, int chunkCount, boolean effectivePreAssign,
+                                        List<BatchScheduleTarget> targets) {
+        JSONObject skeleton = dryRunEnvelope(
+                spec, arr.size(), chunkCount, effectivePreAssign, targets, new JSONArray());
+        long projected = BatchBodyParser.serialize(skeleton).length;
+        if (chunkCount == 0) {
+            return projected;
+        }
+        List<JSONObject> templateBodies = BatchChunkAssembler.buildChunkBodies(
+                envelope, List.of(new JSONArray()), spec.getRequestArrayField());
+        spec.prepareChunkBodies(envelope, templateBodies);
+        long templateBytes = BatchBodyParser.serialize(templateBodies.get(0)).length;
+        long itemBytes = BatchBodyParser.serialize(arr).length;
+
+        // For k chunks, the sum of their array serializations is the original array size + k - 1
+        // (each new pair of [] replaces one comma). Each body then replaces the template's [] with
+        // that chunk array. The outer chunks array contributes another k - 1 commas.
+        long chunkBodiesBytes = saturatedAdd(
+                saturatedMultiply(templateBytes - 2, chunkCount),
+                saturatedAdd(itemBytes, chunkCount - 1L));
+
+        int stamped = Math.min(chunkCount, targets.size());
+        for (int i = 0; i < stamped; i++) {
+            BatchScheduleTarget target = targets.get(i);
+            if (BatchChunkAssembler.isPreAssignable(target)) {
+                long roleAddrsBytes = BatchBodyParser.serialize(
+                        BatchChunkAssembler.preAssignedRoleAddrs(target)).length;
+                // The transformed prompt-batch template always has a non-empty generate_config
+                // (force_batch is present), so inserting this property adds one comma plus the
+                // ASCII `"role_addrs":` key and its array value.
+                chunkBodiesBytes = saturatedAdd(chunkBodiesBytes,
+                        saturatedAdd(14, roleAddrsBytes));
+            }
+        }
+        return saturatedAdd(projected,
+                saturatedAdd(chunkBodiesBytes, chunkCount - 1L));
+    }
+
+    private static long saturatedMultiply(long value, long multiplier) {
+        if (value > Long.MAX_VALUE / multiplier) {
+            return Long.MAX_VALUE;
+        }
+        return value * multiplier;
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        if (left > Long.MAX_VALUE - right) {
+            return Long.MAX_VALUE;
+        }
+        return left + right;
+    }
+
+    private JSONObject dryRunEnvelope(BatchEndpointSpec spec, int totalItems, int chunkCount,
+                                      boolean effectivePreAssign,
+                                      List<BatchScheduleTarget> targets, JSONArray chunks) {
+        JSONObject out = new JSONObject();
+        out.put("path", spec.getPath());
+        out.put("splitMode", cfg.getSubBatch());
+        out.put("totalItems", totalItems);
+        out.put("chunkCount", chunkCount);
+        out.put("preAssignConfigDefault", cfg.isPreAssignBe());
+        out.put("preAssignSupported", spec.isPreAssignable());
+        out.put("preAssignEffective", effectivePreAssign && spec.isPreAssignable());
+        JSONArray targetsOut = new JSONArray(targets.size());
+        for (BatchScheduleTarget target : targets) {
+            JSONObject addr = new JSONObject();
+            addr.put("role", target.getRole() == null ? null : target.getRole().name());
+            addr.put("ip", target.getServerIp());
+            addr.put("httpPort", target.getHttpPort());
+            addr.put("grpcPort", target.getGrpcPort());
+            addr.put("arpcPort", target.getArpcPort());
+            addr.put("preAssignable", BatchChunkAssembler.isPreAssignable(target));
+            targetsOut.add(addr);
+        }
+        out.put("preAssignTargets", targetsOut);
+        out.put("chunks", chunks);
+        return out;
+    }
+
+    private Mono<ServerResponse> responseTooLarge() {
+        return DispatcherResponses.error(413, "dryrun_response_too_large",
+                "dry-run response exceeds the configured dispatcher limit");
     }
 
     /**

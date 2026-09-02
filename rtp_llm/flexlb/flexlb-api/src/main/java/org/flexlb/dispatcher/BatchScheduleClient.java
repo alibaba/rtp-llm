@@ -85,7 +85,7 @@ public class BatchScheduleClient {
                     // Master-local (or consistency-off) resolution bypasses the HTTP handler, so it
                     // stamps fe_url here when requested; a slave's forwarded response is already
                     // stamped and the assigner leaves it untouched. One master cursor, at most once.
-                    masterFeAssigner.assign(req, targets);
+                    masterFeAssigner.assign(req, resp);
                     return targets;
                 })
                 .switchIfEmpty(Mono.fromSupplier(() -> {

@@ -36,6 +36,8 @@ class DispatchConfigTest {
         assertEquals("master", c.getFeAllocation());
         assertFalse(c.isPreAssignBe(),
                 "first rollout must be safe for mixed-version FE fleets");
+        assertEquals(128L * 1024 * 1024, c.getMaxAggregateResponseBytes());
+        assertEquals(64L * 1024 * 1024, c.getMaxDryRunResponseBytes());
     }
 
     @Test
@@ -129,6 +131,22 @@ class DispatchConfigTest {
                 () -> load("{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":0}"));
         assertThrows(IllegalArgumentException.class,
                 () -> load("{\"fePoolServiceId\":\"x\",\"batchTimeoutMs\":-5}"));
+    }
+
+    @Test
+    void responseBudgetsLoadFromEnvAndMustBePositive() {
+        Map<String, String> env = mutableEnv(
+                "DISPATCH_FE_POOL_SERVICE_ID", "x",
+                "DISPATCH_MAX_AGGREGATE_RESPONSE_BYTES", "1048576",
+                "DISPATCH_MAX_DRY_RUN_RESPONSE_BYTES", "524288");
+        DispatchConfig c = DispatcherConfiguration.loadAndValidate(env);
+        assertEquals(1048576L, c.getMaxAggregateResponseBytes());
+        assertEquals(524288L, c.getMaxDryRunResponseBytes());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"maxAggregateResponseBytes\":0}"));
+        assertThrows(IllegalArgumentException.class,
+                () -> load("{\"fePoolServiceId\":\"x\",\"maxDryRunResponseBytes\":-1}"));
     }
 
     @Test

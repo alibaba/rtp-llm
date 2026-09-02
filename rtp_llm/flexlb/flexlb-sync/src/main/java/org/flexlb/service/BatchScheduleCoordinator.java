@@ -51,7 +51,10 @@ public class BatchScheduleCoordinator {
             return forwardToMaster(request);
         }
         return routeService.batchSchedule(request)
-                .doOnNext(response -> response.setRealMasterHost(consistency.getMasterHostIpPort()));
+                .doOnNext(response -> {
+                    response.setRealMasterHost(consistency.getMasterHostIpPort());
+                    response.setResolvedLocally(true);
+                });
     }
 
     private Mono<BatchScheduleResponse> forwardToMaster(BatchScheduleRequest request) {

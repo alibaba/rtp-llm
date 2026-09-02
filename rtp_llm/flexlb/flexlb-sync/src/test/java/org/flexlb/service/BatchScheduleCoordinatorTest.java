@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -61,6 +62,7 @@ class BatchScheduleCoordinatorTest {
 
         assertSame(response, returned);
         assertEquals("10.0.0.1:7001", returned.getRealMasterHost());
+        assertTrue(returned.isResolvedLocally());
         verifyNoInteractions(httpNettyService, engineHealthReporter);
     }
 
@@ -75,6 +77,7 @@ class BatchScheduleCoordinatorTest {
                 coordinator.schedule(new BatchScheduleRequest()).block();
 
         assertSame(response, returned);
+        assertTrue(returned.isResolvedLocally());
         verifyNoInteractions(httpNettyService);
     }
 
@@ -97,8 +100,50 @@ class BatchScheduleCoordinatorTest {
                 coordinator.schedule(new BatchScheduleRequest()).block();
 
         assertSame(response, returned);
+        assertFalse(returned.isResolvedLocally());
         verify(engineHealthReporter).reportForwardToMasterResult("10.0.0.2", "200");
         verifyNoInteractions(routeService);
+    }
+
+    @Test
+    void localOriginIsCapturedBeforeAsyncCompletionEvenAfterRoleDowngrade() {
+        java.util.concurrent.atomic.AtomicBoolean master =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenAnswer(ignored -> master.get());
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
+        BatchScheduleResponse response = BatchScheduleResponse.success(null);
+        when(routeService.batchSchedule(any())).thenReturn(Mono.just(response));
+
+        Mono<BatchScheduleResponse> scheduled =
+                coordinator.schedule(new BatchScheduleRequest());
+        master.set(false);
+
+        BatchScheduleResponse returned = scheduled.block();
+        assertTrue(returned.isResolvedLocally(),
+                "a role change after branch selection must not reclassify local work");
+        assertFalse(org.flexlb.util.JsonUtils.toString(returned).contains("resolvedLocally"),
+                "in-process provenance must never cross the wire");
+    }
+
+    @Test
+    void forwardedOriginStaysRemoteEvenAfterRoleUpgrade() {
+        java.util.concurrent.atomic.AtomicBoolean master =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        when(consistency.isNeedConsistency()).thenReturn(true);
+        when(consistency.isMaster()).thenAnswer(ignored -> master.get());
+        when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.2:7001");
+        BatchScheduleResponse response = BatchScheduleResponse.success(null);
+        when(httpNettyService.request(any(BatchScheduleRequest.class), any(URI.class),
+                eq("/rtp_llm/batch_schedule"), eq(BatchScheduleResponse.class)))
+                .thenReturn(Mono.just(response));
+
+        Mono<BatchScheduleResponse> scheduled =
+                coordinator.schedule(new BatchScheduleRequest());
+        master.set(true);
+
+        assertFalse(scheduled.block().isResolvedLocally(),
+                "a role change after forwarding must not authorize a second FE stamp");
     }
 
     @Test

@@ -54,10 +54,11 @@ class BatchScheduleClientTest {
     void explicitAllocationDimensionsReachCoordinatorAndGateMasterFeStamp() {
         BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
         BatchScheduleTarget target = new BatchScheduleTarget("10.0.0.1", 23840, 23841);
-        when(coordinator.schedule(any()))
-                .thenReturn(Mono.just(BatchScheduleResponse.success(List.of(target))));
+        BatchScheduleResponse response = BatchScheduleResponse.success(List.of(target));
+        response.setResolvedLocally(true);
+        when(coordinator.schedule(any())).thenReturn(Mono.just(response));
         FePool pool = mock(FePool.class);
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
         BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);
 
         StepVerifier.create(client.requestTargets(1, true, false))
@@ -141,10 +142,12 @@ class BatchScheduleClientTest {
         List<BatchScheduleTarget> targets = List.of(
                 new BatchScheduleTarget("10.0.0.1", 23840, 23841),
                 new BatchScheduleTarget("10.0.0.2", 23840, 23841));
-        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(targets)));
+        BatchScheduleResponse response = BatchScheduleResponse.success(targets);
+        response.setResolvedLocally(true);
+        when(coordinator.schedule(any())).thenReturn(Mono.just(response));
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(2)).thenReturn(List.of("http://fe-1", "http://fe-2"));
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, true);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);
 
@@ -161,15 +164,15 @@ class BatchScheduleClientTest {
     void slaveForwardResolutionDoesNotRestampMasterFeUrl() {
         // A slave forwarded to the master; the coordinator's response already carries the master's
         // fe_url. The client must NOT overwrite it with a second (local) cursor — that reintroduces
-        // the collision the feature removes. Guard: isMaster()==false → assign() is a no-op, the
-        // pool is never touched. Mutation guard: drop the resolvedLocally guard and this restamps.
+        // the collision the feature removes. The deserialized response has resolvedLocally=false,
+        // so the pool is never touched. Mutation guard: drop that provenance guard and this restamps.
         BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
         BatchScheduleTarget fromMaster = new BatchScheduleTarget("10.0.0.1", 23840, 23841);
         fromMaster.setFeUrl("http://master-picked-fe");
         when(coordinator.schedule(any()))
                 .thenReturn(Mono.just(BatchScheduleResponse.success(List.of(fromMaster))));
         FePool pool = mock(FePool.class);
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, true, false);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);
 
@@ -182,16 +185,16 @@ class BatchScheduleClientTest {
 
     @Test
     void consistencyOffSingleNodeStampsFeUrlLocally() {
-        // With consistency disabled there is no master/slave split — every node resolves locally, so
-        // the client must stamp via the !isNeedConsistency() operand of resolvedLocally (true even
-        // though isMaster() is false). The commit calls this path out explicitly ("any single-node
-        // consistency-off deploy"); it is the one operand the isMaster() case does not exercise.
+        // With consistency disabled the coordinator still marks its response resolvedLocally=true,
+        // so the client stamps from the same captured provenance as an elected master.
         BatchScheduleCoordinator coordinator = mock(BatchScheduleCoordinator.class);
         List<BatchScheduleTarget> targets = List.of(new BatchScheduleTarget("10.0.0.1", 23840, 23841));
-        when(coordinator.schedule(any())).thenReturn(Mono.just(BatchScheduleResponse.success(targets)));
+        BatchScheduleResponse response = BatchScheduleResponse.success(targets);
+        response.setResolvedLocally(true);
+        when(coordinator.schedule(any())).thenReturn(Mono.just(response));
         FePool pool = mock(FePool.class);
         when(pool.nextBatch(1)).thenReturn(List.of("http://fe-solo"));
-        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool, false, false);
+        MasterFeAssigner assigner = DispatcherTestSupport.masterFeAssigner(pool);
 
         BatchScheduleClient client = new BatchScheduleClient(coordinator, assigner);
 

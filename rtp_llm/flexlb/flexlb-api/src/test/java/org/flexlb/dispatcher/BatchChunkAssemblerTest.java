@@ -88,12 +88,7 @@ class BatchChunkAssemblerTest {
     }
 
     @Test
-    void buildChunkBodiesDeepCopyIsolatesRoleAddrsAcrossChunks() {
-        // When generate_config carries role_addrs, buildChunkBodies takes the deep-copy branch so
-        // each chunk owns an independent nested array. A per-chunk role_addrs append (the real
-        // per-chunk write) on one chunk must not leak into a sibling chunk or the source envelope.
-        // A shallow `new JSONObject(sourceGc)` would share the nested JSONArray reference and let
-        // the mutation bleed across chunks — this test fails in that case.
+    void buildChunkBodiesStripsReservedCallerRoleAddrs() {
         JSONObject envelope = new JSONObject();
         envelope.put("model", "m");
         envelope.put("prompt_batch", JSONArray.of("a", "b"));
@@ -106,17 +101,10 @@ class BatchChunkAssemblerTest {
         List<JSONArray> chunks = List.of(JSONArray.of("a"), JSONArray.of("b"));
         List<JSONObject> bodies = BatchChunkAssembler.buildChunkBodies(envelope, chunks, "prompt_batch");
 
-        JSONArray addrs0 = bodies.get(0).getJSONObject("generate_config").getJSONArray("role_addrs");
-        JSONArray addrs1 = bodies.get(1).getJSONObject("generate_config").getJSONArray("role_addrs");
-        assertNotSame(addrs0, addrs1, "chunks must not share the nested role_addrs array");
-
-        // Mutate chunk 0's role_addrs; sibling chunk and source envelope must stay at size 1.
-        addrs0.add("DECODE@10.0.0.2:8000");
-        assertEquals(2, bodies.get(0).getJSONObject("generate_config").getJSONArray("role_addrs").size());
-        assertEquals(1, bodies.get(1).getJSONObject("generate_config").getJSONArray("role_addrs").size(),
-                "per-chunk role_addrs append leaked into a sibling chunk (shallow copy?)");
+        assertFalse(bodies.get(0).getJSONObject("generate_config").containsKey("role_addrs"));
+        assertFalse(bodies.get(1).getJSONObject("generate_config").containsKey("role_addrs"));
         assertEquals(1, envelope.getJSONObject("generate_config").getJSONArray("role_addrs").size(),
-                "per-chunk role_addrs append mutated the source envelope (shallow copy?)");
+                "defense-in-depth stripping must not mutate the source envelope");
     }
 
     @Test
@@ -197,7 +185,7 @@ class BatchChunkAssemblerTest {
     }
 
     @Test
-    void stampPreAssignedBePreservesUserRoleAddrs() {
+    void stampPreAssignedBeReplacesAnyExistingRoleAddrs() {
         JSONObject body = new JSONObject();
         JSONObject gc = new JSONObject();
         JSONArray userAddrs = new JSONArray();
@@ -214,9 +202,8 @@ class BatchChunkAssemblerTest {
         BatchChunkAssembler.stampPreAssignedBe(List.of(body), List.of(target));
 
         JSONArray addrs = body.getJSONObject("generate_config").getJSONArray("role_addrs");
-        assertEquals(2, addrs.size());
-        assertEquals("PREFILL", addrs.getJSONObject(0).getString("role"));
-        assertEquals("PDFUSION", addrs.getJSONObject(1).getString("role"));
+        assertEquals(1, addrs.size());
+        assertEquals("PDFUSION", addrs.getJSONObject(0).getString("role"));
     }
 
     @Test
@@ -252,5 +239,15 @@ class BatchChunkAssemblerTest {
         assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.splitArray(arr, 0));
         assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.splitByCount(arr, 0));
         assertThrows(IllegalArgumentException.class, () -> BatchChunkAssembler.splitArray(arr, -1));
+    }
+
+    @Test
+    void chunkCountIsOverflowSafeAtIntegerMaxValue() {
+        assertEquals(1_073_741_824, BatchChunkAssembler.chunkCount(
+                Integer.MAX_VALUE, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 2)));
+        assertEquals(7, BatchChunkAssembler.chunkCount(
+                Integer.MAX_VALUE, new SubBatchSpec(SubBatchSpec.Mode.COUNT, 7)));
+        assertEquals(0, BatchChunkAssembler.chunkCount(
+                0, new SubBatchSpec(SubBatchSpec.Mode.SIZE, 1)));
     }
 }

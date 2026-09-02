@@ -122,6 +122,14 @@ public class DispatcherConfiguration {
         if (c.getBodyReadMarginMs() < 0) {
             throw new IllegalArgumentException("bodyReadMarginMs must be >= 0, got " + c.getBodyReadMarginMs());
         }
+        if (c.getMaxAggregateResponseBytes() <= 0) {
+            throw new IllegalArgumentException("maxAggregateResponseBytes must be > 0, got "
+                    + c.getMaxAggregateResponseBytes());
+        }
+        if (c.getMaxDryRunResponseBytes() <= 0) {
+            throw new IllegalArgumentException("maxDryRunResponseBytes must be > 0, got "
+                    + c.getMaxDryRunResponseBytes());
+        }
         if (c.getProbePath() == null || c.getProbePath().isBlank()) {
             throw new IllegalArgumentException(
                     "probePath must not be blank — set DISPATCH_PROBE_PATH=/frontend_health (rtp_llm) "
@@ -202,10 +210,12 @@ public class DispatcherConfiguration {
     SmartInitializingSingleton dispatcherBootLog(DispatchConfig cfg, DispatcherFePoolRefresher refresher) {
         return () -> Logger.warn(
                 "dispatcher enabled: fePoolServiceId={}, seedHosts={}, subBatch={}, batchSpecs={}, "
-                        + "batchTimeoutMs={}, probePath={}, feAllocation={}, preAssignBe={}",
+                        + "batchTimeoutMs={}, probePath={}, feAllocation={}, preAssignBe={}, "
+                        + "maxAggregateResponseBytes={}, maxDryRunResponseBytes={}",
                 cfg.getFePoolServiceId(), refresher.currentSize(), cfg.getSubBatch(),
                 BatchEndpointSpec.SPECS.size(),
                 cfg.getBatchTimeoutMs(), cfg.getProbePath(), cfg.getFeAllocation(),
-                cfg.isPreAssignBe());
+                cfg.isPreAssignBe(), cfg.getMaxAggregateResponseBytes(),
+                cfg.getMaxDryRunResponseBytes());
     }
 }

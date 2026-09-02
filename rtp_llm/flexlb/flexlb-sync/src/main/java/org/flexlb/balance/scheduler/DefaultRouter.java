@@ -26,6 +26,7 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
+import org.flexlb.util.RateLimitedWarn;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 
@@ -33,6 +34,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
@@ -54,6 +56,7 @@ public class DefaultRouter implements Router {
     private final int batchScheduleMaxCount;
     private final ModelMetaConfig modelMetaConfig;
     private final boolean embeddingEngine;
+    private final RateLimitedWarn noWorkerWarn = new RateLimitedWarn(1, TimeUnit.SECONDS);
 
     public DefaultRouter(
             ConfigService configService,
@@ -151,7 +154,10 @@ public class DefaultRouter implements Router {
         }
 
         List<RoleType> configuredRoles = modelMetaConfig.getConfiguredRoleTypes();
-        if (configuredRoles.size() != 1) {
+        if (CollectionUtils.isEmpty(configuredRoles)) {
+            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER, noWorkerDetail());
+        }
+        if (configuredRoles.size() > 1) {
             return rejectRoleTopology("Configured", configuredRoles);
         }
 
@@ -197,11 +203,10 @@ public class DefaultRouter implements Router {
     /** Distinguish a missing route table from discovery resolving a configured route to no hosts. */
     private String noWorkerDetail() {
         List<String> addresses = modelMetaConfig.getConfiguredDiscoveryAddresses();
-        String detail = CollectionUtils.isEmpty(addresses)
-                ? "master not ready: no service route registered; check MODEL_SERVICE_CONFIG is present and parses"
-                : "master not ready: route table is loaded but no worker was discovered through " + addresses
-                        + "; check the configured discovery service and its host membership";
-        return NO_AVAILABLE_WORKER.getErrorMsg() + ": " + detail;
+        noWorkerWarn.warn("master has no available worker: configuredDiscoveryAddresses={}",
+                CollectionUtils.isEmpty(addresses) ? List.of() : addresses);
+        return NO_AVAILABLE_WORKER.getErrorMsg()
+                + ": master not ready; check model route configuration and worker discovery";
     }
 
     private static BatchScheduleResponse rejectRoleTopology(

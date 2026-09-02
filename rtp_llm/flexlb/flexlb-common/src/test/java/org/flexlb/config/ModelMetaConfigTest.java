@@ -15,7 +15,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ModelMetaConfigTest {
 
-    private static final String TEST_SERVICE_ID = "model_meta_cfg_test.pd.service";
+    private static final String TEST_SERVICE_ID =
+            "aigc.text-generation.generation.model_meta_cfg_test";
 
     /** Two distinct serviceIds whose modelName suffix is identical — see IdUtils#getModelNameByServiceId. */
     private static final String SHARED_MODEL_SERVICE_A =
@@ -52,6 +53,37 @@ class ModelMetaConfigTest {
 
         assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName),
                 "the last route referencing the model is gone, so it drops out");
+    }
+
+    @Test
+    void replacingLoadBalancedRouteWithDisabledRouteRemovesStaleModel() {
+        ServiceRoute enabled = routeWithRoles(TEST_SERVICE_ID, true, false, false);
+        enabled.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, enabled);
+        String modelName = org.flexlb.util.IdUtils.getModelNameByServiceId(TEST_SERVICE_ID);
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName));
+
+        ServiceRoute disabled = routeWithRoles(TEST_SERVICE_ID, true, false, false);
+        disabled.setLoadBalance(false);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, disabled);
+
+        assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName));
+    }
+
+    @Test
+    void replacingRouteWithDifferentModelNamePublishesOnlyNewModel() {
+        ServiceRoute original = routeWithRoles(TEST_SERVICE_ID, true, false, false);
+        original.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, original);
+        String oldModel = org.flexlb.util.IdUtils.getModelNameByServiceId(TEST_SERVICE_ID);
+
+        ServiceRoute replacement = routeWithRoles(SHARED_MODEL_SERVICE_A, true, false, false);
+        replacement.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, replacement);
+        String newModel = org.flexlb.util.IdUtils.getModelNameByServiceId(SHARED_MODEL_SERVICE_A);
+
+        assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(oldModel));
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(newModel));
     }
 
     private ServiceRoute routeWithRoles(String serviceId, boolean prefill, boolean decode, boolean pdFusion) {

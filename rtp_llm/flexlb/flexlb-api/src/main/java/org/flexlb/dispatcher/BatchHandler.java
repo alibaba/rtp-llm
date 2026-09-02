@@ -84,6 +84,9 @@ public class BatchHandler {
         this.feAllocationMode = cfg.getFeAllocation() == null
                 ? FeAllocationMode.MASTER
                 : FeAllocationMode.parse(cfg.getFeAllocation());
+        if (maxChunkCount < 1) {
+            throw new IllegalArgumentException("maxChunkCount must be >= 1, got " + maxChunkCount);
+        }
         this.maxChunkCount = maxChunkCount;
     }
 
@@ -96,6 +99,13 @@ public class BatchHandler {
                 return badRequest("expected a JSON object body");
             }
             populateRequestLogFields(pv, body);
+            // Enforce the reserved routing field at the registered HTTP boundary, before the
+            // split-vs-passthrough disposition. A companion-field request is forwarded whole,
+            // but must not use that path to make an FE dial a caller-selected backend.
+            String generateConfigError = BatchChunkAssembler.validateGenerateConfig(body);
+            if (generateConfigError != null) {
+                return badRequest(generateConfigError);
+            }
             JSONArray arr = BatchBodyParser.findArrayField(body, spec.getRequestArrayField());
             if (!spec.isSplittableBatch(body, arr)) {
                 // Registered path, but this body is not a splittable batch (absent array field,
@@ -117,22 +127,16 @@ public class BatchHandler {
                 }
                 return DispatcherResponses.jsonBytes(200, BatchBodyParser.serialize(emptyEnvelope));
             }
-            // Chunk assembly copies generate_config per chunk, so a non-object value (e.g. a
-            // string) is a deterministic client error — reject it here instead of letting the
-            // JSONException fall into the catch-all and masquerade as a 500 dispatch failure.
-            Object generateConfig = body.get("generate_config");
-            if (generateConfig != null && !(generateConfig instanceof JSONObject)) {
-                return badRequest("generate_config must be a JSON object");
-            }
             pv.setTotalItems(arr.size());
-            List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
-            pv.setChunkCount(chunks.size());
-            recordChunkShape(pv, chunks);
-            if (chunks.size() > maxChunkCount) {
+            int chunkCount = BatchChunkAssembler.chunkCount(arr.size(), subBatch);
+            pv.setChunkCount(chunkCount);
+            if (chunkCount > maxChunkCount) {
                 return DispatcherResponses.error(413, "too_many_sub_batches",
-                        "batch produces " + chunks.size() + " sub-batches; maximum is "
+                        "batch produces " + chunkCount + " sub-batches; maximum is "
                                 + maxChunkCount + " (BATCH_SCHEDULE_MAX_COUNT)");
             }
+            List<JSONArray> chunks = BatchChunkAssembler.split(arr, subBatch);
+            recordChunkShape(pv, chunks);
             List<JSONObject> chunkBodies = BatchChunkAssembler.buildChunkBodies(
                     body, chunks, spec.getRequestArrayField());
             spec.prepareChunkBodies(body, chunkBodies);
@@ -178,6 +182,10 @@ public class BatchHandler {
                 // a 500 would invite pointless retries and pollute the server error rate.
                 return DispatcherResponses.error(413, "request_body_too_large",
                         "batch body exceeds the server limit; see MAX_IN_MEMORY_SIZE");
+            }
+            if (e instanceof AggregateResponseTooLargeException) {
+                return DispatcherResponses.error(413, "batch_response_too_large",
+                        "aggregate sub-batch response exceeds the dispatcher limit");
             }
             // Stable, non-revealing text: the exception message can carry the FE address or
             // upstream response detail, which must not cross the client boundary. The full

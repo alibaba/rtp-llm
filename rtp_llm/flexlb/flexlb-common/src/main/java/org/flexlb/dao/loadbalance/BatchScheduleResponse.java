@@ -1,5 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -30,6 +31,14 @@ public class BatchScheduleResponse {
 
     @JsonProperty("real_master_host")
     private String realMasterHost;
+
+    /**
+     * In-process provenance captured when scheduling chooses its branch. It is deliberately not
+     * serialized: a forwarded response must be treated as remote even if the master marked its
+     * own local object before writing it to the wire.
+     */
+    @JsonIgnore
+    private boolean resolvedLocally;
 
     public static BatchScheduleResponse success(List<BatchScheduleTarget> targets) {
         BatchScheduleResponse r = new BatchScheduleResponse();
