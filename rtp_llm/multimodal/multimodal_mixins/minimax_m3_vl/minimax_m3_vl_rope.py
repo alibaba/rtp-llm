@@ -78,7 +78,8 @@ if triton is not None:
             token_index * OUTPUT_TOKEN_STRIDE + head_offsets * HEAD_DIM + dim_offsets
         )
         for projection in range(3):
-            projection_offset = projection * qkv_stride_p
+            projection_i64 = projection.to(tl.int64)
+            projection_offset = projection_i64 * qkv_stride_p
             values = tl.load(
                 qkv_ptr + qkv_offsets + projection_offset,
                 mask=value_mask,
@@ -94,8 +95,9 @@ if triton is not None:
                     values * cos_values + partner_sign * partner_values * sin_values
                 )
                 values = tl.where(rotary_mask, rotated, values)
+            output_projection_offset = projection_i64 * OUTPUT_PROJECTION_STRIDE
             tl.store(
-                output_ptr + projection * OUTPUT_PROJECTION_STRIDE + output_offsets,
+                output_ptr + output_projection_offset + output_offsets,
                 values,
                 mask=value_mask,
             )

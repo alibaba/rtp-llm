@@ -77,3 +77,13 @@ py_test(
         "//rtp_llm:testlib",
     ],
 )
+
+py_test(
+    name = "minimax_m3_vl_rope_test",
+    srcs = [
+        "minimax_m3_vl_rope_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
