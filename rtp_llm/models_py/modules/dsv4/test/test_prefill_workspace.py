@@ -18,7 +18,10 @@ disjointness. ``align_bytes=1`` is passed throughout to avoid the production
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import (
+    PrefillWorkspace,
+    resolve_prefill_workspace_rows,
+)
 
 
 def _assert_raises(fn, exc_type, msg_substr: str):
@@ -28,6 +31,30 @@ def _assert_raises(fn, exc_type, msg_substr: str):
         assert msg_substr in str(exc), str(exc)
         return
     raise AssertionError(f"expected {exc_type.__name__} containing {msg_substr!r}")
+
+
+def test_dynamic_workspace_rows_disabled_keeps_configured_capacity():
+    assert resolve_prefill_workspace_rows(
+        128, 1024, 256, 8, allow_dynamic_growth=False
+    ) == (128, 1024)
+
+
+def test_dynamic_workspace_rows_grows_q_and_cp_capacity():
+    assert resolve_prefill_workspace_rows(
+        128, 1024, 256, 8, allow_dynamic_growth=True
+    ) == (256, 2048)
+
+
+def test_dynamic_workspace_rows_preserves_disabled_cp_region():
+    assert resolve_prefill_workspace_rows(
+        128, 0, 256, 8, allow_dynamic_growth=True
+    ) == (256, 0)
+
+
+def test_dynamic_workspace_rows_never_shrinks_configured_capacity():
+    assert resolve_prefill_workspace_rows(
+        512, 8192, 128, 8, allow_dynamic_growth=True
+    ) == (512, 8192)
 
 
 def test_prefill_q_eager_alloc_shape_and_dtype():
@@ -300,7 +327,48 @@ def test_cp_gather_restore_overflow():
     )
 
 
+def test_sm120_fallback_buffers_reuse_capacity_and_isolate_roles():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
+
+    swa_cache = ws.sm120_packed_cache("swa", num_tokens=65, page_size=64)
+    assert tuple(swa_cache.shape) == (2, 64, 584)
+    assert (
+        ws.sm120_packed_cache("swa", num_tokens=32, page_size=64).data_ptr()
+        == swa_cache.data_ptr()
+    )
+
+    extra_cache = ws.sm120_packed_cache("extra_2", num_tokens=65, page_size=64)
+    assert extra_cache.data_ptr() != swa_cache.data_ptr()
+
+    slots = ws.sm120_linear_slots("swa", 65)
+    assert tuple(slots.shape) == (65,)
+    assert slots.dtype == torch.int64
+    assert ws.sm120_linear_slots("swa", 32).data_ptr() == slots.data_ptr()
+    assert ws.sm120_linear_slots("extra_2", 65).data_ptr() != slots.data_ptr()
+
+    grown_cache = ws.sm120_packed_cache("swa", num_tokens=129, page_size=64)
+    assert tuple(grown_cache.shape) == (3, 64, 584)
+    assert (
+        ws.sm120_packed_cache("swa", num_tokens=65, page_size=64).data_ptr()
+        == grown_cache.data_ptr()
+    )
+
+    grown_slots = ws.sm120_linear_slots("swa", 129)
+    assert tuple(grown_slots.shape) == (129,)
+    assert ws.sm120_linear_slots("swa", 65).data_ptr() == grown_slots.data_ptr()
+
+
 if __name__ == "__main__":
+    test_dynamic_workspace_rows_disabled_keeps_configured_capacity()
+    print("PASS test_dynamic_workspace_rows_disabled_keeps_configured_capacity")
+    test_dynamic_workspace_rows_grows_q_and_cp_capacity()
+    print("PASS test_dynamic_workspace_rows_grows_q_and_cp_capacity")
+    test_dynamic_workspace_rows_preserves_disabled_cp_region()
+    print("PASS test_dynamic_workspace_rows_preserves_disabled_cp_region")
+    test_dynamic_workspace_rows_never_shrinks_configured_capacity()
+    print("PASS test_dynamic_workspace_rows_never_shrinks_configured_capacity")
     test_prefill_q_eager_alloc_shape_and_dtype()
     print("PASS test_prefill_q_eager_alloc_shape_and_dtype")
     test_prefill_q_full_capacity_and_overflow()
@@ -325,4 +393,6 @@ if __name__ == "__main__":
     print("PASS test_cp_restore_region_does_not_alias_gather_region")
     test_cp_gather_restore_overflow()
     print("PASS test_cp_gather_restore_overflow")
+    test_sm120_fallback_buffers_reuse_capacity_and_isolate_roles()
+    print("PASS test_sm120_fallback_buffers_reuse_capacity_and_isolate_roles")
     print("ALL TESTS PASSED")

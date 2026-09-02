@@ -46,11 +46,12 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
     compute_swa_slot_mapping_from_positions,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
-from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
-from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-    get_or_build_sched_meta,
+from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+    BIND_KEEP,
+    _decode_sched_meta,
+    bind_attn_cache,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
 from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
@@ -67,6 +68,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
+from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -110,6 +112,42 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
+
+        # The same DSpARK model class is used by all three serving roles.  A
+        # dedicated PREFILL worker only receives target features and executes
+        # ``forward_commit``; DECODE and PDFUSION must keep proposal support.
+        # Record the role once at construction so both the descriptor loader
+        # and V4Transformer take the identical path without consulting env
+        # variables or duplicating role policy in lower modules.
+        role_type = getattr(parallelism_config, "role_type", None)
+        self._commit_only_prefill = (
+            role_type == RoleType.PREFILL
+            or str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
+        )
+        self._v4_args.commit_only = self._commit_only_prefill
+        if (
+            self._v4_args.fp8_kv_cache
+            and not self._commit_only_prefill
+            and torch.cuda.is_available()
+        ):
+            from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
+                validate_sm120_swa_topk_width,
+            )
+            from rtp_llm.models_py.utils.arch import is_sm120
+
+            if is_sm120():
+                window = int(self._v4_args.window_size)
+                gamma = int(self._gen_num_per_cycle)
+                dspark_topk_width = ((window + gamma + 127) // 128) * 128
+                validate_sm120_swa_topk_width(
+                    dspark_topk_width,
+                    context="DeepSeek-V4 DSpark decode",
+                )
+        if self._commit_only_prefill:
+            logging.info(
+                "[DeepSeekV4DSparkModel] PREFILL role: enabling commit-only "
+                "weight/transformer path"
+            )
 
         noise_token_id = getattr(model_config, "dspark_noise_token_id", None)
         target_layer_ids = getattr(model_config, "dspark_target_layer_ids", None)
@@ -673,7 +711,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             topk = int(global_indices.shape[-1])
             global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
-            sched_meta = get_or_build_sched_meta(
+            sched_meta = _decode_sched_meta(
+                x.device,
                 graph_metadata,
                 batch_size=batch_size,
                 q_len=gamma,
@@ -701,7 +740,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
-        hidden = self.v4.embed(query_ids)
+        hidden = self.v4.embed_full(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
         # The hyper-connection choreography lives in Block.forward_decode;
@@ -775,8 +814,18 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     def _forward_device(self) -> torch.device:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
-        device = self.v4.embed.weight.device
-        if self.kv_cache is not None and not bool(self.fp8_kv_cache):
+        if self._commit_only_prefill:
+            if self.main_proj is None:
+                raise RuntimeError(
+                    "DSpARK commit-only model has no initialized main projection"
+                )
+            # ``main_proj`` is a LinearFactory module with the actual bound
+            # checkpoint tensor; commit-only transformers intentionally do not
+            # materialize an embedding just to answer a device query.
+            device = self.main_proj.weight.device
+        else:
+            device = self.v4.embed.weight.device
+        if self.kv_cache is not None and not self.fp8_kv_cache:
             raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
         return device
 
@@ -797,6 +846,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 batch_size,
             )
             return self.dspark_empty_outputs(batch_size, device)
+        if self._commit_only_prefill:
+            raise RuntimeError(
+                "DSpARK PREFILL commit-only model cannot execute forward_propose; "
+                "use the DECODE/PDFUSION role for proposal inference"
+            )
         return self.run_propose_step(inputs, fmha_impl, device)
 
     @torch.inference_mode()

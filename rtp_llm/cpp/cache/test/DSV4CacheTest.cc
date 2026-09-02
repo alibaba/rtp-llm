@@ -1277,6 +1277,95 @@ TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolBlocksOverridesOnlyHcaState) {
     }
 }
 
+TEST(HybridPoolConfigCreatorTest, DSV4HcaStatePoolConfigInjectionHonorsResidency) {
+    auto make_config = [](int64_t                             blocks,
+                          std::optional<CacheMemoryPlacement> placement,
+                          std::optional<uint32_t>             descriptor_blocks = std::nullopt,
+                          bool                                clear             = false) {
+        auto              mc = makeProModelConfig();
+        ParallelismConfig pc;
+        RuntimeConfig     runtime_config;
+        KVCacheConfig     kv_cache_config;
+        kv_cache_config.test_block_num             = 100;
+        kv_cache_config.dsv4_hca_state_pool_blocks = blocks;
+        kv_cache_config.dsv4_hca_state_pool_clear  = clear;
+        for (auto& descs : mc.kv_cache_spec_descs) {
+            for (auto& desc : descs) {
+                if (desc.tag != DSV4_HCA_STATE_TAG) {
+                    continue;
+                }
+                if (descriptor_blocks.has_value()) {
+                    // Keep an explicit descriptor capacity to verify that the
+                    // runtime KVCacheConfig value is the intentional override.
+                    desc.capacity                         = CacheCapacityPolicyDesc{};
+                    desc.capacity->explicit_block_num     = *descriptor_blocks;
+                    desc.capacity->charge_to_paged_budget = true;
+                } else {
+                    desc.capacity.reset();
+                }
+                if (placement.has_value()) {
+                    desc.memory = CacheMemoryPolicyDesc{placement};
+                }
+            }
+        }
+        runtime_config.max_generate_batch_size                      = 2;
+        runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+        return CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+    };
+
+    // Production descriptors leave memory placement unspecified for a GPU
+    // pool; this exercises the !desc.memory.has_value() branch in the creator.
+    auto device_config = make_config(256, std::nullopt);
+    auto hca_gid       = gidForTag(device_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(device_config.blockNumForGroup(hca_gid), 256u);
+    EXPECT_TRUE(device_config.policyForGroup(hca_gid).charge_to_paged_budget);
+    EXPECT_EQ(device_config.explicitly_sized_pool_reserve_bytes, 256u * device_config.blockSizeBytesForGroup(hca_gid));
+
+    // Runtime injection intentionally wins over a stale descriptor-level
+    // capacity.  This is the precedence used by the production path.
+    auto descriptor_override_config = make_config(256, std::nullopt, 350u);
+    hca_gid                         = gidForTag(descriptor_override_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(descriptor_override_config.blockNumForGroup(hca_gid), 256u);
+    EXPECT_EQ(descriptor_override_config.policyForGroup(hca_gid).explicit_block_num, 256u);
+    EXPECT_EQ(descriptor_override_config.explicitly_sized_pool_reserve_bytes,
+              256u * descriptor_override_config.blockSizeBytesForGroup(hca_gid));
+
+    // The default -1 is genuinely unset: descriptor-owned capacity remains
+    // authoritative instead of being overwritten by a C++ scalar default.
+    auto descriptor_default_config = make_config(-1, std::nullopt, 350u);
+    hca_gid                        = gidForTag(descriptor_default_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(descriptor_default_config.blockNumForGroup(hca_gid), 350u);
+    EXPECT_EQ(descriptor_default_config.policyForGroup(hca_gid).explicit_block_num, 350u);
+
+    auto host_config = make_config(256, CacheMemoryPlacement::HOST_PINNED);
+    hca_gid          = gidForTag(host_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(host_config.blockNumForGroup(hca_gid), 256u);
+    EXPECT_FALSE(host_config.policyForGroup(hca_gid).charge_to_paged_budget);
+    EXPECT_EQ(host_config.explicitly_sized_pool_reserve_bytes, 0u);
+
+    // A legacy zero is still unset and must preserve descriptor ownership.
+    auto legacy_zero_config = make_config(0, std::nullopt, 350u);
+    hca_gid                 = gidForTag(legacy_zero_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(legacy_zero_config.blockNumForGroup(hca_gid), 350u);
+    EXPECT_EQ(legacy_zero_config.policyForGroup(hca_gid).explicit_block_num, 350u);
+
+    // The separate clear flag requests framework sizing. A host-resident
+    // descriptor must still remain outside the HBM budget on the fallback.
+    auto fallback_config = make_config(-1, CacheMemoryPlacement::HOST_PINNED, 350u, true);
+    hca_gid              = gidForTag(fallback_config, std::string(DSV4_HCA_STATE_TAG));
+    EXPECT_EQ(fallback_config.blockNumForGroup(hca_gid), 100u);
+    EXPECT_EQ(fallback_config.policyForGroup(hca_gid).explicit_block_num, 0u);
+    EXPECT_EQ(fallback_config.policyForGroup(hca_gid).memory_placement, CacheMemoryPlacement::HOST_PINNED);
+    EXPECT_FALSE(fallback_config.policyForGroup(hca_gid).charge_to_paged_budget);
+    EXPECT_EQ(fallback_config.explicitly_sized_pool_reserve_bytes, 0u);
+
+    // The C++ creator is also a public construction boundary.  Keep the
+    // tri-state contract enforced even when Python server-arg validation is
+    // bypassed by tests or an embedded caller.
+    EXPECT_THROW((void)make_config(64, std::nullopt, std::nullopt, true), std::exception);
+    EXPECT_THROW((void)make_config(-2, std::nullopt), std::exception);
+}
+
 TEST(CacheConfigTest, DSV4HybridPoolRuntimeConfigAllowsDecoupledPhysicalAndKernelBlockSize) {
     auto              mc = makeProModelConfig();
     ParallelismConfig pc;
@@ -1369,11 +1458,9 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency
         ParallelismConfig pc;
         RuntimeConfig     runtime_config;
         KVCacheConfig     kv_cache_config;
-        kv_cache_config.seq_size_per_block = 128;
-        kv_cache_config.test_block_num     = 100;
-        for (const auto& tag : dsv4StateSwaTags()) {
-            setDsv4ExplicitPoolBlocks(mc, tag, kFixedPoolBlocks);
-        }
+        kv_cache_config.seq_size_per_block                          = 128;
+        kv_cache_config.test_block_num                              = 100;
+        kv_cache_config.dsv4_fixed_pool_blocks                      = kFixedPoolBlocks;
         runtime_config.max_generate_batch_size                      = max_concurrency;
         runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
 
@@ -1397,6 +1484,31 @@ TEST(HybridPoolConfigCreatorTest, DSV4FixedPoolBlocksIndependentOfMaxConcurrency
         EXPECT_GT(expected_reserve, 0u);
         EXPECT_EQ(config.explicitly_sized_pool_reserve_bytes, expected_reserve)
             << "max_concurrency=" << max_concurrency;
+    }
+}
+
+TEST(HybridPoolConfigCreatorTest, DSV4HcaSpecificOverrideWinsLegacyFixedPoolBlocks) {
+    constexpr uint32_t kLegacyBlocks = 64;
+    constexpr uint32_t kHcaBlocks    = 96;
+    auto               mc            = makeProModelConfig();
+    ParallelismConfig  pc;
+    RuntimeConfig      runtime_config;
+    KVCacheConfig      kv_cache_config;
+    kv_cache_config.test_block_num                              = 100;
+    kv_cache_config.dsv4_fixed_pool_blocks                      = kLegacyBlocks;
+    kv_cache_config.dsv4_hca_state_pool_blocks                  = kHcaBlocks;
+    runtime_config.max_generate_batch_size                      = 2;
+    runtime_config.fifo_scheduler_config.max_context_batch_size = 1;
+
+    auto       config     = CacheConfigCreator::createConfig(mc, pc, runtime_config, kv_cache_config);
+    const auto state_tags = dsv4StateSwaTags();
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        const auto& tag = config.tagForGroup(gid);
+        if (tag == DSV4_HCA_STATE_TAG) {
+            EXPECT_EQ(config.blockNumForGroup(gid), kHcaBlocks);
+        } else if (std::find(state_tags.begin(), state_tags.end(), tag) != state_tags.end()) {
+            EXPECT_EQ(config.blockNumForGroup(gid), kLegacyBlocks) << "tag=" << tag;
+        }
     }
 }
 

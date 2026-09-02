@@ -412,7 +412,9 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
         # Also patch _kv_pool_view dim assertion: the 3D pool above (1,1,132)
         # already satisfies it, but be explicit.
         try:
-            indexer_mod.has_fp8_mqa_logits = lambda: True  # type: ignore[assignment]
+            indexer_mod.has_fp8_mqa_logits = (  # type: ignore[assignment]
+                lambda *_args, **_kwargs: True
+            )
             out = ind.forward_with_pending_nested(x, qr, meta, nested_pending=pending)
         finally:
             indexer_mod.has_fp8_mqa_logits = saved_has  # type: ignore[assignment]

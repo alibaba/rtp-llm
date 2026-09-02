@@ -39,6 +39,7 @@ def _fwd_kernel_ep_scatter_1(
         tl.store(
             m_indices_start_ptr + start_m_i64 + off_expert,
             cur_expert.to(tl.int32),
+            mask=start_m_i64 + off_expert < cur_expert_token_num,
         )
 
 
@@ -131,11 +132,7 @@ def ep_scatter(
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
-    scale_hidden_size = hidden_size // BLOCK_D
-    if scale_ue8m0:
-        # ue8m0 scales are packed here (4 scales per int32),
-        # hence the effective size of this dimension is divided by 4.
-        scale_hidden_size = ceil_div(scale_hidden_size, 4)
+    scale_hidden_size = recv_x_scale.shape[1]
 
     assert m_indices.shape[0] % BLOCK_E == 0
     assert recv_x_scale.dtype == output_tensor_scale.dtype
@@ -338,6 +335,7 @@ def ep_scatter_v2(
 def _fwd_kernel_ep_gather(
     total_token_num,
     total_input_tokens,
+    hidden_size,
     input_tensor,
     input_tensor_stride0,
     input_tensor_stride1,
@@ -362,6 +360,8 @@ def _fwd_kernel_ep_gather(
     for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
         cur_token = cur_token_int32.to(tl.int64)
         off_d = tl.arange(0, BLOCK_D)
+        col = cur_block * BLOCK_D + off_d
+        col_mask = col < hidden_size
         accumulator = tl.zeros([BLOCK_D], dtype=tl.float32)
         for topk_index_int32 in range(0, topk_num):
             topk_index = topk_index_int32.to(tl.int64)
@@ -382,16 +382,17 @@ def _fwd_kernel_ep_gather(
                     tmp = tl.load(
                         input_tensor
                         + source_token_index * input_tensor_stride0
-                        + cur_block * BLOCK_D
-                        + off_d
+                        + col * input_tensor_stride1,
+                        mask=col_mask,
+                        other=0.0,
                     )
                     accumulator += tmp.to(tl.float32) * acc_weight
         tl.store(
             output_tensor
             + cur_token * output_tensor_stride0
-            + cur_block * BLOCK_D
-            + off_d,
+            + col * output_tensor_stride1,
             accumulator.to(output_tensor.dtype.element_ty),
+            mask=col_mask,
         )
 
 
@@ -407,11 +408,13 @@ def ep_gather(
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    assert hidden_size % BLOCK_D == 0
+    if num_tokens == 0:
+        return
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
         input_tensor.shape[0],
+        hidden_size,
         input_tensor,
         input_tensor.stride(0),
         input_tensor.stride(1),

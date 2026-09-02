@@ -3,7 +3,10 @@ from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
-from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
+from rtp_llm.test.perf_test.batch_perf_impl import (
+    BatchPerfImpl,
+    require_complete_measurement,
+)
 from rtp_llm.test.perf_test.dataclass import (
     DistributionMetricState,
     create_distribution_metrics_table,
@@ -40,7 +43,7 @@ class DistributionRunner:
         sorted_bs_keys = sorted(batch_seq_len_map.keys(), key=lambda x: int(x))
         first_seq_lens = batch_seq_len_map[sorted_bs_keys[0]]
         logging.info(f"in warmup, port: {self._port}, dp_size: {self._dp_size}")
-        BatchPerfImpl(
+        metric = BatchPerfImpl(
             self._port,
             self._dp_size,
             1 * self._dp_size,
@@ -51,6 +54,7 @@ class DistributionRunner:
             False,
             self._generate_config,
         ).run()
+        require_complete_measurement(metric, context="distribution warmup")
 
     def run(self) -> List[DistributionMetricState]:
         """Warmup then iterate batch_seq_len_map, return metrics."""
@@ -92,6 +96,10 @@ class DistributionRunner:
                     self._generate_config,
                     trace_name,
                 ).run(num_measures=self._num_measures)
+                require_complete_measurement(
+                    metric,
+                    context=f"distribution batch_size={actual_bs}",
+                )
 
                 metrics_list.append(
                     DistributionMetricState(actual_bs, seq_len_list, metric)

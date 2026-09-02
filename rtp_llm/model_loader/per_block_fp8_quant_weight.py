@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -19,6 +20,7 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.utils.model_weight import (
     FP8_E4M3_MAX,
     CkptWeightInfo,
@@ -52,6 +54,35 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
+
+
+def _sm120_inference_device(
+    kernel_weight: torch.Tensor, load_config: LoadConfig
+) -> Optional[int]:
+    """Resolve an SM120 inference target even while conversion uses CPU.
+
+    ``force_cpu_load_weights`` and the loader's memory-pressure fallback run
+    post-processing on CPU before moving the result to its final device.  The
+    physical weight layout is a consumer contract, so it must follow that
+    final device rather than the temporary tensor location.
+    """
+    if kernel_weight.is_cuda:
+        return kernel_weight.device.index
+    exported_device = load_config.exported_device
+    if (
+        exported_device is not None
+        and exported_device.get_device_type() == DeviceType.Cuda
+    ):
+        return int(exported_device.get_device_id())
+    return None
+
+
+def _preserve_output_major_fp8_layout(
+    kernel_weight: torch.Tensor, load_config: LoadConfig
+) -> bool:
+    """CUTLASS SM120 consumes checkpoint-native ``(N, K)`` weights."""
+    target_device = _sm120_inference_device(kernel_weight, load_config)
+    return target_device is not None and is_sm120(target_device)
 
 
 def dequant_weight_split_k(
@@ -813,9 +844,15 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
-        # e8m0 not reshape, weight scale need be non contiguous
-        # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        # Scale encoding and physical matrix layout are separate contracts.
+        # DeepGEMM-disabled legacy backends consume the historical reshaped
+        # layout, while CUTLASS SM120 consumes checkpoint-native (N, K).
+        target_device = _sm120_inference_device(kernel_weight, load_config)
+        use_e8m0 = is_deep_gemm_e8m0_used(target_device)
+        preserve_output_major = _preserve_output_major_fp8_layout(
+            kernel_weight, load_config
+        )
+        if not use_e8m0 and not preserve_output_major:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -824,7 +861,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            if not is_deep_gemm_e8m0_used():
+            if not use_e8m0 and not preserve_output_major:
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
                     if scale_weight.dim() == 2
@@ -838,7 +875,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            if use_e8m0:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -914,14 +951,28 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
+        preserve_output_major = _preserve_output_major_fp8_layout(
+            quant_kernel, load_config
+        )
+        # AtomicWeight._load_raw_tensor has already applied process_fun.
+        # SM120 wants output-major [N, K], so an identity descriptor can be
+        # preserved while transpose/transpose_pad descriptors must be
+        # transposed back.  Looking only at the target architecture silently
+        # returned [K, N] for real descriptors with rectangular weights.
+        transpose_kernel = quant_kernel.dim() == 2 and (
+            not preserve_output_major or self.kernel.need_transpose
+        )
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2:
+        elif transpose_kernel:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
+            transpose_scale = scale.dim() == 2 and (
+                not preserve_output_major or self.scale.need_transpose
+            )
+            scale = scale.T if transpose_scale else scale
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res

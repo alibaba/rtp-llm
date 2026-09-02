@@ -1,9 +1,10 @@
+import argparse
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm import start_server
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
@@ -42,6 +43,43 @@ class StartupRealWarmupTest(unittest.TestCase):
             ),
             1048568,
         )
+
+    @staticmethod
+    def _warmup_config():
+        return SimpleNamespace(
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PREFILL),
+            parallelism_config=SimpleNamespace(world_rank=0, world_size=1, tp_size=1),
+            model_args=SimpleNamespace(model_type="deepseek_v4"),
+            misc_config=SimpleNamespace(dsv4_startup_real_warmup=True),
+        )
+
+    def test_startup_real_warmup_uses_parsed_config(self):
+        config = self._warmup_config()
+        self.assertTrue(start_server._should_run_startup_real_warmup(config))
+        config.misc_config.dsv4_startup_real_warmup = False
+        self.assertFalse(start_server._should_run_startup_real_warmup(config))
+
+    def test_irrelevant_roles_ignore_malformed_warmup_value(self):
+        cases = (
+            (RoleType.FRONTEND, "deepseek_v4"),
+            (RoleType.PREFILL, "qwen_2"),
+        )
+        for role_type, model_type in cases:
+            with self.subTest(role_type=role_type, model_type=model_type):
+                config = self._warmup_config()
+                config.role_config.role_type = role_type
+                config.model_args.model_type = model_type
+                config.misc_config.dsv4_startup_real_warmup = "not-a-bool"
+                self.assertFalse(start_server._should_run_startup_real_warmup(config))
+
+    def test_relevant_worker_rejects_malformed_warmup_value(self):
+        config = self._warmup_config()
+        for value in ("", "not-a-bool"):
+            with self.subTest(value=value):
+                config.misc_config.dsv4_startup_real_warmup = value
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    start_server._should_run_startup_real_warmup(config)
 
 
 if __name__ == "__main__":

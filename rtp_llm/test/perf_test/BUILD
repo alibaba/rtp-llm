@@ -1,5 +1,10 @@
 package(default_visibility = ["//visibility:public"])
 
+_DSV4_SM120_ONLY = select({
+    "@//:using_cuda13_sm120": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 # Exported so the perf_test() macro (defined in defs.bzl, instantiated by
 # internal_source/rtp_llm/test/perf_test/BUILD) can reference test_entry.py
 # across packages.
@@ -432,7 +437,6 @@ py_test(
         "--enable_cuda_graph", "1",
         "--reserver_runtime_mem_mb", "32768",
         "--max_context_batch_size", "1",
-        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -471,10 +475,9 @@ py_test(
 # EngineServer._build_engine_cli also overrides --concurrency_limit to
 # max(batch_size_list)=128 at engine startup, so the BUILD
 # --concurrency_limit below is effectively ignored.
-# DSV4 fixed pools are sized by --dsv4_fixed_pool_blocks.  Each request can hold
-# up to 3 fixed-pool blocks, so 128 concurrent reqs need 384 request-visible
-# blocks per rank.  The default 256 leaves the bs128 run short of admission
-# headroom and surfaces as incrKVBlock LACK MEM; 512 keeps roughly 33% margin.
+# DSV4 state pools use descriptor-specific sizing. HCA_STATE is an active-tail
+# ring controlled by --dsv4_hca_state_pool_blocks; other pools follow the
+# framework's normal linear-step policy.
 # Keep one frontend per DP rank for this smoke: the test readiness check probes a
 # shared rank port once, and multiple SO_REUSEPORT frontends can otherwise route
 # early scheduler updates to a process that is still completing startup.
@@ -515,7 +518,6 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
-        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -585,7 +587,6 @@ py_test(
         "--reserver_runtime_mem_mb", "32768",
         "--reserve_block_ratio", "0",
         "--max_context_batch_size", "256",
-        "--dsv4_fixed_pool_blocks", "512",
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -751,7 +752,6 @@ py_test(
         "--sp_checkpoint_path", "/mnt/nas1/hf/DeepSeek-V4-Flash",
         "--sp_act_type", "bf16",
         "--warm_up", "0",
-        "--dsv4_fixed_pool_blocks", "1024"
     ],
     env = {
         "WORLD_SIZE": "4",
@@ -933,6 +933,172 @@ test_suite(
         ":v4_pro_dp8_decode_bs128_64k_perf",
     ],
     tags = ["manual"],
+)
+
+# SM120 DeepSeek-V4-Flash-0731 DSpark profiles matching the CP4/DP4 smoke
+# deployment. Keep these manual: the full decode cartesian grid is expensive.
+# Supply model locations with --test_env=CHECKPOINT_PATH=... and, when they
+# differ, TOKENIZER_PATH/SP_CHECKPOINT_PATH. Public targets must not encode a
+# developer-specific NAS mount.
+py_test(
+    name = "v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--batch_size", "1",
+        "--input_len", "1024,2048,4096,8192,16384,32768,65536,131072,262144",
+        "--partial", "2",
+        "--role_type", "PREFILL",
+        "--decode_test_length", "1",
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "128",
+        "--tp_size", "4",
+        "--dp_size", "1",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--warm_up", "0",
+        "--max_seq_len", "262160",
+        "--cp_rotate_method", "ALL_GATHER",
+        "--prefill_cp_kv_cache_sharded", "0",
+        "--act_type", "BF16",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "1",
+        "--enable_cuda_graph", "0",
+        "--reserver_runtime_mem_mb", "22528",
+        "--max_context_batch_size", "1",
+        "--dsv4_hca_state_pool_blocks", "64",
+        "--sp_type", "dspark",
+        "--gen_num_per_cycle", "3",
+        "--sp_model_type", "deepseek_v4_dspark",
+        "--sp_act_type", "bf16",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "GPU_COUNT": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "1",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "5",
+        "PERF_GRID_WARMUP_RUNS": "1",
+        "PERF_FORMAL_WARMUP_RUNS": "0",
+        "PERF_MEASURE_RUNS": "1",
+        "PERF_PROFILE_RUNS": "1",
+        "ENABLE_DSPARK": "1",
+        "DSV4_STARTUP_REAL_WARMUP": "0",
+        "DSV4_USE_FRAMEWORK_KV": "1",
+        "DSV4_PREFILL_CP_OVERLAP": "0",
+        "DSV4_CHUNK_TOKENS": "12288",
+        "CP_FORCE_SINGLE_PREFILL": "0",
+        "DSV4_USE_MEGA_MOE": "1",
+        "DSV4_BF16_VLLM": "0",
+        "DSV4_FUSED_PREPARE": "1",
+        "ENABLE_FP32_LM_HEAD": "0",
+        # SWA/other non-HCA state pools use the linear-step fallback; HCA_STATE
+        # is fixed independently above.
+        "LINEAR_STEP": "64",
+        "NCCL_P2P_DISABLE": "1",
+    },
+    tags = ["manual", "SM120_X86"],
+    exec_properties = {
+        "gpu": "SM120_X86",
+        "gpu_count": "4",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--model_type", "deepseek_v4",
+        "--batch_size", "1,2,4,8,16,32,64,128",
+        "--input_len", "1024,4096,8192,16384,32768,65536,131072,262144",
+        "--partial", "1",
+        "--seq_size_per_block", "256",
+        "--kernel_seq_size_per_block", "128",
+        "--tp_size", "1",
+        "--dp_size", "4",
+        "--ep_size", "4",
+        "--world_size", "4",
+        "--warm_up", "0",
+        "--max_seq_len", "262160",
+        "--act_type", "BF16",
+        "--fp8_kv_cache", "1",
+        "--load_method", "fastsafetensors",
+        "--concurrency_limit", "128",
+        "--enable_cuda_graph", "1",
+        "--decode_capture_config", "1,2,4,8,16,32,64,128",
+        "--reserver_runtime_mem_mb", "16384",
+        "--max_context_batch_size", "1",
+        # HCA_STATE is an active-tail ring and does not participate in prefix
+        # reuse; this pool is independently configurable from LINEAR_STEP.
+        "--dsv4_hca_state_pool_blocks", "256",
+        "--sp_type", "dspark",
+        "--gen_num_per_cycle", "3",
+        "--sp_model_type", "deepseek_v4_dspark",
+        "--sp_act_type", "bf16",
+    ],
+    env = {
+        "WORLD_SIZE": "4",
+        "GPU_COUNT": "4",
+        "DG_JIT_CPP_STANDARD": "20",
+        "GEN_TIMELINE_SYNC": "1",
+        "PERF_PREARM_PROFILE": "1",
+        "PERF_PROFILE_NUM_STEPS": "4",
+        "PERF_PROFILE_ARM_SLEEP": "2",
+        "PERF_PROFILE_FLUSH_SLEEP": "5",
+        "PERF_GRID_WARMUP_RUNS": "1",
+        "PERF_FORMAL_WARMUP_RUNS": "0",
+        "PERF_MEASURE_RUNS": "1",
+        "PERF_PROFILE_RUNS": "1",
+        "ENABLE_DSPARK": "1",
+        "DSV4_STARTUP_REAL_WARMUP": "0",
+        "DSV4_USE_FRAMEWORK_KV": "1",
+        "DSV4_USE_MEGA_MOE": "1",
+        "DSV4_BF16_VLLM": "0",
+        "DSV4_FUSED_PREPARE": "1",
+        "FLASHMLA_FORCE_HEAD64X2": "1",
+        "ENABLE_FP32_LM_HEAD": "0",
+        # Decode does not use prefix-reuse compaction. Keep enough SWA/state
+        # tail blocks for the largest tested BS=128 graph. BS=256 is
+        # intentionally excluded from this perf target.
+        "LINEAR_STEP": "16",
+        "NCCL_P2P_DISABLE": "1",
+    },
+    tags = ["manual", "SM120_X86"],
+    exec_properties = {
+        "gpu": "SM120_X86",
+        "gpu_count": "4",
+    },
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+test_suite(
+    name = "perf_dsv4_v4_flash_sm120",
+    tests = [
+        ":v4_flash_0731_dspark_cp4_prefill_grid_sm120_perf",
+        ":v4_flash_0731_dspark_dp4_decode_grid_sm120_perf",
+    ],
+    tags = ["manual", "SM120_X86"],
 )
 
 # DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).

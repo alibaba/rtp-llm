@@ -1,7 +1,8 @@
 import functools
-import os
 
 import torch
+
+from rtp_llm.models_py.utils.arch import mhc_pre_gemm_backend
 
 from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
@@ -19,21 +20,6 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     num_block_k = _ceil_div(k, block_k)
     split_k = min(split_k, num_block_k // 4)
     return max(split_k, 1)
-
-
-def _requested_backend() -> str:
-    requested = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower()
-    if requested in ("", "auto"):
-        # Experiment branch: enable DeepGEMM by default to validate DSV4
-        # greedy/golden semantics under the full SM100 smoke suite. This is
-        # intentionally hard: DeepGEMM/JIT failures must surface directly.
-        return "deepgemm"
-    aliases = {
-        "dg": "deepgemm",
-        "tilelang": "tilelang_single",
-        "single": "tilelang_single",
-    }
-    return aliases.get(requested, requested)
 
 
 def _run_tilelang_single_gemm(
@@ -107,7 +93,9 @@ def mhc_pre_big_fuse(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
-    backend = _requested_backend()
+    # JIT warmup and runtime dispatch share this single resolver so aliases,
+    # explicit overrides, and architecture defaults cannot drift.
+    backend = mhc_pre_gemm_backend(residual.device)
     block_k = 64
     block_m = 64
     n_splits = (

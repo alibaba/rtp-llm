@@ -29,6 +29,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4.quant_layouts import (
     prepare_fp4_weight_scale_for_deepgemm,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 
 
 FP8_BLOCK = 128
@@ -124,6 +125,9 @@ class QuantizedLinear(nn.Module):
         self.weight = weight
         self.scale = scale
         self.scale_gemm = scale_gemm
+        if weight.is_cuda and is_sm120(weight.device):
+            self.scale_gemm = None
+            return
         if self.scale_gemm is None:
             self.scale_gemm = prepare_fp4_weight_scale_for_deepgemm(
                 scale, self.out_features, self.in_features
@@ -192,6 +196,9 @@ class QuantizedLinear(nn.Module):
         if self.storage == "bf16":
             return F.linear(x, self.weight)
         if self.storage == "fp4":
+            if x.is_cuda and is_sm120(x.device):
+                w = self.dequant_weight(out_dtype=x.dtype)
+                return F.linear(x, w)
             return self._fp4_forward_deepgemm(x)
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)

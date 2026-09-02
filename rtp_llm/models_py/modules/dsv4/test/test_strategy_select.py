@@ -8,24 +8,36 @@ contract. Pure-Python, no CUDA / DeepGEMM / dist required — runs on host.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import types
 import unittest
 from contextlib import contextmanager
 from unittest import mock
 
+import torch
+
+from rtp_llm.device.device_type import DeviceType
+from rtp_llm.models_py.distributed import deepep_wrapper
+
 # Importing strategies populates the registry via ``register_strategy``.
 from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     DeepEPStrategy,
     GroupedFP4Strategy,
     LocalLoopStrategy,
+    MegaMoEFusedStrategy,
     MegaMoEStrategy,
     MegaMoEStrategySE,
     MoeCfg,
+    Sm120FusedMoeStrategy,
     _has_fp8_fp4_grouped_kernel,
-    select_strategy,
 )
+from rtp_llm.models_py.modules.dsv4.moe.strategies import (
+    grouped_fp4 as grouped_fp4_module,
+)
+from rtp_llm.models_py.modules.dsv4.moe.strategies import select_strategy
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import _resolve_forced
+from rtp_llm.utils.model_weight import W
 
 
 def _cfg(ep_size: int = 1) -> MoeCfg:
@@ -80,6 +92,26 @@ class StrategySelectTest(unittest.TestCase):
         ):
             os.environ.pop(k, None)
 
+    def test_strategy_import_does_not_require_cuda_pure_cp_router(self):
+        script = """
+import sys
+sys.modules[
+    'rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router'
+] = None
+import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout}\nstderr={result.stderr}",
+        )
+
     # --- auto-pick matrix --------------------------------------------------
 
     def test_ep1_with_grouped_kernel_picks_grouped(self):
@@ -97,12 +129,30 @@ class StrategySelectTest(unittest.TestCase):
         ):
             self.assertFalse(GroupedFP4Strategy.can_handle(cfg))
 
-    def test_grouped_kernel_probe_requires_sm100(self):
+    def test_grouped_kernel_probe_supports_sm100_and_sm120(self):
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.block_scale_interleave = lambda value: value
+        fake_flashinfer.mxfp8_quantize = lambda value, **_: (value, value)
+        fake_gemm = types.ModuleType("flashinfer.gemm")
+        fake_gemm.group_gemm_mxfp4_nt_groupwise = lambda *args, **kwargs: None
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        fake_fused_moe.cutlass_fused_moe = lambda *args, **kwargs: None
+        fake_fused_moe.cutlass_fused_moe_workspace_size = lambda *args, **kwargs: 1
+        fake_fused_moe_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_fused_moe_core.ActivationType = types.SimpleNamespace(Swiglu=object())
         fake_deep_gemm = types.SimpleNamespace(
             m_grouped_fp8_fp4_gemm_nt_contiguous=object(),
             get_mk_alignment_for_contiguous_layout=lambda: (128, 128),
         )
-        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.gemm": fake_gemm,
+                "flashinfer.fused_moe": fake_fused_moe,
+                "flashinfer.fused_moe.core": fake_fused_moe_core,
+            },
+        ), mock.patch(
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.is_available",
             return_value=True,
@@ -110,8 +160,11 @@ class StrategySelectTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.get_device_capability",
             return_value=(12, 0),
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+            return_value=True,
         ):
-            self.assertFalse(_has_fp8_fp4_grouped_kernel())
+            self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
         with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
@@ -121,8 +174,41 @@ class StrategySelectTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
             "torch.cuda.get_device_capability",
             return_value=(10, 0),
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+            return_value=False,
         ):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
+
+    def test_sm120_grouped_probe_requires_cuda_graph_apis(self):
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.block_scale_interleave = lambda value: value
+        fake_flashinfer.mxfp8_quantize = lambda value, **_: (value, value)
+        fake_gemm = types.ModuleType("flashinfer.gemm")
+        fake_gemm.group_gemm_mxfp4_nt_groupwise = lambda *args, **kwargs: None
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        # Deliberately omit cutlass_fused_moe: eager grouped GEMM exists, but
+        # graph capture must be rejected during strategy selection.
+        fake_fused_moe.cutlass_fused_moe_workspace_size = lambda *args, **kwargs: 1
+        fake_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_core.ActivationType = types.SimpleNamespace(Swiglu=object())
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.gemm": fake_gemm,
+                "flashinfer.fused_moe": fake_fused_moe,
+                "flashinfer.fused_moe.core": fake_core,
+            },
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.is_available",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4.is_sm120",
+            return_value=True,
+        ):
+            self.assertFalse(_has_fp8_fp4_grouped_kernel())
 
     def test_ep1_no_grouped_falls_to_local(self):
         with mock.patch.object(
@@ -134,6 +220,149 @@ class StrategySelectTest(unittest.TestCase):
         ):
             self.assertIs(select_strategy(_cfg(ep_size=1)), LocalLoopStrategy)
 
+    def test_sm120_local_loop_setup_never_calls_deepgemm_packer(self):
+        cfg = MoeCfg(
+            layer_id=0,
+            dim=8,
+            moe_inter_dim=4,
+            n_routed_experts=2,
+            n_activated_experts=1,
+            swiglu_limit=0.0,
+            ep_size=1,
+            ep_rank=0,
+            n_local_experts=2,
+            local_expert_start=0,
+            local_expert_end=2,
+            max_tokens_per_rank=4,
+        )
+        strategy = LocalLoopStrategy(cfg)
+        weights = {
+            W.v4_routed_w1_w: torch.zeros(2, 1),
+            W.v4_routed_w1_s: torch.ones(2, 1),
+            W.v4_routed_w2_w: torch.zeros(2, 1),
+            W.v4_routed_w2_s: torch.ones(2, 1),
+            W.v4_routed_w3_w: torch.zeros(2, 1),
+            W.v4_routed_w3_s: torch.ones(2, 1),
+        }
+
+        class _FakeExpert(torch.nn.Module):
+            def __init__(self, *args, expert_weights, **kwargs):
+                super().__init__()
+                self.expert_weights = expert_weights
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
+            "_uses_sm120_local_loop",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
+            "prepare_fp4_weight_scale_for_deepgemm",
+            side_effect=AssertionError("DeepGEMM packer must not run on SM120"),
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop.Expert",
+            _FakeExpert,
+        ):
+            strategy.setup_weights(weights)
+
+        self.assertFalse(strategy._deepgemm_topk_available)
+        self.assertIsNone(strategy._W1_s_gemm)
+        self.assertIsNone(strategy._W2_s_gemm)
+        self.assertIsNone(strategy._W3_s_gemm)
+        for expert in strategy.experts:
+            self.assertIsNone(expert.expert_weights["w1_s_gemm"])
+            self.assertIsNone(expert.expert_weights["w2_s_gemm"])
+            self.assertIsNone(expert.expert_weights["w3_s_gemm"])
+
+    def test_sm120_local_loop_rejects_cuda_graph_capture(self):
+        strategy = LocalLoopStrategy(_cfg(ep_size=1))
+        strategy._deepgemm_topk_available = False
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.local_loop."
+            "torch.cuda.is_current_stream_capturing",
+            return_value=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "eager-only"):
+                strategy.forward_local_range(
+                    torch.zeros(1, 1),
+                    torch.ones(1, 1),
+                    torch.zeros(1, 1, dtype=torch.long),
+                    0,
+                    1,
+                )
+
+    def test_sm120_workspace_growth_reuses_capacity_without_dropping_old_buffer(self):
+        strategy = GroupedFP4Strategy(_cfg(ep_size=1))
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        fake_fused_moe.cutlass_fused_moe_workspace_size = (
+            lambda tokens, *_args, **_kwargs: tokens * 10
+        )
+        fake_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_core.ActivationType = types.SimpleNamespace(Swiglu=object())
+
+        grouped_fp4_module._SM120_FUSED_MOE_WORKSPACES.clear()
+        try:
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "flashinfer.fused_moe": fake_fused_moe,
+                    "flashinfer.fused_moe.core": fake_core,
+                },
+            ):
+                first = strategy._get_sm120_fused_moe_workspace(torch.device("cpu"), 3)
+                grown = strategy._get_sm120_fused_moe_workspace(torch.device("cpu"), 9)
+                reused = strategy._get_sm120_fused_moe_workspace(torch.device("cpu"), 2)
+
+            self.assertNotEqual(first.data_ptr(), grown.data_ptr())
+            self.assertEqual(first.data_ptr(), reused.data_ptr())
+            generations = next(
+                iter(grouped_fp4_module._SM120_FUSED_MOE_WORKSPACES.values())
+            )
+            self.assertEqual([capacity for capacity, _ in generations], [4, 16])
+        finally:
+            grouped_fp4_module._SM120_FUSED_MOE_WORKSPACES.clear()
+
+    def test_sm120_capture_masks_zero_weight_routes(self):
+        strategy = GroupedFP4Strategy(_cfg(ep_size=1))
+        strategy._w13 = torch.zeros(8, dtype=torch.uint8)
+        strategy._w2 = torch.zeros(8, dtype=torch.uint8)
+        strategy._s13_sm120 = torch.zeros(1, dtype=torch.int32)
+        strategy._s2_sm120 = torch.zeros(1, dtype=torch.int32)
+
+        captured = {}
+
+        def fake_cutlass_fused_moe(**kwargs):
+            captured.update(kwargs)
+            kwargs["output"].zero_()
+
+        fake_flashinfer = types.ModuleType("flashinfer")
+        fake_flashinfer.mxfp8_quantize = lambda value, **_: (value, value)
+        fake_fused_moe = types.ModuleType("flashinfer.fused_moe")
+        fake_fused_moe.cutlass_fused_moe = fake_cutlass_fused_moe
+        fake_core = types.ModuleType("flashinfer.fused_moe.core")
+        fake_core.ActivationType = types.SimpleNamespace(Swiglu=object())
+
+        x = torch.zeros(2, 8, dtype=torch.bfloat16)
+        weights = torch.tensor([[1.0, 0.0], [0.5, 0.0]])
+        indices = torch.tensor([[3, 17], [4, 99]], dtype=torch.int64)
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "flashinfer": fake_flashinfer,
+                "flashinfer.fused_moe": fake_fused_moe,
+                "flashinfer.fused_moe.core": fake_core,
+            },
+        ), mock.patch.object(
+            strategy,
+            "_get_sm120_fused_moe_workspace",
+            return_value=torch.zeros(1, dtype=torch.uint8),
+        ):
+            strategy._forward_capture_sm120(x, weights, indices)
+
+        torch.testing.assert_close(
+            captured["token_selected_experts"],
+            torch.tensor([[3, -1], [4, -1]], dtype=torch.int32),
+        )
+
     def test_ep_gt1_with_mega_picks_mega(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
@@ -144,12 +373,92 @@ class StrategySelectTest(unittest.TestCase):
         ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
-    def test_ep_gt1_no_mega_raises(self):
-        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
-            with self.assertRaises(RuntimeError) as cm:
+    def test_mega_child_strategies_share_exact_architecture_gate(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "_architecture_supported", return_value=False
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se."
+            "_mega_moe_se_enabled",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_fused."
+            "_mega_moe_fused_enabled",
+            return_value=True,
+        ):
+            self.assertFalse(MegaMoEStrategySE.can_handle(_cfg(ep_size=4)))
+            self.assertFalse(MegaMoEFusedStrategy.can_handle(_cfg(ep_size=4)))
+
+    def test_accl_ep_policy_is_device_type_aware(self):
+        cases = (
+            (DeviceType.Cuda, False, True),
+            (DeviceType.Cuda, True, False),
+            (DeviceType.ROCm, False, False),
+            (DeviceType.Ppu, False, True),
+            (DeviceType.Cpu, False, False),
+        )
+        for device_type, sm12x, expected in cases:
+            with self.subTest(device_type=device_type, sm12x=sm12x), mock.patch.object(
+                deepep_wrapper, "get_device_type", return_value=device_type
+            ), mock.patch.object(deepep_wrapper, "is_sm12x", return_value=sm12x):
+                self.assertEqual(deepep_wrapper.use_accl_ep(), expected)
+
+    def test_explicit_unsupported_deepep_request_fails_closed(self):
+        with mock.patch.object(
+            deepep_wrapper.DeepEPWrapper, "supported", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "was requested"):
+                deepep_wrapper.init_deepep_wrapper(None, None)
+
+    def test_ep_gt1_no_mega_fails_instead_of_silently_using_deepep(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            Sm120FusedMoeStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=True
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.mega_buf."
+            "_mega_moe_disabled_or_unavailable_reason",
+            return_value="Mega unavailable in test",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Mega unavailable in test"):
                 select_strategy(_cfg(ep_size=4))
-        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
-        self.assertIn("fallback to DeepEP/LocalLoop is disabled", str(cm.exception))
+
+    def test_sm120_ep_gt1_uses_explicit_fused_moe_strategy(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe.is_sm120",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.get_device_capability",
+            return_value=(12, 0),
+        ):
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4)),
+                Sm120FusedMoeStrategy,
+            )
+
+    def test_sm120_strategy_rejects_other_sm12x_devices(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe.is_sm120",
+            return_value=False,
+        ):
+            self.assertFalse(Sm120FusedMoeStrategy.can_handle(_cfg(ep_size=4)))
+
+    def test_deepep_probe_rejects_sm12x_without_mocking_strategy_result(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.deepep.is_sm12x",
+            return_value=True,
+        ):
+            self.assertFalse(DeepEPStrategy.can_handle(_cfg(ep_size=4)))
+
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.deepep.is_sm12x",
+            return_value=False,
+        ):
+            self.assertTrue(DeepEPStrategy.can_handle(_cfg(ep_size=4)))
 
     # --- forced override ---------------------------------------------------
 
@@ -167,12 +476,11 @@ class StrategySelectTest(unittest.TestCase):
         self.assertIn("Forced MoE strategy 'grouped_fp4'", str(cm.exception))
         self.assertIn("cannot handle", str(cm.exception))
 
-    def test_forced_ep_gt1_non_mega_raises_even_if_capable(self):
+    def test_forced_ep_gt1_deepep_is_allowed(self):
         with mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
-            with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=4), forced="deepep")
-        self.assertIn("requires MegaMoEStrategy", str(cm.exception))
-        self.assertIn("bypass Mega", str(cm.exception))
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4), forced="deepep"), DeepEPStrategy
+            )
 
     def test_forced_unknown_raises(self):
         with self.assertRaises(RuntimeError) as cm:
@@ -266,16 +574,15 @@ class StrategySelectTest(unittest.TestCase):
             self.assertIn("Conflicting MoE strategy", str(cm.exception))
 
     def test_legacy_negation_does_not_force_alternative(self):
-        # DSV4_USE_MEGA_MOE=0 should NOT force a different strategy. EP>1
-        # select_strategy() treats disabled Mega as a fatal config error.
         with _env(DSV4_USE_MEGA_MOE="0"):
             self.assertEqual(_resolve_forced(None), (None, False))
 
-    def test_legacy_negation_ep_gt1_raises(self):
-        with _env(DSV4_USE_MEGA_MOE="0"):
-            with self.assertRaises(RuntimeError) as cm:
+    def test_legacy_negation_ep_gt1_fails_closed(self):
+        with _env(DSV4_USE_MEGA_MOE="0"), mock.patch.object(
+            Sm120FusedMoeStrategy, "can_handle", return_value=False
+        ), mock.patch.object(DeepEPStrategy, "can_handle", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "DSV4_USE_MEGA_MOE=0"):
                 select_strategy(_cfg(ep_size=4))
-        self.assertIn("DSV4_USE_MEGA_MOE=0 disables Mega MoE", str(cm.exception))
 
     def test_legacy_force_nonstrict_falls_through_when_incapable(self):
         # Legacy DSV4_USE_MEGA_MOE=1 + ep_size=1 cfg: Mega.can_handle False

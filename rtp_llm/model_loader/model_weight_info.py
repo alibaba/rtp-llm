@@ -197,6 +197,12 @@ class ModelDeployWeightInfo:
         """Initialize ModelDeployWeightInfo with independent configuration objects."""
         self.model_config = model_config
         self.merge_lora = merge_lora
+        # Keep the serving role available to model-specific descriptor
+        # builders.  Most weight classes intentionally ignore it, while
+        # role-specialized speculative models (for example DSpARK's
+        # prefill-only commit worker) can select a smaller, semantically
+        # correct weight graph without changing the loader API.
+        self.role_type = parallelism_config.role_type
 
         self._use_swizzleA = hw_kernel_config.use_swizzleA
         self._use_qk_norm = model_config.qk_norm

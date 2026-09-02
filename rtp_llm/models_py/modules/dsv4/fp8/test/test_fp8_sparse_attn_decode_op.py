@@ -5,15 +5,93 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8.decode import fp8_sparse_attn_decode_op
 from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
     SparseAttnV4DecodeFp8Op,
 )
 
 
 class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
+    def test_flash_mla_optional_wheel_failures_are_lazy_and_nonfatal(self):
+        old_available = fp8_sparse_attn_decode_op._FLASH_MLA_AVAILABLE
+        old_attempted = fp8_sparse_attn_decode_op._flash_mla_load_attempted
+        try:
+            for error in (OSError("ABI mismatch"), RuntimeError("load failure")):
+                with self.subTest(error=type(error).__name__):
+                    fp8_sparse_attn_decode_op._FLASH_MLA_AVAILABLE = False
+                    fp8_sparse_attn_decode_op._flash_mla_load_attempted = False
+                    with patch.object(torch.version, "cuda", "12.9"), patch.object(
+                        fp8_sparse_attn_decode_op.importlib,
+                        "import_module",
+                        side_effect=error,
+                    ) as import_module:
+                        self.assertFalse(fp8_sparse_attn_decode_op._load_flash_mla())
+                        self.assertFalse(fp8_sparse_attn_decode_op._load_flash_mla())
+                    import_module.assert_called_once_with("flash_mla")
+        finally:
+            fp8_sparse_attn_decode_op._FLASH_MLA_AVAILABLE = old_available
+            fp8_sparse_attn_decode_op._flash_mla_load_attempted = old_attempted
+
+    def test_sm120_passes_original_paged_caches_without_static_width_copy(self):
+        # This unit verifies only the cache ABI.  Keep construction independent
+        # of whether the host running the Python test has the optional CUDA 13
+        # FlashInfer wheel installed; the dedicated hardware target exercises
+        # the real entry point.
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.decode."
+            "fp8_sparse_attn_decode_op._load_sm120_sparse_mla",
+            return_value=object(),
+        ):
+            op = SparseAttnV4DecodeFp8Op(8, 512, 1.0)
+        query = torch.zeros(1, 1, 8, 512, dtype=torch.bfloat16)
+        sink = torch.zeros(8, dtype=torch.float32)
+        swa_cache = torch.zeros(2, 64, 584, dtype=torch.uint8)
+        extra_cache = torch.zeros(3, 2, 584, dtype=torch.uint8)
+        swa_indices = torch.tensor([[[1, -1, 3]]], dtype=torch.int32)
+        extra_indices = torch.tensor([[[2, -1]]], dtype=torch.int32)
+
+        with patch("rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla.warmup"), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla.run"
+        ) as mock_run:
+            out = op._forward_sm120_flashinfer(
+                query,
+                swa_cache,
+                sink,
+                swa_indices,
+                torch.tensor([3], dtype=torch.int32),
+                extra_cache,
+                extra_indices,
+                torch.tensor([2], dtype=torch.int32),
+            )
+
+        self.assertEqual(tuple(out.shape), tuple(query.shape))
+        self.assertIs(mock_run.call_args.kwargs["swa_cache"], swa_cache)
+        self.assertIs(mock_run.call_args.kwargs["extra_cache"], extra_cache)
+
+    def test_attn_sink_cache_tracks_source_identity_and_inplace_updates(self):
+        op = SparseAttnV4DecodeFp8Op(
+            n_heads=2,
+            head_dim=128,
+            softmax_scale=1.0,
+        )
+        source = torch.tensor([1.0, 2.0], dtype=torch.bfloat16)
+
+        first = op._cached_attn_sink(source)
+        self.assertIs(first, op._cached_attn_sink(source))
+
+        source.add_(1)
+        second = op._cached_attn_sink(source)
+        self.assertIsNot(first, second)
+        torch.testing.assert_close(second, torch.tensor([2.0, 3.0]))
+
+        replacement = source.clone()
+        third = op._cached_attn_sink(replacement)
+        self.assertIsNot(second, third)
+
     def test_sparse_indices_drop_dense_cache_metadata(self):
         calls = []
         fake_flash_mla = types.ModuleType("flash_mla")
@@ -51,8 +129,8 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             q = torch.zeros(2, 3, 4, 512, dtype=torch.bfloat16)
             kv_cache = torch.zeros(8, 256, 584, dtype=torch.uint8)
             attn_sink = torch.zeros(4, dtype=torch.float32)
-            topk = torch.arange(128, dtype=torch.int32).view(1, 1, 128).expand(
-                2, 3, 128
+            topk = (
+                torch.arange(128, dtype=torch.int32).view(1, 1, 128).expand(2, 3, 128)
             )
             block_table = torch.full((2, 257), -1, dtype=torch.int32)
             cache_seqlens = torch.tensor([65537, 65537], dtype=torch.int32)

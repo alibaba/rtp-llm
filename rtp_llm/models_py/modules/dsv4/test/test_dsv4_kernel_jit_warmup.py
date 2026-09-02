@@ -619,10 +619,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
             old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "deepgemm"
+                "_mhc_prenorm_deepgemm_backend_name", lambda device=None: "deepgemm"
             )
             old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: True
+                "_mhc_prenorm_deepgemm_backend_enabled", lambda device=None: True
             )
             old_values["_generate_mhc_prenorm_warmup_specs"] = with_patch(
                 "_generate_mhc_prenorm_warmup_specs",
@@ -706,10 +706,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "_get_deep_gemm_num_sms", lambda device: 148
             )
             old_values["_mhc_prenorm_deepgemm_backend_name"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_name", lambda: "tilelang_single"
+                "_mhc_prenorm_deepgemm_backend_name", lambda device=None: "tilelang_single"
             )
             old_values["_mhc_prenorm_deepgemm_backend_enabled"] = with_patch(
-                "_mhc_prenorm_deepgemm_backend_enabled", lambda: False
+                "_mhc_prenorm_deepgemm_backend_enabled", lambda device=None: False
             )
             old_values["_dist_rank"] = with_patch("_dist_rank", lambda: 0)
             old_values["_sync_cuda"] = with_patch("_sync_cuda", lambda device: None)

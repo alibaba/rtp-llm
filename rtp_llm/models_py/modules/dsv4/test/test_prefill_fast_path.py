@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
+from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 
 
 class _FakeAttention(AttentionFP8):
@@ -90,6 +91,7 @@ class _FakeV4:
         self._prefill_ws_idx_w = 0
         self._mtp_hidden_buffer = None
         self._mtp_last_hidden_buffer = None
+        self.capture_aux_hidden_layer_ids = []
         self.norm = lambda h: h + 100
 
     def _propagate_cp_ctx(self, cp_ctx):
@@ -98,12 +100,56 @@ class _FakeV4:
     def embed(self, input_ids):
         return torch.stack((input_ids.float(), input_ids.float() + 0.5), dim=-1)
 
+    def embed_full(self, input_ids):
+        return self.embed(input_ids)
+
     def _hc_head_reduce(self, h):
         self.calls.append(("head_reduce", h.clone()))
         return h.squeeze(-2)
 
 
 class PrefillFastPathTest(unittest.TestCase):
+    def test_embed_full_reassembles_sharded_embedding(self):
+        class ShardedEmbedding:
+            args = SimpleNamespace(dim=4)
+
+            @staticmethod
+            def embed(input_ids):
+                values = input_ids.to(torch.float32).reshape(-1, 1)
+                return torch.cat((values, values + 1), dim=-1).view(*input_ids.shape, 2)
+
+        def fake_all_gather(local, group):
+            self.assertEqual(group.name, "TP")
+            return torch.cat((local, local + 100), dim=0)
+
+        input_ids = torch.tensor([[3, 4], [5, 6]], dtype=torch.long)
+        with patch(
+            "rtp_llm.models_py.distributed.collective_torch.all_gather",
+            side_effect=fake_all_gather,
+        ):
+            out = V4Transformer.embed_full(ShardedEmbedding(), input_ids)
+
+        torch.testing.assert_close(
+            out,
+            torch.tensor(
+                [
+                    [[3.0, 4.0, 103.0, 104.0], [4.0, 5.0, 104.0, 105.0]],
+                    [[5.0, 6.0, 105.0, 106.0], [6.0, 7.0, 106.0, 107.0]],
+                ]
+            ),
+        )
+
+    def test_embed_full_rejects_incompatible_shard_width(self):
+        class BadEmbedding:
+            args = SimpleNamespace(dim=5)
+
+            @staticmethod
+            def embed(input_ids):
+                return torch.zeros(*input_ids.shape, 2)
+
+        with self.assertRaisesRegex(ValueError, "incompatible hidden size"):
+            V4Transformer.embed_full(BadEmbedding(), torch.tensor([1, 2]))
+
     def test_disable_record_function_ranges_is_scoped(self):
         calls = []
 

@@ -216,8 +216,8 @@ def check_with_info(condition: bool, error_msg: str):
 
 
 def str_to_bool(s: str):
-    true_values = ("yes", "true", "1")
-    false_values = ("no", "false", "0")
+    true_values = ("yes", "true", "1", "on")
+    false_values = ("no", "false", "0", "off")
     if s.lower() in true_values:
         return True
     elif s.lower() in false_values:

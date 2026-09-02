@@ -84,7 +84,9 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size > 1 and _mega_moe_se_enabled()
+        return (
+            cls._architecture_supported() and cfg.ep_size > 1 and _mega_moe_se_enabled()
+        )
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm

@@ -5,12 +5,14 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <pybind11/embed.h>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 
@@ -75,6 +77,17 @@ struct MtpExecutorTestConfig {
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
     int64_t         dspark_mask_token_id = -1;
+    RoleType        role_type            = RoleType::PDFUSION;
+    bool            use_python_sp_model  = false;
+};
+
+struct PyCommitModelObservation {
+    bool          initialized           = false;
+    bool          saw_kv_cache          = false;
+    int           forward_count         = 0;
+    int           propose_forward_count = 0;
+    torch::Tensor input_ids;
+    torch::Tensor input_hiddens;
 };
 
 template<typename T>
@@ -416,20 +429,43 @@ private:
 };
 
 struct MtpExecutorComponents {
-    std::unique_ptr<MtpExecutor>            executor;
-    std::unique_ptr<FakeModel>              fake_target_model;
-    std::unique_ptr<FakeModel>              fake_draft_model;
-    std::unique_ptr<FakeModel>              fake_draft_prefill_model;
-    std::unique_ptr<FakeFastTopKSampler>    fake_fast_topk_sampler;
-    std::unique_ptr<FakeSpeculativeSampler> fake_speculative_sampler;
-    std::unique_ptr<FakeSampler>            fake_sampler;
-    ModelConfig                             model_config;
-    RuntimeConfig                           runtime_config;
-    ResourceContext                         resource_context;
+    std::unique_ptr<MtpExecutor>              executor;
+    std::unique_ptr<FakeModel>                fake_target_model;
+    std::unique_ptr<FakeModel>                fake_draft_model;
+    std::unique_ptr<FakeModel>                fake_draft_prefill_model;
+    std::unique_ptr<FakeFastTopKSampler>      fake_fast_topk_sampler;
+    std::unique_ptr<FakeSpeculativeSampler>   fake_speculative_sampler;
+    std::unique_ptr<FakeSampler>              fake_sampler;
+    ModelConfig                               model_config;
+    RuntimeConfig                             runtime_config;
+    ResourceContext                           resource_context;
+    std::shared_ptr<PyCommitModelObservation> py_commit_observation;
 };
 
 class MtpExecutorTest: public DeviceTestBase {
 public:
+    static void ensurePythonModelBindings() {
+        static const bool initialized = []() {
+            // This is a native cc_test, so unlike the production Python entry
+            // point it has neither an embedded interpreter nor the
+            // librtp_compute_ops module that registers the model-boundary
+            // types. Register only the three opaque wrappers used by this
+            // test; registering all compute ops would require importing the
+            // Python torch package, which is intentionally absent from this
+            // cc_test's runfiles.
+            if (!Py_IsInitialized()) {
+                py::initialize_interpreter();
+            }
+            py::gil_scoped_acquire gil;
+            auto                   main_module = py::module_::import("__main__");
+            py::class_<torch_ext::PyModelInitResources>(main_module, "PyModelInitResources");
+            py::class_<torch_ext::PyModelInputs>(main_module, "PyModelInputs");
+            py::class_<torch_ext::PyModelOutputs>(main_module, "PyModelOutputs");
+            return true;
+        }();
+        (void)initialized;
+    }
+
     GenerateStreamPtr createContextStream(const ModelConfig&     model_config,
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
@@ -484,6 +520,13 @@ public:
     }
 
     MtpExecutorComponents createMtpExecutorComponents(const MtpExecutorTestConfig& test_config) {
+        // Keep the GIL held until every temporary EngineInitParams/py::object
+        // below has either moved into PyWrappedModel or been destroyed.
+        std::unique_ptr<py::gil_scoped_acquire> python_gil;
+        if (test_config.use_python_sp_model) {
+            ensurePythonModelBindings();
+            python_gil = std::make_unique<py::gil_scoped_acquire>();
+        }
         CustomConfig               config;
         ModelConfig                model_config;
         RuntimeConfig              runtime_config;
@@ -496,6 +539,8 @@ public:
         model_config.num_layers                            = test_config.num_layers;
         model_config.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
         model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
+        model_config.attn_config.tokens_per_block          = 2;
+        model_config.attn_config.kernel_tokens_per_block   = 2;
         sp_config.type                                     = test_config.sp_type;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
         sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
@@ -510,8 +555,50 @@ public:
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;
+        // Keep the test fixture's role plumbing identical to production
+        // EngineConfig: DSpARK's commit-only policy is enabled only for a
+        // dedicated PREFILL worker, never for colocated PDFUSION/DECODE.
+        params.pd_sep_config.role_type      = test_config.role_type;
+        params.parallelism_config.role_type = test_config.role_type;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
+        }
+
+        std::shared_ptr<PyCommitModelObservation> py_commit_observation;
+        if (test_config.use_python_sp_model) {
+            py_commit_observation  = std::make_shared<PyCommitModelObservation>();
+            py::object py_sp_model = py::module_::import("types").attr("SimpleNamespace")();
+            py_sp_model.attr("initialize") =
+                py::cpp_function([py_commit_observation](const torch_ext::PyModelInitResources& resources) {
+                    py_commit_observation->initialized  = true;
+                    py_commit_observation->saw_kv_cache = resources.kv_cache.has_value();
+                    return true;
+                });
+            py_sp_model.attr("prepare_fmha_impl") =
+                py::cpp_function([](const torch_ext::PyModelInputs&, bool) { return py::none(); });
+            py_sp_model.attr("forward_commit") =
+                py::cpp_function([py_commit_observation](const torch_ext::PyModelInputs& inputs, py::object) {
+                    py_commit_observation->forward_count++;
+                    py_commit_observation->input_ids     = inputs.input_ids.detach().cpu().clone();
+                    py_commit_observation->input_hiddens = inputs.input_hiddens.detach().cpu().clone();
+                    const auto hidden_width              = py_commit_observation->input_hiddens.dim() == 2 ?
+                                                               py_commit_observation->input_hiddens.size(1) :
+                                                               0;
+                    return torch_ext::PyModelOutputs(
+                        torch::empty({0, hidden_width}, py_commit_observation->input_hiddens.options()));
+                });
+            py_sp_model.attr("forward_propose") =
+                py::cpp_function([py_commit_observation](const torch_ext::PyModelInputs& inputs, py::object) {
+                    py_commit_observation->propose_forward_count++;
+                    auto hidden_states = inputs.input_hiddens;
+                    if (!hidden_states.defined() || hidden_states.numel() == 0) {
+                        hidden_states = torch::zeros(
+                            {inputs.input_ids.numel(), 2},
+                            torch::TensorOptions().dtype(torch::kBFloat16).device(inputs.input_ids.device()));
+                    }
+                    return torch_ext::PyModelOutputs(std::move(hidden_states));
+                });
+            params.py_sp_model = std::move(py_sp_model);
         }
 
         ModelConfig score_cache_model_config   = params.model_config_;
@@ -607,6 +694,7 @@ public:
         components.model_config             = model_config;
         components.runtime_config           = runtime_config;
         components.resource_context         = resource_context;
+        components.py_commit_observation    = std::move(py_commit_observation);
 
         return components;
     }
@@ -659,6 +747,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     target_output.logits           = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({(int64_t)batch_size, 4});
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->expectTargetVerify(false);
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
@@ -712,6 +801,8 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     test_config.vocab_size_override  = test_config.vocab_size;
     test_config.sp_type              = SP_TYPE_DSPARK;
     test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
+    test_config.use_python_sp_model  = true;
     auto components                  = createMtpExecutorComponents(test_config);
 
     GenerateStreamPtr stream = createContextStream(
@@ -727,30 +818,32 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->expectTargetVerify(false);
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
-
-    GptModelInputs commit_input     = target_input;
-    commit_input.last_hidden_states = target_output.all_hidden_states;
-    components.fake_draft_prefill_model->setInputs({commit_input});
-    components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
-    components.fake_draft_prefill_model->expectTargetVerify(false);
 
     auto sampler_input  = SamplerInputs{target_output.logits};
     auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
-    setupFakeModels(components.executor.get(),
-                    std::move(components.fake_target_model),
-                    std::move(components.fake_draft_model),
-                    std::move(components.fake_fast_topk_sampler),
-                    std::move(components.fake_speculative_sampler),
-                    std::move(components.fake_sampler),
-                    std::move(components.fake_draft_prefill_model));
+    // Keep the production PyWrappedModel commit wrapper constructed by
+    // MtpExecutor. Only isolate the unrelated target/sampling boundaries.
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->setFastTopKSampler(std::move(components.fake_fast_topk_sampler));
+    components.executor->setSpeculativeSampler(std::move(components.fake_speculative_sampler));
+    components.executor->setSampler(std::move(components.fake_sampler));
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok()) << status.ToString();
+    ASSERT_NE(components.py_commit_observation, nullptr);
+    EXPECT_TRUE(components.py_commit_observation->initialized);
+    EXPECT_TRUE(components.py_commit_observation->saw_kv_cache);
+    EXPECT_EQ(components.py_commit_observation->forward_count, 1);
+    EXPECT_TRUE(torch::equal(components.py_commit_observation->input_ids, torch::tensor({0, 1, 2, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(components.py_commit_observation->input_hiddens, target_output.all_hidden_states));
+    EXPECT_NE(dynamic_cast<PyWrappedModel*>(components.executor->sp_prefill_draft_model_.get()), nullptr);
+    EXPECT_EQ(components.executor->draft_model_, nullptr);
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 1}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
     EXPECT_TRUE(stream->getProposeToken().empty());
 }
@@ -1048,10 +1141,9 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     target_input.input_lengths     = torch::tensor({3}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1, 2}, torch::kInt32);
-    target_output.logits =
-        torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.2f, 0.1f, 0.8f, 0.4f, 0.7f, 0.2f, 0.1f, 0.0f})
-            .reshape({3, 4})
-            .to(torch::kCUDA);
+    target_output.logits = torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.2f, 0.1f, 0.8f, 0.4f, 0.7f, 0.2f, 0.1f, 0.0f})
+                               .reshape({3, 4})
+                               .to(torch::kCUDA);
     target_output.all_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f}).reshape({3, 2});
 
     auto next_draft_input               = GptModelInputs{};
@@ -1069,22 +1161,18 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
-    auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{
-        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
-        torch::tensor({0}, torch::kInt32).reshape({1, 1})};
+    auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
+                                                              torch::tensor({0}, torch::kInt32).reshape({1, 1})};
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
-        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}),
-        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
     components.fake_fast_topk_sampler->setInputs({draft_output_1.logits, next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({draft_sampler_output_1, next_draft_sampler_output});
 
     auto sampler_input         = SamplerInputs{target_output.logits.clone()};
     sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
-    auto target_sampler_output  = SamplerOutput{torch::tensor({1, 2, 2}, torch::kInt32).reshape({3, 1})};
-    target_sampler_output.all_probs = torch::tensor({0.0f, 1.0f, 0.0f, 0.0f,
-                                                     0.0f, 0.0f, 1.0f, 0.0f,
-                                                     0.0f, 0.0f, 1.0f, 0.0f})
-                                          .reshape({3, 4});
+    auto target_sampler_output = SamplerOutput{torch::tensor({1, 2, 2}, torch::kInt32).reshape({3, 1})};
+    target_sampler_output.all_probs =
+        torch::tensor({0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}).reshape({3, 4});
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({target_sampler_output});
 
@@ -1406,6 +1494,47 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesDenseSequentialMarkovDistribution) {
     }
 }
 
+TEST_F(MtpExecutorTest, testDSparkPrefillUsesCommitOnlyExecutorPolicy) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    // The fixture has no Python model, so wrapper construction is skipped;
+    // these assertions isolate the C++ role policy and Markov contract.  A
+    // real PREFILL worker receives the commit wrapper from the same branch,
+    // while its proposal-only tensors are absent from the weight descriptor.
+    EXPECT_TRUE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_FALSE(components.executor->draft_model_);
+    EXPECT_FALSE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_FALSE(components.executor->dspark_markov_w2_.defined());
+}
+
+TEST_F(MtpExecutorTest, testDSparkDecodeKeepsProposalAndMarkovContract) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::DECODE;
+    test_config.use_python_sp_model  = true;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    EXPECT_FALSE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_NE(dynamic_cast<PyWrappedModel*>(components.executor->draft_model_.get()), nullptr);
+    EXPECT_NE(dynamic_cast<PyWrappedModel*>(components.executor->sp_prefill_draft_model_.get()), nullptr);
+    ASSERT_NE(components.py_commit_observation, nullptr);
+    EXPECT_TRUE(components.py_commit_observation->initialized);
+    EXPECT_TRUE(components.py_commit_observation->saw_kv_cache);
+    EXPECT_TRUE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_TRUE(components.executor->dspark_markov_w2_.defined());
+}
+
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
     size_t propose_step = 1;
     size_t vocab_size   = 4;
@@ -1431,9 +1560,8 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::tensor({0, 1}, torch::kInt32);
-    target_output.logits           = torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.7f, 0.2f, 0.1f, 0.0f})
-                               .reshape({2, 4})
-                               .to(torch::kCUDA);
+    target_output.logits =
+        torch::tensor({0.1f, 0.9f, 0.2f, 0.3f, 0.7f, 0.2f, 0.1f, 0.0f}).reshape({2, 4}).to(torch::kCUDA);
     target_output.all_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f}).reshape({2, 2});
 
     auto next_draft_input               = GptModelInputs{};
@@ -1452,8 +1580,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
     components.fake_draft_model->setOutputs({next_draft_output});
 
     auto next_draft_sampler_output = spec::FastTopKSamplerOutput{
-        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}),
-        torch::tensor({2}, torch::kInt32).reshape({1, 1})};
+        torch::tensor({0.0f, 0.0f, 1.0f, 0.0f}).reshape({1, 4}), torch::tensor({2}, torch::kInt32).reshape({1, 1})};
     components.fake_fast_topk_sampler->setInputs({next_draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({next_draft_sampler_output});
 
@@ -1758,7 +1885,8 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     std::vector<torch::Tensor> draft_probs_list;
     torch::Tensor              draft_token_ids_t;
     int64_t                    model_forward_us = 0;
-    components.executor->draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+    components.executor->draftModelDecode(
+        model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
@@ -1866,18 +1994,16 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     // Verify next_seq_len = prev_seq_len + accept_len
     auto expected_next = (prev_seq_len + accept_len).cpu();
     auto actual_next   = next_seq_len.cpu();
-    EXPECT_TRUE(torch::equal(actual_next, expected_next))
-        << "next_seq_len mismatch:\n"
-        << actual_next << "\nvs expected:\n"
-        << expected_next;
+    EXPECT_TRUE(torch::equal(actual_next, expected_next)) << "next_seq_len mismatch:\n"
+                                                          << actual_next << "\nvs expected:\n"
+                                                          << expected_next;
 
     // Verify hidden_idx = accept_len - 1
     auto expected_idx = (accept_len.to(torch::kInt64) - 1).cpu();
     auto actual_idx   = hidden_idx.cpu();
-    EXPECT_TRUE(torch::equal(actual_idx, expected_idx))
-        << "hidden_idx mismatch:\n"
-        << actual_idx << "\nvs expected:\n"
-        << expected_idx;
+    EXPECT_TRUE(torch::equal(actual_idx, expected_idx)) << "hidden_idx mismatch:\n"
+                                                        << actual_idx << "\nvs expected:\n"
+                                                        << expected_idx;
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
@@ -1933,10 +2059,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
 
     double speedup = static_cast<double>(us_scalar) / static_cast<double>(us_batched);
     RTP_LLM_LOG_INFO("[dispatch-bench] batch_size=%ld iterations=%d", batch_size, iterations);
-    RTP_LLM_LOG_INFO("[dispatch-bench] batched: %ld us total, %.2f us/iter",
-                     us_batched, (double)us_batched / iterations);
-    RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter",
-                     us_scalar, (double)us_scalar / iterations);
+    RTP_LLM_LOG_INFO(
+        "[dispatch-bench] batched: %ld us total, %.2f us/iter", us_batched, (double)us_batched / iterations);
+    RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
 
@@ -1970,9 +2095,9 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     test_config.vocab_size_override = vocab_size;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    auto stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
-    auto stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
-    auto stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
 
     GenerateStreamPtr stream = createDecodeStream(

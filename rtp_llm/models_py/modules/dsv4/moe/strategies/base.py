@@ -1,31 +1,3 @@
-"""Routed-expert strategy interface + registry.
-
-A *strategy* owns the per-rank routed-expert compute. The MoE layer drives
-``Gate`` (token → expert routing) and, normally, the *shared* expert; a fused
-strategy may own the shared expert too and return ``routed + shared``.
-
-The framework is intentionally NOT involved here — see
-``.claude/plans/optimized-riding-mist.md`` for why we keep this dsv4-internal
-rather than going through ``rtp_llm.models_py.modules.factory.fused_moe``.
-
-Strategies (priority high→low for ``forced=None``):
-
-    ep_size  env / kernel                 → strategy
-    --------------------------------------------------------
-    >1       DSV4_USE_MEGA_MOE_SE=1        MegaMoEStrategySE (strict)
-    >1       mega available + dist-init    MegaMoEStrategy
-    >1       mega unavailable/disabled     RuntimeError
-    1        grouped FP4 kernel available  GroupedFP4Strategy
-    1        grouped unavailable           LocalLoopStrategy
-
-A model can override the auto-pick via:
-  - ``MoE(strategy="mega"|"grouped_fp4"|"local_loop"|"deepep")`` ctor kwarg
-  - ``DSV4_MOE_STRATEGY`` env var (overrides ctor kwarg)
-  - strict ``DSV4_USE_MEGA_MOE_SE=1`` fused-shared-expert opt-in
-  - legacy ``DSV4_USE_MEGA_MOE=0`` / ``DSV4_USE_GROUPED_FP4=0|1`` toggles
-    (translated to forced=... internally; conflicting toggles → RuntimeError)
-"""
-
 from __future__ import annotations
 
 import os
@@ -56,6 +28,14 @@ class MoeCfg:
     local_expert_start: int
     local_expert_end: int
     max_tokens_per_rank: int
+    tp_size: int = 1
+    # Physical MoE TP/CP topology.  ``tp_size`` above is retained for the
+    # attention-facing V4 config, which is intentionally 1 when prefill CP
+    # repurposes the physical TP group as the sequence-parallel group.
+    moe_tp_size: int = 1
+    moe_tp_rank: int = 0
+    cp_size: int = 1
+    cp_enabled: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):
@@ -90,7 +70,7 @@ class RoutedExpertsStrategy(nn.Module):
     """
 
     # Registered names currently include mega, mega_se, mega_fused,
-    # grouped_fp4, local_loop, and deepep.
+    # grouped_fp4, sm120_fused_moe, local_loop, and deepep.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -98,6 +78,11 @@ class RoutedExpertsStrategy(nn.Module):
     # shared-expert executor and the ``combine_routed_and_shared`` add. Only
     # Mega variants that fuse the shared expert set this True.
     routed_includes_shared: ClassVar[bool] = False
+
+    # Collective strategies whose ranks may receive different prefill token
+    # counts must make the outer MoE chunk schedule identical on every rank.
+    # The default keeps local-only strategies free of distributed work.
+    requires_synchronized_chunk_schedule: ClassVar[bool] = False
 
     def __init__(self, cfg: MoeCfg):
         super().__init__()
@@ -130,6 +115,17 @@ class RoutedExpertsStrategy(nn.Module):
         override it after checking env/static model properties.
         """
         return False
+
+    def synchronized_chunk_extent(self, local_tokens: int, device: torch.device) -> int:
+        """Return the common token extent used by outer MoE chunking.
+
+        Only strategies with ``requires_synchronized_chunk_schedule`` set may
+        override this method and perform collectives.  Keeping the method on
+        the strategy makes the process-group/topology choice explicit instead
+        of teaching the generic MoE layer about a concrete backend.
+        """
+        del device
+        return int(local_tokens)
 
     def forward_with_gate_pack(
         self,
@@ -293,9 +289,11 @@ def select_strategy(
                         "mega",
                         "mega_fused",
                         "mega_se",
+                        "deepep",
+                        "sm120_fused_moe",
                     ):
                         raise RuntimeError(
-                            "DSV4 EP MoE requires MegaMoEStrategy. "
+                            "DSV4 EP MoE requires a distributed strategy. "
                             f"Requested strategy {forced!r} would bypass Mega "
                             f"(layer_id={cfg.layer_id}, ep_size={cfg.ep_size})."
                         )
@@ -314,19 +312,21 @@ def select_strategy(
 
     if cfg.ep_size > 1:
         mega_cls = next((c for c in _STRATEGY_PRIORITY if c.name == "mega"), None)
-        if mega_cls is None:
-            raise RuntimeError(
-                "DSV4 EP MoE requires MegaMoEStrategy, but it is not registered."
-            )
-        if mega_cls.can_handle(cfg):
+        if mega_cls is not None and mega_cls.can_handle(cfg):
             return mega_cls
+        sm120_cls = next(
+            (c for c in _STRATEGY_PRIORITY if c.name == "sm120_fused_moe"),
+            None,
+        )
+        if sm120_cls is not None and sm120_cls.can_handle(cfg):
+            return sm120_cls
         from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
             _mega_moe_disabled_or_unavailable_reason,
         )
 
         raise RuntimeError(
-            "DSV4 EP MoE requires MegaMoEStrategy by default; fallback to "
-            "DeepEP/LocalLoop is disabled. "
+            "DSV4 EP MoE auto-selection requires MegaMoE or SM120 FusedMoe. "
+            "DeepEP must be requested explicitly with DSV4_MOE_STRATEGY=deepep. "
             f"layer_id={cfg.layer_id}, ep_size={cfg.ep_size}. "
             f"Reason: {_mega_moe_disabled_or_unavailable_reason()}."
         )

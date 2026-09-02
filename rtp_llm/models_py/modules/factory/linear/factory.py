@@ -111,6 +111,21 @@ class LinearFactory:
         ]
 
         if not candidates:
+            reasons = []
+            for strategy_class in cls._strategies:
+                try:
+                    reason = strategy_class.rejection_reason(
+                        quant_config,
+                        weight,
+                        weight_scales,
+                        hw_kernel_config,
+                        weight_scale_2,
+                        input_scale,
+                    )
+                except Exception as exc:
+                    reason = f"{strategy_class.__name__}: diagnostic failed: {exc}"
+                if reason:
+                    reasons.append(f"{strategy_class.__name__}: {reason}")
             quant_method = (
                 quant_config.get_method() if quant_config is not None else None
             )
@@ -119,13 +134,14 @@ class LinearFactory:
                     "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but "
                     "no registered Linear compute backend can consume them; "
                     "install or register a backend with W8A8 INT8 per-channel "
-                    "execution support"
+                    f"execution support; rejections={'; '.join(reasons)}"
                 )
             raise ValueError(
                 f"No suitable Linear strategy found for:"
                 f"weight.dtype={weight.dtype}, "
                 f"has_scales={weight_scales is not None}, "
-                f"quant_config={quant_config}"
+                f"quant_config={quant_config}; "
+                f"rejections={'; '.join(reasons)}"
             )
 
         # Check uniqueness - should only have one matching strategy
