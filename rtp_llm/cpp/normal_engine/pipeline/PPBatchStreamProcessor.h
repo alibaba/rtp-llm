@@ -26,6 +26,10 @@ public:
     absl::Status dispatchExecutionResult(const StreamGroups& stream_groups, const PPExecutionResult& result) const;
 
 private:
+    void validateExecutionResult(const std::list<GenerateStreamPtr>& all_streams,
+                                 const PPOutputConfig&               output_config,
+                                 const PPExecutionResult&            result) const;
+
     void dispatchSingleStream(const GenerateStreamPtr& stream,
                               const PPExecutionResult& result,
                               int64_t                  index,

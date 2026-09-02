@@ -55,7 +55,6 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
-    void                            pp_loop();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);

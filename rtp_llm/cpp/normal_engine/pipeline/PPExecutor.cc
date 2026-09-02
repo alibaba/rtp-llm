@@ -111,11 +111,7 @@ void PPExecutor::waitAll(PPTickets& tickets) {
 
 absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
     auto result = pp_serialization::deserializeExecutionResult(receiveObject());
-    RETURN_IF_STATUS_ERROR(batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result));
-    for (const auto& stream : batch.stream_groups.allStreams()) {
-        stream->clearPPInflight();
-    }
-    return absl::OkStatus();
+    return batch_stream_processor_->dispatchExecutionResult(batch.stream_groups, result);
 }
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
