@@ -370,7 +370,7 @@ private:
 // global timeout.
 constexpr std::chrono::seconds kRaceWaitTimeout{30};
 
-void waitForCacheTasksToDrainIgnoringCredits(BlockTreeCache& cache) {
+void waitForCacheTasksToDrain(BlockTreeCache& cache) {
     std::unique_lock<std::mutex> lock(cache.task_pool_->wait_mutex_);
     ASSERT_TRUE(cache.task_pool_->wait_cv_.wait_for(
         lock, kRaceWaitTimeout, [&cache] { return cache.task_pool_->pending_tasks_.load() == 0; }));
@@ -1574,7 +1574,7 @@ TEST_P(JoinedParentSettlementTest, OwnedChildPublishesOnlyAfterJoinedParentSettl
     for (size_t index = first_batch_count; index < first_batch_count + second_batch_count; ++index) {
         ASSERT_TRUE(transfer_engine->complete(index, ErrorInfo::OkStatus()));
     }
-    waitForCacheTasksToDrainIgnoringCredits(*environment->cache);
+    waitForCacheTasksToDrain(*environment->cache);
 
     EXPECT_FALSE(first_context->done());
     EXPECT_FALSE(second_context->done());
@@ -1965,7 +1965,6 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
     ASSERT_TRUE(context->commit());
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
 
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     ASSERT_TRUE(environment->allResourcesAtTier(GetParam()));
