@@ -221,8 +221,13 @@ class V4Transformer(nn.Module):
             # ``nn.Parameter``); the framework dict supplies the real tensor.
             self.embed = EmbeddingTorch(gw[W.embedding])
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
+            # Mega decode is the default for its supported FP8-KV/TP1 geometry.
+            # Keep the switches as per-arm opt-outs, and leave unsupported model
+            # configurations on the ordinary attention path unless explicitly
+            # forced (which retains the strict validation below).
+            mega_default = args.fp8_kv_cache and args.tp_size == 1
             mega_flags = {
-                name: os.environ.get(name, "0")
+                name: os.environ.get(name, "1" if mega_default else "0")
                 not in ("0", "", "false", "False")
                 for name in ("DSV4_MEGA_CSA", "DSV4_MEGA_HCA")
             }
