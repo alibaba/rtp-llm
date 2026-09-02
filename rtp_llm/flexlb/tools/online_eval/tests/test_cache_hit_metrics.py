@@ -27,7 +27,7 @@ from pathlib import Path
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 AGGREGATE = TOOLS_DIR / "aggregate_canvas_run.py"
 CANVAS = TOOLS_DIR / "canvas_report_gen.py"
-T0 = 1_788_283_848_000  # epoch ms 锚点（与 per_request 首发送同拍）
+T0 = 1_788_283_848_000  # epoch ms 锚点（与 client_events 首发送同拍）
 
 _P1 = 'role="prefill",engine_ip="10.1.1.1",engine_name="p1"'
 _ROUTE_HIT = 'flexlb_app_cache_routing_selected_match_hit_tokens_total{role="PREFILL"}'
@@ -72,6 +72,52 @@ def _write_log(run_dir):
     )
 
 
+def _write_engine_events(run_dir, n):
+    """engine_events.jsonl：每请求一对 prefill_done/decode_done 终态行
+    （多组件 jsonl 数据层的引擎侧流；aggregate 以 rid join 客户端行，
+    done 时刻均在各自 send 之后以满足 join 时序校验）。"""
+    rows = []
+    for i in range(n):
+        send = T0 + i * 1000
+        rows.append(
+            {
+                "event": "prefill_done",
+                "rid": i,
+                "engine_name": "p1",
+                "batch_id": i,
+                "engine_arrival_ms": send + 10,
+                "prefill_start_ms": send + 20,
+                "prefill_done_ms": send + 30,
+                "ttft_ms": 20,
+                "exec_ms": 10,
+                "batch_size": 1,
+                "input_len": 80,
+                "cache_hit_tokens": 0,
+                "kv_used_tokens": 80,
+                "cancelled": False,
+            }
+        )
+        rows.append(
+            {
+                "event": "decode_done",
+                "rid": i,
+                "engine_name": "d1",
+                "batch_id": 100 + i,
+                "engine_arrival_ms": send + 40,
+                "decode_start_ms": send + 50,
+                "decode_done_ms": send + 80,
+                "exec_ms": 30,
+                "batch_size": 1,
+                "output_len": 8,
+                "kv_used_tokens": 88,
+                "cancelled": False,
+            }
+        )
+    (Path(run_dir) / "engine_events.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+
+
 def _write_full_run(run_dir):
     """构造三口径数据齐备的 run 目录（数值见模块 docstring）。"""
     run_dir = Path(run_dir)
@@ -79,10 +125,11 @@ def _write_full_run(run_dir):
     (run_dir / "client.json").write_text(
         json.dumps({"slo_batch_analysis": {}, "server_latency": {}}), encoding="utf-8"
     )
-    # per_request：3 行 ok，input_len 80 ×3 = 240（token 级 run 分母）
+    # client_events：3 行 ok，input_len 80 ×3 = 240（token 级 run 分母）
     rows = [
         {
             "rid": "r%d" % i,
+            "request_id": i,
             "status": "ok",
             "error": "",
             "send_start_epoch_ms": T0 + i * 1000,
@@ -92,7 +139,7 @@ def _write_full_run(run_dir):
         }
         for i in range(3)
     ]
-    (run_dir / "per_request.jsonl").write_text(
+    (run_dir / "client_events.jsonl").write_text(
         "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
     )
     # mock.json：final_snapshot 单 prefill 引擎，hit_tokens_total = 120
@@ -148,6 +195,7 @@ def _write_full_run(run_dir):
         )
     with gzip.open(run_dir / "mock_per_engine_timeseries.json.gz", "wt") as f:
         json.dump(per_engine, f)
+    _write_engine_events(run_dir, 3)
     _write_log(run_dir)
 
 
@@ -164,6 +212,7 @@ def _write_old_run(run_dir):
     old_rows = [
         {
             "rid": "r%d" % i,
+            "request_id": i,
             "status": "ok",
             "error": "",
             "send_start_epoch_ms": T0 + i * 1000,
@@ -173,7 +222,7 @@ def _write_old_run(run_dir):
         }
         for i in range(2)
     ]
-    (run_dir / "per_request.jsonl").write_text(
+    (run_dir / "client_events.jsonl").write_text(
         "\n".join(json.dumps(r) for r in old_rows) + "\n",
         encoding="utf-8",
     )
@@ -193,6 +242,7 @@ def _write_old_run(run_dir):
     (run_dir / "run_meta.json").write_text(
         json.dumps({"params": {"n_prefill": 1, "n_decode": 1}}), encoding="utf-8"
     )
+    _write_engine_events(run_dir, 2)
     _write_log(run_dir)
 
 

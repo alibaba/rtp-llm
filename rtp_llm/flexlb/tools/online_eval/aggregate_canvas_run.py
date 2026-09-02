@@ -6,15 +6,27 @@ Run inside a run dir on the remote host:
 Reads (consolidated run-root layout, the only supported form):
   client.json (summary source: sh-merged scalar keys + embedded
   server_latency / slo_batch_analysis)
-  per_request.jsonl / per_request.jsonl.gz (run root)
+  client_events.jsonl / client_events.jsonl.gz (run root; renamed from
+  per_request.jsonl together with the multi-component JSONL event streams)
+  engine_events.jsonl / engine_events.jsonl.gz (run root; the engine-side
+  per-rid event rows that replaced the mock_prefill_done / mock_decode_done
+  stdout trace lines)
+  master_events.jsonl — written by THIS script (offline parser) from
+  master.log / flexlb_logs (window rows + generation created/retired
+  events); master production code is untouched
   load_client/server_latency.json or client.json's server_latency
-  mock_engine.log or mock.json (stats + final_snapshot),
+  mock_engine.log or mock.json (stats + final_snapshot; comparison source
+  alongside the jsonl streams — the per-rid data itself is jsonl-only),
   flexlb_logs/flexlb.log* or master.log (dispatch lines + server-schedule-latency rows),
   master.json (inflight_timeseries G4 / prometheus_timeseries G3 /
-  counters_timeseries master per-second arrival/completion rates),
+  counters_timeseries master per-second arrival/completion rates;
+  comparison source),
   run_meta.json (process_usage G5).
-per_request rows are the sole metrics source (no-backward-compat: legacy
-summary passthrough / shard layout chains removed; rows missing -> None).
+client_events rows are the sole per-request metrics source; the engine-side
+event rows are rid-joined onto them (the same join full_e2e always used).
+Both jsonl streams are fail-closed: a missing file or a malformed row is a
+hard error, never a silent empty column (no-backward-compat: legacy runs
+that predate the jsonl streams are no longer supported).
 Outputs meta/summary/batch/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
 send-series source of record) /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
@@ -40,7 +52,7 @@ client-vs-mock token reconciliation, now also produced for
 single-worker runs), quick-stats (actual_send_qps, success/error/
 completed qps, elapsed_s, counts, error_rate) and full-run percentiles for
 ttft/e2e/schedule (schedule dual-source adjudication via
-schedule_latency_source) — all computed from the merged per_request rows
+schedule_latency_source) — all computed from the merged client_events rows
 plus the server_latency terminal state; rows missing -> None (no
 summary.json passthrough, no-backward-compat).
 """
@@ -244,12 +256,14 @@ def latency_summary(values, nd=1):
 
 # ---- inputs: consolidated run-root layout (the only supported form) ----
 # 当前格式（consolidate 后）：client.json（server_latency / slo 嵌入）+
-# run 根 per_request.jsonl(.gz) + master.json + mock.json。legacy
-# load_client/summary.json 双源切换与 shard_* 布局读取链已删
-# （no-backward-compat，旧 run 不再是支持对象）；summary.json 文件随
+# run 根 client_events.jsonl(.gz) + engine_events.jsonl(.gz) + master.json +
+# mock.json。legacy load_client/summary.json 双源切换与 shard_* 布局读取链
+# 已删（no-backward-compat，旧 run 不再是支持对象）；summary.json 文件随
 # Phase B 一并消失（client 只记原始 rows），aggregate 的全部派生统计
 # 自 rows 计算，元数据键（sent_task_count / load_client_workers）同样
 # rows / client.json 自算，不再从任何 client 侧 summary 透传。
+# master.json / mock.json 的 timeseries 与快照降级为对比源（与 jsonl
+# rid-join 主数据源互为印证），不再承担 per-request 数据职责。
 client_json = load_json("client.json") or {}
 summary = client_json
 slo = client_json.get("slo_batch_analysis") or {}
@@ -259,16 +273,22 @@ slo = client_json.get("slo_batch_analysis") or {}
 # 段才读；纯 load，无副作用）。
 run_meta = load_json("run_meta.json") or {}
 
-# ---- per_second from per_request.jsonl (bucket by wall-clock send time) ----
+# ---- per_second from client_events.jsonl (bucket by wall-clock send time) ----
 # run 根合并文件（plain 或 gzip）唯一来源；shard_* 与 load_client/ 布局
 # 链已删（consolidate 成功即删 shard，残留仅意味着旧 run 复用，不支持）。
+# fail-closed：文件缺失直接报错退出（no-backward-compat：jsonl 数据层
+# 之前的旧 run 不再支持，不允许静默空 rows 走 None 派生链）。
+_client_events_candidates = [
+    n for n in ("client_events.jsonl", "client_events.jsonl.gz") if os.path.isfile(n)
+]
+if not _client_events_candidates:
+    sys.exit(
+        "ERROR: client_events.jsonl / client_events.jsonl.gz not found in run dir "
+        "(multi-component JSONL data layer is the only supported input; "
+        "runs older than the jsonl migration are no longer supported)"
+    )
 rows = []
-per_request_files = []
-if os.path.isfile("per_request.jsonl"):
-    per_request_files = ["per_request.jsonl"]
-elif os.path.isfile("per_request.jsonl.gz"):
-    per_request_files = ["per_request.jsonl.gz"]
-for f in per_request_files:
+for f in _client_events_candidates:
     opener = gzip.open if f.endswith(".gz") else open
     with opener(f, "rt", errors="replace") as stream:
         for line in stream:
@@ -278,7 +298,12 @@ for f in per_request_files:
             try:
                 rows.append(json.loads(line))
             except ValueError:
-                continue
+                sys.exit(f"ERROR: malformed JSON row in {f}: {line[:200]!r}")
+if not rows:
+    sys.exit(
+        "ERROR: client_events.jsonl parsed to zero rows — an empty stream is "
+        "not a valid run; refusing to emit an all-None aggregate"
+    )
 # epoch0 anchor: min over rows that ACTUALLY carry send_start_epoch_ms.
 # The old `d.get(..., 0)` default polluted the min with zeros whenever any
 # row lacked the field, shifting every rebased series earlier; rows with no
@@ -315,59 +340,84 @@ ok_input_tokens = 0  # is_ok 行 Σinput_len（input_token_tps 分子，完成�
 ok_output_tokens = 0  # is_ok 行 Σoutput_len（output_token_tps 分子，同口径）
 wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 
-# ---- engine per-rid terminal lines: full_e2e + birth-axis exec join ----
-# JavaMockEngineCluster prints one "mock_decode_done rid=... ts_epoch_ms=...
-# exec_ms=... output_len=... cancelled=..." line per decode request and one
-# "mock_prefill_done rid=... ts_epoch_ms=... exec_ms=... input_len=...
-# cancelled=..." line per prefill batch member (exec_ms = BATCH duration:
-# prefill runs whole batches) on stdout (→ mock_engine.log, kept as the
-# verbatim prefix of mock.log after consolidation). Client, master and the
-# mock engine all run in the same container, so ts_epoch_ms and the client's
+# ---- engine per-rid terminal rows: full_e2e + birth-axis exec join ----
+# JavaMockEngineCluster streams one JSONL row per engine-side terminal into
+# engine_events.jsonl (run root, plain or gzip, ONE shared file for all
+# engines): event=decode_done carries rid / engine_name / batch_id /
+# engine_arrival_ms / decode_start_ms / decode_done_ms / exec_ms /
+# batch_size / output_len / kv_used_tokens / cancelled; event=prefill_done
+# carries the prefill twin set (prefill_start_ms / prefill_done_ms / ttft_ms
+# / input_len / cache_hit_tokens; exec_ms = BATCH duration — prefill runs
+# whole batches). Client, master and the mock engine all run in the same
+# container, so decode_done_ms / prefill_done_ms and the client's
 # send_start_epoch_ms share one wall clock — no domain conversion needed.
-# cancelled=true lines are non-normal terminals and are skipped (they never
+# cancelled=true rows are non-normal terminals and are skipped (they never
 # join; the row lands in the join-miss integrity markers instead of being
-# fabricated). Two consumers share one pass over the engine log:
-#   * full_e2e (schedule-only full path): decode terminal ts - send_start
+# fabricated). Two consumers share one pass over the engine stream:
+#   * full_e2e (schedule-only full path): decode_done_ms - send_start
 #   * birth-axis engine exec percentiles: exec_ms bucketed by the request's
 #     BIRTH second (send_start) — same axis as e2e/full_e2e, unlike the
 #     legacy engine_exec_ts completion-window snapshot (kept unchanged).
-# Legacy engine logs without the lines yield empty maps: the whole
-# full_e2e column is then absent and no miss is counted.
+# fail-closed: this stream is a peer of client_events.jsonl — a missing
+# file, a malformed row, an unknown event kind, or a row missing rid /
+# terminal ts / exec_ms is a hard error, never a silent empty full_e2e
+# column (no-backward-compat: legacy grep-the-stdout runs are no longer
+# supported).
 decode_done_map = {}
 prefill_done_map = {}
 full_e2e_join_miss = 0
 prefill_exec_join_miss = 0
-_decode_done_re = re.compile(
-    r"mock_decode_done rid=(\d+) ts_epoch_ms=(\d+) exec_ms=(\d+) "
-    r"output_len=(\d+) cancelled=(true|false)"
-)
-_prefill_done_re = re.compile(
-    r"mock_prefill_done rid=(\d+) ts_epoch_ms=(\d+) exec_ms=(\d+) "
-    r"input_len=(\d+) cancelled=(true|false)"
-)
-if os.path.isfile("mock_engine.log"):
-    _engine_done_src = "mock_engine.log"
-elif os.path.isfile("mock.log"):
-    _engine_done_src = "mock.log"
-else:
-    _engine_done_src = None
-if _engine_done_src:
-    with open(_engine_done_src, errors="replace") as stream:
-        for line in stream:
-            if "mock_decode_done" in line:
-                m = _decode_done_re.search(line)
-                if m and m.group(5) != "true":
-                    decode_done_map[int(m.group(1))] = (
-                        int(m.group(2)),
-                        int(m.group(3)),
+_engine_events_candidates = [
+    n for n in ("engine_events.jsonl", "engine_events.jsonl.gz") if os.path.isfile(n)
+]
+if not _engine_events_candidates:
+    sys.exit(
+        "ERROR: engine_events.jsonl / engine_events.jsonl.gz not found in run dir "
+        "(multi-component JSONL data layer is the only supported input; "
+        "runs older than the jsonl migration are no longer supported)"
+    )
+for _evf in _engine_events_candidates:
+    _ev_opener = gzip.open if _evf.endswith(".gz") else open
+    with _ev_opener(_evf, "rt", errors="replace") as _ev_stream:
+        for line in _ev_stream:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                sys.exit(f"ERROR: malformed JSON row in {_evf}: {line[:200]!r}")
+            try:
+                _ev_rid = int(ev["rid"])
+            except (KeyError, TypeError, ValueError):
+                sys.exit(
+                    f"ERROR: engine event row missing/invalid rid in {_evf}: "
+                    f"{line[:200]!r}"
+                )
+            if ev.get("cancelled"):
+                continue
+            _ev_kind = ev.get("event")
+            try:
+                if _ev_kind == "decode_done":
+                    decode_done_map[_ev_rid] = (
+                        int(ev["decode_done_ms"]),
+                        int(ev["exec_ms"]),
                     )
-            elif "mock_prefill_done" in line:
-                m = _prefill_done_re.search(line)
-                if m and m.group(5) != "true":
-                    prefill_done_map[int(m.group(1))] = (
-                        int(m.group(2)),
-                        int(m.group(3)),
+                elif _ev_kind == "prefill_done":
+                    prefill_done_map[_ev_rid] = (
+                        int(ev["prefill_done_ms"]),
+                        int(ev["exec_ms"]),
                     )
+                else:
+                    sys.exit(
+                        f"ERROR: unknown engine event kind {_ev_kind!r} in {_evf}: "
+                        f"{line[:200]!r}"
+                    )
+            except (KeyError, TypeError, ValueError):
+                sys.exit(
+                    f"ERROR: {_ev_kind} row missing/invalid terminal ts or exec_ms "
+                    f"in {_evf}: {line[:200]!r}"
+                )
 per_sec = defaultdict(
     lambda: {
         "arrivals": 0,
@@ -481,9 +531,9 @@ for d in rows:
         # full_e2e（schedule-only 全链路）：client 发出 → 引擎侧 decode
         # 正常终态，按 request_id（引擎 GenerateInputPB.requestId 原样
         # 回传的数值字段）关联。ok 行 join 不到终态行（run 结束仍在
-        # decode 的 in-flight、cancelled 终态、引擎日志截断）或关联出
-        # 负值（时钟异常）时计 miss 不编造；旧引擎无该日志行（map 空）
-        # 时整列不产出、也不计 miss。
+        # decode 的 in-flight、cancelled 终态、jsonl 截断）或关联出
+        # 负值（时钟异常）时计 miss 不编造；全部终态行均 cancelled
+        # （map 空，理论上仅极端场景）时整列不产出、也不计 miss。
         # 同一 join 顺带产出出生轴 decode_exec：终态行 exec_ms 归入该
         # 请求的出生秒桶（与 e2e/full_e2e 同轴可比；旧完成轴快照见
         # engine_exec_ts，字段保留）。decode 侧 join miss 与 full_e2e
@@ -502,8 +552,8 @@ for d in rows:
                 full_e2e_join_miss += 1
         # prefill_exec（出生轴）：ok 行按 rid join 引擎侧 prefill 批完成
         # 行（exec_ms = 批执行时长，同批成员同值）。join 不到（cancelled
-        # 批成员/日志截断/时钟异常）计 prefill_exec_join_miss 不编造；
-        # 旧引擎 build 无 mock_prefill_done 行（map 空）时不产出不计 miss。
+        # 批成员/jsonl 截断/时钟异常）计 prefill_exec_join_miss 不编造；
+        # 全部终态行均 cancelled（map 空）时不产出不计 miss。
         if prefill_done_map:
             _pf = prefill_done_map.get(_rid) if _rid is not None else None
             if _pf is not None and _pf[0] >= _send_ts:
@@ -562,11 +612,11 @@ for t in sorted(per_sec):
             "full_e2e_p50": pct(b["full_e2e"], 0.5),
             "full_e2e_p95": pct(b["full_e2e"], 0.95),
             # 引擎执行分位（出生轴，20260830）：ok 行按 rid join 引擎终态行
-            # （mock_prefill_done / mock_decode_done）的 exec_ms，按
-            # send_start 出生秒分桶——与 e2e/full_e2e 同轴可比（幸存者
-            # 口径）；旧完成轴窗口快照见 engine_exec_ts（字段保留，口径
-            # 不同：完成流含 cancel、按完成秒分桶）。旧聚合无引擎终态行
-            # 时这些键恒为 0/n=0，报告层按全零回退完成轴。
+            # （engine_events.jsonl 的 prefill_done / decode_done）的
+            # exec_ms，按 send_start 出生秒分桶——与 e2e/full_e2e 同轴可比
+            # （幸存者口径）；旧完成轴窗口快照见 engine_exec_ts（字段保留，
+            # 口径不同：完成流含 cancel、按完成秒分桶）。终态流全
+            # cancelled（map 空）时这些键恒为 0/n=0，报告层按全零回退完成轴。
             "prefill_exec_n": len(b["prefill_exec"]),
             "prefill_exec_p50": pct(b["prefill_exec"], 0.5),
             "prefill_exec_p95": pct(b["prefill_exec"], 0.95),
@@ -612,8 +662,8 @@ if full_e2e_all:
 
 # ---- Phase A 派生统计：validity / quick-stats / 全程分位（统一聚合侧） ----
 # 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）。rows 是
-# 唯一指标源（no-backward-compat）：rows 缺失（收缩 run / 旧 run）时全部
-# 派生键输出 None，不再透传 summary 键；仅 schedule 双源的 server 口径
+# 唯一指标源（no-backward-compat；client_events.jsonl 已 fail-closed，
+# rows 恒非空，_have_rows 仅保留为防御）；仅 schedule 双源的 server 口径
 # 与 server_* 直读键不依赖 rows（server_latency 是当前格式正式输入）。
 _have_rows = bool(rows)
 _actual_rpc_start_count = len(rpc_start_ms)  # sh: sum(shard actual_sent_count)
@@ -816,9 +866,9 @@ for kv in mock_stats:
 # 原锚是 mock 首样本 t0：引擎启动空转期（约 28s）垫在 TQ 轴前段，与
 # TSEC / master / queue_top_bottom 序列（epoch0 锚）不同轴——Prefill
 # 队列图前段四线贴地重叠、x 轴「压测时间」语义失真。改锚聚合早期从
-# per_request send_start_epoch_ms 算出的 epoch0：t = round((ts-epoch0)/1000)，
+# client_events send_start_epoch_ms 算出的 epoch0：t = round((ts-epoch0)/1000)，
 # 负值样本（早于首个请求发送 = 启动空转）丢弃，首点从 ~0 起；epoch0 == 0
-# （无 per_request 行）保持旧 mock-t0 锚，兼容旧 run。interval 差分在
+# （无带时间戳行的防御路径）保持旧 mock-t0 锚。interval 差分在
 # rebase 之后跑：被丢弃的空转样本 cum 计数为 0，首个保留样本的增量
 # 口径不受影响。
 if epoch0 and queue_ts:
@@ -991,7 +1041,7 @@ log_files = glob.glob("flexlb_logs/flexlb.log*")
 if not log_files and os.path.isfile("master.log"):
     log_files = ["master.log"]
 
-# ---- engine_dist: per-engine routing distribution (from per_request rows) ----
+# ---- engine_dist: per-engine routing distribution (from client_events rows) ----
 # Two scopes since 20260829: prefill/decode = ok rows only (matching
 # JavaLoadClient's loadBalanceSummary, legacy keys kept for compatibility);
 # prefill_all/decode_all = every row that carries a placement, i.e. the
@@ -1212,8 +1262,6 @@ if rows:
                 "final_snapshot engines carry no busy_ms (old mock build): "
                 "utilization omitted"
             )
-else:
-    ed_notes.append("per_request.jsonl not found/empty: engine_dist omitted")
 
 # ---- compact time series: G3/G4/G5 + log rows, rebased to epoch0 ----------
 # All new series share one time axis: seconds since the first per-request
@@ -1240,7 +1288,7 @@ if os.path.isfile("mock_per_engine_timeseries.json.gz"):
 def rel_axis(pts):
     """[(epoch_ms, value)] -> [(t_s, value)] on the per-request send axis.
 
-    Falls back to each series' own first sample when per_request rows are
+    Falls back to each series' own first sample when client_events rows are
     absent (epoch0 == 0).
     """
     if not pts:
@@ -1396,6 +1444,144 @@ SERVER_LAT_LINE_RE = re.compile(
     r"route_submit_p95_ms=([\d.]+) batch_wait_p95_ms=([\d.]+) "
     r"dispatch_ack_p95_ms=([\d.]+) ack_response_p95_ms=([\d.]+)"
 )
+
+# ---- master_events.jsonl: offline parser over the master logs ------------
+# Master production code stays untouched by the multi-component JSONL data
+# layer: the master keeps logging plain text, and THIS parser materializes
+# the master-side event stream offline (one JSON object per line, written
+# to master_events.jsonl in the run dir — the third stream of the data
+# layer, produced by the aggregator instead of the component itself):
+#   * window rows — one per flexlb_server_schedule_latency snapshot
+#     (ServerScheduleLatencyRecorder, 10s cadence, root logger →
+#     application.log), full field set incl. count / arrival_qps /
+#     completion_qps (the p95-only SERVER_LAT_LINE_RE above feeds
+#     stage_latency_ts and stays as-is);
+#   * generation rows — worker-topology lifecycle events (EngineSyncRunner,
+#     syncLogger → sync.log): generation_created ("Created WorkerStatus
+#     generation N for worker: ip:port") and generation_retired
+#     ("[remove] retiring missing worker ..." / "[replace] retiring worker
+#     topology generation ..."). A steady-state run legitimately has ZERO
+#     generation rows.
+# Source chain mirrors consolidation: merged master.log first (run-root
+# application.log prefix + flexlb.log + sync.log + sync_consistency.log
+# sections — BOTH row families live there); the pre-consolidation raw
+# layout (flexlb_logs/*, still on disk when aggregate runs standalone)
+# as the fallback. fail-closed: no master log at all, or a master log with
+# zero window rows, is a hard error (a live master always snapshots).
+_MASTER_WINDOW_RE = re.compile(
+    r"flexlb_server_schedule_latency count=(\d+) arrival_qps=([\d.]+) "
+    r"completion_qps=([\d.]+) server_p50_ms=([\d.]+) server_p95_ms=([\d.]+) "
+    r"server_p99_ms=([\d.]+) grpc_queue_p95_ms=([\d.]+) "
+    r"route_submit_p95_ms=([\d.]+) batch_wait_p95_ms=([\d.]+) "
+    r"dispatch_ack_p95_ms=([\d.]+) ack_response_p95_ms=([\d.]+)"
+)
+_GENERATION_CREATED_RE = re.compile(
+    r"Created WorkerStatus generation (\d+) for worker: ([\w.:-]+)"
+)
+_GENERATION_RETIRED_RE = re.compile(
+    r"\[(remove|replace)\] retiring (?:missing worker|worker topology generation),"
+    r" model=([^,]*), role=([^,]*), ipPort=([^,]*), generation=(\d+)"
+)
+if os.path.isfile("master.log"):
+    _master_log_sources = ["master.log"]
+else:
+    _master_log_sources = sorted(
+        glob.glob("flexlb_logs/application.log*")
+        + glob.glob("flexlb_logs/flexlb.log*")
+        + glob.glob("flexlb_logs/sync.log*")
+        + glob.glob("flexlb_logs/sync_consistency.log*")
+    ) + (["flexlb.log"] if os.path.isfile("flexlb.log") else [])
+if not _master_log_sources:
+    sys.exit(
+        "ERROR: no master log found in run dir (expected master.log, or "
+        "flexlb_logs/{application,flexlb,sync,sync_consistency}.log*, or "
+        "run-root flexlb.log) — master_events.jsonl cannot be generated"
+    )
+
+
+def _log_line_epoch_ms(line):
+    tm = LOG_TS_RE.match(line)
+    if not tm:
+        return None
+    try:
+        return (
+            datetime.strptime(tm.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+            + int(tm.group(2)) / 1000.0
+        ) * 1000.0
+    except ValueError:
+        return None
+
+
+master_events_rows = []
+_master_window_rows = 0
+for _mf in _master_log_sources:
+    with open(_mf, errors="replace") as _mstream:
+        for line in _mstream:
+            if "flexlb_server_schedule_latency" in line:
+                m = _MASTER_WINDOW_RE.search(line)
+                if not m:
+                    continue
+                ts = _log_line_epoch_ms(line)
+                if ts is None:
+                    continue
+                master_events_rows.append(
+                    {
+                        "event": "window",
+                        "ts_epoch_ms": int(round(ts)),
+                        "count": int(m.group(1)),
+                        "arrival_qps": float(m.group(2)),
+                        "completion_qps": float(m.group(3)),
+                        "server_p50_ms": float(m.group(4)),
+                        "server_p95_ms": float(m.group(5)),
+                        "server_p99_ms": float(m.group(6)),
+                        "grpc_queue_p95_ms": float(m.group(7)),
+                        "route_submit_p95_ms": float(m.group(8)),
+                        "batch_wait_p95_ms": float(m.group(9)),
+                        "dispatch_ack_p95_ms": float(m.group(10)),
+                        "ack_response_p95_ms": float(m.group(11)),
+                    }
+                )
+                _master_window_rows += 1
+            elif "WorkerStatus generation" in line or "retiring" in line:
+                ts = _log_line_epoch_ms(line)
+                if ts is None:
+                    continue
+                m = _GENERATION_CREATED_RE.search(line)
+                if m:
+                    master_events_rows.append(
+                        {
+                            "event": "generation_created",
+                            "ts_epoch_ms": int(round(ts)),
+                            "generation": int(m.group(1)),
+                            "ip_port": m.group(2),
+                        }
+                    )
+                    continue
+                m = _GENERATION_RETIRED_RE.search(line)
+                if m:
+                    master_events_rows.append(
+                        {
+                            "event": "generation_retired",
+                            "ts_epoch_ms": int(round(ts)),
+                            "reason": m.group(1),
+                            "model": m.group(2),
+                            "role": m.group(3),
+                            "ip_port": m.group(4),
+                            "generation": int(m.group(5)),
+                        }
+                    )
+if _master_window_rows == 0:
+    sys.exit(
+        "ERROR: zero flexlb_server_schedule_latency window rows in the master "
+        "log(s) — a live master snapshots every "
+        "flexlb.server-latency-log-interval-ms (10s default); zero rows means "
+        "the master log chain is broken"
+    )
+master_events_rows.sort(key=lambda r: (r["ts_epoch_ms"], r["event"]))
+with open("master_events.jsonl", "w") as _mev_stream:
+    for _mev_row in master_events_rows:
+        _mev_stream.write(json.dumps(_mev_row, sort_keys=True) + "\n")
+
 stage_rows = []
 for f in log_files:
     with open(f, errors="replace") as stream:
@@ -2072,9 +2258,9 @@ if _engine_token_run is not None:
 #     decode 引擎在途的长 ol 请求（实测 904 个、Σol≈7.1M、占 client
 #     Σ 15.3%）不进 mock Σ（decode 未完成 → 无完成事件可记账）。修复
 #     方案：复用 engine_exec/full_e2e 的引擎终态 rid 集合
-#     （decode_done_map / prefill_done_map，mock_decode_done /
-#     mock_prefill_done 行解析），ok 行中 rid 不在对应 done 集的行即
-#     在途，其 token 对称补进 mock 侧（input 侧 join prefill done 集、
+#     （decode_done_map / prefill_done_map，engine_events.jsonl 的
+#     decode_done / prefill_done 行解析），ok 行中 rid 不在对应 done 集的
+#     行即在途，其 token 对称补进 mock 侧（input 侧 join prefill done 集、
 #     output 侧 join decode done 集；join 判定只用 rid membership 不做
 #     时间戳过滤——引擎已记终态即 token 已入 mock 完成事件流，时间戳
 #     异常只影响延迟样本有效性不影响记账归属）。rid 缺失/不可解析的
@@ -2095,12 +2281,11 @@ if _engine_token_run is not None:
 # token）→ None（不误报，与现有六项缺输入语义一致；test_valid =
 # all 保守判 invalid）。两侧子对账任一可评估即以可评估侧的 AND
 # 定值；均不可评估 → None。
-# 退化语义：旧 run 无引擎终态日志（mock.log / mock_engine.log 均缺，
-# done 集不可用）→ 在途项恒 0，公式退化为旧式 |client − mock|（None
-# 语义不变）；日志在但 done 集为空且 client 有大量未完成行 → 正常
-# 计算（在途 = 全部未完成行）。两侧数值依据输出进 summary.
-# token_reconciliation 诊断键（validity 不进 canvas 版面，报告层不
-# 消费，供取证与排查）。
+# 退化语义：engine_events.jsonl 已 fail-closed（缺失即硬错），终态
+# done 集恒可用；全 cancelled 的极端情形 done 集为空且 client 有大量
+# 未完成行 → 正常计算（在途 = 全部未完成行）。两侧数值依据输出进
+# summary.token_reconciliation 诊断键（validity 不进 canvas 版面，报
+# 告层不消费，供取证与排查）。
 _mock_in_total = sum(
     r.get("context_tps_with_cache") or 0 for r in mock_tps_ts if isinstance(r, dict)
 )
@@ -2108,8 +2293,9 @@ _mock_out_total = sum(
     r.get("generate_tps") or 0 for r in mock_tps_ts if isinstance(r, dict)
 )
 # 在途项：ok 行 rid 不在引擎终态 done 集的 Σil/Σol（两侧对称，见上
-# 块注释）。done 集不可用（无引擎终态日志）→ 恒 0（旧语义退化）。
-_engine_rids_available = _engine_done_src is not None
+# 块注释）。engine_events.jsonl fail-closed 后终态流必在，done 集恒
+# 可用（旧「无引擎终态日志→在途恒 0」的退化分支已随数据层消亡）。
+_engine_rids_available = True
 inflight_input_tokens = 0
 inflight_output_tokens = 0
 if _engine_rids_available:
@@ -2243,7 +2429,7 @@ dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)
 
 # consolidate integrity markers (consolidate_run_outputs.py): how the
 # final_snapshot was obtained (live HTTP fetch vs stale fallback) and
-# whether the slo analysis predates this run's per_request data. Empty for
+# whether the slo analysis predates this run's client_events data. Empty for
 # pre-integrity consolidations; the generator then stays silent.
 integrity = {}
 if per_second_unstamped:
@@ -2252,15 +2438,16 @@ if per_second_unstamped:
     # sum(per_second.arrivals) == total_requests.
     integrity["per_second_rows_without_send_ts"] = per_second_unstamped
 # Degradation marker (full_e2e / birth-axis decode exec): scheduled-ok rows
-# with no normal engine-side decode terminal line to join against (in-flight
-# at run end / cancelled decode / truncated engine log). Not fabricated into
-# either metric.
+# with no normal engine-side decode terminal row to join against (in-flight
+# at run end / cancelled decode / truncated engine_events stream). Not
+# fabricated into either metric.
 if full_e2e_join_miss:
     integrity["full_e2e_join_miss"] = full_e2e_join_miss
 # Degradation marker (birth-axis prefill exec): scheduled-ok rows with no
-# normal engine-side prefill batch-completion line to join against. Not
-# fabricated into the metric. Absent on old engine builds (no
-# mock_prefill_done lines at all → no join attempted, no miss counted).
+# normal engine-side prefill batch-completion row to join against. Not
+# fabricated into the metric. Only fires when the join runs (a stream whose
+# terminal rows are all cancelled leaves the map empty → no join attempted,
+# no miss counted).
 if prefill_exec_join_miss:
     integrity["prefill_exec_join_miss"] = prefill_exec_join_miss
 # cancel 按角色拆分的降级标记：cancelled_rids 里无法在 master 终态行

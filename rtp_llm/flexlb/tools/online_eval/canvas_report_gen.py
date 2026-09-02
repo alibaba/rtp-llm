@@ -1322,7 +1322,7 @@ def main():
     _si = integrity.get("slo_integrity") or {}
     if _si and not _si.get("fresh", True):
         integrity_notes.append(
-            "slo_batch_analysis.json 早于 per_request.jsonl（陈旧残留），SLO/批决策结论不可信"
+            "slo_batch_analysis.json 早于 client_events.jsonl（陈旧残留），SLO/批决策结论不可信"
         )
     _unstamped = integrity.get("per_second_rows_without_send_ts")
     if _unstamped:
