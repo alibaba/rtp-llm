@@ -90,7 +90,7 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         if (queueingEnabled && v0Config.has("maxQueueSize")) {
             scheduler.putObject("capacity").set("maxOutstandingRequestsGlobal", v0Config.get("maxQueueSize").deepCopy());
         }
-        flexlbConfig.putObject("dispatcher").put("type", queueingEnabled ? "BATCH" : "NON_BATCH");
+        flexlbConfig.putObject("dispatcher").put("type", "NON_BATCH");
     }
 
     private static void configureRouting(ObjectNode v0Config, ObjectNode flexlbConfig) {

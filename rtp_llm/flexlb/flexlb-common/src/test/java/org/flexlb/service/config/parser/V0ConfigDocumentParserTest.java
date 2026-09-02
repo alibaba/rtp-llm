@@ -3,6 +3,7 @@ package org.flexlb.service.config.parser;
 import org.flexlb.config.ConfigSchemaVersion;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.QueueSchedulerConfig;
 import org.flexlb.config.ZookeeperConsistencyConfig;
 import org.flexlb.service.config.ConfigSource;
@@ -20,6 +21,8 @@ class V0ConfigDocumentParserTest {
 
     @Test
     void resolvesExactlyOneParserFromDocumentVersionBeforeEnvironmentVersion() throws Exception {
+        new StandardConfigDocumentParser();
+        new V0ConfigDocumentParser();
         assertThat(ConfigDocumentParserResolver.resolve("{\"schemaVersion\":0,\"enableQueueing\":true}").schemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
         new EnvironmentVariables(ConfigDocumentParserResolver.CONFIG_SCHEMA_VERSION_ENV, "0").execute(() -> {
             assertThat(ConfigDocumentParserResolver.resolve("{\"schemaVersion\":1}").schemaVersion()).isEqualTo(ConfigSchemaVersion.STANDARD);
@@ -104,6 +107,7 @@ class V0ConfigDocumentParserTest {
         var modelService = service.modelServiceConfig();
 
         assertThat(behavior.isQueue()).isTrue();
+        assertThat(behavior.getDispatcher()).isInstanceOf(NonBatchDispatcherConfig.class);
         assertThat(((QueueSchedulerConfig) behavior.getScheduler()).getCapacity()
                 .getMaxOutstandingRequestsGlobal()).isEqualTo(200000);
         assertThat(behavior.getCacheMatching()).isInstanceOf(KvcmCacheMatchingConfig.class);
