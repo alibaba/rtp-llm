@@ -791,7 +791,10 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
     RTP_LLM_LOG_DEBUG(
         "batch size used in replay: %d (graph key %d)", state.current_batch_size, state.current_real_graph_bs);
 
-    const bool target_verify_decode = is_target_verify_ || inputs.attention_inputs.is_target_verify;
+    // is_target_verify_ describes the graph captured by this runner. Runtime
+    // prefill still has to bypass that graph until MTP marks the actual verify
+    // input; otherwise the whole prompt is replayed into a B * q_len buffer.
+    const bool target_verify_decode = inputs.attention_inputs.is_target_verify;
     if (target_verify_decode) {
         state.seq_len_sum = inferTotalTokensNoSync(inputs);
         if (state.seq_len_sum <= 0) {
@@ -826,7 +829,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     if (!enable_cuda_graph_) {
         return false;
     }
-    const bool target_verify_decode = is_target_verify_ || inputs.attention_inputs.is_target_verify;
+    // The runner is also used for the target model's ordinary context prefill.
+    // Only the per-request flag distinguishes a real MTP verify invocation.
+    const bool target_verify_decode = inputs.attention_inputs.is_target_verify;
     if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !target_verify_decode) {
         return false;
     }
