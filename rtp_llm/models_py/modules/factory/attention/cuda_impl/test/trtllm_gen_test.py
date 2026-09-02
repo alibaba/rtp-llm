@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl import trtllm_gen
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util import (
     attention_prefill_ref,
@@ -25,6 +26,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
     _prepare_cg_spec_decode_kernel,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferMropePagedPrefillImpl,
     PyFlashinferPagedPrefillImpl,
     PyFlashinferPrefillPagedAttnOp,
 )
@@ -33,7 +35,7 @@ from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 device = torch.device("cuda")
 
-from rtp_llm.ops import AttentionConfigs, KvCacheDataType
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 
 
@@ -89,6 +91,57 @@ class FlashInferTRTLLMDispatchTest(TestCase):
                     self._config(head_dim=128), attn_inputs
                 )
             )
+
+    def test_mrope_mixed_bf16_fp8_context_uses_fused_rope_native_prefill(self):
+        config = self._config()
+        config.rope_config.style = RopeStyle.Mrope
+        attn_inputs = SimpleNamespace()
+
+        self.assertFalse(FlashInferTRTLLMPrefillImpl.support(config, attn_inputs))
+        with patch.object(
+            PyFlashinferPrefillPagedAttnOp, "support", return_value=True
+        ):
+            self.assertFalse(PyFlashinferPagedPrefillImpl.support(config, attn_inputs))
+            self.assertTrue(
+                PyFlashinferMropePagedPrefillImpl.support(config, attn_inputs)
+            )
+
+    def test_mrope_native_prefill_combines_fused_rope_and_paged_attention(self):
+        config = self._config()
+        config.rope_config.style = RopeStyle.Mrope
+        attn_inputs = SimpleNamespace(is_prefill=True)
+        qkv = object()
+        kv_cache = object()
+        query = object()
+        output = object()
+        rope_params = SimpleNamespace(kv_cache_offset=None)
+
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+                "PyFlashinferPrefillPagedAttnOp"
+            ) as paged_op_cls,
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha."
+                "FusedRopeKVCachePrefillOpQOut"
+            ) as rope_op_cls,
+            patch.object(common, "create_write_cache_store_impl", return_value=None),
+            patch.object(common, "apply_write_cache_store") as apply_cache_store,
+        ):
+            paged_op = paged_op_cls.return_value
+            rope_op = rope_op_cls.return_value
+            rope_op.prepare.return_value = rope_params
+            rope_op.forward.return_value = query
+            paged_op.forward.return_value = output
+
+            impl = PyFlashinferMropePagedPrefillImpl(config, attn_inputs)
+            self.assertIs(impl.forward(qkv, kv_cache), output)
+
+            paged_op.prepare.assert_called_once_with(attn_inputs)
+            rope_op.prepare.assert_called_once_with(attn_inputs)
+            rope_op.forward.assert_called_once_with(qkv, kv_cache, rope_params)
+            paged_op.forward.assert_called_once_with(query, kv_cache)
+            apply_cache_store.assert_called_once_with(None, attn_inputs, kv_cache)
 
 
 class FlashInferPythonMHATest(TestCase):

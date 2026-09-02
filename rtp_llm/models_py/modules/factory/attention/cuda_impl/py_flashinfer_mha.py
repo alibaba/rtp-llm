@@ -23,6 +23,7 @@ from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType, ParallelismConfig, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
+    FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
     ParamsBase,
     PyAttentionInputs,
@@ -881,6 +882,61 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
 
     def support_cuda_graph(self) -> bool:
         return True
+
+
+class PyFlashinferMropePagedPrefillImpl(FMHAImplBase):
+    """Native paged prefill with the fused MRoPE/KV-cache writer.
+
+    The Python MhaRotaryEmbeddingOp used by PyFlashinferPagedPrefillImpl does
+    not implement MRoPE.  Qwen3.5 therefore keeps the fused RTP kernel for
+    position encoding and KV-cache writes, while native FlashInfer performs
+    only paged attention.  This is intentionally limited to the BF16-query /
+    FP8-KV shape missing from the TRTLLM-Gen context cubin bundle.
+    """
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
+    ) -> None:
+        self.fmha_impl = PyFlashinferPrefillPagedAttnOp(attn_configs, attn_inputs)
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
+        self.attn_inputs = attn_inputs
+        self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return (
+            common.requires_native_bf16_fp8_prefill(attn_configs)
+            and attn_configs.rope_config.style == RopeStyle.Mrope
+            and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        )
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: int = 0,
+    ) -> torch.Tensor:
+        query = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        return self.fmha_impl.forward(query, kv_cache)
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
+        new_rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        if new_rope_params.kv_cache_offset is not None:
+            assert self.rope_params.kv_cache_offset is not None
+            common.copy_kv_cache_offset(
+                self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
+            )
 
 
 class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
