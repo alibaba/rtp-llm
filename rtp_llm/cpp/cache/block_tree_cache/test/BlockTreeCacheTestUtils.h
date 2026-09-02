@@ -156,7 +156,6 @@ public:
     static bool
     demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
-    static int  pendingTasksForTest(const BlockTreeCache& cache);
     static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
 
 private:

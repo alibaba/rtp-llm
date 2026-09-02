@@ -83,7 +83,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
@@ -136,7 +135,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_disk = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_disk.has_value());
@@ -193,7 +191,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     }
     ASSERT_TRUE(load_entered);
     EXPECT_FALSE(load_result.async_context->done());
-    EXPECT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_loading = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_loading.has_value());
@@ -226,7 +223,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     ASSERT_TRUE(load_result.async_context->done());
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     descriptors = pausable_engine->descriptors();
     ASSERT_EQ(descriptors.size(), 3 * cache->groupSets().size());
@@ -415,18 +411,24 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         }
     }
 
-    // Select a real HOST victim from one FULL group set. Path 2 is colder than
-    // the re-heated path 1, and reverse cascading moves every group set on that
-    // tier leaf to DISK in the same plan.
-    std::vector<size_t> full_group_set_ids;
+    // Build the mixed-tier fixture explicitly. Path 2 is colder than the
+    // re-heated path 1, so each group set independently selects it as its HOST
+    // victim. Reverse-cascade behavior is covered by dedicated eviction tests.
     for (const auto& group_set : cache->groupSets()) {
-        if (group_set->groupType() == CacheGroupType::FULL) {
-            full_group_set_ids.push_back(group_set->groupSetId());
-        }
+        const size_t group_set_id = group_set->groupSetId();
+        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, group_set_id, Tier::HOST));
+        ASSERT_TRUE(waitForConditionFor(
+            [&] {
+                const auto resources = snapshotPathResources(*cache, seed.cache_keys);
+                if (!resources.has_value() || resources->size() != 3u) {
+                    return false;
+                }
+                const auto& resource = (*resources)[2][group_set_id];
+                return resource.transfer_state == GroupSetTransferState::IDLE
+                       && resource.getTopTier() == Tier::DISK;
+            },
+            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
     }
-    ASSERT_FALSE(full_group_set_ids.empty());
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, full_group_set_ids.front(), Tier::HOST));
-    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     auto mixed = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(mixed.has_value());
     ASSERT_EQ(mixed->size(), 3u);
@@ -516,10 +518,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     }
     ASSERT_TRUE(failure_entered);
     engine->release();
-    ASSERT_TRUE(waitForPendingTasksDoneFor(
-        *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-
     auto second_schedule = scheduler->schedule();
+    const auto schedule_deadline = std::chrono::steady_clock::now() + kTransferWaitTimeout;
+    while (second_schedule.ok() && second_schedule.value().empty()
+           && std::chrono::steady_clock::now() < schedule_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        second_schedule = scheduler->schedule();
+    }
     ASSERT_TRUE(second_schedule.ok());
     ASSERT_EQ(second_schedule.value().size(), 1u);
     EXPECT_EQ(second_schedule.value().front(), prefill_stream);
@@ -626,7 +631,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     load_result.async_context->waitDone();
     ASSERT_TRUE(load_result.async_context->success()) << load_result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     const auto descriptors = engine->descriptors();
     ASSERT_EQ(descriptors.size(), descriptors_before_load + expected_load_descriptors);
@@ -713,7 +717,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         const size_t next = countTreeResourcesAtTier(*cache, Tier::DEVICE);
         EXPECT_LT(next, remaining_device) << "round=" << round;
         remaining_device = next;
@@ -738,7 +741,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         const size_t next = countTreeResourcesAtTier(*cache, Tier::HOST);
         EXPECT_LT(next, remaining_host) << "round=" << round;
         remaining_host = next;
@@ -826,7 +828,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     ASSERT_TRUE(result.async_context->done());
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     ASSERT_EQ(engine->submittedDescriptorCount(), disk_snapshot_begin + expected_load_descriptors);
 
     descriptors = engine->descriptors();

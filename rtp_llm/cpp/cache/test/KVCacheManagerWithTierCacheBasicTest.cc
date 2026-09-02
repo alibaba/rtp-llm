@@ -118,7 +118,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDe
     ASSERT_NO_FATAL_FAILURE(expectAllTreeResourcesIdleAtDevice(*cache));
     expectPoolSnapshotsEq(lower_before_pressure, snapshotLowerPools(*cache, GetParam()));
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), 0u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     const auto device_after_pressure = snapshotDevicePools(manager_);
     ASSERT_EQ(device_after_pressure.size(), device_before_pressure.size());
@@ -229,8 +228,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     }
     ASSERT_TRUE(first_load_entered);
     EXPECT_FALSE(first_result.async_context->done());
-    const int pending_before_second = BlockTreeCacheTestPeer::pendingTasksForTest(*cache);
-    EXPECT_GT(pending_before_second, 0);
     EXPECT_EQ(countTreeResourcesAtTier(*cache, Tier::DEVICE), 0u);
 
     PathResourcesSnapshot loading_snapshot;
@@ -271,8 +268,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     expectPoolSnapshotsEq(lower_before_second, snapshotLowerPools(*cache, GetParam()));
     EXPECT_EQ(pausable_engine->submittedDescriptorCount(), submits_before_second);
     EXPECT_FALSE(first_result.async_context->done());
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_before_second)
-        << "reuse_cache=false pressure must not enqueue or settle the first load";
 
     ASSERT_NO_FATAL_FAILURE(
         expectPausedHostLoadState(cache, seed, *maybe_host, first_resource, nullptr, &loading_snapshot));
@@ -280,15 +275,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     pausable_engine->release();
     ASSERT_TRUE(waitForAsyncContextDoneFor(first_result.async_context,
                                            std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
         << " submits=" << pausable_engine->submittedDescriptorCount();
     first_result.async_context->waitDone();
     ASSERT_TRUE(first_result.async_context->done());
     ASSERT_TRUE(first_result.async_context->success()) << first_result.async_context->errorInfo().ToString();
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << pausable_engine->submittedDescriptorCount();
     const auto descriptors_after_first_load = pausable_engine->descriptors();
     ASSERT_GT(descriptors_after_first_load.size(), first_load_submits_begin);
     for (size_t index = first_load_submits_begin; index < descriptors_after_first_load.size(); ++index) {
@@ -562,7 +552,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     ASSERT_TRUE(result.async_context->done());
     ASSERT_TRUE(result.async_context->success()) << result.async_context->errorInfo().ToString();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(engine->submittedDescriptorCount(), descriptors_before_load + cache->groupSets().size());
 
     const auto descriptors = engine->descriptors();

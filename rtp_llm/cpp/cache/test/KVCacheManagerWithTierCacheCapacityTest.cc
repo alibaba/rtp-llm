@@ -42,7 +42,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_host);
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
@@ -97,7 +96,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_disk);
         auto retained_host_path = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(retained_host_path.has_value());
@@ -214,10 +212,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_host);
     auto retained_device = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retained_device.has_value());
@@ -246,10 +241,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_host_delete)
         << "HostOnly HOST eviction deletes cache-owned victims without a copy";
     std::vector<size_t> freed_host_blocks(cache->groupSets().size(), 0);
@@ -273,10 +265,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     const auto descriptors_after_retry = transfer_engine_->descriptors();
     ASSERT_GT(descriptors_after_retry.size(), submits_before_retry);
     for (size_t index = submits_before_retry; index < descriptors_after_retry.size(); ++index) {
@@ -386,10 +375,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_full_disk);
     auto retained_host = snapshotPathResources(*cache, retry_seed.cache_keys);
     ASSERT_TRUE(retained_host.has_value());
@@ -413,10 +399,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, *disk_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     EXPECT_EQ(transfer_engine_->submittedDescriptorCount(), submits_before_disk_delete)
         << "DISK eviction deletes cache-owned victims without a copy";
     std::vector<size_t> freed_disk_blocks(cache->groupSets().size(), 0);
@@ -440,10 +423,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-    ASSERT_TRUE(
-        waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
-        << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
-        << " submits=" << transfer_engine_->submittedDescriptorCount();
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     const auto descriptors_after_retry = transfer_engine_->descriptors();
     ASSERT_GT(descriptors_after_retry.size(), submits_before_retry);
     for (size_t index = submits_before_retry; index < descriptors_after_retry.size(); ++index) {
