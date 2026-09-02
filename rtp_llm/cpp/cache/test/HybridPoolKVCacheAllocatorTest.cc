@@ -1039,7 +1039,7 @@ static void expectSameFinalPoolMetrics(const CachePoolMetricsSnapshot& expected,
     EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
-    EXPECT_EQ(actual.eviction_ref_blocks, expected.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, expected.used_ratio) << context;
 }
@@ -1095,7 +1095,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         EXPECT_EQ(snapshot->active_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->request_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
-        EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(snapshot->used_ratio, 0.0f) << source.pool_name;
         init_reserve_blocks += snapshot->reserve_blocks;
@@ -1137,7 +1137,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AllPrefixReuseDisabledPoolMetricsFollowAl
         EXPECT_EQ(snapshot->available_blocks, snapshot->total_blocks - expected_request_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->active_blocks, expected_request_blocks) << source.pool_name;
         EXPECT_EQ(snapshot->block_cache_ref_blocks, 0u) << source.pool_name;
-        EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << source.pool_name;
+        EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << source.pool_name;
         EXPECT_EQ(snapshot->store_ref_blocks, 0u) << source.pool_name;
         EXPECT_FLOAT_EQ(snapshot->used_ratio,
                         static_cast<float>(100.0 * snapshot->used_blocks / static_cast<double>(snapshot->total_blocks)))
@@ -1165,19 +1165,19 @@ static KVCachePoolMetricsSnapshot makeMergeAllocatorInput(
     const std::string& pool_name, size_t seed, size_t total_blocks, size_t free_blocks, size_t available_blocks) {
     KVCachePoolMetricsSnapshot snapshot;
     snapshot.pool_index             = seed;
-    snapshot.pool_name              = pool_name;
-    snapshot.block_size_bytes       = 1000 + seed;
-    snapshot.total_blocks           = total_blocks;
-    snapshot.free_blocks            = free_blocks;
-    snapshot.used_blocks            = total_blocks - free_blocks;
-    snapshot.active_blocks          = 7 + seed;
-    snapshot.available_blocks       = available_blocks;
-    snapshot.reserve_blocks         = 5 + seed;
-    snapshot.request_ref_blocks     = 11 + seed;
-    snapshot.block_cache_ref_blocks = 13 + seed;
-    snapshot.load_ref_blocks        = 14 + seed;
-    snapshot.eviction_ref_blocks    = 15 + seed;
-    snapshot.store_ref_blocks       = 16 + seed;
+    snapshot.pool_name                  = pool_name;
+    snapshot.block_size_bytes           = 1000 + seed;
+    snapshot.total_blocks               = total_blocks;
+    snapshot.free_blocks                = free_blocks;
+    snapshot.used_blocks                = total_blocks - free_blocks;
+    snapshot.active_blocks              = 7 + seed;
+    snapshot.available_blocks           = available_blocks;
+    snapshot.reserve_blocks             = 5 + seed;
+    snapshot.request_ref_blocks         = 11 + seed;
+    snapshot.block_cache_ref_blocks     = 13 + seed;
+    snapshot.load_ref_blocks            = 14 + seed;
+    snapshot.eviction_target_ref_blocks = 15 + seed;
+    snapshot.store_ref_blocks           = 16 + seed;
     snapshot.used_ratio = static_cast<float>(100.0 * snapshot.used_blocks / static_cast<double>(snapshot.total_blocks));
     return snapshot;
 }
@@ -1189,19 +1189,19 @@ static BlockTreePoolMetricsSnapshot makeMergeTreeInput(Tier               tier,
                                                        size_t             free_blocks,
                                                        size_t             available_blocks) {
     BlockTreePoolMetricsSnapshot snapshot;
-    snapshot.tier                   = tier;
-    snapshot.pool_name              = pool_name;
-    snapshot.block_size_bytes       = 2000 + seed;
-    snapshot.total_blocks           = total_blocks;
-    snapshot.free_blocks            = free_blocks;
-    snapshot.used_blocks            = total_blocks - free_blocks;
-    snapshot.available_blocks       = available_blocks;
-    snapshot.active_blocks          = total_blocks - available_blocks;
-    snapshot.request_ref_blocks     = 31 + seed;
-    snapshot.block_cache_ref_blocks = 33 + seed;
-    snapshot.load_ref_blocks        = 34 + seed;
-    snapshot.eviction_ref_blocks    = 35 + seed;
-    snapshot.store_ref_blocks       = 36 + seed;
+    snapshot.tier                       = tier;
+    snapshot.pool_name                  = pool_name;
+    snapshot.block_size_bytes           = 2000 + seed;
+    snapshot.total_blocks               = total_blocks;
+    snapshot.free_blocks                = free_blocks;
+    snapshot.used_blocks                = total_blocks - free_blocks;
+    snapshot.available_blocks           = available_blocks;
+    snapshot.active_blocks              = total_blocks - available_blocks;
+    snapshot.request_ref_blocks         = 31 + seed;
+    snapshot.block_cache_ref_blocks     = 33 + seed;
+    snapshot.load_ref_blocks            = 34 + seed;
+    snapshot.eviction_target_ref_blocks = 35 + seed;
+    snapshot.store_ref_blocks           = 36 + seed;
     return snapshot;
 }
 
@@ -1220,7 +1220,7 @@ static void expectMergedRowFromAllocator(const KVCachePoolMetricsSnapshot& sourc
     EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
-    EXPECT_EQ(actual.eviction_ref_blocks, source.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio, source.used_ratio) << context;
     EXPECT_EQ(actual.available_blocks, expected_available) << context;
@@ -1242,7 +1242,7 @@ static void expectMergedRowFromTree(const BlockTreePoolMetricsSnapshot& source,
     EXPECT_EQ(actual.request_ref_blocks, source.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, source.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, source.load_ref_blocks) << context;
-    EXPECT_EQ(actual.eviction_ref_blocks, source.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_target_ref_blocks, source.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, source.store_ref_blocks) << context;
     EXPECT_FLOAT_EQ(actual.used_ratio,
                     static_cast<float>(100.0 * (source.total_blocks - source.free_blocks)

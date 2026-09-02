@@ -328,11 +328,11 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     EXPECT_DOUBLE_EQ(snapshotQps(operation_metrics->malloc_failed_qps_metric, tags), 1);
 
     RtpLLMCacheTransferMetricsCollector transfer_collector;
-    transfer_collector.operation        = "load";
-    transfer_collector.source_tier      = "host";
-    transfer_collector.target_tier      = "device";
-    transfer_collector.descriptor_count = 3;
-    transfer_collector.success          = true;
+    transfer_collector.operation                = "load";
+    transfer_collector.source_tier              = "host";
+    transfer_collector.target_tier              = "device";
+    transfer_collector.descriptors_per_transfer = 3;
+    transfer_collector.success                  = true;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
         nullptr, &transfer_collector)));
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
@@ -341,8 +341,8 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     transfer_tags.AddTag("source_tier", "host");
     transfer_tags.AddTag("target_tier", "device");
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_failed_qps_metric), 1u);
-    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_descriptor_count_metric), 1u);
-    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_descriptor_count_metric, transfer_tags), 3);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->descriptors_per_transfer_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->descriptors_per_transfer_metric, transfer_tags), 3);
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_failed_qps_metric, transfer_tags), 0);
     transfer_collector.success = false;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
@@ -416,6 +416,54 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
     reporter.reportEvictionTriggered(Tier::DEVICE, CacheGroupType::FULL, true);
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
+}
+
+TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    cache_->setMetricsReporter(metrics_reporter);
+
+    std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
+    first_resources[0][0].device_blocks = {42};
+    cache_->insert({100}, first_resources, Tier::DEVICE);
+    std::vector<std::vector<GroupSetResource>> second_resources(1, std::vector<GroupSetResource>(1));
+    second_resources[0][0].device_blocks = {43};
+    cache_->insert({200}, second_resources, Tier::DEVICE);
+
+    EXPECT_EQ(cache_->evictForGroup(/*group_id=*/0, /*num_blocks=*/2), 2);
+
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    kmonitor::MetricsTags force_drop_tags("trigger_type", "force_drop");
+    force_drop_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    force_drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
+}
+
+TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    cache_->setMetricsReporter(metrics_reporter);
+
+    std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
+    first_resources[0][0].device_blocks = {42};
+    cache_->insert({100}, first_resources, Tier::DEVICE);
+    std::vector<std::vector<GroupSetResource>> second_resources(1, std::vector<GroupSetResource>(1));
+    second_resources[0][0].device_blocks = {43};
+    cache_->insert({200}, second_resources, Tier::DEVICE);
+
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
+
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    kmonitor::MetricsTags watermark_tags("trigger_type", "watermark");
+    watermark_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
 }
 
 TEST_F(BlockTreeCacheTest, EvictionMetricsReportSettledTransferTarget) {
@@ -960,7 +1008,7 @@ void expectSameJointLifecycleMetrics(const BlockTreePoolMetricsSnapshot& expecte
     EXPECT_EQ(actual.request_ref_blocks, expected.request_ref_blocks) << context;
     EXPECT_EQ(actual.block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
     EXPECT_EQ(actual.load_ref_blocks, expected.load_ref_blocks) << context;
-    EXPECT_EQ(actual.eviction_ref_blocks, expected.eviction_ref_blocks) << context;
+    EXPECT_EQ(actual.eviction_target_ref_blocks, expected.eviction_target_ref_blocks) << context;
     EXPECT_EQ(actual.store_ref_blocks, expected.store_ref_blocks) << context;
 }
 
@@ -1013,7 +1061,7 @@ TEST_F(BlockTreeCacheTest, MultiMemberPoolMetricsStayAlignedThroughJointEviction
             EXPECT_EQ(snapshot->block_cache_ref_blocks, expected.block_cache_ref_blocks) << context;
             EXPECT_EQ(snapshot->active_blocks, expected.active_blocks) << context;
             EXPECT_EQ(snapshot->load_ref_blocks, 0u) << context;
-            EXPECT_EQ(snapshot->eviction_ref_blocks, 0u) << context;
+            EXPECT_EQ(snapshot->eviction_target_ref_blocks, 0u) << context;
             EXPECT_EQ(snapshot->store_ref_blocks, 0u) << context;
             if (first == nullptr) {
                 first = snapshot;

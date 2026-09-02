@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -45,7 +46,7 @@ RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const KVCacheAllocatorPtr&
 }
 
 void logGlobalCacheMetrics(const RtpLLMCacheMetricsCollector& collector) {
-    RTP_LLM_LOG_INFO("kvc raw global: items=%ld left_seq=%ld",
+    RTP_LLM_LOG_INFO("kvc raw global: tree_node_count=%ld available_tokens=%ld",
                      static_cast<long>(collector.kv_cache_item_num),
                      static_cast<long>(collector.kv_cache_left_seq));
 }
@@ -57,7 +58,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
         RTP_LLM_LOG_INFO("kvc raw pool[%s/%s]: block_size_bytes=%zu total=%zu free=%zu used=%zu available=%zu "
                          "active=%zu "
                          "reserve=%zu request_ref_blocks=%zu block_cache_ref_blocks=%zu "
-                         "load_ref_blocks=%zu eviction_ref_blocks=%zu store_ref_blocks=%zu ratio=%.4f%%",
+                         "load_ref_blocks=%zu eviction_target_ref_blocks=%zu store_ref_blocks=%zu used_ratio=%.4f%%",
                          pool_snapshot.tier.c_str(),
                          pool_snapshot.pool_name.c_str(),
                          pool_snapshot.block_size_bytes,
@@ -70,25 +71,26 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          pool_snapshot.request_ref_blocks,
                          pool_snapshot.block_cache_ref_blocks,
                          pool_snapshot.load_ref_blocks,
-                         pool_snapshot.eviction_ref_blocks,
+                         pool_snapshot.eviction_target_ref_blocks,
                          pool_snapshot.store_ref_blocks,
                          pool_snapshot.used_ratio);
     }
 
     RtpLLMCachePoolMetricsCollector pool_collector;
-    pool_collector.block_size_bytes       = static_cast<int64_t>(pool_snapshot.block_size_bytes);
-    pool_collector.free_blocks            = static_cast<int64_t>(pool_snapshot.free_blocks);
-    pool_collector.used_blocks            = static_cast<int64_t>(pool_snapshot.used_blocks);
-    pool_collector.available_blocks       = static_cast<int64_t>(pool_snapshot.available_blocks);
-    pool_collector.active_blocks          = static_cast<int64_t>(pool_snapshot.active_blocks);
-    pool_collector.total_blocks           = static_cast<int64_t>(pool_snapshot.total_blocks);
-    pool_collector.reserve_blocks         = static_cast<int64_t>(pool_snapshot.reserve_blocks);
-    pool_collector.request_ref_blocks     = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
-    pool_collector.block_cache_ref_blocks = static_cast<int64_t>(pool_snapshot.block_cache_ref_blocks);
-    pool_collector.load_ref_blocks        = static_cast<int64_t>(pool_snapshot.load_ref_blocks);
-    pool_collector.eviction_ref_blocks    = static_cast<int64_t>(pool_snapshot.eviction_ref_blocks);
-    pool_collector.store_ref_blocks       = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
-    pool_collector.used_ratio             = pool_snapshot.used_ratio;
+    pool_collector.block_size_bytes                  = static_cast<int64_t>(pool_snapshot.block_size_bytes);
+    pool_collector.free_blocks                       = static_cast<int64_t>(pool_snapshot.free_blocks);
+    pool_collector.used_blocks                       = static_cast<int64_t>(pool_snapshot.used_blocks);
+    pool_collector.available_blocks                  = static_cast<int64_t>(pool_snapshot.available_blocks);
+    pool_collector.active_blocks                     = static_cast<int64_t>(pool_snapshot.active_blocks);
+    pool_collector.total_blocks                      = static_cast<int64_t>(pool_snapshot.total_blocks);
+    pool_collector.reserve_blocks                    = static_cast<int64_t>(pool_snapshot.reserve_blocks);
+    pool_collector.request_ref_blocks                = static_cast<int64_t>(pool_snapshot.request_ref_blocks);
+    pool_collector.block_cache_ref_blocks            = static_cast<int64_t>(pool_snapshot.block_cache_ref_blocks);
+    pool_collector.load_ref_blocks                   = static_cast<int64_t>(pool_snapshot.load_ref_blocks);
+    pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_snapshot.eviction_target_ref_blocks);
+    pool_collector.report_eviction_target_ref_blocks = pool_snapshot.tier != tierName(Tier::DEVICE);
+    pool_collector.store_ref_blocks                  = static_cast<int64_t>(pool_snapshot.store_ref_blocks);
+    pool_collector.used_ratio                        = pool_snapshot.used_ratio;
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     pool_tags.AddTag("tier", pool_snapshot.tier);

@@ -184,14 +184,19 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     const GroupSetPtr& group_set   = tree_->groupSets()[location->group_set_id];
     const auto&        device_pool = group_set->devicePools()[location->member_group_id];
 
-    const size_t initial_free = device_pool->freeBlocksNum();
-    size_t       reclaimed    = 0;
+    const size_t initial_free       = device_pool->freeBlocksNum();
+    size_t       reclaimed          = 0;
+    bool         eviction_triggered = false;
     while (reclaimed < num_blocks) {
         if (!evictor_.evictLocked(location->group_set_id, Tier::DEVICE, /*force_drop=*/true)) {
             break;
         }
+        eviction_triggered        = true;
         const size_t current_free = device_pool->freeBlocksNum();
         reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
+    }
+    if (eviction_triggered) {
+        metrics_reporter_.reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), /*force_drop=*/true);
     }
     RTP_LLM_LOG_DEBUG("group_id=%zu group_set[%zu] reclaimed %zu/%zu device blocks",
                       group_id,

@@ -515,7 +515,8 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(request_ref_blocks_metric, "rtp_llm_kv_cache_pool_request_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(block_cache_ref_blocks_metric, "rtp_llm_kv_cache_pool_block_cache_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_pool_load_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_metric, "rtp_llm_kv_cache_pool_eviction_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric,
+                                  "rtp_llm_kv_cache_pool_eviction_target_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(store_ref_blocks_metric, "rtp_llm_kv_cache_pool_store_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_pool_used_ratio");
     return true;
@@ -532,7 +533,9 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     REPORT_MUTABLE_METRIC(request_ref_blocks_metric, collector->request_ref_blocks);
     REPORT_MUTABLE_METRIC(block_cache_ref_blocks_metric, collector->block_cache_ref_blocks);
     REPORT_MUTABLE_METRIC(load_ref_blocks_metric, collector->load_ref_blocks);
-    REPORT_MUTABLE_METRIC(eviction_ref_blocks_metric, collector->eviction_ref_blocks);
+    if (collector->report_eviction_target_ref_blocks) {
+        REPORT_MUTABLE_METRIC(eviction_target_ref_blocks_metric, collector->eviction_target_ref_blocks);
+    }
     REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
     REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
 }
@@ -540,7 +543,7 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
 bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(transfer_qps_metric, "rtp_llm_kv_cache_transfer_qps");
     REGISTER_QPS_MUTABLE_METRIC(transfer_failed_qps_metric, "rtp_llm_kv_cache_transfer_failed_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(transfer_descriptor_count_metric, "rtp_llm_kv_cache_transfer_descriptor_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(descriptors_per_transfer_metric, "rtp_llm_kv_cache_descriptors_per_transfer");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_latency_us_metric, "rtp_llm_kv_cache_transfer_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
@@ -555,7 +558,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
     if (collector->transfer_completed) {
         transfer_qps_metric->Report(&transfer_tags, 1);
         transfer_failed_qps_metric->Report(&transfer_tags, collector->success ? 0 : 1);
-        transfer_descriptor_count_metric->Report(&transfer_tags, collector->descriptor_count);
+        descriptors_per_transfer_metric->Report(&transfer_tags, collector->descriptors_per_transfer);
         transfer_latency_us_metric->Report(&transfer_tags, collector->latency_us);
         for (const RtpLLMCacheTransferMetricsCollector::TransferBytesEntry& entry : collector->transfer_bytes) {
             kmonitor::MetricsTags bytes_tags("operation", collector->operation);
