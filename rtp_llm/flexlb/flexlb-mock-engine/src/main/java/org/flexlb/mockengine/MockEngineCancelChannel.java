@@ -1,7 +1,8 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
+import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.preemption.CancelTarget;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -16,8 +17,7 @@ import java.util.concurrent.CompletableFuture;
  * tombstone return ACCEPTED; a request not known by the specifically addressed
  * Prefill returns NOT_FOUND; Decode rejects this RPC as unsupported.
  *
- * <p><b>Wiring:</b> this class is NOT a Spring component. Production contexts
- * keep {@code UnsupportedEngineCancelChannel}; tests inject this channel
+ * <p><b>Wiring:</b> this class is NOT a Spring component. Tests inject it
  * explicitly, e.g.:
  * <pre>{@code
  *   Map<Integer, FastRpcService> services = ...; // port -> mock engine

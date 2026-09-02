@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """End-to-end smoke for RUNNING Decode priority preemption.
 
-This is deliberately separate from ``cancel_smoke.py``: the existing six
-scenarios cover client cancellation, while this scenario proves that a P70
+This scenario complements client-cancel coverage (now in the
+``flexlb_ft/`` framework): it proves that a P70
 incoming request evicts a P30 request already running on Decode through the
 Master -> original-Prefill weak-Cancel protocol.
 """
@@ -26,7 +26,6 @@ class VictimTerminal:
 
 
 class PriorityPreemptionSmoke(FlexLBSmokeBase):
-    CANCEL_CLEANUP_DELAY_MS = 350
     POLL_INTERVAL_S = 0.01
 
     async def _master_inflight(self) -> dict:
@@ -265,13 +264,11 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
             selected_decode_name = selected_decode["name"]
             low_kv_before = int(selected_decode["active_kv_tokens"])
 
-            # Keep Decode cleanup behind the weak ACK long enough to observe
-            # CANCELING and both engine-side and Master-side accounting fences.
-            injected = await self._inject(
-                selected_decode_name,
-                {"cancel_cleanup_delay_ms": self.CANCEL_CLEANUP_DELAY_MS},
-            )
-            assert injected.get("status") == "ok", f"inject failed: {injected}"
+            # No cleanup-delay injection here: cancel_cleanup_delay_ms was a
+            # feature of the deleted Python mock engine; the Java engine only
+            # parses the four boolean fault flags and silently ignores other
+            # config keys. The weak-ACK observation window relies on the
+            # WorkerStatus 20ms polling cadence instead.
 
             # WorkerStatus sync runs every 20ms.  A short stability interval
             # ensures Master has ingested the Decode RUNNING task, so this is

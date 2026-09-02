@@ -30,6 +30,13 @@ PROMETHEUS_DISPATCH_RE = re.compile(
     r"^flexlb_app_engine_balancing_master_dispatch_reason_total"
     r"\{(?P<labels>[^}]*)\}\s+(?P<value>[-+\deE.]+)\s*$"
 )
+# Same metric matcher for the consolidated layout, where the prometheus dump
+# lives in master.json as a {"name{labels}": value} dict — the sample value is
+# the dict value, so only the key needs to match.
+PROMETHEUS_DISPATCH_KEY_RE = re.compile(
+    r"^flexlb_app_engine_balancing_master_dispatch_reason_total"
+    r"\{(?P<labels>[^}]*)\}\s*$"
+)
 PROMETHEUS_REASON_RE = re.compile(r'(?:^|,)reason="(?P<reason>[^"]+)"(?:,|$)')
 
 INT_FIELDS = {
@@ -54,12 +61,21 @@ def _record(match: re.Match[str]) -> dict[str, int | str]:
 
 
 def flexlb_log_paths(run_dir: Path) -> list[Path]:
+    # Legacy sources win whenever they exist: a successful consolidation
+    # deletes them, so a legacy file that is present means fresher data (a
+    # RUN_DIR reused for a second run). The consolidated run-root master.log
+    # is only the fallback for already-consolidated directories.
     log_dir = run_dir / "flexlb_logs"
     paths = list(log_dir.glob("flexlb.log*")) if log_dir.is_dir() else []
     if paths:
         return sorted(paths, key=lambda path: (path.stat().st_mtime_ns, path.name))
     fallback = run_dir / "flexlb.log"
-    return [fallback] if fallback.is_file() else []
+    if fallback.is_file():
+        return [fallback]
+    master_log = run_dir / "master.log"
+    if master_log.is_file():
+        return [master_log]
+    return []
 
 
 def parse_log(path: Path) -> tuple[list[dict], list[dict]]:
@@ -108,6 +124,75 @@ def parse_prometheus_dispatch_counts(path: Path) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def load_json(path: Path) -> dict:
+    # Defensive loader: a missing file or a truncated/corrupt JSON (e.g. a
+    # killed consolidation left a partial file) returns {} so the caller
+    # falls back to the next layout instead of crashing.
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+# ---- Input entry points: legacy layout first, consolidated fallback -------
+# After consolidate_run_outputs.py the run root carries mock.json / master.json
+# / client.json. These loaders prefer the LEGACY files whenever they exist (a
+# successful consolidation deletes them, so a legacy file that is present means
+# fresher data — a RUN_DIR reused for a second run) and only fall back to the
+# consolidated files, so pre-consolidation and post-consolidation run
+# directories both stay analyzable. Only the entry points differ; the
+# analysis below is untouched.
+
+
+def load_mock_stats(run_dir: Path) -> list[dict[str, int | float]]:
+    legacy = run_dir / "mock_engine.log"
+    if legacy.is_file():
+        return parse_mock_stats(legacy)
+    mock_stats = load_json(run_dir / "mock.json").get("stats")
+    if isinstance(mock_stats, list):
+        return [row for row in mock_stats if isinstance(row, dict)]
+    return []
+
+
+def load_prometheus_dispatch_counts(run_dir: Path) -> dict[str, int]:
+    legacy = run_dir / "master_prometheus_after.prom"
+    if legacy.is_file():
+        return parse_prometheus_dispatch_counts(legacy)
+    prometheus = load_json(run_dir / "master.json").get("prometheus_after")
+    if isinstance(prometheus, dict) and prometheus:
+        counts: Counter[str] = Counter()
+        for key, value in prometheus.items():
+            metric = PROMETHEUS_DISPATCH_KEY_RE.match(key)
+            if not metric:
+                continue
+            reason = PROMETHEUS_REASON_RE.search(metric.group("labels"))
+            if reason:
+                counts[reason.group("reason")] += round(float(value))
+        return dict(sorted(counts.items()))
+    return {}
+
+
+def load_client_summary(run_dir: Path) -> dict:
+    # Phase B removed load_client/summary.json (the client records raw rows
+    # only); client.json is the sole source (no-backward-compat).
+    return load_json(run_dir / "client.json")
+
+
+def load_server_latency(run_dir: Path) -> dict:
+    # server_latency.json is kept in place by consolidation, so the legacy
+    # path stays the primary source; client.json's merged copy is fallback.
+    legacy = load_json(run_dir / "load_client" / "server_latency.json")
+    if legacy:
+        return legacy
+    server_latency = load_json(run_dir / "client.json").get("server_latency")
+    if isinstance(server_latency, dict):
+        return server_latency
+    return {}
+
+
 def percentile(sorted_values: list[int], quantile: float) -> int:
     if not sorted_values:
         return 0
@@ -154,12 +239,6 @@ def load_flexlb_config(path: Path | None) -> dict:
     return json.loads(document) if document else {}
 
 
-def load_json(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
 def analyze(run_dir: Path, master_config: Path | None) -> dict:
     decisions: list[dict] = []
     completions: list[dict] = []
@@ -168,13 +247,11 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
         path_decisions, path_completions = parse_log(log_path)
         decisions.extend(path_decisions)
         completions.extend(path_completions)
-    mock_stats = parse_mock_stats(run_dir / "mock_engine.log")
-    prometheus_reasons = parse_prometheus_dispatch_counts(
-        run_dir / "master_prometheus_after.prom"
-    )
+    mock_stats = load_mock_stats(run_dir)
+    prometheus_reasons = load_prometheus_dispatch_counts(run_dir)
     flexlb_config = load_flexlb_config(master_config)
-    summary = load_json(run_dir / "load_client" / "summary.json")
-    server_latency = load_json(run_dir / "load_client" / "server_latency.json")
+    summary = load_client_summary(run_dir)
+    server_latency = load_server_latency(run_dir)
 
     violation_count = 0
     violations: list[dict] = []
@@ -182,8 +259,12 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
         reason = decision["reason"]
         invalid = (
             (
-                reason == "predict_threshold"
-                and decision["predicted_ms"] < decision["threshold_ms"]
+                # The cap only admits a member that keeps the group under
+                # budget, so a multi-member group must stay below it. The
+                # mandatory head is exempt: it dispatches alone at any cost.
+                reason == "predicted_execution_cap"
+                and decision["batch_size"] > 1
+                and decision["predicted_ms"] >= decision["threshold_ms"]
             )
             or (
                 reason == "fixed_window_timeout"
@@ -227,15 +308,11 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
             "arrival_qps": server_latency.get(
                 "arrival_qps", summary.get("server_arrival_qps", 0.0)
             ),
-            "completion_qps": server_latency.get(
-                "completion_qps", summary.get("server_completion_qps", 0.0)
-            ),
+            "completion_qps": server_latency.get("completion_qps", 0.0),
             "error_count": summary.get("error_count", summary.get("errors", 0)),
             "test_valid": summary.get("test_valid"),
             "validity_checks": summary.get("validity_checks", {}),
             "client_pacing_lag_ms": summary.get("client_pacing_lag_ms", {}),
-            "client_send_peak_qps": summary.get("client_send_peak_qps", {}),
-            "trace_due_peak_qps": summary.get("trace_due_peak_qps", {}),
             "schedule_latency_ms": summary.get("schedule_latency_ms", {}),
         },
         "decisions": {

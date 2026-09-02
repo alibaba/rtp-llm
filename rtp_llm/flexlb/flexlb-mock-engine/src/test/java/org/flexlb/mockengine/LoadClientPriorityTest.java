@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -18,9 +17,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Auto-TPM priority support in {@link JavaLoadClient}: per-record priority
- * parsing (trace field beats the PRIORITY env default), propagation onto
- * FlexlbScheduleRequestPB.priority (field 14; 0 keeps it off the wire), and
- * the per-priority stats view used by priority-dimension assertions.
+ * parsing (trace field beats the PRIORITY env default), the FORCE_PRIORITY
+ * single-level pin (overrides both), propagation onto
+ * FlexlbScheduleRequestPB.priority (field 14; 0 keeps it off the wire),
+ * validation with graceful fallback (warn + default, never a hard fail),
+ * and raw per-request row serialization (synthesized rows omit the
+ * priority key entirely rather than writing a misleading 0).
  */
 class LoadClientPriorityTest {
 
@@ -34,7 +36,7 @@ class LoadClientPriorityTest {
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
-                "engine_service", "", false,
+                "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true,
                 priority);
         return new JavaLoadClient(config);
@@ -98,6 +100,36 @@ class LoadClientPriorityTest {
         assertEquals(40, defaulted.priority);
     }
 
+    // ---- trace parsing: FORCE_PRIORITY pins a single level ----
+
+    @Test
+    void forcePriorityPinsEveryRecord() throws Exception {
+        // Bottom constructor carries the FORCE_PRIORITY knob (fromEnv reads
+        // the env); the 35-param convenience overload forwards 0 = disabled.
+        JavaLoadClient.Config config = new JavaLoadClient.Config(
+                "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
+                0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
+                120_000L, 500.0, "skip", false, false, 1, 1, 0L, 120, true,
+                "engine_service", "",
+                false, 10, 1000, 0, 0, "", false, "", true,
+                40, 50, "replay", 0.0, true);
+        JavaLoadClient client = new JavaLoadClient(config);
+
+        ObjectNode withField = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r1").put("priority", 70);
+        JavaLoadClient.TraceRecord pinned = client.parseTraceRecord(withField);
+        assertNotNull(pinned);
+        assertEquals(50, pinned.priority);
+
+        ObjectNode withoutField = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r2");
+        JavaLoadClient.TraceRecord pinnedDefault = client.parseTraceRecord(withoutField);
+        assertNotNull(pinnedDefault);
+        assertEquals(50, pinnedDefault.priority);
+    }
+
     @Test
     void loopAndTruncationPreservePriority() {
         JavaLoadClient.TraceRecord original = new JavaLoadClient.TraceRecord(
@@ -111,34 +143,54 @@ class LoadClientPriorityTest {
         assertEquals(100, truncated.get(0).outputLen);
     }
 
-    // ---- per-priority stats view ----
+    // ---- raw per-request row serialization ----
 
     @Test
-    void priorityBreakdownGroupsCompletedRejectedAndLatency() {
-        List<JavaLoadClient.RequestResult> rows = new ArrayList<>();
-        rows.add(result(70, "ok", 10.0));
-        rows.add(result(70, "scheduled", 20.0));
-        rows.add(result(70, "schedule_error", 5.0));
-        rows.add(result(30, "ok", 40.0));
-        rows.add(result(30, "exception", 0.0));
-        rows.add(result(0, "ok", 8.0));
+    void syntheticRowsOmitThePriorityKey() {
+        ObjectNode real = JavaLoadClient.perRequestNode(result(70, "ok", 10.0));
+        assertTrue(real.has("priority"));
+        assertEquals(70, real.get("priority").asInt());
 
-        ObjectNode stats = JavaLoadClient.priorityBreakdown(rows);
+        // client_events.jsonl rows distinguish synthesized entries by key
+        // absence — a literal 0 would pollute downstream priority stats.
+        ObjectNode synthetic = JavaLoadClient.perRequestNode(syntheticResult("timeout"));
+        assertFalse(synthetic.has("priority"),
+                "synthetic rows must not write priority=0");
+    }
 
-        assertEquals(3, stats.get("70").get("total").asInt());
-        assertEquals(2, stats.get("70").get("completed").asInt());
-        assertEquals(1, stats.get("70").get("rejected").asInt());
-        assertEquals(15.0, stats.get("70").get("avg_schedule_ms").asDouble(), 1e-9);
+    @Test
+    void invalidTracePriorityFallsBackToConfigDefault() throws Exception {
+        JavaLoadClient client = dryRunClient(40);
 
-        assertEquals(2, stats.get("30").get("total").asInt());
-        assertEquals(1, stats.get("30").get("completed").asInt());
-        assertEquals(1, stats.get("30").get("rejected").asInt());
-        assertEquals(40.0, stats.get("30").get("avg_schedule_ms").asDouble(), 1e-9);
+        ObjectNode invalidHigh = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r1").put("priority", 200);
+        assertEquals(40, client.parseTraceRecord(invalidHigh).priority);
 
-        assertEquals(1, stats.get("0").get("total").asInt());
-        assertEquals(1, stats.get("0").get("completed").asInt());
-        assertEquals(0, stats.get("0").get("rejected").asInt());
-        assertFalse(stats.has("40"), "unobserved priorities must not appear");
+        ObjectNode invalidNegative = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r2").put("priority", -5);
+        assertEquals(40, client.parseTraceRecord(invalidNegative).priority);
+
+        // Explicit 0 stays unset (legacy wire behavior), not "invalid".
+        ObjectNode explicitZero = MAPPER.createObjectNode()
+                .put("il", 100).put("ol", 10).put("ts", 1L)
+                .put("request_id", "r3").put("priority", 0);
+        assertEquals(0, client.parseTraceRecord(explicitZero).priority);
+    }
+
+    @Test
+    void envPriorityKnobsRejectInvalidLevels() {
+        // Valid and legacy values pass through unchanged.
+        assertEquals(70, JavaLoadClient.Config.sanitizePriority(70));
+        assertEquals(0, JavaLoadClient.Config.sanitizePriority(0));
+        assertEquals(60, JavaLoadClient.Config.sanitizeForcePriority(60));
+        assertEquals(0, JavaLoadClient.Config.sanitizeForcePriority(0));
+        // Out-of-range values warn and fall back instead of failing the run.
+        assertEquals(50, JavaLoadClient.Config.sanitizePriority(200));
+        assertEquals(50, JavaLoadClient.Config.sanitizePriority(-5));
+        assertEquals(0, JavaLoadClient.Config.sanitizeForcePriority(101));
+        assertEquals(0, JavaLoadClient.Config.sanitizeForcePriority(-1));
     }
 
     private static JavaLoadClient.RequestResult result(int priority, String status, double scheduleMs) {
@@ -146,6 +198,14 @@ class LoadClientPriorityTest {
         result.priority = priority;
         result.status = status;
         result.scheduleMs = scheduleMs;
+        return result;
+    }
+
+    /** A collector-synthesized row (timeout/exception fallback): no real
+     *  request ever carried a priority for it. */
+    private static JavaLoadClient.RequestResult syntheticResult(String status) {
+        JavaLoadClient.RequestResult result = result(0, status, 0.0);
+        result.synthetic = true;
         return result;
     }
 }

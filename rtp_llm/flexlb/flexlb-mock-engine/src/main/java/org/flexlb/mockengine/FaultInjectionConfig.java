@@ -1,5 +1,7 @@
 package org.flexlb.mockengine;
 
+import java.util.List;
+
 /**
  * Immutable fault-injection configuration for the Java mock engine.
  *
@@ -28,6 +30,22 @@ public final class FaultInjectionConfig {
     private final long kvPressureTokens;
     private final int queueDepthLimit;
     private final int crashAfterNRequests;
+    // ── Status-report fault family (getWorkerStatus output-layer filters;
+    // the completion queue / version protocol core stays untouched) ──
+    private final boolean statusSuppressFinished;
+    private final boolean statusSuppressRunning;
+    private final List<Long> statusSuppressRids;
+    private final boolean statusNoRespond;
+    private final List<StatusFakeTask> statusFakeTasks;
+    private final boolean statusDuplicateFinished;
+    private final int statusCursorRegress;
+    private final boolean statusVersionRegress;
+    private final boolean statusZombieRunning;
+    // ── EnqueueBatch ack fault family (ack content corruption only;
+    // engine-side processing is untouched) ──
+    private final int enqueueAckPartialFail;
+    private final long enqueueAckErrorCode;
+    private final boolean enqueueAckDrop;
 
     private FaultInjectionConfig(Builder b) {
         this.failOnEnqueue = b.failOnEnqueue;
@@ -41,6 +59,18 @@ public final class FaultInjectionConfig {
         this.kvPressureTokens = b.kvPressureTokens;
         this.queueDepthLimit = b.queueDepthLimit;
         this.crashAfterNRequests = b.crashAfterNRequests;
+        this.statusSuppressFinished = b.statusSuppressFinished;
+        this.statusSuppressRunning = b.statusSuppressRunning;
+        this.statusSuppressRids = b.statusSuppressRids;
+        this.statusNoRespond = b.statusNoRespond;
+        this.statusFakeTasks = b.statusFakeTasks;
+        this.statusDuplicateFinished = b.statusDuplicateFinished;
+        this.statusCursorRegress = b.statusCursorRegress;
+        this.statusVersionRegress = b.statusVersionRegress;
+        this.statusZombieRunning = b.statusZombieRunning;
+        this.enqueueAckPartialFail = b.enqueueAckPartialFail;
+        this.enqueueAckErrorCode = b.enqueueAckErrorCode;
+        this.enqueueAckDrop = b.enqueueAckDrop;
     }
 
     public boolean isFailOnEnqueue() {
@@ -87,6 +117,54 @@ public final class FaultInjectionConfig {
         return crashAfterNRequests;
     }
 
+    public boolean isStatusSuppressFinished() {
+        return statusSuppressFinished;
+    }
+
+    public boolean isStatusSuppressRunning() {
+        return statusSuppressRunning;
+    }
+
+    public List<Long> getStatusSuppressRids() {
+        return statusSuppressRids;
+    }
+
+    public boolean isStatusNoRespond() {
+        return statusNoRespond;
+    }
+
+    public List<StatusFakeTask> getStatusFakeTasks() {
+        return statusFakeTasks;
+    }
+
+    public boolean isStatusDuplicateFinished() {
+        return statusDuplicateFinished;
+    }
+
+    public int getStatusCursorRegress() {
+        return statusCursorRegress;
+    }
+
+    public boolean isStatusVersionRegress() {
+        return statusVersionRegress;
+    }
+
+    public boolean isStatusZombieRunning() {
+        return statusZombieRunning;
+    }
+
+    public int getEnqueueAckPartialFail() {
+        return enqueueAckPartialFail;
+    }
+
+    public long getEnqueueAckErrorCode() {
+        return enqueueAckErrorCode;
+    }
+
+    public boolean isEnqueueAckDrop() {
+        return enqueueAckDrop;
+    }
+
     /**
      * Create a new mutable builder with sensible defaults.
      */
@@ -109,7 +187,19 @@ public final class FaultInjectionConfig {
                 .noRespond(noRespond)
                 .kvPressureTokens(kvPressureTokens)
                 .queueDepthLimit(queueDepthLimit)
-                .crashAfterNRequests(crashAfterNRequests);
+                .crashAfterNRequests(crashAfterNRequests)
+                .statusSuppressFinished(statusSuppressFinished)
+                .statusSuppressRunning(statusSuppressRunning)
+                .statusSuppressRids(statusSuppressRids)
+                .statusNoRespond(statusNoRespond)
+                .statusFakeTasks(statusFakeTasks)
+                .statusDuplicateFinished(statusDuplicateFinished)
+                .statusCursorRegress(statusCursorRegress)
+                .statusVersionRegress(statusVersionRegress)
+                .statusZombieRunning(statusZombieRunning)
+                .enqueueAckPartialFail(enqueueAckPartialFail)
+                .enqueueAckErrorCode(enqueueAckErrorCode)
+                .enqueueAckDrop(enqueueAckDrop);
     }
 
     @Override
@@ -125,7 +215,41 @@ public final class FaultInjectionConfig {
                 + ", kvPressureTokens=" + kvPressureTokens
                 + ", queueDepthLimit=" + queueDepthLimit
                 + ", crashAfterNRequests=" + crashAfterNRequests
+                + ", statusSuppressFinished=" + statusSuppressFinished
+                + ", statusSuppressRunning=" + statusSuppressRunning
+                + ", statusSuppressRids=" + statusSuppressRids
+                + ", statusNoRespond=" + statusNoRespond
+                + ", statusFakeTasks=" + statusFakeTasks
+                + ", statusDuplicateFinished=" + statusDuplicateFinished
+                + ", statusCursorRegress=" + statusCursorRegress
+                + ", statusVersionRegress=" + statusVersionRegress
+                + ", statusZombieRunning=" + statusZombieRunning
+                + ", enqueueAckPartialFail=" + enqueueAckPartialFail
+                + ", enqueueAckErrorCode=" + enqueueAckErrorCode
+                + ", enqueueAckDrop=" + enqueueAckDrop
                 + '}';
+    }
+
+    /**
+     * One synthetic task for the {@code status_fake_task} injection: a task
+     * that never existed, appended to the getWorkerStatus output on every
+     * poll until the injection is cleared (multiple injects accumulate into
+     * a continuously reported set).
+     *
+     * <p>{@code phase} is one of {@code RUNNING}, {@code KV_ALLOCATED},
+     * {@code RECEIVED} (running-form: appended to runningTaskInfo) or
+     * {@code finished} (finished-form: appended to finishedTaskList with an
+     * optional {@code errorCode} carried in the task's error_info).
+     */
+    public record StatusFakeTask(long requestId,
+                                 long batchId,
+                                 String phase,
+                                 long errorCode) {
+
+        /** True for the finished-form synthetic completion. */
+        public boolean isFinishedForm() {
+            return "finished".equalsIgnoreCase(phase);
+        }
     }
 
     public static final class Builder {
@@ -140,6 +264,18 @@ public final class FaultInjectionConfig {
         private long kvPressureTokens = 0;
         private int queueDepthLimit = 0;
         private int crashAfterNRequests = 0;
+        private boolean statusSuppressFinished = false;
+        private boolean statusSuppressRunning = false;
+        private List<Long> statusSuppressRids = List.of();
+        private boolean statusNoRespond = false;
+        private List<StatusFakeTask> statusFakeTasks = List.of();
+        private boolean statusDuplicateFinished = false;
+        private int statusCursorRegress = 0;
+        private boolean statusVersionRegress = false;
+        private boolean statusZombieRunning = false;
+        private int enqueueAckPartialFail = 0;
+        private long enqueueAckErrorCode = 0;
+        private boolean enqueueAckDrop = false;
 
         private Builder() {
         }
@@ -196,6 +332,66 @@ public final class FaultInjectionConfig {
 
         public Builder crashAfterNRequests(int n) {
             this.crashAfterNRequests = n;
+            return this;
+        }
+
+        public Builder statusSuppressFinished(boolean suppress) {
+            this.statusSuppressFinished = suppress;
+            return this;
+        }
+
+        public Builder statusSuppressRunning(boolean suppress) {
+            this.statusSuppressRunning = suppress;
+            return this;
+        }
+
+        public Builder statusSuppressRids(List<Long> rids) {
+            this.statusSuppressRids = rids == null ? List.of() : List.copyOf(rids);
+            return this;
+        }
+
+        public Builder statusNoRespond(boolean noRespond) {
+            this.statusNoRespond = noRespond;
+            return this;
+        }
+
+        public Builder statusFakeTasks(List<StatusFakeTask> fakeTasks) {
+            this.statusFakeTasks = fakeTasks == null ? List.of() : List.copyOf(fakeTasks);
+            return this;
+        }
+
+        public Builder statusDuplicateFinished(boolean duplicate) {
+            this.statusDuplicateFinished = duplicate;
+            return this;
+        }
+
+        public Builder statusCursorRegress(int regress) {
+            this.statusCursorRegress = regress;
+            return this;
+        }
+
+        public Builder statusVersionRegress(boolean regress) {
+            this.statusVersionRegress = regress;
+            return this;
+        }
+
+        public Builder statusZombieRunning(boolean zombie) {
+            this.statusZombieRunning = zombie;
+            return this;
+        }
+
+        public Builder enqueueAckPartialFail(int k) {
+            this.enqueueAckPartialFail = k;
+            return this;
+        }
+
+        public Builder enqueueAckErrorCode(long code) {
+            this.enqueueAckErrorCode = code;
+            return this;
+        }
+
+        public Builder enqueueAckDrop(boolean drop) {
+            this.enqueueAckDrop = drop;
             return this;
         }
 

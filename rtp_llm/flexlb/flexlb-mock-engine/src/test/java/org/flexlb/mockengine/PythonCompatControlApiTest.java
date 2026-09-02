@@ -2,28 +2,27 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
+import static org.flexlb.mockengine.MockEngineTestSupport.unary;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -124,16 +123,7 @@ class PythonCompatControlApiTest {
     }
 
     private MockPerformanceModel model(String formula, double sleepScale) throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", sleepScale,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(tempDir, formula, sleepScale);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -246,12 +236,6 @@ class PythonCompatControlApiTest {
         assertTrue(root.get("engines").isArray());
         assertEquals(3, root.get("engines").size());
 
-        JsonNode counters = root.get("cluster_counters");
-        assertNotNull(counters, "/snapshot must include cluster_counters");
-        assertEquals(0, counters.get("grpc_error_count").asInt());
-        assertEquals(0, counters.get("grpc_retry_count").asInt());
-        assertEquals(0, counters.get("grpc_cancel_forward_count").asInt());
-
         JsonNode engine = root.get("engines").get(0);
         // Python field set (legacy MockEngineState.snapshot) — names and types.
         assertEquals("prefill-0", engine.get("name").asText());
@@ -359,11 +343,6 @@ class PythonCompatControlApiTest {
                 EngineRpcService.StatusVersionPB.newBuilder().build(), observer));
         assertEquals(3, status.getAvailableConcurrency(),
                 "idle prefill available_concurrency should equal max_prefill_concurrency");
-
-        // Legacy field names still accepted.
-        httpPost("/set_perf",
-                "{\"port\":" + prefill.getGrpcPort() + ",\"prefill_ms\":25}");
-        assertEquals(25L, perf.prefillMs(List.of(shape)));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -449,7 +428,7 @@ class PythonCompatControlApiTest {
     }
 
     // ════════════════════════════════════════════════════════════════
-    //  Test 9: /metrics — Python names in both modes, legacy retained
+    // Test 9: /metrics — Python names in both modes
     // ════════════════════════════════════════════════════════════════
 
     @Test
@@ -470,8 +449,7 @@ class PythonCompatControlApiTest {
                 "mock_engine_cancelled_total", "mock_engine_cache_keys",
                 "mock_engine_cache_evictions_total", "mock_engine_active_kv_tokens",
                 "mock_engine_available_kv_tokens", "mock_engine_rpc_total",
-                "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_p99",
-                "flexlb_mock_grpc_error_count"}) {
+                "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_p99"}) {
             assertTrue(body.contains(metric), "/metrics should contain " + metric);
         }
         // Aggregated mode uses role-only labels.
@@ -480,12 +458,6 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{role=\"decode\"} 2"),
                 "aggregated decode completed should be 2");
         assertTrue(body.contains("mock_engine_rpc_total{role=\"prefill\",rpc_method=\"enqueue_batch\"} 1"));
-        // Legacy series retained with port/role labels. Role label is
-        // lowercase to stay consistent with the Python-compat aggregated
-        // series (avoids case-split double counting in role-less queries).
-        assertTrue(body.contains("mock_engine_inflight_count{port=\""
-                + prefill.getGrpcPort() + "\",role=\"prefill\"}"));
-        assertTrue(body.contains("mock_engine_heap_used_bytes"));
     }
 
     @Test
@@ -507,7 +479,6 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{engine_name=\"decode-0\","
                 + "role=\"decode\",grpc_port=\"" + decodeServices.get(0).getGrpcPort()
                 + "\",engine_ip=\"127.0.0.1\"} 1"));
-        assertTrue(body.contains("flexlb_mock_grpc_cancel_forward_count 0"));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -571,14 +542,7 @@ class PythonCompatControlApiTest {
     }
 
     private String httpGet(String path) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "GET " + path + " failed");
-        return response.body();
+        return MockEngineTestSupport.httpGet(controlServer.getPort(), path);
     }
 
     private void httpPost(String path, String body) throws Exception {
@@ -588,93 +552,7 @@ class PythonCompatControlApiTest {
     }
 
     private HttpResponse<String> httpPostResponse(String path, String body) throws Exception {
-        return HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .header("Content-Type", "application/json")
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
+        return MockEngineTestSupport.httpPostResponse(controlServer.getPort(), path, body);
     }
 
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "unary response");
-        return response.get();
-    }
 }

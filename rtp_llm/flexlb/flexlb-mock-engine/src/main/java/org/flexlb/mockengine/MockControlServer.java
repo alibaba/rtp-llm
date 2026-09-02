@@ -23,21 +23,23 @@ import java.util.concurrent.TimeUnit;
 /**
  * Lightweight HTTP control server for the Java mock engine cluster.
  *
- * <p>Provides 11 endpoints mirroring the legacy Python mock control API:
+ * <p>Provides 15 endpoints mirroring the legacy Python mock control API:
  * snapshot, inject, clear_inject, health, requests, set_perf, set_kv_pressure,
- * set_queue_depth, stop_engine, start_engine, and metrics.
+ * set_queue_depth, cache_evict, stop_engine, start_engine, cancel_request,
+ * add_engine, remove_engine, and metrics. add_engine/remove_engine back runtime
+ * scale-out/in and keep the optional --discovery-file mapping in sync (see
+ * {@link DynamicEngineManager}).
  *
  * <p>Python compatibility layer (Phase 2): all POST endpoints accept dual
  * addressing — either {@code {"engine": "<name>"}} resolved by engine name
  * (e.g. "prefill-0") or {@code {"port": N}} resolved by gRPC port, matching
  * the legacy Python mock control plane which addresses engines by name.
  * Response schemas follow Python: /snapshot wraps engines in
- * {@code {"engines": [...], "cluster_counters": {...}}}, /requests is keyed
- * by engine name, /health returns {@code {"status": "ok"}}, and /metrics
- * emits the Python metric names with matching labels (aggregated by role by
- * default, per-engine with {@code ?per_engine=true}). The pre-existing Java
- * request formats and legacy metric series are retained for backward
- * compatibility.
+ * {@code {"engines": [...]}}, /requests is keyed by engine name, /health
+ * returns {@code {"status": "ok"}}, and /metrics emits the Python metric
+ * names with matching labels (aggregated by role by default, per-engine with
+ * {@code ?per_engine=true}). The pre-existing Java request formats are
+ * retained for backward compatibility.
  *
  * <p>Uses JDK built-in {@link HttpServer} — no additional Maven dependencies.
  */
@@ -50,6 +52,8 @@ final class MockControlServer {
     private final Map<Integer, Server> serversByPort;
     private final EventLoopGroup bossGroup;
     private final EventLoopGroup workerGroup;
+    /** Runtime scale-out/in backend for /add_engine + /remove_engine; null disables them. */
+    private final DynamicEngineManager engineManager;
 
     MockControlServer(Map<Integer, JavaMockEngineCluster.FastRpcService> services,
                       Map<Integer, Server> serversByPort,
@@ -57,10 +61,21 @@ final class MockControlServer {
                       EventLoopGroup workerGroup,
                       String host,
                       int httpPort) throws IOException {
+        this(services, serversByPort, bossGroup, workerGroup, host, httpPort, null);
+    }
+
+    MockControlServer(Map<Integer, JavaMockEngineCluster.FastRpcService> services,
+                      Map<Integer, Server> serversByPort,
+                      EventLoopGroup bossGroup,
+                      EventLoopGroup workerGroup,
+                      String host,
+                      int httpPort,
+                      DynamicEngineManager engineManager) throws IOException {
         this.services = services;
         this.serversByPort = serversByPort;
         this.bossGroup = bossGroup;
         this.workerGroup = workerGroup;
+        this.engineManager = engineManager;
         this.httpServer = HttpServer.create(new InetSocketAddress(host, httpPort), 0);
         httpServer.createContext("/snapshot", this::handleSnapshot);
         httpServer.createContext("/inject", this::handleInject);
@@ -70,9 +85,12 @@ final class MockControlServer {
         httpServer.createContext("/set_perf", this::handleSetPerf);
         httpServer.createContext("/set_kv_pressure", this::handleSetKvPressure);
         httpServer.createContext("/set_queue_depth", this::handleSetQueueDepth);
+        httpServer.createContext("/cache_evict", this::handleCacheEvict);
         httpServer.createContext("/stop_engine", this::handleStopEngine);
         httpServer.createContext("/start_engine", this::handleStartEngine);
         httpServer.createContext("/cancel_request", this::handleCancelRequest);
+        httpServer.createContext("/add_engine", this::handleAddEngine);
+        httpServer.createContext("/remove_engine", this::handleRemoveEngine);
         httpServer.createContext("/metrics", this::handleMetrics);
         httpServer.setExecutor(Executors.newCachedThreadPool(r -> {
             Thread t = new Thread(r, "mock-control-http");
@@ -98,11 +116,29 @@ final class MockControlServer {
     /** Carries an HTTP error status + message back to the handler wrapper. */
     private static final class ApiException extends Exception {
         final int status;
+        final Map<String, Object> response;
 
         ApiException(int status, String message) {
             super(message);
             this.status = status;
+            this.response = Map.of("error", message);
         }
+
+        ApiException(
+                int status,
+                String message,
+                Map<String, Object> response) {
+            super(message);
+            this.status = status;
+            this.response = response;
+        }
+    }
+
+    @FunctionalInterface
+    private interface ServicePostAction {
+        Map<String, Object> apply(
+                JsonNode body,
+                JavaMockEngineCluster.FastRpcService service) throws Exception;
     }
 
     /**
@@ -134,6 +170,40 @@ final class MockControlServer {
         throw new ApiException(400, "request must contain 'engine' or 'port'");
     }
 
+    private void handleServicePost(
+            HttpExchange exchange,
+            ServicePostAction action) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            sendJson(exchange, 200, action.apply(body, service));
+        } catch (ApiException apiFailure) {
+            sendJson(exchange, apiFailure.status, apiFailure.response);
+        } catch (Exception failure) {
+            // Always answer malformed JSON and unexpected handler failures;
+            // if a response was already committed there is nothing left to do.
+            try {
+                sendJson(exchange, 500,
+                        Map.of("error", String.valueOf(failure)));
+            } catch (IOException ignored) {
+                // Response already committed.
+            }
+        }
+    }
+
+    private static Map<String, Object> successResponse(
+            JavaMockEngineCluster.FastRpcService service) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "ok");
+        response.put("engine", service.getEngineName());
+        response.put("port", service.getGrpcPort());
+        return response;
+    }
+
     // ────────────────── Endpoint handlers ──────────────────
 
     private void handleSnapshot(HttpExchange exchange) throws IOException {
@@ -141,7 +211,7 @@ final class MockControlServer {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
             return;
         }
-        // Python cluster.snapshot() shape: {"engines": [...], "cluster_counters": {...}}
+        // Python cluster.snapshot() shape: {"engines": [...]}
         List<Map<String, Object>> engines = new ArrayList<>();
         for (JavaMockEngineCluster.FastRpcService service : orderedServices()) {
             engines.add(service.getSnapshot());
@@ -151,25 +221,11 @@ final class MockControlServer {
         // fields and the java_mock_stats ts_epoch_ms field (additive, top-level).
         response.put("ts_epoch_ms", System.currentTimeMillis());
         response.put("engines", engines);
-        // The Java cluster runs engines in-process (no remote decode forwarding),
-        // so the gRPC forwarding counters are always zero — kept for schema parity.
-        Map<String, Object> clusterCounters = new LinkedHashMap<>();
-        clusterCounters.put("grpc_error_count", 0);
-        clusterCounters.put("grpc_retry_count", 0);
-        clusterCounters.put("grpc_cancel_forward_count", 0);
-        response.put("cluster_counters", clusterCounters);
         sendJson(exchange, 200, response);
     }
 
     private void handleInject(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
-
+        handleServicePost(exchange, (body, service) -> {
             if (body.has("type")) {
                 // Original Java fault-injection format ({"port"/"engine", "type", "enabled", ...}).
                 String type = body.path("type").asText();
@@ -185,19 +241,51 @@ final class MockControlServer {
                     case "crash_after" -> builder.crashAfterNRequests(enabled ? body.path("n").asInt(5) : 0);
                     case "enqueue_delay" -> builder.enqueueDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
                     case "generate_delay" -> builder.generateDelayMs(enabled ? body.path("delay_ms").asLong(0) : 0);
-                    default -> {
-                        sendJson(exchange, 400, Map.of("error", "unknown injection type: " + type));
-                        return;
+                    // ── Status-report fault family (getWorkerStatus output layer) ──
+                    case "status_suppress_finished" -> builder.statusSuppressFinished(enabled);
+                    case "status_suppress_running" -> builder.statusSuppressRunning(enabled);
+                    case "status_suppress_rids" -> builder.statusSuppressRids(
+                            enabled ? readLongList(body.path("rids")) : List.of());
+                    case "status_no_respond" -> builder.statusNoRespond(enabled);
+                    case "status_fake_task" -> {
+                        // Append-on-inject / clear-on-disable: multiple injects
+                        // accumulate into a continuously reported synthetic set.
+                        if (enabled) {
+                            long rid = body.path("rid").asLong(0);
+                            if (rid == 0) {
+                                throw new ApiException(400, "status_fake_task requires 'rid'");
+                            }
+                            List<FaultInjectionConfig.StatusFakeTask> fakeTasks =
+                                    new ArrayList<>(service.getFaultConfig().getStatusFakeTasks());
+                            fakeTasks.add(new FaultInjectionConfig.StatusFakeTask(
+                                    rid,
+                                    body.path("batch_id").asLong(0),
+                                    body.path("phase").asText("RUNNING"),
+                                    body.path("error_code").asLong(0)));
+                            builder.statusFakeTasks(fakeTasks);
+                        } else {
+                            builder.statusFakeTasks(List.of());
+                        }
                     }
+                    case "status_duplicate_finished" -> builder.statusDuplicateFinished(enabled);
+                    case "status_cursor_regress" -> builder.statusCursorRegress(
+                            enabled ? body.path("n").asInt(1) : 0);
+                    case "status_version_regress" -> builder.statusVersionRegress(enabled);
+                    case "status_zombie_running" -> builder.statusZombieRunning(enabled);
+                    // ── EnqueueBatch ack fault family (ack content corruption;
+                    // engine-side processing is untouched) ──
+                    case "enqueue_ack_partial_fail" -> builder.enqueueAckPartialFail(
+                            enabled ? body.path("k").asInt(1) : 0);
+                    case "enqueue_ack_error_code" -> builder.enqueueAckErrorCode(
+                            enabled ? body.path("code").asLong(0) : 0);
+                    case "enqueue_ack_drop" -> builder.enqueueAckDrop(enabled);
+                    default -> throw new ApiException(
+                            400, "unknown injection type: " + type);
                 }
                 service.setFaultConfig(builder.build());
-                Map<String, Object> response = new LinkedHashMap<>();
-                response.put("status", "ok");
-                response.put("engine", service.getEngineName());
-                response.put("port", service.getGrpcPort());
+                Map<String, Object> response = successResponse(service);
                 response.put("type", type);
-                sendJson(exchange, 200, response);
-                return;
+                return response;
             }
 
             // Python format (_http_inject / set_injection):
@@ -212,51 +300,24 @@ final class MockControlServer {
                     .noRespond(cfg.path("no_respond").asBoolean(false))
                     .build();
             service.setFaultConfig(injected);
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
+            return successResponse(service);
+        });
+    }
+
+    /** Read a JSON array of integers into a Long list (status_suppress_rids). */
+    private static List<Long> readLongList(JsonNode node) {
+        List<Long> values = new ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(item -> values.add(item.asLong()));
         }
+        return values;
     }
 
     private void handleClearInject(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             service.clearFaultConfig();
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleHealth(HttpExchange exchange) throws IOException {
@@ -290,13 +351,7 @@ final class MockControlServer {
     }
 
     private void handleSetPerf(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             MockPerformanceModel perf = service.getPerformance();
             // Python fields (_http_set_perf):
             if (body.has("prefill_fixed_ms")) {
@@ -308,81 +363,21 @@ final class MockControlServer {
             if (body.has("max_prefill_concurrency")) {
                 service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
             }
-            // Original Java fields retained:
-            if (body.has("prefill_ms")) {
-                perf.setOverrideFixedPrefillMs(body.get("prefill_ms").asDouble());
-            }
-            if (body.has("decode_step_ms")) {
-                perf.setOverrideDecodeStepMs(body.get("decode_step_ms").asDouble());
-            }
-            if (body.has("jitter_pct")) {
-                perf.setJitterPct(body.get("jitter_pct").asDouble());
-            }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return successResponse(service);
+        });
     }
 
     private void handleSetKvPressure(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
-            if (body.has("active_kv_tokens")) {
-                // Python semantics (_http_set_kv_pressure): ABSOLUTE
-                // value — state._active_kv_tokens = value.
-                service.setAbsoluteActiveKvTokens(body.get("active_kv_tokens").asLong(0));
-            } else {
-                // Original Java semantics: additive pressure tokens.
-                long tokens = body.path("tokens").asLong(0);
-                FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
-                builder.kvPressureTokens(tokens);
-                service.setFaultConfig(builder.build());
-            }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+        handleServicePost(exchange, (body, service) -> {
+            // Python semantics (_http_set_kv_pressure): ABSOLUTE value —
+            // state._active_kv_tokens = value.
+            service.setAbsoluteActiveKvTokens(body.path("active_kv_tokens").asLong(0));
+            return successResponse(service);
+        });
     }
 
     private void handleSetQueueDepth(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             // NOTE (intentional divergence): the legacy Python queue_depth was a fake
             // display value (only bumped the snapshot "waiting" counter); Java
             // implements it as real enqueue rejection. Field name kept for compatibility.
@@ -392,67 +387,53 @@ final class MockControlServer {
             FaultInjectionConfig.Builder builder = service.getFaultConfig().toBuilder();
             builder.queueDepthLimit(depth);
             service.setFaultConfig(builder.build());
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", service.getGrpcPort());
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
+            return successResponse(service);
+        });
+    }
+
+    /**
+     * POST /cache_evict {"engine"|"port": ..., "keys": [k1, k2, ...]} —
+     * force-evict the named block keys from the addressed engine's
+     * MockLruBlockCache. Idempotent: keys not present are a no-op. When the
+     * key set changes the engine's cacheVersion is bumped, so the master's
+     * next cache-status poll re-pulls the key set and its global key→holder
+     * index converges on the eviction (the flexlb_ft KV family's sync
+     * premise). Response: {status, engine, port, changed, cache_version}.
+     */
+    private void handleCacheEvict(HttpExchange exchange) throws IOException {
+        handleServicePost(exchange, (body, service) -> {
+            JsonNode keysNode = body.path("keys");
+            if (!keysNode.isArray()) {
+                throw new ApiException(400, "'keys' must be an array of block keys");
             }
-        }
+            List<Long> keys = new ArrayList<>();
+            for (JsonNode key : keysNode) {
+                keys.add(parseBlockKey(key));
+            }
+            boolean changed = service.evictCacheKeys(keys);
+            Map<String, Object> response = successResponse(service);
+            response.put("changed", changed);
+            response.put("cache_version", service.getCacheVersion());
+            return response;
+        });
     }
 
     private void handleStopEngine(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
             service.setStopped(true);
             Server server = serversByPort.get(port);
             if (server != null) {
                 server.shutdownNow();
             }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", port);
+            Map<String, Object> response = successResponse(service);
             response.put("action", "stopped");
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return response;
+        });
     }
 
     private void handleStartEngine(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             int port = service.getGrpcPort();
             service.clearFaultConfig();
             service.resetEnqueueCount();
@@ -492,25 +473,16 @@ final class MockControlServer {
                         "failed to start engine on port " + port + ": " + e);
             }
             service.setStopped(false);
+            // Point the service at the rebuilt server: after a crash_after
+            // true-crash the old reference is a dead victim; after stop_engine
+            // the port simply rebinds. Either way the service must be able to
+            // kill THIS server on a future crash.
+            service.setGrpcServer(server);
             serversByPort.put(port, server);
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", "ok");
-            response.put("engine", service.getEngineName());
-            response.put("port", port);
+            Map<String, Object> response = successResponse(service);
             response.put("action", "started");
-            sendJson(exchange, 200, response);
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return response;
+        });
     }
 
     /**
@@ -526,18 +498,22 @@ final class MockControlServer {
      * matching the production role contract.
      */
     private void handleCancelRequest(HttpExchange exchange) throws IOException {
-        if (!"POST".equals(exchange.getRequestMethod())) {
-            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
-            return;
-        }
-        try {
-            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
-            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+        handleServicePost(exchange, (body, service) -> {
             if (!body.has("request_id")) {
                 throw new ApiException(400, "request must contain 'request_id'");
             }
             long requestId = parseRequestId(body.get("request_id"));
-            JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
+            JavaMockEngineCluster.CancelResult result;
+            try {
+                result = service.cancelRequest(requestId);
+            } catch (UnsupportedOperationException unsupported) {
+                throw new ApiException(
+                        501,
+                        unsupported.getMessage(),
+                        Map.of(
+                                "status", "UNIMPLEMENTED",
+                                "error", unsupported.getMessage()));
+            }
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("status", result.found() ? "ACCEPTED" : "NOT_FOUND");
             response.put("found", result.found());
@@ -546,23 +522,8 @@ final class MockControlServer {
             response.put("engine", service.getEngineName());
             response.put("port", service.getGrpcPort());
             response.put("request_id", requestId);
-            sendJson(exchange, 200, response);
-        } catch (UnsupportedOperationException e) {
-            sendJson(exchange, 501, Map.of(
-                    "status", "UNIMPLEMENTED",
-                    "error", e.getMessage()));
-        } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
-        } catch (Exception e) {
-            // Guarantee a response for any failure (e.g. malformed/empty JSON
-            // body raising MismatchedInputException) instead of leaving the
-            // caller hanging.
-            try {
-                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
-            } catch (IOException ignored) {
-                // Response already committed; nothing more to do.
-            }
-        }
+            return response;
+        });
     }
 
     /**
@@ -585,6 +546,108 @@ final class MockControlServer {
         throw new ApiException(400, "'request_id' must be an integer, got: " + node);
     }
 
+    /**
+     * Strict block-key parsing (same policy as parseRequestId): Jackson's
+     * {@code asLong()} coerces non-numeric values to 0, silently turning a
+     * caller schema bug into an eviction of key 0. Accept integral numbers
+     * and integral decimal strings only; everything else is a 400.
+     */
+    private static long parseBlockKey(JsonNode node) throws ApiException {
+        if (node.isIntegralNumber() && node.canConvertToLong()) {
+            return node.asLong();
+        }
+        if (node.isTextual()) {
+            try {
+                return Long.parseLong(node.asText().trim());
+            } catch (NumberFormatException ignored) {
+                // fall through to the 400 below
+            }
+        }
+        throw new ApiException(400, "'keys' entries must be integers, got: " + node);
+    }
+
+    /**
+     * POST /add_engine {"role": "prefill"|"decode", "port": <grpcPort, optional>} —
+     * create and start a NEW engine (dynamic scale-out). Port is auto-allocated
+     * (current max + 1) when omitted; an explicit port already in use is a 409.
+     * When the cluster runs with --discovery-file the mapping file is updated
+     * atomically so a file-discovery master picks the engine up.
+     */
+    private void handleAddEngine(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            if (engineManager == null) {
+                sendJson(exchange, 501, Map.of("error",
+                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                return;
+            }
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            String role = body.path("role").asText(null);
+            Integer explicitPort = body.hasNonNull("port") ? body.path("port").asInt() : null;
+            DynamicEngineManager.AddedEngine added = engineManager.addEngine(role, explicitPort);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "ok");
+            response.put("engine", added.engineName());
+            response.put("port", added.grpcPort());
+            response.put("http_port", added.grpcPort() - 1);
+            response.put("action", "added");
+            sendJson(exchange, 200, response);
+        } catch (DynamicEngineManager.EngineOperationException e) {
+            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
+        }
+    }
+
+    /**
+     * POST /remove_engine {"port": <grpcPort>} or {"engine": "<name>"} —
+     * PERMANENTLY detach an engine: stop_engine semantics (stopped flag +
+     * shutdownNow cutting in-flight RPC streams) plus removal from the services
+     * map and the discovery file. Unlike /stop_engine, the engine never comes
+     * back on this port within this process.
+     */
+    private void handleRemoveEngine(HttpExchange exchange) throws IOException {
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            if (engineManager == null) {
+                sendJson(exchange, 501, Map.of("error",
+                        "dynamic engine management not configured (start cluster with --discovery-file)"));
+                return;
+            }
+            JsonNode body = MAPPER.readTree(exchange.getRequestBody());
+            JavaMockEngineCluster.FastRpcService service = resolveService(body);
+            DynamicEngineManager.RemovedEngine removed = engineManager.removeEngine(service);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "ok");
+            response.put("engine", removed.engineName());
+            response.put("port", removed.grpcPort());
+            response.put("action", "removed");
+            response.put("running_at_removal", removed.runningAtRemoval());
+            response.put("waiting_at_removal", removed.waitingAtRemoval());
+            sendJson(exchange, 200, response);
+        } catch (DynamicEngineManager.EngineOperationException e) {
+            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (ApiException e) {
+            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
+        }
+    }
+
     private void handleMetrics(HttpExchange exchange) throws IOException {
         if (!"GET".equals(exchange.getRequestMethod())) {
             sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
@@ -593,10 +656,14 @@ final class MockControlServer {
         String query = exchange.getRequestURI().getQuery();
         boolean perEngine = query != null && query.contains("per_engine=true");
 
-        // Take one snapshot per engine; reused for both Python-style and legacy series.
+        // Take one snapshot per engine; reused by both emission modes.
         List<Map<String, Object>> snaps = new ArrayList<>();
         List<JavaMockEngineCluster.FastRpcService> engineServices = orderedServices();
         for (JavaMockEngineCluster.FastRpcService service : engineServices) {
+            // rtp_llm_* TPS series: settle the per-scrape window BEFORE reading
+            // the snapshot so this scrape reads exactly its own token sums
+            // (window = scrape interval; the G1 poller is 1s -> tokens/s).
+            service.drainTpsWindows();
             snaps.add(service.getSnapshot());
         }
 
@@ -608,12 +675,6 @@ final class MockControlServer {
         } else {
             appendAggregatedMetrics(sb, snaps);
         }
-        appendLegacyMetrics(sb, engineServices);
-
-        // Cluster-level counters (Java in-process model: always 0, schema-compatible).
-        sb.append("flexlb_mock_grpc_error_count 0\n");
-        sb.append("flexlb_mock_grpc_retry_count 0\n");
-        sb.append("flexlb_mock_grpc_cancel_forward_count 0\n");
 
         sendText(exchange, 200, sb.toString());
     }
@@ -628,8 +689,7 @@ final class MockControlServer {
     // ────────────────── Metrics builders ──────────────────
 
     /**
-     * HELP/TYPE lines for the union of the Python metric set (legacy
-     * ~L825-877 / ~L1344-1396) and the retained legacy Java series.
+     * HELP/TYPE lines for the Python metric set (legacy ~L825-877 / ~L1344-1396).
      */
     private static void appendMetricsMeta(StringBuilder sb) {
         String[][] meta = {
@@ -650,14 +710,32 @@ final class MockControlServer {
                 {"mock_engine_decode_ms_avg", "average decode execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_p99", "p99 decode execution time in ms", "gauge"},
                 {"mock_engine_decode_ms_count", "number of decode samples", "gauge"},
-                {"flexlb_mock_grpc_error_count", "Total gRPC errors in remote decode", "counter"},
-                {"flexlb_mock_grpc_retry_count", "Total gRPC retries in remote decode", "counter"},
-                {"flexlb_mock_grpc_cancel_forward_count", "Total cancel forwarded to remote engines", "counter"},
-                // Legacy Java-only series (retained, not part of the Python set).
-                {"mock_engine_running_tasks", "Current running tasks", "gauge"},
-                {"mock_engine_inflight_count", "Current inflight count", "gauge"},
-                {"mock_engine_kv_tokens_used", "KV cache tokens in use", "gauge"},
-                {"mock_engine_heap_used_bytes", "JVM heap used in bytes", "gauge"},
+                // Production-caliber TPS series (pure accounting on completion
+                // events; window = scrape interval, 1s under the G1 poller).
+                // Same metric names as the real engine (RtpLLMMetrics) so mock
+                // dashboards read like the production ones.
+                {"rtp_llm_context_tps", "computed context tokens (input minus cache hits) per scrape window", "gauge"},
+                {"rtp_llm_context_tps_with_cache", "context tokens per scrape window including cache hits", "gauge"},
+                {"rtp_llm_generate_tps", "generated output tokens per scrape window", "gauge"},
+                // Block-pool observability (KV capacity model v2): the
+                // three-state block split + the admission/reuse counters.
+                // Gauges read the pool state; counters are cumulative
+                // (prefill rejects synchronously, decode degrades un-pooled
+                // and stalls growth; decode reuse = the fix #5 net-demand
+                // deduction against the engine's own LRU).
+                {"mock_engine_cache_blocks", "total block-pool size in blocks", "gauge"},
+                {"mock_engine_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
+                {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
+                {"mock_engine_referenced_blocks", "cache-key blocks referenced by in-flight requests", "gauge"},
+                {"mock_engine_kv_admission_fails_total", "total KV admission/growth failures (decode degradations)", "counter"},
+                {"mock_engine_lack_mem_rejects_total", "total prefill LACK_MEM synchronous rejections (error 602)", "counter"},
+                {"mock_engine_decode_reuse_blocks_total", "total decode prefix-reuse blocks (own-LRU net-demand deduction)", "counter"},
+                // Key-level cache-hit observability (recent_cache_key_hit_count /
+                // total_count production caliber): cumulative counters recorded at
+                // the prefill admission hit computation (shape()'s prefixHitBlocks
+                // call). hit ratio = hits/requested, both per-engine + role.
+                {"mock_engine_cache_key_hits_total", "total prefix-matched cache keys at prefill admission (recent_cache_key_hit caliber)", "counter"},
+                {"mock_engine_cache_keys_requested_total", "total request block keys observed at prefill admission (empty-bh adds 0)", "counter"},
         };
         for (String[] m : meta) {
             sb.append("# HELP ").append(m[0]).append(' ').append(m[1]).append('\n');
@@ -704,6 +782,23 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_decode_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_avg"))));
             sb.append(String.format("mock_engine_decode_ms_p99{%s} %.1f%n", labels, asDouble(snap.get("decode_ms_p99"))));
             sb.append(String.format("mock_engine_decode_ms_count{%s} %s%n", labels, snap.get("decode_ms_count")));
+            // Production-caliber TPS (PD-split roles: prefill engines carry
+            // the context series, decode engines the generate series; the
+            // off-role series stay 0 so every engine reports the full set).
+            sb.append(String.format("rtp_llm_context_tps{%s} %s%n", labels, snap.get("context_tps")));
+            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %s%n", labels, snap.get("context_tps_with_cache")));
+            sb.append(String.format("rtp_llm_generate_tps{%s} %s%n", labels, snap.get("generate_tps")));
+            // Block-pool observability (KV v2): gauges + cumulative counters,
+            // same snapshot fields the /snapshot endpoint exposes.
+            sb.append(String.format("mock_engine_cache_blocks{%s} %s%n", labels, snap.get("cache_blocks")));
+            sb.append(String.format("mock_engine_available_blocks{%s} %s%n", labels, snap.get("available_blocks")));
+            sb.append(String.format("mock_engine_held_blocks{%s} %s%n", labels, snap.get("held_blocks")));
+            sb.append(String.format("mock_engine_referenced_blocks{%s} %s%n", labels, snap.get("referenced_blocks")));
+            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %s%n", labels, snap.get("kv_admission_fails")));
+            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %s%n", labels, snap.get("lack_mem_rejects")));
+            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %s%n", labels, snap.get("decode_reuse_blocks")));
+            sb.append(String.format("mock_engine_cache_key_hits_total{%s} %s%n", labels, snap.get("cache_key_hits")));
+            sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %s%n", labels, snap.get("cache_keys_requested")));
         }
     }
 
@@ -741,6 +836,25 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
             sb.append(String.format("mock_engine_active_kv_tokens{%s} %d%n", label, sumLong(group, "active_kv_tokens")));
             sb.append(String.format("mock_engine_available_kv_tokens{%s} %d%n", label, sumLong(group, "available_kv_tokens")));
+            // Production-caliber TPS, role-summed (rate series add across
+            // engines; each engine's off-role series are 0 by design, so the
+            // prefill bucket carries the context pair and the decode bucket
+            // the generate series).
+            sb.append(String.format("rtp_llm_context_tps{%s} %d%n", label, sumLong(group, "context_tps")));
+            sb.append(String.format("rtp_llm_context_tps_with_cache{%s} %d%n", label, sumLong(group, "context_tps_with_cache")));
+            sb.append(String.format("rtp_llm_generate_tps{%s} %d%n", label, sumLong(group, "generate_tps")));
+            // Block-pool observability (KV v2): blocks and cumulative counters
+            // sum across engines (role-level pool totals; the report layer
+            // derives per-engine averages via its engine-count chain).
+            sb.append(String.format("mock_engine_cache_blocks{%s} %d%n", label, sumLong(group, "cache_blocks")));
+            sb.append(String.format("mock_engine_available_blocks{%s} %d%n", label, sumLong(group, "available_blocks")));
+            sb.append(String.format("mock_engine_held_blocks{%s} %d%n", label, sumLong(group, "held_blocks")));
+            sb.append(String.format("mock_engine_referenced_blocks{%s} %d%n", label, sumLong(group, "referenced_blocks")));
+            sb.append(String.format("mock_engine_kv_admission_fails_total{%s} %d%n", label, sumLong(group, "kv_admission_fails")));
+            sb.append(String.format("mock_engine_lack_mem_rejects_total{%s} %d%n", label, sumLong(group, "lack_mem_rejects")));
+            sb.append(String.format("mock_engine_decode_reuse_blocks_total{%s} %d%n", label, sumLong(group, "decode_reuse_blocks")));
+            sb.append(String.format("mock_engine_cache_key_hits_total{%s} %d%n", label, sumLong(group, "cache_key_hits")));
+            sb.append(String.format("mock_engine_cache_keys_requested_total{%s} %d%n", label, sumLong(group, "cache_keys_requested")));
 
             Map<String, Long> rpcTotals = new TreeMap<>();
             for (Map<String, Object> e : group) {
@@ -780,25 +894,6 @@ final class MockControlServer {
         sb.append(String.format("mock_engine_%s_ms_avg{%s} %.1f%n", kind, label, avg));
         sb.append(String.format("mock_engine_%s_ms_p99{%s} %.1f%n", kind, label, p99));
         sb.append(String.format("mock_engine_%s_ms_count{%s} %d%n", kind, label, totalCount));
-    }
-
-    /** Retained legacy Java series with port/role labels (pre-Phase-2 format). */
-    private static void appendLegacyMetrics(StringBuilder sb,
-                                            List<JavaMockEngineCluster.FastRpcService> engineServices) {
-        Runtime runtime = Runtime.getRuntime();
-        long heapUsed = runtime.totalMemory() - runtime.freeMemory();
-        for (JavaMockEngineCluster.FastRpcService service : engineServices) {
-            // Lowercase role keeps the legacy series label-consistent with the
-            // Python-compat aggregated series (role="prefill"/"decode").
-            String labels = String.format("port=\"%d\",role=\"%s\"",
-                    service.getGrpcPort(), service.getRoleName().toLowerCase());
-            sb.append(String.format("mock_engine_running_tasks{%s} %d%n", labels, service.getRunningCount()));
-            sb.append(String.format("mock_engine_accepted_total{%s} %d%n", labels, service.getAcceptedCount()));
-            sb.append(String.format("mock_engine_completed_total{%s} %d%n", labels, service.getCompletedCount()));
-            sb.append(String.format("mock_engine_inflight_count{%s} %d%n", labels, service.getInflightCount()));
-            sb.append(String.format("mock_engine_kv_tokens_used{%s} %d%n", labels, service.getActiveKvTokens()));
-            sb.append(String.format("mock_engine_heap_used_bytes{%s} %d%n", labels, heapUsed));
-        }
     }
 
     private static long sumLong(List<Map<String, Object>> group, String key) {

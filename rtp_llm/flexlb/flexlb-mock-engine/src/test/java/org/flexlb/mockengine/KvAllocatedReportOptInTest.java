@@ -1,32 +1,26 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Method;
 import java.nio.file.Path;
-import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.awaitDecodeQuiescence;
+import static org.flexlb.mockengine.MockEngineTestSupport.decodeModel;
+import static org.flexlb.mockengine.MockEngineTestSupport.requestShape;
+import static org.flexlb.mockengine.MockEngineTestSupport.scheduleDecodeCompletion;
+import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Two-state tests for the opt-in accepted-layer window (performance JSON
@@ -46,7 +40,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class KvAllocatedReportOptInTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63400;
 
     @TempDir
@@ -80,12 +73,12 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void defaultOffKeepsQueuedTasksReportedAsRunning() throws Exception {
-        MockPerformanceModel model = model(10_000.0, 3, false);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, false);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         // 1 running + 2 queued behind the concurrency gate.
         for (long rid = 1; rid <= 3; rid++) {
-            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, rid, 8), -1, null));
+            assertTrue(scheduleDecodeCompletion(decode, requestShape(model, rid, 8), -1, null));
         }
 
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
@@ -100,11 +93,12 @@ class KvAllocatedReportOptInTest {
                 "all admitted requests keep their runningTasks claim");
         // KV accounting, flag OFF (P2-5 byte-for-byte guard): only the one
         // truly RUNNING request holds KV — queued requests stay uncounted
-        // until run start, exactly today's behavior.
-        assertEquals(8, decode.getActiveKvTokens(),
-                "default OFF: only the running request's input tokens are counted");
+        // until run start, exactly today's behavior. Block-pool caliber:
+        // inputLen=8 rounds up to ceil(8/1024)=1 block = 1024 tokens.
+        assertEquals(1024, decode.getActiveKvTokens(),
+                "default OFF: only the running request's block lease is counted");
 
-        awaitQuiescence(decode, 30_000);
+        awaitDecodeQuiescence(decode, 30_000);
         assertEquals(3, decode.getCompletedCount());
         assertEquals(0, decode.getActiveKvTokens(), "KV must net to zero after quiescence");
         decode.checkLeakDrain(0L);
@@ -115,11 +109,11 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInReportsQueuedAsKvAllocatedAndFlipsBackWhenRunning() throws Exception {
-        MockPerformanceModel model = model(10_000.0, 3, true);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         for (long rid = 1; rid <= 3; rid++) {
-            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, rid, 8), -1, null));
+            assertTrue(scheduleDecodeCompletion(decode, requestShape(model, rid, 8), -1, null));
         }
 
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
@@ -133,13 +127,14 @@ class KvAllocatedReportOptInTest {
                 "runningQueryLen must not count KV_ALLOCATED (queued) tasks");
         // KV accounting, flag ON (P2-5): KV_ALLOCATED means "KV reserved", so
         // the two queued requests hold their reservation from enqueue — all
-        // three requests (1 running + 2 queued) are counted.
-        assertEquals(24, decode.getActiveKvTokens(),
+        // three requests (1 running + 2 queued) are counted. Block-pool
+        // caliber: 3 leases x 1 block = 3 x 1024 tokens.
+        assertEquals(3 * 1024, decode.getActiveKvTokens(),
                 "opt-in: queued requests must hold their KV reservation from enqueue");
 
         // As slots free, queued requests drain and their phase flips to
         // RUNNING; eventually everything completes with no leak.
-        awaitQuiescence(decode, 30_000);
+        awaitDecodeQuiescence(decode, 30_000);
         assertEquals(3, decode.getCompletedCount(),
                 "queued requests must still drain and complete normally");
         assertEquals(0, decode.getActiveKvTokens(),
@@ -151,12 +146,12 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInCancelOfQueuedRequestReportsKvAllocatedPhase() throws Exception {
-        MockPerformanceModel model = model(10_000.0, 3, true);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
-        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 8), -1, null));
-        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 2L, 8), -1, null));
-        assertEquals(16, decode.getActiveKvTokens(),
+        assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
+        assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 2L, 8), -1, null));
+        assertEquals(2 * 1024, decode.getActiveKvTokens(),
                 "opt-in: running + queued requests both hold KV before the cancel");
 
         // Cancel the QUEUED request (rid=2) through Decode's ordinary internal
@@ -165,8 +160,9 @@ class KvAllocatedReportOptInTest {
         assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, phase,
                 "cancel of a queued request must report the KV_ALLOCATED phase");
         // Cancel of a queued opt-in request must release its enqueue-time KV
-        // reservation immediately (P2-5), leaving only the running request's.
-        assertEquals(8, decode.getActiveKvTokens(),
+        // reservation immediately (P2-5), leaving only the running request's
+        // block lease (1 block = 1024 tokens).
+        assertEquals(1024, decode.getActiveKvTokens(),
                 "cancelling the queued request must release its KV reservation");
 
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
@@ -178,7 +174,7 @@ class KvAllocatedReportOptInTest {
         assertTrue(cancelledReported,
                 "CANCELLED completion for request 2 must appear in WorkerStatus");
 
-        awaitQuiescence(decode, 30_000);
+        awaitDecodeQuiescence(decode, 30_000);
         assertEquals(1, decode.getCompletedCount(), "only the running request completes");
         assertEquals(0, decode.getActiveKvTokens(), "KV must net to zero after quiescence");
         decode.checkLeakDrain(0L);
@@ -197,114 +193,8 @@ class KvAllocatedReportOptInTest {
     private JavaMockEngineCluster.FastRpcService newDecodeService(
             MockPerformanceModel model, int decodeMaxConcurrency) {
         int port = BASE_PORT + nextPortOffset++;
-        JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                "decode-" + port, "127.0.0.1", "decode",
-                EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                port, services, scheduler, model, 100,
-                new JavaMockEngineCluster.ClusterStats(), 10_000_000L, decodeMaxConcurrency);
-        services.put(port, service);
-        return service;
+        return MockEngineTestSupport.decodeService(
+                model, port, services, scheduler, decodeMaxConcurrency);
     }
 
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests,
-                                       boolean reportQueuedAsKvAllocated) throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        decodeConfig.put("scale", 1.0);
-        decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
-        if (reportQueuedAsKvAllocated) {
-            decodeConfig.put("report_queued_as_kv_allocated", true);
-        }
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 0.1,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", decodeConfig));
-        MockMasterConfig.writeWithPrefillExpression(master, "10");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
-    private static MockPerformanceModel.RequestShape shapeOf(
-            MockPerformanceModel model, long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return model.shape(input.build(), new MockLruBlockCache(100));
-    }
-
-    private void awaitQuiescence(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
-            throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (service.getInflightCount() == 0 && service.getRunningCount() == 0) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        fail("engine did not quiesce: inflight=" + service.getInflightCount()
-                + " running=" + service.getRunningCount());
-    }
-
-    private static EngineRpcService.WorkerStatusPB workerStatus(
-            JavaMockEngineCluster.FastRpcService service, long sinceVersion) {
-        AtomicReference<EngineRpcService.WorkerStatusPB> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        service.getWorkerStatus(
-                EngineRpcService.StatusVersionPB.newBuilder()
-                        .setLatestFinishedVersion(sinceVersion)
-                        .build(),
-                new StreamObserver<>() {
-                    @Override
-                    public void onNext(EngineRpcService.WorkerStatusPB value) {
-                        response.set(value);
-                    }
-
-                    @Override
-                    public void onError(Throwable throwable) {
-                        error.set(throwable);
-                        latch.countDown();
-                    }
-
-                    @Override
-                    public void onCompleted() {
-                        latch.countDown();
-                    }
-                });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("worker status timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for worker status");
-        }
-        Optional.ofNullable(error.get()).ifPresent(t -> fail(String.valueOf(t)));
-        assertNotNull(response.get());
-        return response.get();
-    }
-
-    private static boolean invokeScheduleDecodeCompletion(
-            JavaMockEngineCluster.FastRpcService service,
-            MockPerformanceModel.RequestShape shape,
-            long batchId,
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
-            throws Exception {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
-        method.setAccessible(true);
-        return (Boolean) method.invoke(service, shape, batchId, responseQueue);
-    }
 }

@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
@@ -15,10 +14,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.ServerSocket;
-import java.net.URI;
 import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,8 +26,12 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
+import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -186,7 +186,7 @@ class ComprehensiveFaultInjectionTest {
             // Call generateStreamCall 5 times — all should return error
             for (int i = 1; i <= 5; i++) {
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 3_000);
+                        prefillServices.get(0), input(i, 10), 3_000);
                 assertTrue(result.completed(), "generateStreamCall " + i + " should complete (onError)");
                 assertNotNull(result.error(), "generateStreamCall " + i + " should have error");
                 assertTrue(result.error().getMessage().contains("generate_error"),
@@ -201,7 +201,7 @@ class ComprehensiveFaultInjectionTest {
             // Call generateStreamCall 5 more times — all should succeed
             for (int i = 6; i <= 10; i++) {
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 5_000);
+                        prefillServices.get(0), input(i, 10), 5_000);
                 assertTrue(result.completed(), "generateStreamCall " + i + " should complete after clear");
                 assertNotNull(result.response(), "generateStreamCall " + i + " should have response");
                 assertEquals(i, result.response().getRequestId());
@@ -238,7 +238,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 3; i++) {
                 long start = System.nanoTime();
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 2_000);
+                        prefillServices.get(0), input(i, 10), 2_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertFalse(result.completed(),
                         "generateStreamCall " + i + " should time out under no_respond");
@@ -254,7 +254,7 @@ class ComprehensiveFaultInjectionTest {
             // Call generateStreamCall 3 more times — all should succeed
             for (int i = 4; i <= 6; i++) {
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 5_000);
+                        prefillServices.get(0), input(i, 10), 5_000);
                 assertTrue(result.completed(), "generateStreamCall " + i + " should complete after clear");
                 assertNotNull(result.response(), "generateStreamCall " + i + " should have response");
             }
@@ -283,21 +283,22 @@ class ComprehensiveFaultInjectionTest {
 
         try {
             // Verify baseline: available == total
-            EngineRpcService.WorkerStatusPB before = status(prefill);
+            EngineRpcService.WorkerStatusPB before = workerStatus(prefill, 0);
             assertEquals(TOTAL_KV_TOKENS, before.getAvailableKvCache(),
                     "baseline available KV should equal total");
             double beforeRatio = 1.0 - (double) before.getAvailableKvCache() / before.getTotalKvCache();
             assertEquals(0.0, beforeRatio, 0.001, "baseline KV ratio should be ~0");
 
-            // Set KV pressure via HTTP — using 4M tokens for >0.5 ratio
-            // (50000 as suggested in the task spec is insufficient for >0.5 with total=6,291,456)
+            // Set KV pressure via HTTP — absolute active_kv_tokens semantics,
+            // 4M tokens for >0.5 ratio (50000 as suggested in the task spec is
+            // insufficient for >0.5 with total=6,291,456)
             long pressureTokens = 4_000_000L;
             httpPost(controlServer.getPort(), "/set_kv_pressure",
-                    "{\"port\":" + prefillPort + ",\"tokens\":" + pressureTokens + "}");
+                    "{\"port\":" + prefillPort + ",\"active_kv_tokens\":" + pressureTokens + "}");
             assertEquals(pressureTokens, prefill.getFaultConfig().getKvPressureTokens());
 
             // Get worker status — verify pressure
-            EngineRpcService.WorkerStatusPB after = status(prefill);
+            EngineRpcService.WorkerStatusPB after = workerStatus(prefill, 0);
             long usedKv = after.getTotalKvCache() - after.getAvailableKvCache();
             double ratio = (double) usedKv / after.getTotalKvCache();
             assertTrue(ratio > 0.5,
@@ -306,13 +307,13 @@ class ComprehensiveFaultInjectionTest {
             assertTrue(after.getAvailableKvCache() < after.getTotalKvCache(),
                     "available KV should be less than total under pressure");
 
-            // Clear KV pressure
+            // Clear KV pressure (absolute zero)
             httpPost(controlServer.getPort(), "/set_kv_pressure",
-                    "{\"port\":" + prefillPort + ",\"tokens\":0}");
+                    "{\"port\":" + prefillPort + ",\"active_kv_tokens\":0}");
             assertEquals(0, prefill.getFaultConfig().getKvPressureTokens());
 
             // Verify recovery
-            EngineRpcService.WorkerStatusPB recovered = status(prefill);
+            EngineRpcService.WorkerStatusPB recovered = workerStatus(prefill, 0);
             assertEquals(TOTAL_KV_TOKENS, recovered.getAvailableKvCache(),
                     "available KV should return to total after clearing pressure");
         } finally {
@@ -531,7 +532,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 5; i++) {
                 long start = System.nanoTime();
                 GenerateResult result = generateStream(
-                        prefill, genInput(i, 10), 5_000);
+                        prefill, input(i, 10), 5_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertTrue(result.completed(),
                         "generateStreamCall " + i + " should complete");
@@ -551,7 +552,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 6; i <= 10; i++) {
                 long start = System.nanoTime();
                 GenerateResult result = generateStream(
-                        prefill, genInput(i, 10), 5_000);
+                        prefill, input(i, 10), 5_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertTrue(result.completed(),
                         "generateStreamCall " + i + " should complete after clearing");
@@ -620,9 +621,12 @@ class ComprehensiveFaultInjectionTest {
 
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
+            // Pool sized ceil(TOTAL_KV_TOKENS / spb) = 6144 blocks so the
+            // engine's available capacity equals the reported TOTAL_KV_TOKENS
+            // exactly (capacity model v2: available = min(total, blocks x spb)).
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
@@ -631,7 +635,7 @@ class ComprehensiveFaultInjectionTest {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);
@@ -663,9 +667,10 @@ class ComprehensiveFaultInjectionTest {
 
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
+            // Same 6144-block pool as startCluster (see comment there).
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
@@ -684,7 +689,7 @@ class ComprehensiveFaultInjectionTest {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);
@@ -771,26 +776,11 @@ class ComprehensiveFaultInjectionTest {
     // ════════════════════════════════════════════════════════════════
 
     private static String httpGet(int port, String path) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .GET()
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "GET " + path + " failed");
-        return response.body();
+        return MockEngineTestSupport.httpGet(port, path);
     }
 
     private static String httpPost(int port, String path, String body) throws Exception {
-        HttpResponse<String> response = HTTP_CLIENT.send(
-                HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + port + path))
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(body))
-                        .build(),
-                HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "POST " + path + " failed");
-        return response.body();
+        return MockEngineTestSupport.httpPost(port, path, body);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -798,75 +788,7 @@ class ComprehensiveFaultInjectionTest {
     // ════════════════════════════════════════════════════════════════
 
     private MockPerformanceModel model(String formula) throws Exception {
-        Path performance = tempDir.resolve("perf-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Protobuf builders
-    // ════════════════════════════════════════════════════════════════
-
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.GenerateInputPB genInput(long requestId, int inputTokens) {
-        return input(requestId, inputTokens);
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  RPC helpers
-    // ════════════════════════════════════════════════════════════════
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static EngineRpcService.WorkerStatusPB status(
-            JavaMockEngineCluster.FastRpcService service) {
-        return unary(observer -> service.getWorkerStatus(
-                EngineRpcService.StatusVersionPB.newBuilder()
-                        .setLatestFinishedVersion(0)
-                        .build(),
-                observer));
+        return MockEngineTestSupport.performanceModel(tempDir, formula);
     }
 
     /**
@@ -900,41 +822,6 @@ class ComprehensiveFaultInjectionTest {
         });
         boolean completed = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
         return new GenerateResult(completed, response.get(), error.get());
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "unary response");
-        return response.get();
     }
 
     // ════════════════════════════════════════════════════════════════

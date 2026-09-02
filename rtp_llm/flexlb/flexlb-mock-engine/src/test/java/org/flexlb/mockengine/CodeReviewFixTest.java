@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,8 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -23,9 +20,12 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -121,6 +121,9 @@ class CodeReviewFixTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         long requestId = 42L;
         int inputLen = 10;
+        // Block-pool caliber: inputLen=10 rounds up to ceil(10/1024)=1 block,
+        // so the lease pins 1 x spb = 1024 tokens.
+        long expectedKvTokens = 1024L;
         MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
 
         // Directly invoke the private scheduleDecodeCompletion via reflection.
@@ -129,8 +132,8 @@ class CodeReviewFixTest {
         // After scheduling, all three counters must reflect the single request.
         assertEquals(1, getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 1 after scheduling");
-        assertEquals(inputLen, decode.getActiveKvTokens(),
-                "activeKvTokens should be " + inputLen + " after scheduling");
+        assertEquals(expectedKvTokens, decode.getActiveKvTokens(),
+                "activeKvTokens should be " + expectedKvTokens + " after scheduling");
         assertEquals(1, decode.getInflightCount(),
                 "pendingRequests should be 1 after scheduling");
         assertEquals(1, decode.getRunningCount(),
@@ -230,6 +233,8 @@ class CodeReviewFixTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         long requestId = 99L;
         int inputLen = 10;
+        // Block-pool caliber: inputLen=10 rounds up to 1 block = 1024 tokens.
+        long expectedKvTokens = 1024L;
         MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
 
         int nThreads = 50;
@@ -261,8 +266,8 @@ class CodeReviewFixTest {
         assertEquals(1, getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 1, not " + nThreads
                         + " (putIfAbsent must reject duplicates)");
-        assertEquals(inputLen, decode.getActiveKvTokens(),
-                "activeKvTokens should be " + inputLen + ", not " + (nThreads * inputLen)
+        assertEquals(expectedKvTokens, decode.getActiveKvTokens(),
+                "activeKvTokens should be " + expectedKvTokens + ", not " + (nThreads * expectedKvTokens)
                         + " (putIfAbsent must reject duplicates)");
         assertEquals(1, decode.getInflightCount(),
                 "pendingRequests should be 1, not " + nThreads
@@ -343,11 +348,7 @@ class CodeReviewFixTest {
      */
     private static int getActiveDecodeRequests(JavaMockEngineCluster.FastRpcService service)
             throws Exception {
-        Field field = JavaMockEngineCluster.FastRpcService.class
-                .getDeclaredField("activeDecodeRequests");
-        field.setAccessible(true);
-        AtomicInteger counter = (AtomicInteger) field.get(service);
-        return counter.get();
+        return MockEngineTestSupport.activeDecodeRequests(service);
     }
 
     /**
@@ -361,82 +362,15 @@ class CodeReviewFixTest {
             long batchId,
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
             throws Exception {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
-        method.setAccessible(true);
-        method.invoke(service, shape, batchId, responseQueue);
+        MockEngineTestSupport.scheduleDecodeCompletion(service, shape, batchId, responseQueue);
     }
 
     // ──────────── Model helper ────────────
 
     private MockPerformanceModel model(String prefillFormula, double decodeStepMs)
             throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 0.1,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0,
-                        "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
-        MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
-    }
-
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
+        return MockEngineTestSupport.performanceModel(
+                tempDir, prefillFormula, 0.1, decodeStepMs);
     }
 
     // ──────────── Shape helper ────────────
@@ -447,49 +381,7 @@ class CodeReviewFixTest {
      */
     private static MockPerformanceModel.RequestShape shapeOf(
             MockPerformanceModel model, long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB input = input(requestId, inputTokens);
-        return model.shape(input, new MockLruBlockCache(100));
+        return MockEngineTestSupport.requestShape(model, requestId, inputTokens);
     }
 
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        return response.get();
-    }
 }

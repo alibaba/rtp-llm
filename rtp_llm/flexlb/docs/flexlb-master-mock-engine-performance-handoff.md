@@ -4,10 +4,14 @@
 > `slo` 的文件名、脚本变量和结果字段是测试工具的历史命名，不是当前
 > FlexLB 的 SLO 配置接口。当前调度、凑批和路由行为只从进程配置中的
 > `FLEXLB_CONFIG` JSON 读取；不要把历史环境变量名称复制到生产配置。
+> 文中出现的 `dispatcher.maxRequests`、`dispatcher.maxCollectionWaitMs` 和
+> `dispatcher.earlyDispatchPredictedExecutionMs` 是当时 schema v1 的历史字段，
+> schema v2 已删除。当前分别使用 `scheduler.decision.maxRequests`、
+> `scheduler.decision.maxCollectionWaitMs` 和
+> `scheduler.decision.maxPredictedExecutionMs`；预测边界语义也已收敛为“等于
+> 上限时纳入并立即下发，超过上限时保留新请求”。
 
 本文用于交接 FlexLB Master 的 batch 调度性能测试。目标是让接手人能够复现测试、逐级寻找容量拐点，并判断瓶颈在发压端、FlexLB Master 还是 mock engine。
-
-fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报告](flexlb-master-mock-engine-performance-20260717.md)。500 ms 预测阈值、160 ms 固定等待的评估见 [FlexLB Master SLO Batch 性能评估](flexlb-master-slo-batch-evaluation-20260717.md)。
 
 ## 1. 测试目标和边界
 
@@ -18,14 +22,18 @@ fixed-window 10 ms 基准结果见 [FlexLB Master + Mock Engine Batch 性能报�
 本手册只测 Master 调度能力：
 
 - Master 进程配置必须在 `FLEXLB_CONFIG` 中选择
-  `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`SCHEDULE_ONLY=1` 只是
-  load client 的测试开关。历史 10 ms base case 需要在独立进程 JSON 中
-  配置 `dispatcher.maxCollectionWaitMs=10`；当前仓库的
+  `scheduler.type=QUEUE` 和 `dispatcher.type=BATCH`；`FETCH_OUTPUT_STREAM=0` 只是
+  load client 的测试开关：客户端不读输出流，engine 侧仍完整执行 prefill+decode。
+  历史 10 ms base case 需要在独立进程 JSON 中配置当时的
+  `dispatcher.maxCollectionWaitMs=10`，在当前 schema v2 中应写为
+  `scheduler.decision.maxCollectionWaitMs=10`；当前仓库的
   `master_fixed_window.json` 已不是该 10 ms fixture，不能用已删除的标量
   环境变量覆盖。历史 `slo500_wait160` case 在独立 JSON 中配置
-  `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
-  `dispatcher.maxCollectionWaitMs=160`。
-- 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能。
+  当时的 `dispatcher.earlyDispatchPredictedExecutionMs=500` 和
+  `dispatcher.maxCollectionWaitMs=160`；当前 fixture 已迁移到对应的
+  `scheduler.decision` 字段。
+- 不调用 `FetchResponse`。Fetch 是 frontend 的后续动作，不属于 Master Schedule 性能；
+  关闭客户端读流（`FETCH_OUTPUT_STREAM=0`）不影响 engine 侧的完整执行。
 - 吞吐以 Master 服务端的 `server_arrival_qps` 为准。
 - 延迟以 Master 服务端的 `schedule_latency_ms` 为准，不以 client RTT 作为最终报告口径。
 - mock engine 必须有足够余量，不能让 mock 的 CPU、线程或队列先成为瓶颈。
@@ -112,7 +120,6 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb"
 test -s flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
 test -s flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 bash -n tools/online_eval/run_online_eval.sh
-python3 -m py_compile tools/online_eval/flexlb_load_client.py
 ```
 
 重新编译后再压测，避免代码和旧 jar 不一致。功能测试和两组性能门禁使用独立 Maven invocation：
@@ -130,8 +137,8 @@ python3 -m unittest discover -s tools/online_eval/tests
 
 普通 `./mvnw test` 只运行功能测试，并排除 `performance-regression` tag。性能回归分为两个显式 profile，必须分别运行：
 
-- `sync-performance-regression`：`SchedulingConfigAndExpirationPerformanceTest`、`AutoTpmSchedulingOverheadPerfTest` 和 `CostBasedPrefillRoutingPerformanceTest`。其中后者覆盖 750 个 prefill endpoint 的 cost-based 选点热路径。
-- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路；cost-based prefill 热路径由 Sync profile 的 750-endpoint 门禁独立覆盖。
+- `sync-performance-regression`：`WorkerBatcherPerformanceTest`，覆盖不同真实非空队列深度下 projection input capture 与 immutable materialization 的延迟和分配上限。
+- `api-performance-regression`：`MasterBatchEndToEndPerformanceTest`，覆盖真实 Netty client/Master gRPC、`DefaultRouter`、random prefill、cost-based decode、fixed-window batcher、engine gRPC client 和 Java mock worker ACK 链路。类内先运行单 worker 的真实 payload burst，再运行 engine-scale 矩阵，避免大规模 fixture 的回收状态污染 burst 基线。
 
 分别运行两组门禁：
 
@@ -139,6 +146,19 @@ python3 -m unittest discover -s tools/online_eval/tests
 ./mvnw test -P '!internal,sync-performance-regression' -pl flexlb-sync -am
 ./mvnw test -P '!internal,api-performance-regression' -pl flexlb-api -am
 ```
+
+需要在 UT 中复核 750 Prefill / 500 Decode 拓扑时，必须显式覆盖矩阵；默认
+矩阵只到 16 / 32：
+
+```bash
+./mvnw -P 'opensource,!internal,api-performance-regression' \
+  -pl flexlb-api -am \
+  -Dflexlb.perf.engine-matrix-topologies=750x500 \
+  -Dflexlb.perf.engine-matrix-target-qps=1000,2000,5000,10000 test
+```
+
+如果一次指定多个 topology，应按 Prefill、Decode 数量均不下降的顺序排列；
+同一测试 fixture 只增加 endpoint，不在参数项之间缩减已注册的拓扑。
 
 profile 已内置精确的测试类 includes；不需要手写 `-Dtest`。上游无匹配性能类的模块会正常放行，每个性能类都在不可复用的新 fork 中执行。
 
@@ -171,7 +191,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 2000 QPS 包含连续的机器数减半对照：`16/32 -> 8/16 -> 4/8 -> 2/4 -> 1/2`。矩阵中的请求按目标 QPS 均匀分布到纳秒时间点，不会在一秒开始时集中发送。每个 prefill 都是独立的 Netty mock server，Master 会建立真实 engine gRPC 连接；decode 只注册逻辑 endpoint，因为 schedule ACK 之前不会调用 decode RPC。每一格都校验成功率、实际 client/Master QPS、Master P99、Master batch wait 分位数、dispatch ACK、dispatch reason、所有 prefill 收到流量、prefill/decode 路由覆盖全部 endpoint，以及请求无丢失/重复。
 
-这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predict_threshold` 次数和 `dispatch_ack`，用于区分“成功凑满后提前发送”“等待窗口到期”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
+这里的排队数据是 Master 的 `batch_wait_ms`（路由提交到 batch dispatch），用于观察 engine 数量减少后每个 batcher 的聚合与等待；它不是 engine 内部计算队列延迟。2000 QPS 场景要求 batch wait P95 非零，并默认要求 P99 不超过 50 ms。输出同时提供 `batch_full` / `fixed_window_timeout` / `predicted_execution_cap` 次数和 `dispatch_ack`，用于区分“成功凑满后发送”“等待窗口到期”“预测执行时间到顶”和“mock worker ACK 变慢”。回归门禁还会根据 `QPS * fixed_window / prefill_count` 推导平均 batch 下限，默认要求达到理论值的 80%。
 
 这个矩阵回答的是“Master 在不同 engine 数量和请求压力下是否退化”，不能单独推导真实 GPU 机器数。真实机器数还依赖单机 batch 处理时间、并发上限、KV 容量和请求完成状态更新；这些参数必须通过 Java mock engine 的处理模型或真实 engine 容量结果输入 `run_online_eval.sh`。
 
@@ -187,7 +207,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 ## 5. mock engine 的模拟方式
 
-基准必须使用 `MOCK_ENGINE_IMPL=java`，不使用 Python mock 做高 QPS 容量结论。
+基准使用 Java mock engine（本仓库现为 Java-only 实现，Python mock engine 已删除），不使用低余量模拟冲高 QPS 做容量结论。
 
 Java mock 不是固定延迟返回。它从每个请求读取输入 token、输出 token 和 cache key，并维护每个 engine 的运行任务、等待任务、KV 使用量和 cache 命中。Prefill 时间优先使用 `master_fixed_window.json` 中和 Master 相同的 `FLEXLB_CONFIG.router.roles.prefill.executionTimeEstimator.expression`：
 
@@ -196,12 +216,19 @@ prefill_ms = formula(batchSize, inputTokens, computeTokens,
                      hitCacheTokens, hasHitCache) * prefill.scale * sleep_scale
 ```
 
-Decode 时间由输出长度和实时 active batch 决定：
+Decode 时间按 per-step 口径计费（task #69 生产对齐）：每个 step 推进
+tokens_per_step 个 token（MTP 折算，生产 DSv4 accept 2.54–2.88），step 时长
+优先用显式 step_ms_by_batch 曲线，否则用线性生产拟合 19.5 + 0.175 × running：
 
 ```text
-decode_ms = output_len * interpolate(step_ms_by_batch, active_batch)
+decode_ms = ceil(output_len / tokens_per_step)
+            * (step_base_ms + step_per_running_ms * running)   # 或 curve(batch)
             * decode.scale * sleep_scale
 ```
+
+低批（running=4）≈ 515 tok/s、满批（running=128）≈ 7900 tok/s，
+与生产实测（519 / 7726）对齐；旧的固定 per_token_ms=45 口径已删除
+（低批高估 ~5.5x、满批高估 ~2.8x）。
 
 `fast_ab` 模型的 `sleep_scale=0.1` 用于给 mock 留出吞吐余量，避免下面的模拟 engine 先卡住 Master。它适合隔离 Master 调度上限，不代表真实 LLM engine 的绝对 TTFT 或端到端容量。需要评估真实 engine 容量时，必须换成真实测得的 performance model，并重新确认 mock 不成为瓶颈。
 
@@ -251,12 +278,11 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb/tools/online_eval"
 RUN_ID="handoff_$(date +%Y%m%d_%H%M%S)_w1_s13" \
 N_PREFILL=750 \
 N_DECODE=500 \
-MOCK_ENGINE_IMPL=java \
 MOCK_BASE_GRPC_PORT=61000 \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.fast_ab.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window.json" \
-SCHEDULE_ONLY=1 \
+FETCH_OUTPUT_STREAM=0 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=1 \
 REPLAY_SPEED=13 \
@@ -286,12 +312,11 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb/tools/online_eval"
 BASE_ENV=(
   N_PREFILL=750
   N_DECODE=500
-  MOCK_ENGINE_IMPL=java
   MOCK_BASE_GRPC_PORT=61000
   JAVA_MOCK_EVENT_LOOP_THREADS=32
   "PERFORMANCE_FILE=$PWD/data/performance/dsv4_flash_performance.fast_ab.json"
   "PROCESS_CONFIG_FILE=$PWD/data/config/master_fixed_window.json"
-  SCHEDULE_ONLY=1
+  FETCH_OUTPUT_STREAM=0
   SCHEDULE_WORKER_SIZE=16
   DURATION_S=60
   LOOP=1
@@ -339,19 +364,16 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb/tools/online_eval"
 export JAVA_HOME="${JAVA21_HOME:-$HOME/java21}"
 export JAVA21_HOME="$JAVA_HOME"
 export PATH="$JAVA_HOME/bin:$PATH"
-export PYTHON_BIN="${PYTHON_BIN:-$HOME/.venvs/flexlb-eval/bin/python3}"
 
-PYTHON_BIN="$PYTHON_BIN" \
 FLEXLB_NETWORK_ISOLATED=1 \
 RUN_ID="slo500_wait160_10k_$(date +%Y%m%d_%H%M%S)" \
 N_PREFILL=750 \
 N_DECODE=500 \
-MOCK_ENGINE_IMPL=java \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 JAVA_MOCK_ENGINE_HEAP_SIZE=32g \
-PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.formula_1x.json" \
+PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.sample.json" \
 PROCESS_CONFIG_FILE="$PWD/data/config/master_fixed_window_slo500_wait160.json" \
-SCHEDULE_ONLY=1 \
+FETCH_OUTPUT_STREAM=0 \
 SCHEDULE_WORKER_SIZE=16 \
 LOAD_CLIENT_WORKERS=8 \
 REPLAY_SPEED=1400 \
@@ -372,25 +394,28 @@ bash run_online_eval.sh
 
 做容量矩阵时只修改 `REPLAY_SPEED`，按 14、130、650、1400 依次运行，分别对应约 100、1K、5K、10K QPS。比较不同压力时不要改变 Master/load worker 数。
 
-脚本会在开始阶段校验 Java 21，以及 `PYTHON_BIN` 是否可导入 `aiohttp` 和 `grpc`。未满足依赖时会立即退出。测试结束会保存 `master_prometheus_after.prom`，`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量，并用 `log_coverage_ratio` 标识逐批日志覆盖率。
+脚本会在开始阶段校验 Java 21；mock engine 与 load client 均为 Java 实现，无需 Python 虚拟环境。测试结束会保存 `master_prometheus_after.prom`，随后 run 目录收尾（`consolidate_run_outputs.py`）把它并入 run 根的 `master.json`（`prometheus_after` 键）。`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量（legacy `.prom` 文件存在时优先，其次读 `master.json`），并用 `log_coverage_ratio` 标识逐批日志覆盖率。
 
 ## 9. 读取和校验结果
 
-每个 run 的关键文件：
+每个 run 的关键文件（`run_online_eval.sh` 收尾时会把 run 目录收编成每个组件一份 JSON + 一份日志，见 `tools/online_eval/README.md` 的 Run output layout 一节）：
 
 | 文件 | 用途 |
 |---|---|
-| `load_client/summary.json` | 合并后的 QPS、错误数和 Master 服务端延迟 |
-| `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值 |
-| `load_client/shard_*/summary.json` | 多 load worker 时每个发压分片的数据 |
-| `load_client/slo_batch_analysis.json` | Batch reason、batch size、预测时间、SLO 和 mock 汇总 |
-| `master_prometheus_after.prom` | Master 退出前的 Prometheus 快照，含精确 dispatch reason counter |
-| `flexlb_profile.jfr` | FlexLB JVM profile |
-| `flexlb.log` | Master 日志、拒绝执行、无可用 worker、GC/OOM 线索 |
-| `mock_engine.log` | mock 的 RPC 数、prefill pending 和 decode running |
-| `flexlb_env.txt` | 本次 engine endpoint 和启动环境 |
+| `load_client/summary.json` | 合并后的 QPS、错误数和 Master 服务端延迟（收编后原样保留） |
+| `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值（原样保留） |
+| `client.json` | summary.json 与 server_latency.json、`slo_batch_analysis.json`、每秒聚合时间线的合并视图 |
+| `master.json` | Master 计数时间序列、Prometheus 快照（含精确 dispatch reason counter）、master_info 前后快照、SLO 汇总 |
+| `master.log` | Master 日志（application.log 前缀 + `flexlb.log` 结构化行 + sync 日志）、拒绝执行、无可用 worker、GC/OOM 线索 |
+| `mock.json` / `mock.log` | mock 的 RPC 数、prefill pending 和 decode running 时间线（解析覆盖 26/28 字段，`decode_exec_p50`/`p95` 见 `mock.log` 原文行） |
+| `per_request.jsonl(.gz)` | 合并后的逐请求数据（run 根；10 MB 以下保持明文，更大的 run 为 gzip） |
+| `flexlb_profile.jfr` | FlexLB JVM profile（原样保留） |
+| `flexlb_env.txt` | 本次 engine endpoint 和启动环境（原样保留，同时快照进 `run_meta.json`） |
+| `run_meta.json` | 启动参数快照（含 `FLEXLB_CONFIG`）与环境 |
 
-用以下命令打印单个 run 的正式报告字段并做计数校验：
+注：`load_client/shard_*/`、`load_client/slo_batch_analysis.json`、`master_prometheus_after.prom`、run 根 `flexlb.log`、`mock_engine.log` 等中间产物在成功收编后删除（内容已并入上表对应文件）；`load_client/slo_batch_analysis.json` 仅在其内容成功并入 `client.json` 后才删除。
+
+用以下命令打印单个 run 的正式报告字段并做计数校验（`load_client/summary.json` 与 `load_client/server_latency.json` 收编后原样保留，该命令在收编前后同样可用；若更喜欢读合并视图，可将第二行换成 `json.loads((run / "client.json").read_text())` 并以 `client["server_latency"]` 取同一份数据）：
 
 ```bash
 RUN_DIR="$PWD/run/<run_id>"
@@ -401,7 +426,12 @@ import sys
 
 run = pathlib.Path(sys.argv[1])
 summary = json.loads((run / "load_client/summary.json").read_text())
-server = json.loads((run / "load_client/server_latency.json").read_text())
+server_path = run / "load_client/server_latency.json"
+if server_path.is_file():
+    server = json.loads(server_path.read_text())
+else:
+    # server_latency.json 被手动清理过的收编 run：同一份数据在 client.json
+    server = json.loads((run / "client.json").read_text())["server_latency"]
 latency = summary["schedule_latency_ms"]
 
 print(f"load_workers={summary.get('load_client_workers', 1)}")
@@ -457,7 +487,7 @@ curl -s -X POST http://127.0.0.1:7001/rtp_llm/server_latency/reset
 典型现象：
 
 - `dispatch_ack_ms` 明显上升，而 `route_submit_ms` 和 `batch_wait_ms` 正常。
-- `mock_engine.log` 中 `prefill_pending` 持续增长，或 mock CPU/event loop 饱和。
+- `mock.json` 的 stats 时间线（或 `mock.log`）中 `prefill_waiting` 持续增长，或 mock CPU/event loop 饱和。
 - 出现 `engine-grpc-client-executor` 拒绝执行、连接失败或 ACK timeout。
 
 处理：先确认使用 Java mock 和 `fast_ab`，检查 mock CPU、`JAVA_MOCK_EVENT_LOOP_THREADS`、outbound gRPC executor 和连接稳定性。若只有冷启动出现，增加预热并复测；若稳态持续出现，才属于真实容量问题。
@@ -527,7 +557,7 @@ master config:
 performance model:
 n_prefill/n_decode:
 schedule mode:
-schedule_only:
+fetch_output_stream:
 batch algorithm:
 fixed window wait ms:
 schedule workers:
@@ -555,8 +585,8 @@ artifact directory:
 ## 15. 常见错误
 
 - 只看 client RTT：会把发压端排队和网络抖动算到 Master。正式值必须取服务端打点。
-- 忘记 `SCHEDULE_ONLY=1`：会执行 FetchResponse，测试目标变成端到端链路。
-- 使用 Python mock 冲高 QPS：mock 可能先成为瓶颈，无法证明 Master 容量。
+- 忘记 `FETCH_OUTPUT_STREAM=0`：客户端会读取 FetchResponse 输出流，测试目标变成端到端链路。
+- mock 余量不足就冲高 QPS：mock 可能先成为瓶颈，无法证明 Master 容量。
 - 使用固定 completion delay：丢失输入长度、cache 命中和 active batch 对执行时间的影响。
 - 一次直接打 10K：无法定位拐点，还可能用冷启动失败污染结论。
 - 只改 `REPLAY_SPEED` 不看实际 QPS：speed 是 trace 时间倍率，不是 QPS 本身。
@@ -569,7 +599,7 @@ artifact directory:
 
 - [ ] Java 21 和两个 jar 校验通过。
 - [ ] 使用 Java mock、750 prefill、500 decode 和 `fast_ab`。
-- [ ] 使用 batch、`SCHEDULE_ONLY=1`、fixed-window 10 ms，没有 FetchResponse。
+- [ ] 使用 batch、`FETCH_OUTPUT_STREAM=0`、fixed-window 10 ms，客户端不读输出流。
 - [ ] endpoint 全部 ready 后预热至少 10 秒。
 - [ ] 从约 100 QPS 开始，按阶梯逐级加压。
 - [ ] QPS 和延迟均取 Master 服务端指标。
