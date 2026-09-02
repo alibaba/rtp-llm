@@ -40,10 +40,14 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
 FLEXLB_LOG_PATH="${FLEXLB_LOG_PATH:-${RUN_DIR}/flexlb_logs}"
 
-# Default load (user-approved 2026-08-31, mock3-aligned single tier):
-# 12P/40D + uniform 650 QPS + ramp-up 30s + duration 120s. The default run
-# tests only this single tier; tier/matrix scans are research use (opt in
-# explicitly), never the default load.
+# Default load (user-approved 2026-09-02, replay profile): 12P/40D + replay
+# mode (trace-timestamp pacing) + LOOP=1 cyclic refill + duration 120s.
+# REPLAY_SPEED is caller-supplied (the flexlb-mock-engine-test skill
+# auto-calibrates it from the trace to the nominal 650 QPS target); this
+# script never invents a speed. Baseline break (2026-09-02): the mock3
+# uniform-650 default is retired to an explicit opt-in (SEND_MODE=uniform
+# SEND_MODE_QPS=650) — numbers from the uniform-default era are NOT directly
+# comparable with replay-default runs.
 N_PREFILL="${N_PREFILL:-12}"
 N_DECODE="${N_DECODE:-40}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
@@ -88,10 +92,12 @@ MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"  # no-op, see NOTE abov
 
 LIMIT="${LIMIT:-1000}"
 DURATION_S="${DURATION_S:-120}"
-# REPLAY_SPEED is a LEGACY parameter left over from the 750P/500D era: on the
-# small default cluster it maps to a 1.4-1.9x overload with ~94% errors. It
-# only takes effect when SEND_MODE=replay is set explicitly and must never be
-# used as the default load; the value is kept for explicit replay research.
+# REPLAY_SPEED: replay pacing multiplier, pure pass-through. The caller is
+# expected to supply it (the skill layer auto-calibrates from the trace:
+# SPEED = max(1, round(target_qps * valid_span_s / valid_requests)), where
+# valid = ol>0 rows per the ZERO_OUTPUT_POLICY=skip client-side filter). The
+# bare 10 fallback below equals the JavaLoadClient built-in default and only
+# applies to direct invocations that omit the variable; it is NOT calibrated.
 REPLAY_SPEED="${REPLAY_SPEED:-10}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-999999999}"
 TIMEOUT_MS="${TIMEOUT_MS:-3600000}"
@@ -114,15 +120,21 @@ FETCH_OUTPUT_STREAM="${FETCH_OUTPUT_STREAM:-1}"
 # equivalent under a uniform priority). Multi-priority experiments opt out
 # explicitly with FORCE_PRIORITY=0 so per-record trace priority wins.
 FORCE_PRIORITY="${FORCE_PRIORITY:-50}"
-LOOP="${LOOP:-0}"
-# Send mode is a pure pass-through (single env-var layer). Default uniform at
-# SEND_MODE_QPS=650 (mock3-aligned single tier); replay must be opted into
-# explicitly with SEND_MODE=replay (see the REPLAY_SPEED legacy note above).
-SEND_MODE="${SEND_MODE:-uniform}"
+# LOOP=1 (default): cyclic replay refills the trace to fill DURATION_S
+# (uniform mode is cyclic by construction and ignores LOOP).
+LOOP="${LOOP:-1}"
+# Send mode is a pure pass-through (single env-var layer). Default replay
+# (trace-timestamp pacing; user-approved 2026-09-02, speed auto-calibrated
+# upstream). uniform is the explicit opt-in for the strictest scheduling
+# regime / pressure-boundary / capacity-critical scans and requires
+# SEND_MODE_QPS. Baseline break: pre-2026-09-02 uniform-default runs are not
+# directly comparable with replay-default runs.
+SEND_MODE="${SEND_MODE:-replay}"
 SEND_MODE_QPS="${SEND_MODE_QPS:-650}"
 # Traffic ramp-up for uniform mode: QPS climbs linearly 0 -> SEND_MODE_QPS
-# over RAMP_UP_SECONDS, then stays constant. Default 30s (mock3-aligned
-# single tier); 0 disables it. Distinct from FLEXLB_WARMUP_SECONDS above
+# over RAMP_UP_SECONDS, then stays constant (replay mode ignores ramp-up).
+# Default 30s (mock3-aligned uniform-opt-in tier); 0 disables it. Distinct
+# from FLEXLB_WARMUP_SECONDS above
 # (the no-traffic prepare sleep before load starts): ramp-up shapes the
 # arrival process once traffic begins.
 RAMP_UP_SECONDS="${RAMP_UP_SECONDS:-30}"
