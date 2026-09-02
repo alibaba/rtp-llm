@@ -44,9 +44,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
-    PureCpRouterNoQuant,
-)
 
 from .strategies.base import MoeCfg, RoutedExpertsStrategy
 

@@ -147,9 +147,36 @@ class AutoDeepEpArchitectureTest(TestCase):
         "rtp_llm.config.server_config_setup.torch.cuda.is_available",
         return_value=True,
     )
-    def test_other_sm12x_fails_with_explicit_capability_error(self, *_mocks):
-        with self.assertRaisesRegex(RuntimeError, "SM121.*exact SM120 only"):
-            _auto_deepep_supported_on_visible_devices(2)
+    def test_other_sm12x_defers_error_to_concrete_moe_backend(self, *_mocks):
+        # Generic config setup may also be serving a dense model.  It disables
+        # automatic DeepEP here; an MoE model without a compatible fallback is
+        # rejected later by its concrete backend selector.
+        self.assertFalse(_auto_deepep_supported_on_visible_devices(2))
+
+    def test_multi_gpu_dense_startup_skips_unsupported_deepep_backend(self):
+        config = PyEnvConfigs()
+        config.parallelism_config.world_size = 4
+        config.parallelism_config.local_world_size = 4
+        config.parallelism_config.tp_size = 4
+        config.parallelism_config.dp_size = 1
+        config.parallelism_config.ep_size = 4
+
+        with patch(
+            "rtp_llm.config.server_config_setup."
+            "_auto_deepep_supported_on_visible_devices",
+            return_value=False,
+        ) as architecture_probe:
+            auto_configure_deepep(
+                config.moe_config,
+                config.deep_ep_config,
+                config.parallelism_config,
+                RoleType.PDFUSION,
+            )
+
+        architecture_probe.assert_called_once_with(4)
+        self.assertFalse(config.moe_config.use_deepep_moe)
+        self.assertFalse(config.moe_config.use_deepep_low_latency)
+        self.assertFalse(config.moe_config.use_deepep_internode)
 
     @patch(
         "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",

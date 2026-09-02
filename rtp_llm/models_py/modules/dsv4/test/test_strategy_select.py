@@ -8,6 +8,7 @@ contract. Pure-Python, no CUDA / DeepGEMM / dist required — runs on host.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import types
 import unittest
@@ -90,6 +91,26 @@ class StrategySelectTest(unittest.TestCase):
             "DSV4_USE_GROUPED_FP4",
         ):
             os.environ.pop(k, None)
+
+    def test_strategy_import_does_not_require_cuda_pure_cp_router(self):
+        script = """
+import sys
+sys.modules[
+    'rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router'
+] = None
+import rtp_llm.models_py.modules.dsv4.moe.strategies  # noqa: F401
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout}\nstderr={result.stderr}",
+        )
 
     # --- auto-pick matrix --------------------------------------------------
 

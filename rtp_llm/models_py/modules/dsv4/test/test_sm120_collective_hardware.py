@@ -254,6 +254,56 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
         )
         dist.barrier()
 
+        # Cross the outer chunk threshold on rank 0 only.  Production first
+        # agrees on ``schedule_tokens`` and therefore both ranks execute two
+        # collective rounds; rank 1 contributes an empty second chunk instead
+        # of advancing to the next layer's collective and deadlocking.
+        threshold_tokens = 5 if rank == 0 else 1
+        threshold_x = make_x(threshold_tokens, phase=7)
+        threshold_indices = torch.tensor(
+            [
+                [(rank + token) % 4, (rank + token + 2) % 4]
+                for token in range(threshold_tokens)
+            ],
+            dtype=torch.int64,
+            device=device,
+        ).reshape(threshold_tokens, 2)
+        threshold_weights = torch.full(
+            (threshold_tokens, 2), 0.5, dtype=torch.float32, device=device
+        )
+        schedule_tokens = strategy.synchronized_chunk_extent(threshold_tokens, device)
+        if schedule_tokens != 5:
+            raise AssertionError(
+                f"rank {rank} received chunk extent {schedule_tokens}, expected 5"
+            )
+        threshold_chunks = []
+        for token_start in range(0, schedule_tokens, cfg.max_tokens_per_rank):
+            token_end = min(token_start + cfg.max_tokens_per_rank, threshold_tokens)
+            threshold_chunks.append(
+                strategy._forward_collective(
+                    threshold_x[token_start:token_end],
+                    threshold_weights[token_start:token_end],
+                    threshold_indices[token_start:token_end],
+                )
+            )
+        threshold_actual = torch.cat(threshold_chunks, dim=0)
+        threshold_reference = _dense_fp4_reference(
+            threshold_x,
+            threshold_weights,
+            threshold_indices,
+            w1=dense_w1,
+            w2=dense_w2,
+            w3=dense_w3,
+            swiglu_limit=cfg.swiglu_limit,
+        )
+        torch.testing.assert_close(
+            threshold_actual,
+            threshold_reference,
+            rtol=8e-2,
+            atol=5e-1,
+        )
+        dist.barrier()
+
         # A rank with no local tokens must still participate in all
         # collectives and return a correctly shaped empty result.
         zero_rank_tokens = 2 if rank == 0 else 0
