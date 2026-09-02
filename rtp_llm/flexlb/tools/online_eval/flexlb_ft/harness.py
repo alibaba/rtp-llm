@@ -15,10 +15,10 @@ and fault scripts.  Provides:
                    port planning, per-spec environment reuse and teardown.
   * ProcessOps   — managed subprocess handles (kill -9, restart, pgrep sweep).
   * ClientOps    — JavaLoadClient driver (all 35 env vars explicit) plus
-                   summary.json / per_request.jsonl parsing.
+                   per_request.jsonl parsing.
   * EngineOps    — mock HTTP control-plane + gRPC schedule/cancel/stream
                    (see engine_ops.py).
-  * AssertUtils  — wait_for / inflight-clean / recovery-rate / TTFT helpers.
+  * AssertUtils  — wait_for / inflight-clean / TTFT helpers.
 
 Only the Python standard library is used apart from ``grpc`` /
 ``grpc_tools`` (already required by the legacy smoke tests).
@@ -1220,47 +1220,16 @@ class EnvManager:
 
 
 class LoadClientResult:
+    """Raw client output handle.
+
+    Phase B removed summary.json (the client records raw rows only), so the
+    derived total/ok/errors summary fields are gone with it — per_request()
+    rows are the sole client-side source (no-backward-compat).
+    """
+
     def __init__(self, output_dir: Path, returncode: int):
         self.output_dir = output_dir
         self.returncode = returncode
-        self.summary: Optional[dict] = None
-        summary_file = output_dir / "summary.json"
-        if summary_file.is_file():
-            try:
-                self.summary = json.loads(summary_file.read_text(encoding="utf-8"))
-            except Exception:
-                self.summary = None
-
-    @property
-    def total(self) -> int:
-        if not self.summary:
-            return 0
-        for key in ("total_requests", "total", "requests"):
-            if key in self.summary:
-                return int(self.summary[key])
-        return 0
-
-    @property
-    def ok(self) -> int:
-        if not self.summary:
-            return 0
-        for key in ("completed", "ok", "success"):
-            if key in self.summary:
-                return int(self.summary[key])
-        return 0
-
-    @property
-    def errors(self) -> int:
-        if not self.summary:
-            return 0
-        for key in ("errors", "error", "failed"):
-            if key in self.summary:
-                return int(self.summary[key])
-        return 0
-
-    @property
-    def success_rate(self) -> float:
-        return (self.ok / self.total) if self.total else 0.0
 
     def per_request(self) -> list[dict]:
         path = self.output_dir / "per_request.jsonl"
@@ -1406,14 +1375,6 @@ class AssertUtils:
                 )
             time.sleep(0.5)
         return False, f"timeout waiting for inflight clean: {detail}"
-
-    @staticmethod
-    def recovery_rate(result: LoadClientResult) -> tuple[bool, str]:
-        """>= 95% success rate with at least one request (legacy chaos rule)."""
-        if result.total == 0:
-            return False, "recovery verification sent 0 requests"
-        rate = result.ok / result.total
-        return rate >= 0.95, f"recovery {result.ok}/{result.total} ({rate:.1%})"
 
     @staticmethod
     def ttft_degradation(

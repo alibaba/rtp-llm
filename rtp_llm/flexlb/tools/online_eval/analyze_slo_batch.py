@@ -176,12 +176,8 @@ def load_prometheus_dispatch_counts(run_dir: Path) -> dict[str, int]:
 
 
 def load_client_summary(run_dir: Path) -> dict:
-    # The legacy summary.json (kept in place by consolidation) is the primary
-    # source; client.json — the summary base plus merged extras — only fills
-    # in for consolidated directories where the legacy copy is gone.
-    legacy = load_json(run_dir / "load_client" / "summary.json")
-    if legacy:
-        return legacy
+    # Phase B removed load_client/summary.json (the client records raw rows
+    # only); client.json is the sole source (no-backward-compat).
     return load_json(run_dir / "client.json")
 
 
