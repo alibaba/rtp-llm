@@ -34,7 +34,8 @@ std::string IBlockPool::debugString() const {
         << ", free=" << free_blocks << ", available=" << available_blocks_num_
         << ", cache_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::CACHE)]
         << ", load_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::LOAD)]
-        << ", eviction_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
+        << ", eviction_target_ref_blocks="
+        << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::EVICTION)]
         << ", store_ref_blocks=" << tree_referenced_block_counts_[treeRefTypeIndex(BlockTreeRefType::STORE)] << "}";
     return oss.str();
 }
