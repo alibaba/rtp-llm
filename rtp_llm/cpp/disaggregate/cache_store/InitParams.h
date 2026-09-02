@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
+#include "rtp_llm/cpp/utils/RdmaDeviceHealthTypes.h"
 #include "kmonitor/client/MetricsReporter.h"
 
 namespace rtp_llm {
@@ -19,6 +20,9 @@ struct MessagerInitParams {
 
     int rdma_connect_timeout_ms{250};
     int rdma_qp_count_per_connection{2};
+
+    // 由 CacheStoreInitParams 透传；实际消费方是支持设备健康探测的 RDMA messager 实现
+    RdmaDeviceHealthMonitorConfig rdma_device_health_monitor_config;
 };
 
 class CacheStoreInitParams {
@@ -35,6 +39,8 @@ public:
 
     int rdma_connect_timeout_ms{250};
     int rdma_qp_count_per_connection{2};
+
+    RdmaDeviceHealthMonitorConfig rdma_device_health_monitor_config;
 
     uint32_t rdma_io_thread_count{4};
     uint32_t rdma_worker_thread_count{2};

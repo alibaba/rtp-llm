@@ -75,6 +75,7 @@ cc_library(
         ":arpc_dep",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/cpp/utils:rdma_device_health_types",
     ],
     visibility=['//visibility:public'],
     alwayslink = True,

@@ -103,6 +103,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("VIT", RoleType::VIT)
         .value("FRONTEND", RoleType::FRONTEND);
 
+    py::enum_<RdmaDeviceHealthFaultHandler>(m, "RdmaDeviceHealthFaultHandler")
+        .value("LOG", RdmaDeviceHealthFaultHandler::LOG)
+        .value("ABORT", RdmaDeviceHealthFaultHandler::ABORT);
+    // 边界与默认值只在 C++ 定义一份，Python 侧的 argparse 校验直接引用，避免硬编码漂移
+    m.attr("RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN")       = kMinRdmaDeviceHealthProbeIntervalMs;
+    m.attr("RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX")       = kMaxRdmaDeviceHealthProbeIntervalMs;
+    m.attr("RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT")   = kDefaultRdmaDeviceHealthProbeIntervalMs;
+    m.attr("RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MIN")     = kMinRdmaDeviceHealthFaultConfirmCount;
+    m.attr("RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX")     = kMaxRdmaDeviceHealthFaultConfirmCount;
+    m.attr("RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT") = kDefaultRdmaDeviceHealthFaultConfirmCount;
+
     py::enum_<VitSeparation>(m, "VitSeparation")
         .value("VIT_SEPARATION_LOCAL", VitSeparation::VIT_SEPARATION_LOCAL)
         .value("VIT_SEPARATION_ROLE", VitSeparation::VIT_SEPARATION_ROLE)
@@ -1012,6 +1023,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
         .def_readwrite("cache_store_tcp_anet_rpc_queue_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_queue_num)
+        .def_readwrite("rdma_device_health_check_enabled", &CacheStoreConfig::rdma_device_health_check_enabled)
+        .def_readwrite("rdma_device_health_fault_handler", &CacheStoreConfig::rdma_device_health_fault_handler)
+        .def_readwrite("rdma_device_health_probe_interval_ms", &CacheStoreConfig::rdma_device_health_probe_interval_ms)
+        .def_readwrite("rdma_device_health_fault_confirm_count",
+                       &CacheStoreConfig::rdma_device_health_fault_confirm_count)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1034,10 +1050,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_layer_cache_buffer_store_timeout_ms,
                                       self.p2p_cancel_broadcast_timeout_ms,
                                       self.cache_store_tcp_anet_rpc_thread_num,
-                                      self.cache_store_tcp_anet_rpc_queue_num);
+                                      self.cache_store_tcp_anet_rpc_queue_num,
+                                      self.rdma_device_health_check_enabled,
+                                      self.rdma_device_health_fault_handler,
+                                      self.rdma_device_health_probe_interval_ms,
+                                      self.rdma_device_health_fault_confirm_count);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                // 20 = 新增 RDMA 设备健康字段之前的长度，仍可读入（新字段回落 C++ 默认值）
+                if (t.size() != 24 && t.size() != 20)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -1061,6 +1082,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
                     c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
                     c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
+                    if (t.size() == 24) {
+                        c.rdma_device_health_check_enabled       = t[20].cast<bool>();
+                        c.rdma_device_health_fault_handler       = t[21].cast<RdmaDeviceHealthFaultHandler>();
+                        c.rdma_device_health_probe_interval_ms   = t[22].cast<uint32_t>();
+                        c.rdma_device_health_fault_confirm_count = t[23].cast<uint32_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }

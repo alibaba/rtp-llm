@@ -80,10 +80,23 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
     params.messager_worker_thread_count = init_params.cache_store_config.messager_worker_thread_count;
     params.metrics_reporter             = metrics_reporter_;
     params.device_id                    = static_cast<int>(init_params.parallelism_config.local_rank);
+
+    // 设备健康探测的实际执行方是支持探测的 RDMA messager 实现，此处只做投影与透传；
+    // enabled 的门控与数值来源见 CacheStoreConfig::makeRdmaDeviceHealthMonitorConfig
+    params.rdma_device_health_monitor_config =
+        init_params.cache_store_config.makeRdmaDeviceHealthMonitorConfig(params.rdma_mode);
+
     RTP_LLM_LOG_INFO("cache store listen port is [%ld], rdma listen port is [%ld] rdma_mode is [%d]",
                      params.listen_port,
                      params.rdma_listen_port,
                      params.rdma_mode);
+    RTP_LLM_LOG_INFO("rdma device health check requested [%d], effective [%d], fault handler [%s], "
+                     "probe interval [%u] ms, fault confirm count [%u]",
+                     init_params.cache_store_config.rdma_device_health_check_enabled,
+                     params.rdma_device_health_monitor_config.enabled,
+                     rdmaDeviceHealthFaultHandlerName(params.rdma_device_health_monitor_config.fault_handler),
+                     params.rdma_device_health_monitor_config.probe_interval_ms,
+                     params.rdma_device_health_monitor_config.fault_confirm_count);
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);
     RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
     RTP_LLM_LOG_INFO("cache store init success");

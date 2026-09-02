@@ -1,8 +1,10 @@
 import importlib
+import io
 import json
 import os
 import pickle
 import sys
+from contextlib import redirect_stderr
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -672,6 +674,239 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+
+class ServerArgsRdmaDeviceHealthTest(TestCase):
+    """Cover the --cache_store_rdma_device_health_* pipe: defaults, CLI/env
+    binding, range rejection and pickle compatibility of CacheStoreConfig."""
+
+    def setUp(self):
+        environ_backup = os.environ.copy()
+        argv_backup = sys.argv.copy()
+
+        def _restore():
+            os.environ.clear()
+            os.environ.update(environ_backup)
+            sys.argv = argv_backup
+
+        self.addCleanup(_restore)
+
+        os.environ.clear()
+        sys.argv = ["prog"]
+
+    def _setup(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args.setup_args()
+
+    def _assert_rejected(self, expected_message):
+        """Assert setup fails *because of the converter*.
+
+        argparse exits with SystemExit(2) for an unknown flag as well, so a typo
+        in the option name would make a bare assertRaises(SystemExit) pass for
+        the wrong reason. Matching the stderr message is what proves the value
+        reached int_in_range / str2_rdma_device_health_fault_handler.
+        """
+        stderr = io.StringIO()
+        with self.assertRaises(SystemExit) as ctx, redirect_stderr(stderr):
+            self._setup()
+        message = stderr.getvalue()
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertNotIn("unrecognized arguments", message)
+        self.assertIn(expected_message, message)
+
+    def test_defaults_keep_probe_disabled(self):
+        """Without any input the feature stays off and numeric fields match the
+        C++ defaults — rollback is simply not passing the flags."""
+        from rtp_llm.ops import (
+            RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT,
+            RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT,
+            RdmaDeviceHealthFaultHandler,
+        )
+
+        c = self._setup().cache_store_config
+        self.assertEqual(c.rdma_device_health_check_enabled, False)
+        self.assertEqual(
+            c.rdma_device_health_fault_handler, RdmaDeviceHealthFaultHandler.LOG
+        )
+        self.assertEqual(
+            c.rdma_device_health_probe_interval_ms,
+            RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT,
+        )
+        self.assertEqual(
+            c.rdma_device_health_fault_confirm_count,
+            RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT,
+        )
+
+    def test_cmd_args_bind_to_cache_store_config(self):
+        """The fault handler name is case-insensitive on the CLI."""
+        from rtp_llm.ops import RdmaDeviceHealthFaultHandler
+
+        sys.argv = [
+            "prog",
+            "--cache_store_rdma_device_health_check_enabled",
+            "1",
+            "--cache_store_rdma_device_health_fault_handler",
+            "abort",
+            "--cache_store_rdma_device_health_probe_interval_ms",
+            "2000",
+            "--cache_store_rdma_device_health_fault_confirm_count",
+            "5",
+        ]
+
+        c = self._setup().cache_store_config
+        self.assertEqual(c.rdma_device_health_check_enabled, True)
+        self.assertEqual(
+            c.rdma_device_health_fault_handler, RdmaDeviceHealthFaultHandler.ABORT
+        )
+        self.assertEqual(c.rdma_device_health_probe_interval_ms, 2000)
+        self.assertEqual(c.rdma_device_health_fault_confirm_count, 5)
+
+    def test_env_vars_bind_to_cache_store_config(self):
+        """Env values go through the same argparse type converters as the CLI."""
+        from rtp_llm.ops import RdmaDeviceHealthFaultHandler
+
+        os.environ["CACHE_STORE_RDMA_DEVICE_HEALTH_CHECK_ENABLED"] = "true"
+        os.environ["CACHE_STORE_RDMA_DEVICE_HEALTH_FAULT_HANDLER"] = " AbOrt "
+        os.environ["CACHE_STORE_RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS"] = "500"
+        os.environ["CACHE_STORE_RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT"] = "10"
+
+        c = self._setup().cache_store_config
+        self.assertEqual(c.rdma_device_health_check_enabled, True)
+        self.assertEqual(
+            c.rdma_device_health_fault_handler, RdmaDeviceHealthFaultHandler.ABORT
+        )
+        self.assertEqual(c.rdma_device_health_probe_interval_ms, 500)
+        self.assertEqual(c.rdma_device_health_fault_confirm_count, 10)
+
+    def test_out_of_range_and_unknown_values_are_rejected(self):
+        """Bad values fail startup at parse time instead of reaching the messager."""
+        interval_range = (
+            "RDMA device health probe interval (ms) must be in [100, 60000]"
+        )
+        count_range = "RDMA device health fault confirm count must be in [1, 100]"
+        bad_argvs = [
+            # below RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MIN
+            (
+                ["--cache_store_rdma_device_health_probe_interval_ms", "10"],
+                f"{interval_range}, got 10",
+            ),
+            # above RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_MAX
+            (
+                ["--cache_store_rdma_device_health_probe_interval_ms", "60001"],
+                f"{interval_range}, got 60001",
+            ),
+            (
+                ["--cache_store_rdma_device_health_probe_interval_ms", "not_an_int"],
+                "RDMA device health probe interval (ms) must be an integer",
+            ),
+            # above RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_MAX
+            (
+                ["--cache_store_rdma_device_health_fault_confirm_count", "101"],
+                f"{count_range}, got 101",
+            ),
+            (
+                ["--cache_store_rdma_device_health_fault_confirm_count", "0"],
+                f"{count_range}, got 0",
+            ),
+            (
+                ["--cache_store_rdma_device_health_fault_handler", "panic"],
+                "invalid RDMA device health fault handler: 'panic'",
+            ),
+        ]
+        for bad_argv, expected_message in bad_argvs:
+            with self.subTest(argv=bad_argv):
+                sys.argv = ["prog"] + bad_argv
+                self._assert_rejected(expected_message)
+
+    def test_env_out_of_range_is_rejected(self):
+        """The env path must not silently drop an invalid value, with or without
+        an accompanying CLI arg."""
+        os.environ["CACHE_STORE_RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS"] = "60001"
+        expected_message = (
+            "RDMA device health probe interval (ms) must be in [100, 60000], got 60001"
+        )
+
+        # env only
+        sys.argv = ["prog"]
+        self._assert_rejected(expected_message)
+
+        # mixed with an unrelated CLI arg
+        sys.argv = ["prog", "--cache_store_rdma_device_health_check_enabled", "1"]
+        self._assert_rejected(expected_message)
+
+    def test_cache_store_config_pickle_round_trip_and_legacy_state(self):
+        """The new fields survive the spawn boundary, and a pre-feature pickle
+        still loads with the new fields falling back to their defaults."""
+        from rtp_llm.ops import (
+            RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT,
+            RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT,
+            RdmaDeviceHealthFaultHandler,
+        )
+
+        sys.argv = [
+            "prog",
+            "--cache_store_rdma_device_health_check_enabled",
+            "1",
+            "--cache_store_rdma_device_health_fault_handler",
+            "ABORT",
+            "--cache_store_rdma_device_health_probe_interval_ms",
+            "2000",
+            "--cache_store_rdma_device_health_fault_confirm_count",
+            "5",
+        ]
+        c = self._setup().cache_store_config
+
+        restored = pickle.loads(pickle.dumps(c))
+        self.assertEqual(restored.rdma_device_health_check_enabled, True)
+        self.assertEqual(
+            restored.rdma_device_health_fault_handler,
+            RdmaDeviceHealthFaultHandler.ABORT,
+        )
+        self.assertEqual(restored.rdma_device_health_probe_interval_ms, 2000)
+        self.assertEqual(restored.rdma_device_health_fault_confirm_count, 5)
+
+        config_type = type(c)
+        legacy_config = config_type.__new__(config_type)
+        legacy_config.__setstate__(
+            (
+                True,  # cache_store_rdma_mode
+                80,  # wrr_available_ratio
+                0,  # rank_factor
+                32,  # thread_count
+                250,  # rdma_connect_timeout_ms
+                2,  # rdma_qp_count_per_connection
+                4,  # rdma_io_thread_count
+                2,  # rdma_worker_thread_count
+                2,  # messager_io_thread_count
+                32,  # messager_worker_thread_count
+                180000,  # rdma_transfer_wait_timeout_ms
+                0,  # rdma_max_block_pairs_per_connection
+                250,  # p2p_read_steal_before_deadline_ms
+                100,  # p2p_read_return_before_deadline_ms
+                10000,  # p2p_transfer_not_done_resource_hold_ms
+                100,  # p2p_resource_store_timeout_check_interval_ms
+                100000,  # p2p_layer_cache_buffer_store_timeout_ms
+                1000,  # p2p_cancel_broadcast_timeout_ms
+                3,  # cache_store_tcp_anet_rpc_thread_num
+                100,  # cache_store_tcp_anet_rpc_queue_num
+            )
+        )
+        self.assertEqual(legacy_config.cache_store_rdma_mode, True)
+        self.assertEqual(legacy_config.rdma_device_health_check_enabled, False)
+        self.assertEqual(
+            legacy_config.rdma_device_health_fault_handler,
+            RdmaDeviceHealthFaultHandler.LOG,
+        )
+        self.assertEqual(
+            legacy_config.rdma_device_health_probe_interval_ms,
+            RDMA_DEVICE_HEALTH_PROBE_INTERVAL_MS_DEFAULT,
+        )
+        self.assertEqual(
+            legacy_config.rdma_device_health_fault_confirm_count,
+            RDMA_DEVICE_HEALTH_FAULT_CONFIRM_COUNT_DEFAULT,
+        )
 
 
 if __name__ == "__main__":
