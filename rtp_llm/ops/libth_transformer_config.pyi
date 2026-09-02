@@ -94,7 +94,7 @@ class AttentionConfigs:
     kv_head_num: int
     kv_lora_rank: int
     max_seq_len: int
-    mla_prefill_kv_chunk_tokens: int
+    mla_prefill_expanded_kv_budget_bytes: int
     need_rope_kv_cache: bool
     nope_head_dim: int
     q_lora_rank: int

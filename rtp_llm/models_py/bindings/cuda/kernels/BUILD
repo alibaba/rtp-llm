@@ -8,6 +8,18 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
 ]
 
+sm103_cuda_copts = select({
+    "@//:using_cuda13_x86": [
+        "--cuda-gpu-arch=sm_103",
+        "--cuda-include-ptx=sm_103",
+    ],
+    "@//:using_cuda13_arm": [
+        "--cuda-gpu-arch=sm_103",
+        "--cuda-include-ptx=sm_103",
+    ],
+    "//conditions:default": [],
+})
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
@@ -121,6 +133,18 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "flashmla_state_merge",
+    srcs = ["flashmla_state_merge.cu"],
+    hdrs = ["flashmla_state_merge.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts() + sm103_cuda_copts,
     visibility = ["//visibility:public"],
 )
 

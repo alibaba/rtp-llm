@@ -481,7 +481,9 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
                 weights,
                 quant_config,
                 kv_cache_dtype=attn_configs.kv_cache_dtype,
-                prefix_chunk_tokens=attn_configs.mla_prefill_kv_chunk_tokens,
+                expanded_kv_budget_bytes=(
+                    attn_configs.mla_prefill_expanded_kv_budget_bytes
+                ),
             ),
             NewMlaRotaryEmbeddingOp(
                 cos_sin_cache=cos_sin_cache,
@@ -517,8 +519,6 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         mutate or recycle a pinned FlashInfer host plan because none is created.
         """
 
-        if forbid_realloc:
-            raise RuntimeError("dense FlashMLA Prefill does not support graph replay")
         assert self.fmha_impl is not None
         check_attention_inputs(attn_inputs)
         from .flashmla_dense_prefill import build_flashmla_device_params
@@ -614,32 +614,16 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
         return (
             attn_configs.use_mla
-            and (
-                not attn_inputs.is_prefill
-                or is_target_verify
-                or is_mtp_draft_update
-            )
-            and (
-                not attn_configs.is_sparse
-                or is_target_verify
-                or is_mtp_draft_update
-            )
+            and (not attn_inputs.is_prefill or is_target_verify or is_mtp_draft_update)
+            and (not attn_configs.is_sparse or is_target_verify or is_mtp_draft_update)
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
-        is_mtp_draft_update = bool(
-            getattr(attn_inputs, "is_mtp_draft_update", False)
-        )
-        sequence_lengths_d = getattr(
-            attn_inputs, "sequence_lengths_plus_1_d", None
-        )
-        sequence_lengths_host = getattr(
-            attn_inputs, "sequence_lengths_host", None
-        )
-        block_table_d = getattr(
-            attn_inputs, "kv_cache_kernel_block_id_device", None
-        )
+        is_mtp_draft_update = bool(getattr(attn_inputs, "is_mtp_draft_update", False))
+        sequence_lengths_d = getattr(attn_inputs, "sequence_lengths_plus_1_d", None)
+        sequence_lengths_host = getattr(attn_inputs, "sequence_lengths_host", None)
+        block_table_d = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
 
         # Normal and MTP draft decode are q=1. Build their bulk metadata with
         # the existing CUDA replay kernel, while retaining only the tiny CPU

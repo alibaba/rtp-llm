@@ -532,7 +532,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_prefix_tree_memory_cache,
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_dsv4_state_block_independent_eviction);
+                                      self.enable_dsv4_state_block_independent_eviction,
+                                      self.kimi_k3_kda_pool_blocks);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -616,6 +617,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             if (extra_count >= 6) {
                                 c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
                                 c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
+                            }
+                            if (extra_count >= 7) {
+                                c.kimi_k3_kda_pool_blocks = t[extra_start + 6].cast<uint32_t>();
                             }
                         }
                     }
@@ -1549,7 +1553,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("nope_head_dim", &AttentionConfigs::nope_head_dim)
         .def_readwrite("rope_head_dim", &AttentionConfigs::rope_head_dim)
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
-        .def_readwrite("mla_prefill_kv_chunk_tokens", &AttentionConfigs::mla_prefill_kv_chunk_tokens)
+        .def_readwrite("mla_prefill_expanded_kv_budget_bytes", &AttentionConfigs::mla_prefill_expanded_kv_budget_bytes)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)

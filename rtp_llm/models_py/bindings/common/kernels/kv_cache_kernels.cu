@@ -423,26 +423,24 @@ __global__ void GatherMLALatentAndFillKPeKernel(T*             final_compressed_
         return;
     }
 
-    int batch_idx    = -1;
+    int batch_idx    = 0;
     int final_offset = 0;
     if (lane == 0) {
-        for (int i = 0; i < num_batches; ++i) {
-            const int reuse_len    = batch_reuse_info_vec[i * 4 + 1];
-            const int query_len    = qo_indptr[i + 1] - qo_indptr[i];
-            const int batch_kv_len = reuse_len + query_len;
-            if (token_idx < final_offset + batch_kv_len) {
-                batch_idx = i;
+        int64_t offset = 0;
+        for (int batch = 0; batch < num_batches; ++batch) {
+            const int     reuse_len   = batch_reuse_info_vec[batch * 4 + 1];
+            const int     query_len   = qo_indptr[batch + 1] - qo_indptr[batch];
+            const int64_t next_offset = offset + reuse_len + query_len;
+            if (token_idx < next_offset) {
+                batch_idx    = batch;
+                final_offset = static_cast<int>(offset);
                 break;
             }
-            final_offset += batch_kv_len;
+            offset = next_offset;
         }
     }
-    batch_idx    = __shfl_sync(0xffffffff, batch_idx, 0);
-    final_offset = __shfl_sync(0xffffffff, final_offset, 0);
-    if (batch_idx < 0) {
-        return;
-    }
-
+    batch_idx                 = __shfl_sync(0xffffffff, batch_idx, 0);
+    final_offset              = __shfl_sync(0xffffffff, final_offset, 0);
     const int reuse_len       = batch_reuse_info_vec[batch_idx * 4 + 1];
     const int block_start_idx = batch_reuse_info_vec[batch_idx * 4 + 2];
     const int local_idx       = token_idx - final_offset;
@@ -501,13 +499,9 @@ void invokeGatherMLALatentAndFillKPe(T*             final_compressed_kv,
                                      int64_t        kv_cache_block_stride,
                                      int64_t        kv_cache_entry_stride,
                                      cudaStream_t   stream) {
-    if (total_final_len == 0) {
-        return;
-    }
-
     constexpr int kWarpsPerBlock = 8;
     constexpr int kBlockSize     = kWarpsPerBlock * 32;
-    const int     grid_size      = (total_final_len + kWarpsPerBlock - 1) / kWarpsPerBlock;
+    const int64_t grid_size      = (static_cast<int64_t>(total_final_len) + kWarpsPerBlock - 1) / kWarpsPerBlock;
     GatherMLALatentAndFillKPeKernel<<<grid_size, kBlockSize, 0, stream>>>(final_compressed_kv,
                                                                           packed_kv,
                                                                           compressed_kv,
@@ -530,11 +524,6 @@ void invokeGatherMLALatentAndFillKPe(T*             final_compressed_kv,
                                                                           k_pe_stride,
                                                                           kv_cache_block_stride,
                                                                           kv_cache_entry_stride);
-
-#if USING_CUDA
-    check_cuda_value(cudaPeekAtLastError());
-    check_cuda_error();
-#endif
 }
 
 // Explicit template instantiation

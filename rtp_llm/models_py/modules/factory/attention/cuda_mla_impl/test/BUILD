@@ -1,11 +1,17 @@
 load("//bazel:arch_select.bzl", "tokenspeed_mla_test_deps")
 
 py_test(
-    name = "flashmla_prefix_chunk_test",
-    srcs = ["flashmla_prefix_chunk_test.py"],
-    deps = [
-        "//rtp_llm/models_py/standalone:py_standalone_testlib",
-    ],
+    name = "flashmla_forward_plan_test",
+    srcs = ["flashmla_forward_plan_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
+py_test(
+    name = "flashmla_state_merge_test",
+    srcs = ["flashmla_state_merge_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["B300"],
+    exec_properties = {'gpu': 'B300'},
 )
 
 # only can run in cu129 so mark as manual
@@ -80,12 +86,15 @@ py_test(
 
 py_test(
     name = "flashmla_dense_prefill_packed_kv_test",
-    srcs = ["flashmla_dense_prefill_packed_kv_test.py"],
+    srcs = [
+        "flashmla_dense_prefill_packed_kv_test.py",
+        "flashmla_forward_test_utils.py",
+    ],
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual", "SM100"],
-    exec_properties = {'gpu': 'SM100'},
+    tags = ["B300"],
+    exec_properties = {'gpu': 'B300'},
 )
 
 py_binary(
@@ -94,6 +103,6 @@ py_binary(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual", "SM100"],
-    exec_properties = {'gpu': 'SM100'},
+    tags = ["manual", "B300"],
+    exec_properties = {'gpu': 'B300'},
 )

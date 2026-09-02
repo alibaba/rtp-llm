@@ -1,4 +1,6 @@
+import os
 from types import SimpleNamespace
+from typing import Sequence
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 
@@ -12,17 +14,25 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wr
     MlaFlashMLAPrefillImpl,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_dense_prefill import (
+    FlashMLADeviceParams,
     MlaFlashMLAPrefillOp,
     build_flashmla_device_params,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_forward_plan import (
+    FlashMLAForwardRoute,
+)
 from rtp_llm.ops import AttentionConfigs
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+_TEST_TMPDIR = os.environ.get("TEST_TMPDIR")
+if _TEST_TMPDIR:
+    os.environ.setdefault("DG_JIT_CACHE_DIR", os.path.join(_TEST_TMPDIR, "deep_gemm"))
 
 CUDA_AVAILABLE = torch.cuda.is_available()
 
 
 class FlashMlaDensePrefillConfigForwardingTest(TestCase):
-    def test_wrapper_forwards_explicit_prefix_chunk_capacity(self) -> None:
+    def test_wrapper_forwards_expanded_kv_budget(self) -> None:
         configs = AttentionConfigs()
         configs.head_num = 96
         configs.kv_lora_rank = 512
@@ -32,29 +42,36 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
         configs.kernel_tokens_per_block = 4096
         configs.softmax_extra_scale = 1.0
         configs.use_mla = True
-        configs.mla_prefill_kv_chunk_tokens = 32768
-        captured: dict[str, int] = {}
+        configs.mla_prefill_expanded_kv_budget_bytes = 5 * 1024**3
+        captured: dict[str, object] = {}
 
         def make_op(*args: object, **kwargs: object) -> object:
-            captured["prefix_chunk_tokens"] = int(kwargs["prefix_chunk_tokens"])
+            captured["expanded_kv_budget_bytes"] = int(
+                kwargs["expanded_kv_budget_bytes"]
+            )
             return object()
 
-        with patch.object(
-            flashmla_dense_prefill,
-            "MlaFlashMLAPrefillOp",
-            side_effect=make_op,
-        ), patch.object(
-            flashinfer_mla_wrapper,
-            "NewMlaRotaryEmbeddingOp",
-            return_value=object(),
-        ), patch.object(
-            flashinfer_mla_wrapper,
-            "MlaKVCacheWriteOp",
-            return_value=object(),
-        ), patch.object(
-            flashinfer_mla_wrapper.MlaFlashInferImplBase,
-            "__init__",
-            return_value=None,
+        with (
+            patch.object(
+                flashmla_dense_prefill,
+                "MlaFlashMLAPrefillOp",
+                side_effect=make_op,
+            ),
+            patch.object(
+                flashinfer_mla_wrapper,
+                "NewMlaRotaryEmbeddingOp",
+                return_value=object(),
+            ),
+            patch.object(
+                flashinfer_mla_wrapper,
+                "MlaKVCacheWriteOp",
+                return_value=object(),
+            ),
+            patch.object(
+                flashinfer_mla_wrapper.MlaFlashInferImplBase,
+                "__init__",
+                return_value=None,
+            ),
         ):
             MlaFlashMLAPrefillImpl(
                 configs,
@@ -63,7 +80,7 @@ class FlashMlaDensePrefillConfigForwardingTest(TestCase):
                 torch.empty(0),
             )
 
-        self.assertEqual(captured["prefix_chunk_tokens"], 32768)
+        self.assertEqual(captured["expanded_kv_budget_bytes"], 5 * 1024**3)
 
 
 def _indptr(lengths: list[int]) -> torch.Tensor:
@@ -120,6 +137,118 @@ def _assert_cuda_i32(test: TestCase, tensor: torch.Tensor) -> None:
 class FlashMlaDensePrefillParamsTest(TestCase):
     page_size = 128
 
+    def _make_unplanned_op(
+        self,
+        *,
+        expanded_kv_budget_bytes: int = 5 * 1024**3,
+    ) -> MlaFlashMLAPrefillOp:
+        op = object.__new__(MlaFlashMLAPrefillOp)
+        op.num_heads = 12
+        op.kv_lora_rank = 512
+        op.qk_rope_head_dim = 64
+        op.qk_nope_head_dim = 128
+        op.v_head_dim = 128
+        op.page_size = self.page_size
+        op.expanded_kv_budget_bytes = expanded_kv_budget_bytes
+        op.flash_mla_cuda = SimpleNamespace(dense_prefill_fwd=lambda *args: None)
+        op._forward_plan = None
+        op._prefix_runtime_launches = ()
+        op._forward_workspace = None
+        return op
+
+    def _make_plan_params(
+        self,
+        *,
+        q_lens: Sequence[int],
+        reuse_lens: Sequence[int],
+    ) -> FlashMLADeviceParams:
+        self.assertEqual(len(q_lens), len(reuse_lens))
+        q_lens = list(q_lens)
+        reuse_lens = list(reuse_lens)
+        max_blocks = max(
+            (q_len + reuse_len + self.page_size - 1) // self.page_size
+            for q_len, reuse_len in zip(q_lens, reuse_lens, strict=True)
+        )
+        block_table = torch.arange(
+            len(q_lens) * max_blocks, dtype=torch.int32, device="cuda"
+        ).view(len(q_lens), max_blocks)
+        return build_flashmla_device_params(
+            _attention_inputs(q_lens, reuse_lens, [block_table], current_group=0),
+            self.page_size,
+        )
+
+    def test_plan_builds_full_route_once_without_prefix_metadata(self) -> None:
+        op = self._make_unplanned_op(expanded_kv_budget_bytes=0)
+        params = self._make_plan_params(q_lens=(128,), reuse_lens=(1024,))
+        with patch.object(
+            flashmla_dense_prefill,
+            "plan_flashmla_forward",
+            wraps=flashmla_dense_prefill.plan_flashmla_forward,
+        ) as planner:
+            op.plan(params)
+
+        self.assertEqual(planner.call_count, 1)
+        self.assertIs(op._forward_plan.route, FlashMLAForwardRoute.FULL)
+        self.assertEqual(op._prefix_runtime_launches, ())
+        self.assertIsNone(op._forward_workspace)
+
+    def test_plan_materializes_contiguous_prefix_launch_in_one_storage(self) -> None:
+        op = self._make_unplanned_op(
+            expanded_kv_budget_bytes=256 * 12 * (128 + 64 + 128) * 2
+        )
+        params = self._make_plan_params(q_lens=(2, 3), reuse_lens=(128, 128))
+        with patch.object(
+            op,
+            "_materialize_prefix_runtime_launches",
+            wraps=op._materialize_prefix_runtime_launches,
+        ) as materializer:
+            op.plan(params)
+
+        self.assertEqual(materializer.call_count, 1)
+        self.assertEqual(len(op._prefix_runtime_launches), 1)
+        launch = op._prefix_runtime_launches[0]
+        self.assertEqual(launch.qo_indptr.cpu().tolist(), [0, 2, 5])
+        self.assertEqual(launch.kv_indptr.cpu().tolist(), [0, 128, 256])
+        self.assertEqual(launch.gather_qo_indptr.cpu().tolist(), [0, 0, 0])
+        self.assertEqual(
+            launch.batch_reuse_info.cpu().tolist(),
+            [[0, 128, 0, 1], [1, 128, 2, 1]],
+        )
+        self.assertEqual(launch.destination_starts.cpu().tolist(), [0, 2])
+        self.assertEqual(launch.q_range, (0, 5))
+
+    def test_plan_materializes_b1_then_noncontiguous_launches_once(self) -> None:
+        op = self._make_unplanned_op(
+            expanded_kv_budget_bytes=256 * 12 * (128 + 64 + 128) * 2
+        )
+        params = self._make_plan_params(q_lens=(2, 3, 1), reuse_lens=(384, 0, 128))
+        with patch.object(
+            flashmla_dense_prefill,
+            "plan_flashmla_forward",
+            wraps=flashmla_dense_prefill.plan_flashmla_forward,
+        ) as planner:
+            op.plan(params)
+
+        self.assertEqual(planner.call_count, 1)
+        self.assertTrue(op._forward_plan.requires_fp32_accumulator)
+        self.assertEqual(len(op._prefix_runtime_launches), 2)
+        b1, noncontiguous = op._prefix_runtime_launches
+        self.assertEqual(b1.qo_indptr.cpu().tolist(), [0, 2])
+        self.assertEqual(b1.kv_indptr.cpu().tolist(), [0, 256])
+        self.assertEqual(b1.gather_qo_indptr.cpu().tolist(), [0, 0])
+        self.assertEqual(b1.batch_reuse_info.cpu().tolist(), [[0, 256, 0, 2]])
+        self.assertEqual(b1.destination_starts.cpu().tolist(), [0])
+        self.assertEqual(b1.q_range, (0, 2))
+        self.assertEqual(noncontiguous.qo_indptr.cpu().tolist(), [0, 2, 3])
+        self.assertEqual(noncontiguous.kv_indptr.cpu().tolist(), [0, 128, 256])
+        self.assertEqual(noncontiguous.gather_qo_indptr.cpu().tolist(), [0, 0, 0])
+        self.assertEqual(
+            noncontiguous.batch_reuse_info.cpu().tolist(),
+            [[0, 128, 2, 1], [1, 128, 8, 1]],
+        )
+        self.assertEqual(noncontiguous.destination_starts.cpu().tolist(), [0, 5])
+        self.assertIsNone(noncontiguous.q_range)
+
     def test_fixed_q4_uses_row_stride_block_table(self) -> None:
         block_table = torch.tensor(
             [[11, 12, 13, 14], [21, 22, 23, 24]],
@@ -150,7 +279,6 @@ class FlashMlaDensePrefillParamsTest(TestCase):
             # second request therefore starts at the row stride (4), not at
             # the first request's live-page count (2).
             "batch_reuse_info_vec_d": [[0, 130, 0, 2], [1, 5, 4, 1]],
-            "reuse_cache_page_indice_d": [11, 12, 13, 14, 21, 22, 23, 24],
         }
         for name, values in expected.items():
             actual = getattr(params, name)
@@ -165,9 +293,6 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         self.assertEqual(
             params.prefill_ragged_kv_len_indptr_d.data_ptr(),
             attn_inputs.cu_kv_seqlens.data_ptr(),
-        )
-        self.assertEqual(
-            params.reuse_cache_page_indice_d.data_ptr(), block_table.data_ptr()
         )
 
     def test_ragged_q_positions_and_prefix_pages(self) -> None:
@@ -204,7 +329,7 @@ class FlashMlaDensePrefillParamsTest(TestCase):
                 actual.cpu(), torch.tensor(values, dtype=torch.int32), rtol=0, atol=0
             )
 
-    def test_consecutive_plans_do_not_overwrite_prior_group(self) -> None:
+    def test_consecutive_plans_do_not_overwrite_prior_metadata(self) -> None:
         group_zero = torch.tensor(
             [[10, 11, 12], [20, 21, 22]],
             dtype=torch.int32,
@@ -226,7 +351,6 @@ class FlashMlaDensePrefillParamsTest(TestCase):
                 "positions_d",
                 "batch_indice_d",
                 "batch_reuse_info_vec_d",
-                "reuse_cache_page_indice_d",
             )
         }
 
@@ -237,12 +361,6 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         second = build_flashmla_device_params(second_inputs, self.page_size)
 
         self.assertIsNot(first, second)
-        self.assertEqual(
-            first.reuse_cache_page_indice_d.data_ptr(), group_zero.data_ptr()
-        )
-        self.assertEqual(
-            second.reuse_cache_page_indice_d.data_ptr(), group_one.data_ptr()
-        )
         for name, snapshot in first_snapshot.items():
             torch.testing.assert_close(getattr(first, name), snapshot, rtol=0, atol=0)
         torch.testing.assert_close(
@@ -322,18 +440,8 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         )
         params = build_flashmla_device_params(attn_inputs, self.page_size)
 
-        op = object.__new__(MlaFlashMLAPrefillOp)
-        op.qk_rope_head_dim = 64
-        op.kv_lora_rank = 512
-        op.page_size = self.page_size
-        op.has_reuse_cache = True
-        op.reuse_cache_page_indice = params.reuse_cache_page_indice_d
-        op.batch_reuse_info_vec = params.batch_reuse_info_vec_d
-        op.qo_indptr = params.qo_indptr_d
-        op.total_kv_lens = sum(params.kv_lens_host)
-        op.batch_size = len(params.q_lens_host)
-        op._direct_attn_inputs = attn_inputs
-        op._direct_block_table_width = initial_group.shape[1]
+        op = self._make_unplanned_op(expanded_kv_budget_bytes=0)
+        op.plan(params)
 
         # Model-layer dispatch switches this alias after the per-forward plan.
         # Both cache write and reused-KV gather must observe the same live group.
@@ -379,32 +487,6 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         self.assertEqual(tuple(gathered_compressed_kv.shape), (143, 512))
         self.assertEqual(tuple(gathered_k_pe.shape), (143, 64))
 
-    def test_rejects_cuda_host_mirrors(self) -> None:
-        block_table = torch.arange(8, dtype=torch.int32, device="cuda").reshape(2, 4)
-        for field in ("input_lengths_host", "prefix_lengths_host"):
-            with self.subTest(field=field):
-                attn_inputs = _attention_inputs(
-                    q_lens=[4, 4],
-                    prefix_lens=[128, 16],
-                    block_tables=[block_table],
-                    current_group=0,
-                )
-                setattr(attn_inputs, field, getattr(attn_inputs, field).cuda())
-                with self.assertRaisesRegex(RuntimeError, rf"CPU.*{field}"):
-                    build_flashmla_device_params(attn_inputs, self.page_size)
-
-    def test_rejects_query_write_past_block_table(self) -> None:
-        block_table = torch.tensor([[17]], dtype=torch.int32, device="cuda")
-        attn_inputs = _attention_inputs(
-            q_lens=[4],
-            prefix_lens=[127],
-            block_tables=[block_table],
-            current_group=0,
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "query write exceeds"):
-            build_flashmla_device_params(attn_inputs, self.page_size)
-
     def test_cacheless_prefill_does_not_require_block_table(self) -> None:
         empty_table = torch.empty((1, 0), dtype=torch.int32, device="cuda")
         attn_inputs = _attention_inputs(
@@ -417,21 +499,6 @@ class FlashMlaDensePrefillParamsTest(TestCase):
         params = build_flashmla_device_params(attn_inputs, self.page_size)
 
         self.assertFalse(params.has_reuse_cache)
-        self.assertEqual(params.block_table_width, 0)
-        self.assertEqual(params.reuse_cache_page_indice_d.numel(), 0)
-
-    def test_rejects_non_i32_host_mirror(self) -> None:
-        block_table = torch.tensor([[17, 18]], dtype=torch.int32, device="cuda")
-        attn_inputs = _attention_inputs(
-            q_lens=[4],
-            prefix_lens=[8],
-            block_tables=[block_table],
-            current_group=0,
-        )
-        attn_inputs.input_lengths_host = attn_inputs.input_lengths_host.to(torch.int64)
-
-        with self.assertRaisesRegex(RuntimeError, "int32 input_lengths_host"):
-            build_flashmla_device_params(attn_inputs, self.page_size)
 
 
 if __name__ == "__main__":

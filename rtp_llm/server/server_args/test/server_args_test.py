@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import pickle
 import sys
 from unittest import TestCase, main
 
@@ -221,6 +222,19 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.concurrency_config.concurrency_limit, 64
         )  # Overridden
+
+    def test_kimi_k3_kda_pool_blocks_survives_pickle(self):
+        """Kimi K3's fixed KDA pool size must reach spawned workers."""
+        sys.argv = ["prog", "--kimi_k3_kda_pool_blocks", "16"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.kv_cache_config.kimi_k3_kda_pool_blocks, 16)
+        restored = pickle.loads(pickle.dumps(py_env_configs.kv_cache_config))
+        self.assertEqual(restored.kimi_k3_kda_pool_blocks, 16)
 
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""

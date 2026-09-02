@@ -23,26 +23,24 @@ void ReuseKVCacheIndexedBatched(torch::Tensor final_compressed_kv,
     TORCH_CHECK(k_pe.is_cuda(), "k_pe must be on CUDA");
     TORCH_CHECK(kv_cache_base.is_cuda(), "kv_cache_base must be on CUDA");
 
-    const int num_batches       = batch_reuse_info_vec.size(0);
-    const int total_final_len   = final_compressed_kv.size(0);  // 从 final_compressed_kv 的第0维获取
-    const int compressed_kv_dim = compressed_kv.size(1);
-    const int k_pe_dim          = k_pe.size(1);
-    const int kv_dim            = compressed_kv_dim + k_pe_dim;
+    const int     num_batches              = batch_reuse_info_vec.size(0);
+    const int     total_final_len          = final_compressed_kv.size(0);  // 从 final_compressed_kv 的第0维获取
+    const int     compressed_kv_dim        = compressed_kv.size(1);
+    const int     k_pe_dim                 = k_pe.size(1);
+    const int64_t required_cache_entry_dim = static_cast<int64_t>(compressed_kv_dim) + static_cast<int64_t>(k_pe_dim);
 
-    TORCH_CHECK(kv_cache_base.dim() == 3,
-                "kv_cache_base must be [num_blocks, tokens_per_block, kv_dim]");
+    TORCH_CHECK(kv_cache_base.dim() == 3, "kv_cache_base must be [num_blocks, tokens_per_block, kv_dim]");
     TORCH_CHECK(kv_cache_base.size(1) == tokens_per_block,
                 "kv_cache_base tokens per block mismatch: ",
                 kv_cache_base.size(1),
                 " != ",
                 tokens_per_block);
-    TORCH_CHECK(kv_cache_base.size(2) >= kv_dim,
+    TORCH_CHECK(kv_cache_base.size(2) >= required_cache_entry_dim,
                 "kv_cache_base entry is too small: ",
                 kv_cache_base.size(2),
                 " < ",
-                kv_dim);
-    TORCH_CHECK(kv_cache_base.stride(2) == 1,
-                "kv_cache_base innermost KV dimension must be contiguous");
+                required_cache_entry_dim);
+    TORCH_CHECK(kv_cache_base.stride(2) == 1, "kv_cache_base innermost KV dimension must be contiguous");
 
     const int64_t kv_cache_block_stride = kv_cache_base.stride(0);
     const int64_t kv_cache_entry_stride = kv_cache_base.stride(1);
@@ -78,28 +76,15 @@ void GatherMLALatentAndFillKPe(torch::Tensor final_compressed_kv,
                                int           tokens_per_block,
                                int           packed_head_dim,
                                int           k_pe_offset) {
-    TORCH_CHECK(final_compressed_kv.is_cuda(), "final_compressed_kv must be on CUDA");
-    TORCH_CHECK(packed_kv.is_cuda(), "packed_kv must be on CUDA");
-    TORCH_CHECK(compressed_kv.is_cuda(), "compressed_kv must be on CUDA");
-    TORCH_CHECK(k_pe.is_cuda(), "k_pe must be on CUDA");
-    TORCH_CHECK(kv_cache_base.is_cuda(), "kv_cache_base must be on CUDA");
-    TORCH_CHECK(reuse_cache_page_indice.is_cuda(), "reuse_cache_page_indice must be on CUDA");
-    TORCH_CHECK(batch_reuse_info_vec.is_cuda(), "batch_reuse_info_vec must be on CUDA");
-    TORCH_CHECK(qo_indptr.is_cuda(), "qo_indptr must be on CUDA");
-
-    const auto device = final_compressed_kv.device();
-    TORCH_CHECK(packed_kv.device() == device && compressed_kv.device() == device && k_pe.device() == device
-                    && kv_cache_base.device() == device && reuse_cache_page_indice.device() == device
-                    && batch_reuse_info_vec.device() == device && qo_indptr.device() == device,
-                "all gather MLA tensors must be on the same CUDA device");
+    const auto                 device = final_compressed_kv.device();
     const c10::cuda::CUDAGuard device_guard(device);
     TORCH_CHECK(final_compressed_kv.scalar_type() == torch::kBFloat16 && packed_kv.scalar_type() == torch::kBFloat16
                     && compressed_kv.scalar_type() == torch::kBFloat16 && k_pe.scalar_type() == torch::kBFloat16
                     && kv_cache_base.scalar_type() == torch::kBFloat16,
-                "gather_mla_latent_and_fill_k_pe requires BF16 data tensors");
+                "FlashMLA fused gather requires BF16 data tensors");
     TORCH_CHECK(reuse_cache_page_indice.scalar_type() == torch::kInt32
                     && batch_reuse_info_vec.scalar_type() == torch::kInt32 && qo_indptr.scalar_type() == torch::kInt32,
-                "gather_mla_latent_and_fill_k_pe requires int32 metadata");
+                "FlashMLA fused gather requires int32 metadata");
 
     TORCH_CHECK(final_compressed_kv.dim() == 2 && final_compressed_kv.stride(1) == 1,
                 "final_compressed_kv must be a 2D tensor with a contiguous inner dimension");
@@ -123,12 +108,12 @@ void GatherMLALatentAndFillKPe(torch::Tensor final_compressed_kv,
     const int total_final_len   = final_compressed_kv.size(0);
     const int compressed_kv_dim = compressed_kv.size(1);
     const int k_pe_dim          = k_pe.size(1);
-    TORCH_CHECK(num_batches > 0, "gather_mla_latent_and_fill_k_pe requires at least one batch");
+    TORCH_CHECK(num_batches > 0, "FlashMLA fused gather requires at least one batch");
     TORCH_CHECK(tokens_per_block > 0, "tokens_per_block must be positive");
     TORCH_CHECK(packed_head_dim > 0, "packed_head_dim must be positive");
     TORCH_CHECK(packed_kv.size(1) > 0 && packed_kv.size(1) % packed_head_dim == 0,
                 "packed_kv must contain at least one complete packed head");
-    TORCH_CHECK(k_pe_offset >= 0 && k_pe_offset + k_pe_dim <= packed_head_dim,
+    TORCH_CHECK(k_pe_offset >= 0 && static_cast<int64_t>(k_pe_offset) + k_pe_dim <= packed_head_dim,
                 "K_pe does not fit in the packed head gap");
     TORCH_CHECK(final_compressed_kv.size(1) == compressed_kv_dim,
                 "gathered and current compressed KV dimensions disagree");
@@ -139,7 +124,8 @@ void GatherMLALatentAndFillKPe(torch::Tensor final_compressed_kv,
                 kv_cache_base.size(1),
                 " != ",
                 tokens_per_block);
-    TORCH_CHECK(kv_cache_base.size(2) >= compressed_kv_dim + k_pe_dim,
+    const int64_t required_cache_entry_dim = static_cast<int64_t>(compressed_kv_dim) + static_cast<int64_t>(k_pe_dim);
+    TORCH_CHECK(kv_cache_base.size(2) >= required_cache_entry_dim,
                 "kv_cache_base entry is too small for compressed KV and K_pe");
 
     StreamType stream = at::cuda::getCurrentCUDAStream(final_compressed_kv.get_device()).stream();

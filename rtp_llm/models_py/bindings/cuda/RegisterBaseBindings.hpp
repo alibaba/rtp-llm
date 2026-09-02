@@ -20,6 +20,7 @@
 #include "rtp_llm/models_py/bindings/cuda/DebugKernelOp.h"
 #include "rtp_llm/models_py/bindings/cuda/UserBuffersOp.h"
 #include "rtp_llm/models_py/bindings/cuda/FakeBalanceExpertOp.h"
+#include "rtp_llm/models_py/bindings/cuda/FlashMlaStateMergeOp.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
@@ -30,6 +31,16 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("_flashmla_merge_attention_states_segmented_in_place",
+                  &rtp_llm::FlashMlaMergeAttentionStatesSegmentedInPlace,
+                  "Merge segmented natural-log FlashMLA partial states into canonical rows",
+                  py::arg("output"),
+                  py::arg("output_lse"),
+                  py::arg("partial_output"),
+                  py::arg("partial_lse"),
+                  py::arg("partial_q_indptr"),
+                  py::arg("destination_starts"));
+
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",
@@ -181,7 +192,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("qo_indptr"),
                   py::arg("tokens_per_block"));
 
-    rtp_ops_m.def("gather_mla_latent_and_fill_k_pe",
+    rtp_ops_m.def("_gather_mla_latent_and_fill_k_pe",
                   &rtp_llm::GatherMLALatentAndFillKPe,
                   "Gather MLA latent cache and fill the packed K_pe gap",
                   py::arg("final_compressed_kv"),

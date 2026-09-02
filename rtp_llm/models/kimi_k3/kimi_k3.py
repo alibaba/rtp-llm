@@ -12,23 +12,26 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3Weight
 from rtp_llm.ops import HybridAttentionType
 
-_MLA_PREFILL_KV_CHUNK_TOKENS_ENV = "KIMI_K3_MLA_PREFILL_KV_CHUNK_TOKENS"
+_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV = (
+    "KIMI_K3_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES"
+)
 
 
-def _mla_prefill_kv_chunk_tokens() -> int:
-    """Resolve K3's dense-MLA historical-prefix chunk capacity."""
+def _mla_prefill_expanded_kv_budget_bytes() -> int:
+    """Resolve K3's dense-MLA expanded-KV workspace budget."""
 
-    raw = os.environ.get(_MLA_PREFILL_KV_CHUNK_TOKENS_ENV, "16384").strip()
+    raw = os.environ.get(_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV, "0").strip()
     try:
         value = int(raw)
     except ValueError as error:
         raise ValueError(
-            f"{_MLA_PREFILL_KV_CHUNK_TOKENS_ENV} must be a non-negative "
+            f"{_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV} must be a non-negative "
             f"integer, got {raw!r}"
         ) from error
     if value < 0:
         raise ValueError(
-            f"{_MLA_PREFILL_KV_CHUNK_TOKENS_ENV} must be non-negative, got {value}"
+            f"{_MLA_PREFILL_EXPANDED_KV_BUDGET_BYTES_ENV} must be non-negative, "
+            f"got {value}"
         )
     return value
 
@@ -155,7 +158,7 @@ class KimiK3(BaseModel):
         logging.info(
             "Kimi K3 text config loaded: layers=%d hidden=%d heads=%d "
             "kda_layers=%d mla_layers=%d experts=%d topk=%d attn_res_block=%d "
-            "mla_prefix_chunk_tokens=%d",
+            "mla_prefill_expanded_kv_budget_bytes=%d",
             config.num_layers,
             config.hidden_size,
             config.attn_config.head_num,
@@ -170,7 +173,7 @@ class KimiK3(BaseModel):
             config.expert_num,
             config.moe_k,
             config.k3_runtime_config.attn_res_block_size,
-            config.attn_config.mla_prefill_kv_chunk_tokens,
+            config.attn_config.mla_prefill_expanded_kv_budget_bytes,
         )
         return config
 
@@ -249,7 +252,9 @@ class KimiK3(BaseModel):
         # it as no-RoPE even though existing MLA APIs retain the historical name.
         config.attn_config.rope_head_dim = qk_rope_head_dim
         config.attn_config.v_head_dim = int(cls._required(text_config, "v_head_dim"))
-        config.attn_config.mla_prefill_kv_chunk_tokens = _mla_prefill_kv_chunk_tokens()
+        config.attn_config.mla_prefill_expanded_kv_budget_bytes = (
+            _mla_prefill_expanded_kv_budget_bytes()
+        )
         config.attn_config.use_mla = True
         config.attn_config.is_causal = True
         config.attn_config.rope_config.style = 0
@@ -508,7 +513,6 @@ class KimiK3Eagle3(KimiK3):
         config.attn_config.q_lora_rank = int(cls._required(raw, "q_lora_rank"))
         config.attn_config.kv_lora_rank = int(cls._required(raw, "kv_lora_rank"))
         config.attn_config.sliding_window = int(cls._required(raw, "sliding_window"))
-        config.attn_config.mla_prefill_kv_chunk_tokens = _mla_prefill_kv_chunk_tokens()
         config.attn_config.use_mla = True
         config.attn_config.is_causal = True
         config.attn_config.rope_config.style = 0
