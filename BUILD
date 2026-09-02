@@ -189,11 +189,25 @@ cc_binary(
     srcs = [
         ":rtp_compute_ops",
     ],
+    additional_linker_inputs = [
+        ":rtp_compute_ops",
+    ],
     copts = copts(),
     linkopts = [
         "-Wl,-rpath='$$ORIGIN'",
         # "-Wl,--exclude-libs,ALL",  # 添加这行，隐藏静态库符号
-    ],
+    ] + select({
+        # ROCm keeps process-wide execution state in librtp_compute_ops.so.
+        # The generated link line lists the srcs entry before the engine objects
+        # that reference it, so the default --as-needed drops its DT_NEEDED.
+        # Repeat the library after the objects as an additional linker input.
+        ":using_rocm": [
+            "-Wl,--no-as-needed",
+            "-lrtp_compute_ops",
+            "-Wl,--as-needed",
+        ],
+        "//conditions:default": [],
+    }),
     linkshared = 1,
     visibility = ["//visibility:public"],
     deps = [

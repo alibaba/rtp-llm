@@ -801,9 +801,15 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
-torch::Tensor sampleFromProbs(const torch::Tensor&) {
-    RTP_LLM_CHECK_WITH_INFO(false, "DSpARK stochastic probability sampling currently requires CUDA");
-    return {};
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.defined() && probabilities.is_cuda() && probabilities.dim() == 2
+                                && probabilities.scalar_type() == torch::kFloat32 && probabilities.is_contiguous(),
+                            "probability sampling expects contiguous CUDA/HIP FP32 [batch,vocab] probabilities");
+
+    // torch::multinomial dispatches to the active HIP stream and uses PyTorch's
+    // process-local default generator. The regular ROCm sampler above uses the
+    // same fallback because FlashInfer sampling is not stable for TP > 1.
+    return torch::multinomial(probabilities, 1, /*replacement=*/false).squeeze(-1).to(torch::kInt32);
 }
 
 }  // namespace rtp_llm

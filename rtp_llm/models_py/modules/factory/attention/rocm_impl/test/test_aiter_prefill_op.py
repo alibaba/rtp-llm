@@ -1719,6 +1719,48 @@ class TestCompactGatherReshape(unittest.TestCase):
         self.assertFalse(op.use_compact)
         self.assertEqual(full_reshape.call_count, 1)
 
+    def test_paged_prefill_forwards_noncausal_semantics(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(
+            head_num=2, head_num_kv=1, head_dim=8, tokens_per_block=8
+        )
+        cfg.is_causal = False
+        op = AiterPrefillAttnOp(cfg, v1_kv_layout=True)
+        op.use_compact = False
+        query = torch.zeros(2, 2, 8, dtype=torch.float16)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.zeros(2, 2, 1, 8, 8, dtype=torch.float16)
+        )
+        block_table = torch.tensor([[0]], dtype=torch.int32)
+        params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            prefill_seqlen_k_int32=torch.tensor([2], dtype=torch.int32),
+            max_seqlen_q=2,
+            max_seqlen_k=2,
+            token_q_num=2,
+            sanitized_block_table=block_table,
+        )
+        k_cache = torch.zeros(2, 1, 1, 8, 8, dtype=torch.float16)
+        v_cache = torch.zeros(2, 1, 1, 8, 8, dtype=torch.float16)
+        seen_causal = []
+
+        def fake_prefill(*args, **kwargs):
+            seen_causal.append(kwargs["causal"])
+            return torch.zeros_like(query)
+
+        prefill_func = (
+            "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
+            "aiter.mha_batch_prefill_func"
+        )
+        with patch.object(
+            op, "_reshape_kv_cache_vectorized", return_value=(k_cache, v_cache)
+        ), patch(prefill_func, side_effect=fake_prefill):
+            output = op._forward_paged(query, cache, params)
+
+        self.assertEqual(tuple(output.shape), (2, 16))
+        self.assertEqual(seen_causal, [False])
+
     # ---- block table sanitization ------------------------------------------
 
     def test_sanitize_block_table_fills_padding_with_last_valid(self):

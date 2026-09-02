@@ -67,6 +67,17 @@ cc_test(
 )
 
 cc_test(
+    name = "sample_from_probs_test",
+    srcs = ["SampleFromProbsTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:rejection_sampling_ops_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+cc_test(
     name = "distributed_comm_test",
     deps = [
         "//rtp_llm/cpp/testing:distributed_test",

@@ -620,7 +620,7 @@ class AiterPrefillAttnOp:
             kv_page_indices,
             max_seqlen_q,
             max_seqlen_k,
-            causal=True,
+            causal=self.is_causal,
             block_table=block_table,
             seqlen_k=seqlen_k,
             q_descale=q_descale,

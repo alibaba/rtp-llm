@@ -61,6 +61,21 @@ cc_library(
 )
 
 cc_test(
+    name = "hybrid_pool_config_creator_test",
+    srcs = ["HybridPoolConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_state",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "cache_topology_test",
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,

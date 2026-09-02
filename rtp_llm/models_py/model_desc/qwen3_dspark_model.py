@@ -6,17 +6,16 @@ import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import (
-    select_attention_inputs_for_layer,
-)
+from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import ParallelismConfig, check_rope_cache, get_rope_cache_once
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
@@ -24,6 +23,132 @@ from rtp_llm.utils.model_weight import W
 class _RopePositions:
     def __init__(self, positions: torch.Tensor) -> None:
         self.positions_d = positions
+
+
+def _apply_non_interleaved_rope(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    rope_dim: int,
+) -> None:
+    """Apply LLaMA/Qwen-style RoPE to the leading dimensions in-place."""
+    if query.numel() == 0:
+        return
+    if rope_dim <= 0 or rope_dim % 2 != 0:
+        raise ValueError(f"RoPE dimension must be positive and even, got {rope_dim}")
+    if rope_dim > query.size(-1) or rope_dim > key.size(-1):
+        raise ValueError(
+            f"RoPE dimension {rope_dim} exceeds Q/K head dimensions "
+            f"{query.size(-1)}/{key.size(-1)}"
+        )
+
+    positions = positions.narrow(0, 0, query.size(0)).long()
+    cos_sin = cos_sin_cache.index_select(0, positions)
+    half_dim = rope_dim // 2
+    cos = cos_sin[:, :half_dim].unsqueeze(1)
+    sin = cos_sin[:, half_dim:rope_dim].unsqueeze(1)
+
+    def rotate(tensor: torch.Tensor) -> None:
+        rope_input = tensor[..., :rope_dim].float()
+        first = rope_input[..., :half_dim]
+        second = rope_input[..., half_dim:]
+        rotated = torch.cat(
+            (first * cos - second * sin, second * cos + first * sin), dim=-1
+        )
+        tensor[..., :rope_dim].copy_(rotated)
+
+    rotate(query)
+    rotate(key)
+
+
+def _write_rocm_paged_kv_cache(
+    cache: torch.Tensor,
+    pages: torch.Tensor,
+    slots: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    *,
+    vectorized_value: bool,
+) -> None:
+    """Write semantic K/V rows using the physical layout consumed by AITER."""
+    if cache.dim() != 5 or cache.size(1) != 2:
+        raise ValueError(
+            "Qwen3 DSpark ROCm context cache must be "
+            f"[blocks,2,heads,page,dim], got {tuple(cache.shape)}"
+        )
+
+    block_count, _, kv_heads, page_size, head_dim = cache.shape
+    del block_count
+    element_size = cache.element_size()
+    if element_size <= 0 or 16 % element_size:
+        raise ValueError(f"unsupported ROCm KV-cache element size: {element_size}")
+    vector_size = 16 // element_size
+    if head_dim % vector_size:
+        raise ValueError(
+            f"ROCm K head dimension {head_dim} must be divisible by {vector_size}"
+        )
+
+    key_rows = (
+        key.to(cache.dtype)
+        .contiguous()
+        .view(-1, kv_heads, head_dim // vector_size, vector_size)
+    )
+    key_physical = cache[:, 0].view(
+        cache.shape[0], kv_heads, head_dim // vector_size, page_size, vector_size
+    )
+    key_physical[pages, :, :, slots, :] = key_rows
+
+    value_rows = value.to(cache.dtype).contiguous()
+    if vectorized_value:
+        if page_size % vector_size:
+            raise ValueError(
+                f"ROCm V page size {page_size} must be divisible by {vector_size}"
+            )
+        value_physical = cache[:, 1].view(
+            cache.shape[0], kv_heads, page_size // vector_size, head_dim, vector_size
+        )
+        value_physical[pages, :, slots // vector_size, :, slots % vector_size] = (
+            value_rows
+        )
+    else:
+        value_physical = cache[:, 1].view(cache.shape[0], kv_heads, head_dim, page_size)
+        value_physical[pages, :, :, slots] = value_rows
+
+
+class _TorchMhaRotaryEmbeddingOp:
+    """ROCm fallback for the FlashInfer-only DSpark context RoPE path."""
+
+    def __init__(self, attn_config) -> None:
+        self.rope_config = attn_config.rope_config
+        self.rope_dim = self.rope_config.dim
+        rope_cache = get_rope_cache_once(
+            self.rope_config,
+            attn_config.max_seq_len + attn_config.gen_num_per_cycle + 1,
+            # This API flag means "GPU cache"; torch::kCUDA maps to HIP in a
+            # ROCm PyTorch build.
+            is_cuda=True,
+            interleave=False,
+        )
+        if not check_rope_cache(self.rope_config, rope_cache):
+            raise RuntimeError(
+                "Qwen3 DSpark ROCm context RoPE requires a supported GPU cache"
+            )
+        self.cos_sin_cache = rope_cache.data
+
+    def _apply_rope(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        rope_params: Any,
+    ) -> None:
+        _apply_non_interleaved_rope(
+            query,
+            key,
+            self.cos_sin_cache,
+            rope_params.positions_d,
+            self.rope_dim,
+        )
 
 
 class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
@@ -56,8 +181,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             width=proposal_width,
             query_width=query_width,
             noise_token_id=config.dspark_noise_token_id,
-            aux_feature_dim=len(config.dspark_target_layer_ids)
-            * config.hidden_size,
+            aux_feature_dim=len(config.dspark_target_layer_ids) * config.hidden_size,
             hidden_dim=config.hidden_size,
         )
 
@@ -94,11 +218,14 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             py_hw_kernel_config,
         )
 
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
-            MhaRotaryEmbeddingOp,
-        )
+        if is_hip():
+            self.context_rope = _TorchMhaRotaryEmbeddingOp(self.attn_configs)
+        else:
+            from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+                MhaRotaryEmbeddingOp,
+            )
 
-        self.context_rope = MhaRotaryEmbeddingOp(self.attn_configs)
+            self.context_rope = MhaRotaryEmbeddingOp(self.attn_configs)
 
     def cuda_graph_input_hidden_size(self) -> int:
         return self._dspark_aux_feature_dim
@@ -158,8 +285,27 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
                 dummy_q, key, _RopePositions(context_positions)
             )
             cache = self.kv_cache.get_layer_cache(layer_idx).kv_cache_base
-            cache[pages, 0, :, slots, :] = key.to(cache.dtype)
-            cache[pages, 1, :, slots, :] = value.to(cache.dtype)
+            if is_hip():
+                is_fp8_cache = cache.dtype in (
+                    torch.float8_e4m3fnuz,
+                    torch.float8_e4m3fn,
+                )
+                vectorized_value = (
+                    self.fmha_config is None
+                    or self.fmha_config.use_asm_pa
+                    or is_fp8_cache
+                )
+                _write_rocm_paged_kv_cache(
+                    cache,
+                    pages,
+                    slots,
+                    key,
+                    value,
+                    vectorized_value=vectorized_value,
+                )
+            else:
+                cache[pages, 0, :, slots, :] = key.to(cache.dtype)
+                cache[pages, 1, :, slots, :] = value.to(cache.dtype)
 
         writer = create_write_cache_store_impl(self.dspark_attention_inputs(inputs))
         if writer is not None:
@@ -181,8 +327,47 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         inputs: PyModelInputs,
         fmha_impl: Any,
     ) -> torch.Tensor:
-        del query_ids, query_positions, prefix_lengths, active_requests
-        return super().forward(inputs, fmha_impl).hidden_states
+        del query_ids, prefix_lengths, active_requests
+
+        # The target owns the engine input geometry, so an MRoPE target can
+        # publish three position ids per token into the shared attention input.
+        # This Qwen3 draft uses scalar RoPE. The FMHA implementation has already
+        # retained the shared tensor during prepare_fmha_impl(), therefore rebind
+        # is too late here: update the consumed prefix in-place for the duration
+        # of the draft layers, then restore it for the target verify path.
+        attention = self.dspark_attention_inputs(inputs)
+        position_ids = getattr(attention, "combo_position_ids", None)
+        restore_position_ids = None
+        position_slice = None
+        draft_positions = query_positions.reshape(-1)
+        if (
+            isinstance(position_ids, torch.Tensor)
+            and position_ids.numel() > 0
+            and draft_positions.numel() > 0
+        ):
+            if (
+                position_ids.dim() != 1
+                or position_ids.numel() < draft_positions.numel()
+            ):
+                raise RuntimeError(
+                    "Qwen3 DSpark position ids must be a flat buffer with at least "
+                    f"one entry per query token: got shape={tuple(position_ids.shape)}, "
+                    f"query_tokens={draft_positions.numel()}"
+                )
+            position_slice = position_ids.narrow(0, 0, draft_positions.numel())
+            restore_position_ids = position_slice.clone()
+            position_slice.copy_(
+                draft_positions.to(
+                    device=position_ids.device,
+                    dtype=position_ids.dtype,
+                )
+            )
+
+        try:
+            return super().forward(inputs, fmha_impl).hidden_states
+        finally:
+            if restore_position_ids is not None:
+                position_slice.copy_(restore_position_ids)
 
     def _forward_device(self) -> torch.device:
         device = self.embed_tokens.weight.device
@@ -196,8 +381,7 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         if self.kv_cache is None:
             tokens = int(inputs.input_ids.numel())
             batch = max(
-                (tokens + self._dspark_query_width - 1)
-                // self._dspark_query_width,
+                (tokens + self._dspark_query_width - 1) // self._dspark_query_width,
                 1,
             )
             return self.dspark_empty_outputs(batch, device)
