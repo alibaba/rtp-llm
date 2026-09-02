@@ -3,6 +3,7 @@ py_library(
     srcs = [
         "batch_decode_test.py",
         "batch_perf_impl.py",
+        "cache_grid_runner.py",
         "dataclass.py",
         "dataset.py",
         "distribution_runner.py",
@@ -26,6 +27,15 @@ py_test(
     deps = [
         ":perf_test_lib",
     ],
+)
+
+py_test(
+    name = "deepseek_v4_prefill_formula_fit_test",
+    srcs = [
+        "deepseek_v4_prefill_formula_fit.py",
+        "deepseek_v4_prefill_formula_fit_test.py",
+    ],
+    main = "deepseek_v4_prefill_formula_fit_test.py",
 )
 
 py_test(
@@ -86,6 +96,24 @@ py_test(
         "--dp_size",
         "1",
     ],
+    tags = ["manual"],
+)
+
+# Prefix-cache mode: measures an explicit total-sequence × cache-length grid.
+# Invoke with --test_arg=--cache_grid_json=<file> and --test_arg=--partial=2.
+# The runner seeds each requested prefix and verifies reuse_len on every
+# measured request; cache_len is a workload dimension, not an engine argument.
+py_test(
+    name = "cache_grid_perf_test",
+    main = "batch_decode_test.py",
+    srcs = ["batch_decode_test.py"],
+    timeout = "eternal",
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
     tags = ["manual"],
 )
 
