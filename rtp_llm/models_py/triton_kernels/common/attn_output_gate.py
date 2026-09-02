@@ -1,4 +1,4 @@
-"""Fused sigmoid-gate-mul kernel for Qwen3.5 attention output gate.
+"""Fused sigmoid-gate-mul kernels for attention output gates.
 
 Replaces:
     attn_output = attn_output * torch.sigmoid(gate)
@@ -17,6 +17,7 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
 _MIN_TOTAL_PROGRAMS = 512
 _MIN_BLOCK_H = 128
 _MAX_BLOCK_H = 4096
+_PREFILL_GROUPS_PER_PROGRAM = 128
 
 
 @triton.jit
@@ -139,6 +140,7 @@ def _sigmoid_mul_fp8_quant_kernel(
     stride_scale_g,
     BLOCK_N: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    ROUND_SCALE_TO_POW2: tl.constexpr,
 ):
     """Fused sigmoid-mul + per-token-group FP8 quant.
 
@@ -208,6 +210,8 @@ def _sigmoid_mul_fp8_quant_kernel(
         )
         _absmax = tl.maximum(tl.max(tl.abs(result)), 1e-4)
         s = _ieee_rn_div_f32(_absmax, fp8_max)
+        if ROUND_SCALE_TO_POW2:
+            s, _ = _ue8m0_pow2_round_scalar(s)
         fp8_val = tl.clamp(
             _ieee_rn_div_f32(result, tl.full(result.shape, s, tl.float32)),
             fp8_min,
@@ -220,6 +224,101 @@ def _sigmoid_mul_fp8_quant_kernel(
         )
 
 
+@triton.jit
+def _sigmoid_mul_fp8_quant_row_kernel(
+    attn_ptr,
+    gate_ptr,
+    fp8_out_ptr,
+    scale_out_ptr,
+    fp8_max,
+    fp8_min,
+    stride_attn_t,
+    stride_gate_t,
+    stride_fp8_t,
+    stride_scale_t,
+    stride_scale_g,
+    H: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    NUM_GROUP_BLOCKS: tl.constexpr,
+    SCALE_UE8M0: tl.constexpr,
+    ROUND_SCALE_TO_POW2: tl.constexpr,
+):
+    """Long-prefill path: one program computes several adjacent row groups."""
+    program_id = tl.program_id(0)
+    group_block_id = program_id % NUM_GROUP_BLOCKS
+    token_id = (program_id // NUM_GROUP_BLOCKS).to(tl.int64)
+    offsets = group_block_id * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask = offsets < H
+    attn = tl.load(
+        attn_ptr + token_id * stride_attn_t + offsets,
+        mask=mask,
+        other=0.0,
+    )
+    gate = tl.load(
+        gate_ptr + token_id * stride_gate_t + offsets,
+        mask=mask,
+        other=0.0,
+    )
+    sigmoid = tl.sigmoid(gate.to(tl.float32)).to(attn.dtype)
+    gated = (
+        (attn.to(tl.float32) * sigmoid.to(tl.float32))
+        .to(tl.bfloat16)
+        .to(tl.float32)
+    )
+
+    block_groups: tl.constexpr = BLOCK_H // GROUP_SIZE
+    actual_groups: tl.constexpr = H // GROUP_SIZE
+    gated_2d = tl.reshape(gated, (block_groups, GROUP_SIZE))
+    absmax = tl.maximum(tl.max(tl.abs(gated_2d), axis=1), 1e-4)
+    if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
+        scale = absmax / fp8_max
+    else:
+        scale = _ieee_rn_div_f32(absmax, fp8_max)
+    if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
+        scale, exp_bits = _ue8m0_pow2_round_scalar(scale)
+
+    scale_2d = tl.broadcast_to(
+        tl.reshape(scale, (block_groups, 1)),
+        (block_groups, GROUP_SIZE),
+    )
+    if SCALE_UE8M0 or ROUND_SCALE_TO_POW2:
+        quantized_values = gated_2d * (1.0 / scale_2d)
+    else:
+        quantized_values = _ieee_rn_div_f32(gated_2d, scale_2d)
+    quantized = tl.clamp(quantized_values, fp8_min, fp8_max).to(
+        fp8_out_ptr.dtype.element_ty
+    )
+    tl.store(
+        fp8_out_ptr + token_id * stride_fp8_t + offsets,
+        tl.reshape(quantized, (BLOCK_H,)),
+        mask=mask,
+    )
+
+    group_offsets = group_block_id * block_groups + tl.arange(0, block_groups)
+    if SCALE_UE8M0:
+        packed_groups: tl.constexpr = block_groups // 4
+        packed_offsets = group_block_id * packed_groups + tl.arange(0, packed_groups)
+        shifts = (group_offsets % 4) * 8
+        shifted = tl.where(group_offsets < actual_groups, exp_bits << shifts, 0)
+        packed = tl.sum(tl.reshape(shifted, (packed_groups, 4)), axis=1)
+        tl.store(
+            scale_out_ptr
+            + token_id * stride_scale_t
+            + packed_offsets * stride_scale_g,
+            packed,
+            mask=packed_offsets < actual_groups // 4,
+        )
+    else:
+        tl.store(
+            scale_out_ptr
+            + token_id * stride_scale_t
+            + group_offsets * stride_scale_g,
+            scale,
+            mask=group_offsets < actual_groups,
+        )
+
+
 _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD = 1024
 
 
@@ -228,23 +327,26 @@ def sigmoid_mul_fp8_quant_fwd(
     gate: torch.Tensor,
     quant_group_size: int = 128,
     scale_ue8m0: bool = False,
+    round_scale_to_pow2: bool = False,
+    column_major_scales: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused sigmoid-mul + per-token-group FP8 quantization.
 
     Computes: result = attn_output * sigmoid(gate), then quantizes to fp8.
-    Falls back to unfused path for large T (prefill) where the fused kernel
-    is slower than baseline.
+    Long prefill uses a grouped-row kernel so adjacent groups share one
+    program. MXFP8 group-32 consumers set ``scale_ue8m0=True`` and
+    ``column_major_scales=True`` so the kernel writes DeepGEMM's packed int32
+    scale layout directly.
 
     Returns:
         (fp8_output, scale) matching DeepGEMM's expected layout.
     """
-    assert attn_output.shape == gate.shape
-    assert attn_output.dim() == 2
     T, H = attn_output.shape
-    assert H % quant_group_size == 0
     num_groups = H // quant_group_size
 
-    if T >= _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD:
+    # Preserve the existing Qwen FP8 path. The grouped prefill kernel below is
+    # specifically for MXFP8's group-32 power-of-two scale contract.
+    if T >= _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD and not round_scale_to_pow2:
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )
@@ -253,20 +355,32 @@ def sigmoid_mul_fp8_quant_fwd(
         return sgl_per_token_group_quant_fp8(
             attn_output,
             group_size=quant_group_size,
-            column_major_scales=True,
+            column_major_scales=column_major_scales,
             scale_tma_aligned=True,
             scale_ue8m0=scale_ue8m0,
         )
 
     fp8_out = torch.empty((T, H), dtype=torch.float8_e4m3fn, device=attn_output.device)
-    scale_out = create_per_token_group_quant_fp8_output_scale(
-        x_shape=(T, H),
-        device=attn_output.device,
-        group_size=quant_group_size,
-        column_major_scales=True,
-        scale_tma_aligned=True,
-        scale_ue8m0=scale_ue8m0,
-    )
+    if scale_ue8m0:
+        # Four exponent-only group scales are packed into each int32. Allocate
+        # transposed storage so the returned view has DeepGEMM's MN-major,
+        # 4-row TMA alignment without a follow-up layout transform.
+        packed_groups = num_groups // 4
+        aligned_tokens = (T + 3) // 4 * 4
+        scale_out = torch.empty(
+            (packed_groups, aligned_tokens),
+            dtype=torch.int32,
+            device=attn_output.device,
+        ).transpose(0, 1)[:T, :]
+    else:
+        scale_out = create_per_token_group_quant_fp8_output_scale(
+            x_shape=(T, H),
+            device=attn_output.device,
+            group_size=quant_group_size,
+            column_major_scales=column_major_scales,
+            scale_tma_aligned=True,
+            scale_ue8m0=False,
+        )
     if T == 0:
         return fp8_out, scale_out
 
@@ -275,26 +389,53 @@ def sigmoid_mul_fp8_quant_fwd(
     fp8_min = -fp8_max
 
     if scale_ue8m0:
-        assert num_groups % 4 == 0
         num_blocks = num_groups // 4
     else:
         num_blocks = num_groups
 
-    grid = (num_blocks, T)
-    _sigmoid_mul_fp8_quant_kernel[grid](
-        attn_output,
-        gate,
-        fp8_out,
-        scale_out,
-        H,
-        fp8_max,
-        fp8_min,
-        attn_output.stride(0),
-        gate.stride(0),
-        fp8_out.stride(0),
-        scale_out.stride(0),
-        scale_out.stride(1),
-        BLOCK_N=quant_group_size,
-        SCALE_UE8M0=scale_ue8m0,
-    )
+    if T >= _SIGMOID_MUL_FP8_QUANT_M_THRESHOLD:
+        groups_per_program = min(_PREFILL_GROUPS_PER_PROGRAM, num_groups)
+        groups_per_program = triton.next_power_of_2(groups_per_program)
+        num_group_blocks = triton.cdiv(num_groups, groups_per_program)
+        grid = (T * num_group_blocks,)
+        _sigmoid_mul_fp8_quant_row_kernel[grid](
+            attn_output,
+            gate,
+            fp8_out,
+            scale_out,
+            fp8_max,
+            fp8_min,
+            attn_output.stride(0),
+            gate.stride(0),
+            fp8_out.stride(0),
+            scale_out.stride(0),
+            scale_out.stride(1),
+            H=H,
+            BLOCK_H=groups_per_program * quant_group_size,
+            GROUP_SIZE=quant_group_size,
+            NUM_GROUP_BLOCKS=num_group_blocks,
+            SCALE_UE8M0=scale_ue8m0,
+            ROUND_SCALE_TO_POW2=round_scale_to_pow2,
+            num_warps=4,
+            num_stages=2,
+        )
+    else:
+        grid = (num_blocks, T)
+        _sigmoid_mul_fp8_quant_kernel[grid](
+            attn_output,
+            gate,
+            fp8_out,
+            scale_out,
+            H,
+            fp8_max,
+            fp8_min,
+            attn_output.stride(0),
+            gate.stride(0),
+            fp8_out.stride(0),
+            scale_out.stride(0),
+            scale_out.stride(1),
+            BLOCK_N=quant_group_size,
+            SCALE_UE8M0=scale_ue8m0,
+            ROUND_SCALE_TO_POW2=round_scale_to_pow2,
+        )
     return fp8_out, scale_out

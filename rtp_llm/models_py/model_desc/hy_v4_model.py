@@ -123,8 +123,9 @@ class Hy4DecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> Hy4LayerOutput:
-        attn_input, attn_post_gate = self.attn_ihc.pre(channels)
-        attn_input = self.input_layernorm(attn_input)
+        attn_input, attn_post_gate = self.attn_ihc.pre_normed(
+            channels, self.input_layernorm
+        )
         attn_output, topk_indices = self.self_attn(
             hidden_states=attn_input,
             fmha_impl=fmha_impl,
@@ -134,8 +135,9 @@ class Hy4DecoderLayer(nn.Module):
         )
         channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
 
-        mlp_input, mlp_post_gate = self.mlp_ihc.pre(channels)
-        mlp_input = self.post_attention_layernorm(mlp_input)
+        mlp_input, mlp_post_gate = self.mlp_ihc.pre_normed(
+            channels, self.post_attention_layernorm
+        )
         mlp_output = self.mlp(mlp_input)
         channels = self.mlp_ihc.post(mlp_output, channels, mlp_post_gate)
         return Hy4LayerOutput(channels, topk_indices)
