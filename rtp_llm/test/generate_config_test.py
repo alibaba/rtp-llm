@@ -447,6 +447,19 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(mixed_config.return_logprobs)
         self.assertEqual(mixed_config.top_logprobs, 5)
 
+    def test_zero_temperature_uses_greedy_sampling(self):
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(messages=[], temperature=0)
+        )
+
+        self.assertEqual(config.temperature, 0)
+        self.assertFalse(config.do_sample)
+
+        positive_temperature_config = self._extract_openai_generation_config(
+            ChatCompletionRequest(messages=[], temperature=0.7)
+        )
+        self.assertTrue(positive_temperature_config.do_sample)
+
     def test_openai_logprobs_request_validation(self):
         for value in (-1, 21):
             with self.subTest(top_logprobs=value):

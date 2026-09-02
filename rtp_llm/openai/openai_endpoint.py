@@ -253,6 +253,11 @@ class OpenaiEndpoint(object):
             config.is_streaming = True
         if request.temperature != None:
             config.temperature = request.temperature
+            # OpenAI-compatible APIs define temperature=0 as deterministic
+            # greedy decoding. GenerateConfig defaults do_sample to True, so
+            # leaving it unchanged would still enter RTP's sampling path.
+            if request.temperature == 0:
+                config.do_sample = False
         if request.top_p != None:
             config.top_p = request.top_p
         if request.top_k != None:
