@@ -620,10 +620,6 @@ bool BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::restore() {
     return BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(*cache);
 }
 
-int BlockTreeCacheTestPeer::pendingTasksForTest(const BlockTreeCache& cache) {
-    return cache.task_pool_->pending_tasks_.load();
-}
-
 void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& cache) {
     cache.task_pool_->waitForIdle();
     cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();

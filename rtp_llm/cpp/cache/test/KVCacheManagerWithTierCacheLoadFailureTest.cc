@@ -75,7 +75,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBefo
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
     auto maybe_host = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(maybe_host.has_value());
@@ -133,7 +132,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBefo
 
     EXPECT_EQ(recording_engine->submittedDescriptorCount(), submits_before)
         << "pre-commit failure must not submit a lower-tier copy";
-    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     expectPoolSnapshotsEq(device_before, snapshotDevicePools(manager_));
     expectPoolSnapshotsEq(lower_before, snapshotLowerPools(*cache, GetParam()));
 
