@@ -399,9 +399,10 @@ class MegaHCAAdapter:
             xsf_out=workspace.hidden_sf[:token_count],
             pdl=False,
         )
-        # PDL stays off by design: the op's bf16 feature tasks read
-        # ``collapsed`` with no predecessor wait, and ``hc_reduce_fuse_out``
-        # writes it (see the op docstring).
+        # For physical batches there is no padding memset between the fused
+        # reduce producer and front, so front can overlap its launch prologue.
+        # Sub-16 batches retain stream ordering for the padded-tail writes.
+        front_pdl = token_count >= 16
         dsv4_mega.front_mixed_gemm_hca(
             workspace.collapsed,
             workspace.hidden_fp8,
@@ -422,7 +423,7 @@ class MegaHCAAdapter:
             pools.state_gate,
             token_count,
             hc_eps=block.attn_hc.hc_eps,
-            pdl=False,
+            pdl=front_pdl,
         )
         q_raw = dsv4_mega.wq_b_proj_gemm_merged_hca(
             workspace.front_out,
