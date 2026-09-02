@@ -12,11 +12,21 @@ outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 pa
 {run_id/title/subtitle/kpis/panels} spec，喂 canvas_report_render_html.render()
 写入 --out 指向的 HTML 文件；不再写 .tsx 中间产物。
 
-头部元数据面板（2026-08）：spec.meta 三分区（数据源 / 规模 / 时间轴口径），
-渲染为 KPI 行下方的浅色信息面板；数据源从生成器输入参数推导（绝对路径，
-engine_dist 内嵌于 aggregate 时标注），规模 P/D/shards/replay/duration，
-时间轴口径 T_END 动态取 timeAxis.max。同批下线头部 KPI 的「泄漏判定」
-chip（tsx 汇总表行保留但不进 HTML；见 main() 内 fail-closed 负向断言）。
+头部三层规范化（2026-09）：
+  * subtitle（一眼看清实验条件）：拓扑 + 发送模式/倍率 + ramp/duration/
+    shards，形如「12P + 40D mock · replay@82x（名义 650 QPS）· ramp 30s
+    · 120s · 8 shards」。倍率取数源 = aggregate meta replay_speed
+    （REPLAY_SPEED 自动校准值），不再吃 CLI 缺省（replay@1000x bug：
+    旧版 argparse default=1000 被当倍率显示，而 1000 是旧档显式速度
+    恰与 trace 行数同值的巧合）；
+  * KPI 结果行（头部第二行 chip）：请求数量 / 成功数量 / 失败·cancel /
+    成功率 / 持续时间（summary 结果类字段；cancel 为 error_count 的
+    具名子桶 err_cancelled，chip 上注记子集数）；
+  * detail（<details> 折叠，默认收起）：代码版本（branch/commit）、测试
+    数据集（trace 路径/行数/sha256）、实验参数（run_meta.params 全量）、
+    环境变量（client_env / flexlb_env FINAL ENV 快照）、数据源（绝对
+    路径）、规模 chips。旧 meta 三分区中的数据源/规模从可见面板移入
+    detail；时间轴口径 + 采样说明保留在可见 meta 面板（口径标注纪律）。
 
 报告级统一时间轴：全部时序面板（x = 压测时间）共享同一 x 轴 [0, T_END]。
 T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；min 固定 0
@@ -31,7 +41,9 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
       [--engine-dist <engine_dist.json>] \
       [--slo <slo_batch_analysis.json>] \
       --out <out.html> [--run-id <id>] \
-      [--p-engines 750] [--d-engines 500] [--shards 8] [--replay 1000]
+      [--p-engines 750] [--d-engines 500] [--shards 8] \
+      [--send-mode replay] [--replay <speed>] \
+      [--git-branch <b>] [--git-commit <c>]
 
 缺省规则：
   * --slo 未指定时取 aggregate 同目录同名文件（存在才读）；
@@ -41,6 +53,13 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
   * --run-id 未指定时取 aggregate 的 meta.run_dir；
   * P/D 引擎数优先取 engine_dist 的 engine_count，其次 --p-engines/--d-engines；
   * shards 优先取 aggregate.summary 的 load_client_workers，其次 --shards，再缺省 8；
+  * 实验条件（send_mode/replay_speed/名义 QPS/ramp/数据集/配置）优先取
+    aggregate meta（aggregate_canvas_run.py 20260902+ 写入），其次同目录
+    run_meta.json params，最后 CLI 显式参数；均缺则 subtitle 对应段省略
+    （fail-closed，不再回退硬编码缺省倍率）；
+  * git branch/commit 优先取 aggregate meta（远端重聚合时经
+    FLEXLB_GIT_BRANCH/FLEXLB_GIT_COMMIT 注入），其次 CLI，均缺则 detail
+    显示 —（未提供）；
   * 2.3 TPS P/D 主图为每引擎平均（集群和 ÷ 引擎数，生产大盘单实例
     series 同构读法；mock_tps_ts/aggregate 语义不动，折算在呈现层）。
     折算引擎数可靠链：aggregate 同目录 run_meta.json 的
@@ -479,7 +498,10 @@ def _extract_spec_from_tsx(tsx_src, run_id, subtitle, time_axes=None, time_axis=
         "run_id": run_id,
         "title": "FlexLB 压测报告 · run " + run_id,
         "subtitle": subtitle,
-        "kpis": kpis[:5],
+        # KPI 两行：第一行五连（发送 QPS / 成功调度 QPS / 错误率 / Gini /
+        # pacing）+ 第二行结果五连（请求数量 / 成功 / 失败·cancel / 成功率 /
+        # 持续时间），共 10 chip；头部 Grid 区之外无其它 Stat 使用点。
+        "kpis": kpis[:10],
         "panels": panels,
     }
     if time_axis:
@@ -545,10 +567,30 @@ def main():
         help="JavaLoadClient 分片数（缺省取 summary.load_client_workers，再缺省 8）",
     )
     ap.add_argument(
+        "--send-mode",
+        help=(
+            "发送模式（replay/uniform；缺省取 aggregate meta.send_mode，"
+            "再缺省同目录 run_meta.json params.send_mode，最后回退 replay）"
+        ),
+    )
+    ap.add_argument(
         "--replay",
         type=int,
-        default=1000,
-        help="replay 倍速（数据文件不含此参数，CLI 提供）",
+        default=None,
+        help=(
+            "replay 倍速（优先取 aggregate meta.replay_speed 即 REPLAY_SPEED"
+            " 自动校准值，再取同目录 run_meta.json params.replay_speed；"
+            "均缺则 subtitle 不显示倍率段——不再回退硬编码缺省，"
+            "旧版 default=1000 造成的 replay@1000x 误显示即此根因）"
+        ),
+    )
+    ap.add_argument(
+        "--git-branch",
+        help="代码分支（优先取 aggregate meta.git_branch；均缺则 detail 显示 —）",
+    )
+    ap.add_argument(
+        "--git-commit",
+        help="代码 commit（优先取 aggregate meta.git_commit；均缺则 detail 显示 —）",
     )
     args = ap.parse_args()
 
@@ -705,6 +747,55 @@ def main():
         if os.path.isfile(_rm_path)
         else {}
     )
+
+    # ---- 实验条件取数（subtitle 条件行 + detail 层，20260902 三层重构）----
+    # 优先级：aggregate meta（aggregate_canvas_run.py 20260902+ 写入）>
+    # 同目录 run_meta.json params > CLI 显式参数。全链 fail-closed：皆缺
+    # 则对应段省略（replay 速度绝不回退硬编码缺省 —— replay@1000x bug
+    # 根因即旧版 argparse default=1000 被直接当倍率显示）。
+    _agg_meta = agg.get("meta") or {}
+
+    def _cond_int(*raws):
+        for raw in raws:
+            if raw is None:
+                continue
+            try:
+                iv = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if iv > 0:
+                return iv
+        return None
+
+    send_mode = (
+        str(
+            _agg_meta.get("send_mode")
+            or _rm_params.get("send_mode")
+            or args.send_mode
+            or ""
+        )
+        .strip()
+        .lower()
+        or "replay"
+    )
+    replay_speed = _cond_int(
+        _agg_meta.get("replay_speed"), _rm_params.get("replay_speed"), args.replay
+    )
+    # 名义 QPS：replay 模式 = 校准目标（650 这类）；uniform 模式 = 发送 QPS
+    nominal_qps = _cond_int(
+        _agg_meta.get("send_mode_qps"), _rm_params.get("send_mode_qps")
+    )
+    ramp_s = _cond_int(
+        _agg_meta.get("ramp_up_seconds"), _rm_params.get("ramp_up_seconds")
+    )
+    # detail 层：代码版本 / 数据集 / 配置（同优先级链）
+    git_branch = (
+        str(_agg_meta.get("git_branch") or args.git_branch or "").strip() or None
+    )
+    git_commit = (
+        str(_agg_meta.get("git_commit") or args.git_commit or "").strip() or None
+    )
+
     tps_p_engines = _tps_engine_count(_rm_params.get("n_prefill"))
     tps_d_engines = _tps_engine_count(_rm_params.get("n_decode"))
     if tps_p_engines is None and ed:
@@ -1277,28 +1368,35 @@ def main():
                 )
         kv_util_data = const("dKvUtil", num_arr(kv_util))
 
-    # ---- 身份行 / 采样说明 ----
+    # ---- 身份行（subtitle 第一层：一眼看清实验条件，20260902 三层规范化）----
+    # 拓扑 + 发送模式/倍率 + ramp/duration/shards。倍率取数源 =
+    # replay_speed（REPLAY_SPEED 自动校准值，如 82），非 CLI 缺省
+    # （replay@1000x bug 修复）。原 identity 中的请求总数移入 KPI 结果
+    # 行、采样说明移入可见 meta 面板，subtitle 只保留实验条件。
     sampling_note = "时间序列 1s 采样（QPS / 延迟）"
     if queue_ts:
         sampling_note += "，队列 " + str(q_step) + "s 采样"
-    # fetch_output_stream=False 仅在 aggregate meta 明确报告时展示（旧 aggregate 无该键则省略）
-    sched_seg = "FETCH_OUTPUT_STREAM=0 · " if fetch_output_stream is False else ""
-    identity = (
-        str(p_engines)
-        + "P + "
-        + str(d_engines)
-        + "D mock · JavaLoadClient "
-        + str(shards)
-        + " shards · replay@"
-        + str(args.replay)
-        + "x · "
-        + str(duration_s)
-        + "s · "
-        + sched_seg
-        + num(total_req)
-        + " 请求 · "
-        + sampling_note
-    )
+    cond_parts = [str(p_engines) + "P + " + str(d_engines) + "D mock"]
+    if send_mode == "replay":
+        if replay_speed:
+            _mode_seg = "replay@" + str(replay_speed) + "x"
+            if nominal_qps:
+                _mode_seg += "（名义 " + str(nominal_qps) + " QPS）"
+            cond_parts.append(_mode_seg)
+        elif nominal_qps:
+            cond_parts.append("replay（名义 " + str(nominal_qps) + " QPS）")
+        else:
+            cond_parts.append("replay")
+    else:
+        cond_parts.append(
+            ("uniform " + str(nominal_qps) + " QPS") if nominal_qps else "uniform"
+        )
+    if ramp_s:
+        cond_parts.append("ramp " + str(ramp_s) + "s")
+    if duration_s:
+        cond_parts.append(str(int(duration_s)) + "s")
+    cond_parts.append(str(shards) + " shards")
+    identity = " · ".join(cond_parts)
 
     # ---- JSX 组装 ----
     lines = []
@@ -1346,6 +1444,61 @@ def main():
     lines.append(emit_stat(fmt_pct(error_rate), "错误率", "danger"))
     lines.append(emit_stat(gini_stat, gini_label, gini_tone))
     lines.append(emit_stat(pacing_label, "pacing 质量", pacing_tone))
+    lines.append("      </Grid>")
+    lines.append("")
+
+    # ---- KPI 第二行：结果行（三层规范化第二层，20260902）----
+    # 请求数量 / 成功数量 / 失败·cancel / 成功率 / 持续时间，全部自
+    # summary 结果类字段（total_req/success_n/error_n 在上方 Stat 段已
+    # 取）。error_count 与 error_breakdown 同口径（全量行），err_cancelled
+    # 是其具名子桶——失败 chip 主值用总数、cancel 子集数括号注记，
+    # 避免两数相加造成口径重叠误导。旧 aggregate 无 summary 值时（rows
+    # 缺失 → None）chip 显示 —。
+    res_cancel = (sm.get("error_breakdown") or {}).get("err_cancelled") or 0
+    if error_n is not None and res_cancel:
+        fail_stat = (
+            fmt_int_trunc(error_n) + "（cancel " + fmt_int_trunc(res_cancel) + "）"
+        )
+    elif error_n is not None:
+        fail_stat = fmt_int_trunc(error_n)
+    else:
+        fail_stat = "—"
+    res_ok_rate = (
+        (float(success_n) / float(total_req))
+        if (success_n is not None and total_req)
+        else None
+    )
+    ok_rate_tone = (
+        "success"
+        if res_ok_rate is not None and res_ok_rate >= 0.99
+        else ("warning" if res_ok_rate is not None and res_ok_rate >= 0.9 else "danger")
+    )
+    lines.append("      <Grid columns={5} gap={10}>")
+    lines.append(
+        emit_stat(
+            fmt_int_trunc(total_req) if total_req is not None else "—", "请求数量"
+        )
+    )
+    lines.append(
+        emit_stat(
+            fmt_int_trunc(success_n) if success_n is not None else "—",
+            "成功数量",
+            "success",
+        )
+    )
+    lines.append(
+        emit_stat(fail_stat, "失败 / cancel", "danger" if error_n else "success")
+    )
+    lines.append(
+        emit_stat(
+            fmt_pct(res_ok_rate) if res_ok_rate is not None else "—",
+            "成功率",
+            ok_rate_tone,
+        )
+    )
+    lines.append(
+        emit_stat((str(int(duration_s)) + "s") if duration_s else "—", "持续时间")
+    )
     lines.append("      </Grid>")
     lines.append("")
 
@@ -3985,14 +4138,13 @@ def main():
         t_end = int(math.ceil(max(v for vals in cats_time.values() for v in vals)))
         time_axis = {"min": 0, "max": t_end}
 
-    # ---- 元数据区 spec（数据源 / 规模 / 时间轴口径）----
-    # 头部 KPI 行下方的浅色信息面板（渲染层 canvas_report_render_html.py
-    # 消费 SPEC.meta 三分区）。数据源从生成器自身输入参数推导（绝对路径），
-    # engine_dist 内嵌于 aggregate 时标注而非给路径；规模 = P/D/shards/
-    # replay/duration；时间轴口径的 T_END 动态取 time_axis.max。
-    # subtitle（HTML 页头副标）相应瘦身为 run 概览行（identity：规模 +
-    # 发送量 + 采样说明），不再承担数据源/口径标注——元数据是口径/溯源
-    # 性质，符合报告纪律：纯图表 + 头部 KPI + 口径标注 + 页脚溯源。
+    # ---- 元数据区 spec（三层规范化，20260902）----
+    # 可见 meta 面板：时间轴口径 + 采样说明（口径标注纪律，报告头必须
+    # 直观可读）。detail 层（<details> 折叠，默认收起）：代码版本 /
+    # 数据集 / 实验参数 / 环境变量 / 数据源 / 规模 chips——旧三分区中
+    # 的数据源与规模从可见面板移入 detail，规模信息已由 subtitle 承担。
+    # detail 取数链：aggregate meta（aggregate_canvas_run.py 20260902+
+    # 写入）> 同目录 run_meta.json；均缺则对应分区显示 —（未提供）。
     ed_embedded = (
         ed is not None
         and args.engine_dist is None
@@ -4001,6 +4153,14 @@ def main():
     _run_dir_abs = os.path.abspath(os.path.dirname(args.aggregate) or ".")
     if os.path.basename(_run_dir_abs) in ("analysis", "load_client"):
         _run_dir_abs = os.path.dirname(_run_dir_abs)
+    _rm_full = load_json(_rm_path) if os.path.isfile(_rm_path) else {}
+    _rm_client_env = (_rm_full.get("client_env") or {}) if _rm_full else {}
+    _rm_flexlb_env = (_rm_full.get("flexlb_env") or {}) if _rm_full else {}
+
+    def _detail_str(key):
+        v = str(_agg_meta.get(key) or _rm_params.get(key) or "").strip()
+        return v or None
+
     meta_spec = {
         "sources": {
             "runDir": _run_dir_abs,
@@ -4015,10 +4175,28 @@ def main():
             "p": p_engines,
             "d": d_engines,
             "shards": shards,
-            "replay": args.replay,
+            "replay": replay_speed,
             "durationS": int(duration_s) if duration_s else None,
         },
         "timeAxis": ({"tEnd": time_axis["max"]} if time_axis else None),
+        "sampling": sampling_note,
+        "version": {"branch": git_branch, "commit": git_commit},
+        "dataset": {
+            "traceFile": _detail_str("trace_file"),
+            "traceLines": _cond_int(
+                _agg_meta.get("trace_file_lines"),
+                _rm_params.get("trace_file_lines"),
+            ),
+            "traceSha256": _detail_str("trace_file_sha256"),
+        },
+        # 实验参数全量（run_meta.params：拓扑/端口/容量/JVM/配置文件路径等）
+        "params": _rm_params or None,
+        # FINAL ENV 快照：JavaLoadClient env（client_env.json）+ FlexLB env
+        # （flexlb_env.txt），consolidate 阶段嵌入 run_meta.json
+        "env": {
+            "clientEnv": _rm_client_env or None,
+            "flexlbEnv": _rm_flexlb_env or None,
+        },
     }
     subtitle_html = identity
 
@@ -4084,11 +4262,15 @@ def main():
                 )
 
     # ---- 元数据区 / leak KPI 自检（fail-closed）----
-    # 1) 元数据区存在性：spec.meta 三分区齐全，渲染输出含数据源绝对路径与
-    #    T_END 时间轴口径字样（有时间轴时）；
-    # 2) leak chip 负向：头部 KPI 无“泄漏判定”且渲染 HTML 全文无该字样
+    # 1) 元数据区存在性：spec.meta 齐全（sources/scale/version/dataset/
+    #    params/env），渲染输出含数据源绝对路径与 T_END 时间轴口径字样
+    #    （有时间轴时）；
+    # 2) leak chip 负向：头部 KPI 无「泄漏判定」且渲染 HTML 全文无该字样
     #    （tsx 汇总表行保留但不进 HTML，见 leak_label 计算处注释——若未来
-    #    汇总表进 HTML，此断言会拦下，需同步重新评审 leak 展示面）。
+    #    汇总表进 HTML，此断言会拦下，需同步重新评审 leak 展示面）；
+    # 3) 三层规范化（20260902）：detail 折叠块存在且默认收起；replay 模式
+    #    且倍率可得时 subtitle 必含 replay@<speed>x（倍率取自动校准值，
+    #    非 CLI 缺省）；KPI 含结果行五连。
     _meta_chk = spec.get("meta") or {}
     _meta_src = _meta_chk.get("sources") or {}
     assert isinstance(_meta_chk.get("sources"), dict) and isinstance(
@@ -4100,7 +4282,7 @@ def main():
     assert _meta_src.get("runDir"), TAG + " meta sources.runDir missing"
     assert 'id="meta"' in html_out, TAG + " rendered HTML missing metadata panel"
     assert os.path.abspath(args.aggregate) in html_out, (
-        TAG + " rendered HTML missing data-source path in metadata panel"
+        TAG + " rendered HTML missing data-source path (detail panel)"
     )
     if time_axis:
         assert "T_END" in html_out, (
@@ -4112,6 +4294,47 @@ def main():
     assert "泄漏判定" not in html_out, (
         TAG + " rendered HTML must not contain leak verdict text "
         "(header KPI chip removed by design)"
+    )
+    # detail 折叠块：默认收起（无 open 属性）+ 汇总行存在
+    assert '<details id="detail"' in html_out, (
+        TAG + ' rendered HTML missing detail panel (<details id="detail">)'
+    )
+    assert '<details id="detail" open' not in html_out, (
+        TAG + " detail panel must be collapsed by default (no open attr)"
+    )
+    # subtitle 倍率：replay 模式且倍率可得时必含 replay@<speed>x；倍率
+    # 不可得时不显示倍率段（而非回退硬编码缺省——replay@1000x bug 回归门）
+    if send_mode == "replay":
+        if replay_speed:
+            assert ("replay@" + str(replay_speed) + "x") in html_out, (
+                TAG
+                + " subtitle missing replay@"
+                + str(replay_speed)
+                + "x (calibrated speed)"
+            )
+        else:
+            assert "replay@" not in html_out, (
+                TAG + " replay speed unknown yet subtitle shows a rate "
+                "(stale default leaked in?)"
+            )
+    _kpi_labels = [k.get("label") for k in spec.get("kpis", [])]
+    for _need in (
+        "发送 QPS（master）",
+        "请求数量",
+        "成功数量",
+        "失败 / cancel",
+        "成功率",
+        "持续时间",
+    ):
+        if _need == "发送 QPS（master）" and not send_qps_master:
+            continue  # 旧 aggregate 无 master 口径时回退 client 自估 label
+        assert _need in _kpi_labels, (
+            TAG + " header kpis missing result-row chip: " + _need
+        )
+    assert len(_kpi_labels) == 10, (
+        TAG
+        + " header kpis must be 10 chips (5 metric + 5 result), got "
+        + str(len(_kpi_labels))
     )
 
     # ---- 观测口径自检（fail-closed，20260829 口径修正批次）----
@@ -4573,6 +4796,12 @@ def main():
             print(TAG + " engine_dist note: " + str(note))
     print(
         TAG
+        + " header tiers: subtitle("
+        + identity
+        + ") · kpi rows 2x5 · detail(collapsed)"
+    )
+    print(
+        TAG
         + " meta panel: sources(runDir/aggregate"
         + ("/summary" if _meta_src.get("summary") else "")
         + ("/engineDist" if _meta_src.get("engineDist") else "")
@@ -4587,6 +4816,11 @@ def main():
         + " duration="
         + str(meta_spec["scale"]["durationS"])
         + "s)"
+        + " · version("
+        + (git_branch or "?")
+        + "@"
+        + (git_commit or "?")
+        + ")"
         + (
             " · timeAxis T_END=" + str(meta_spec["timeAxis"]["tEnd"]) + "s"
             if meta_spec.get("timeAxis")

@@ -2471,10 +2471,57 @@ else:
     _legacy = str(_run_params.get("schedule_only", "0")).strip()
     fetch_output_stream = _legacy not in ("1", "true", "True")
 
+# ---- meta 补充：报告头部三层取数源（20260902 条件/结果/详情重构）----
+# subtitle 实验条件（send_mode / replay_speed / 名义 QPS / ramp / duration）
+# 与 detail 层（数据集 / 配置 / 代码版本）从 run_meta.params 提升进
+# aggregate meta；canvas_report_gen.py 优先读这里，旧 aggregate 无键时
+# 回退同目录 run_meta.json。值缺失（None / 空串）不写键——fail-closed
+# 留空，不硬错。远端 rsync 树无 .git：git_branch / git_commit 由调用方
+# （重聚合命令）经 FLEXLB_GIT_BRANCH / FLEXLB_GIT_COMMIT 注入。
+
+
+def _meta_int(raw):
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+_meta_conditions = {}
+for _k in (
+    "send_mode",
+    "trace_file",
+    "trace_file_sha256",
+    "flexlb_config",
+    "performance_file",
+    "process_config_file",
+):
+    _v = str(_run_params.get(_k) or "").strip()
+    if _v:
+        _meta_conditions[_k] = _v
+for _k in (
+    "replay_speed",
+    "send_mode_qps",
+    "ramp_up_seconds",
+    "duration_s",
+    "trace_file_lines",
+):
+    _v = _meta_int(_run_params.get(_k))
+    if _v is not None:
+        _meta_conditions[_k] = _v
+for _k, _env in (
+    ("git_branch", "FLEXLB_GIT_BRANCH"),
+    ("git_commit", "FLEXLB_GIT_COMMIT"),
+):
+    _v = str(os.environ.get(_env) or "").strip()
+    if _v:
+        _meta_conditions[_k] = _v
+
 out = {
     "meta": {
         "run_dir": os.path.basename(run_dir),
         "fetch_output_stream": fetch_output_stream,
+        **_meta_conditions,
     },
     "summary": {
         # ---- rows 唯一指标源（no-backward-compat）：全部自算，rows 缺失

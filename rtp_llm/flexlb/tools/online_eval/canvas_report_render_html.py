@@ -11,14 +11,24 @@ Spec schema（core.py 产）：
   {
     'run_id':   str,
     'title':    str,              # 页首 H1
-    'subtitle': Optional[str],    # 副标（run 概览：规模 / 发送量 / 采样说明）
+    'subtitle': Optional[str],    # 副标（实验条件行：拓扑 / 发送模式倍率 /
+                                   # ramp / duration / shards，三层第一层）
     'kpis':     [{'label': str, 'value': str, 'tone': Optional[str]}],
-    'meta':     Optional[{        # 头部元数据面板（KPI 行下方三分区）
+                                   # 两行×最多 5 chip：指标五连 + 结果五连
+                                   # （请求数量 / 成功 / 失败·cancel / 成功率 /
+                                   # 持续时间），三层第二层
+    'meta':     Optional[{        # 可见口径面板 + detail 折叠层（三层第三层）
+        'timeAxis': Optional[{'tEnd': num}],   # T_END 动态填入口径文案（可见）
+        'sampling': Optional[str],             # 采样说明（可见）
+        'version':  {'branch': Opt[str], 'commit': Opt[str]},      # detail
+        'dataset':  {'traceFile': Opt[str], 'traceLines': Opt[num],
+                     'traceSha256': Opt[str]},                      # detail
+        'params':   Optional[dict],  # run_meta.params 全量（detail）
+        'env':      {'clientEnv': Opt[dict], 'flexlbEnv': Opt[dict]},# detail
         'sources': {'runDir': str, 'aggregate': str,
-                    'engineDist': Optional[str]},
+                    'engineDist': Optional[str]},                    # detail
         'scale':   {'p': num, 'd': num, 'shards': num,
-                    'replay': num, 'durationS': Optional[num]},
-        'timeAxis': Optional[{'tEnd': num}],   # T_END 动态填入口径文案
+                    'replay': num, 'durationS': Optional[num]},      # detail
     }],
     'timeAxis': Optional[{'min': number, 'max': number}],  # 报告级统一时间轴
     'panels':   [panel],
@@ -36,9 +46,12 @@ Spec schema（core.py 产）：
     'series':  [{'name': str, 'data': [num], 'color': str}],
   }
 
-元数据面板：meta 三分区（数据源 / 规模 / 时间轴口径）渲染为 KPI 行下方的
-浅色信息面板；路径用等宽字体、overflow-wrap:anywhere 保留完整可复制。
-旧 spec 无 meta 键时整个面板不渲染（向后兼容）。
+头部三层（2026-09 规范化）：subtitle = 实验条件行；KPI 两行 = 指标五连 +
+结果五连；可见 meta 面板只留时间轴口径 + 采样说明（口径标注纪律），其余
+（代码版本 / 数据集 / 实验参数 / FINAL ENV / 数据源 / 规模）收进
+<details id="detail"> 折叠块默认收起。路径用等宽字体、
+overflow-wrap:anywhere 保留完整可复制。旧 spec 无 meta 键时两个面板
+均不渲染（向后兼容）。
 
 时间轴语义：timeAxis.min = 0（t=0 = 压测正式开始，warmup 后）；
 timeAxis.max = T_END（全部时序面板最后采样点，ceil 整秒，含收尾排空）。
@@ -166,19 +179,18 @@ body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
 header{margin-bottom:20px}
 h1{margin:0 0 6px;font-size:22px}
 .sub{color:var(--sub)}
-.kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:16px 0 12px}
+/* KPI 两行（指标五连 + 结果五连）：wrapper 纵向叠行，每行 grid 随
+   行内 chip 数自适应列数（JS 注入 inline grid-template-columns）。 */
+.kpi-stack{display:flex;flex-direction:column;gap:12px;margin:16px 0 12px}
+.kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:12px}
 .kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
 .kpi .v{font-size:22px;font-weight:600}
 .kpi .l{color:var(--sub);font-size:12px;margin-top:4px}
 .kpi.success .v{color:var(--success)} .kpi.danger .v{color:var(--danger)} .kpi.warn .v{color:var(--warn)}
-/* 头部元数据面板：KPI 行下方三分区（数据源 / 规模 / 时间轴口径）。
-   长路径等宽字体 + overflow-wrap:anywhere：可折行但保留完整可复制。 */
+/* 可见口径面板（三层第三层之可见部分）：时间轴口径 + 采样说明。 */
 .meta-panel{background:var(--card);border:1px solid var(--border);border-radius:8px;
-  margin:0 0 24px;display:grid;
-  grid-template-columns:minmax(300px,1.5fr) minmax(170px,.75fr) minmax(290px,1.15fr);
-  font-size:12px;line-height:1.7;color:var(--sub)}
+  margin:0 0 12px;font-size:12px;line-height:1.7;color:var(--sub)}
 .meta-sec{padding:12px 16px;min-width:0}
-.meta-sec+.meta-sec{border-left:1px solid var(--border)}
 .meta-sec h4{margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.6px;
   text-transform:uppercase;color:rgba(0,0,0,.38)}
 .meta-row{display:flex;gap:8px;align-items:baseline;margin:1px 0}
@@ -196,10 +208,26 @@ h1{margin:0 0 6px;font-size:22px}
 .meta-ta p{margin:0;color:rgba(0,0,0,.6)}
 .meta-ta b{font-weight:600;color:#1677ff;
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
-@media(max-width:960px){
-  .meta-panel{grid-template-columns:1fr}
-  .meta-sec+.meta-sec{border-left:none;border-top:1px solid var(--border)}
-}
+/* detail 折叠层（三层第三层）：代码版本 / 数据集 / 参数 / FINAL ENV /
+   数据源 / 规模，默认收起；长表（params / env）限高滚动防长屏。 */
+.detail-panel{background:var(--card);border:1px solid var(--border);border-radius:8px;
+  margin:0 0 24px;font-size:12px;color:var(--sub)}
+.detail-panel>summary{cursor:pointer;padding:10px 16px;font-size:12px;
+  font-weight:600;letter-spacing:.4px;color:rgba(0,0,0,.55);
+  user-select:none;list-style:none}
+.detail-panel>summary::-webkit-details-marker{display:none}
+.detail-panel>summary::before{content:'▸';display:inline-block;margin-right:8px;
+  transition:transform .15s;color:rgba(0,0,0,.35)}
+.detail-panel[open]>summary::before{transform:rotate(90deg)}
+.detail-body{border-top:1px solid var(--border);padding:12px 16px 16px;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+  gap:14px 28px}
+.detail-sec{min-width:0}
+.detail-wide{grid-column:1/-1}
+.detail-sec h4{margin:0 0 6px;font-size:11px;font-weight:600;letter-spacing:.6px;
+  text-transform:uppercase;color:rgba(0,0,0,.38)}
+.detail-env{max-height:280px;overflow:auto;border:1px solid var(--border);
+  border-radius:6px;padding:6px 10px;background:rgba(0,0,0,.015)}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px}
 .panel h3{margin:0 0 4px;font-size:15px}
@@ -210,8 +238,12 @@ h1{margin:0 0 6px;font-size:22px}
 <header>
   <h1 id="title"></h1><div class="sub" id="subtitle"></div>
 </header>
-<div class="kpi-row" id="kpis"></div>
+<div class="kpi-stack" id="kpis"></div>
 <div class="meta-panel" id="meta"></div>
+<details id="detail" class="detail-panel">
+  <summary>实验详情 · 代码版本 / 数据集 / 参数 / 环境变量 / 数据源</summary>
+  <div class="detail-body" id="detail-body"></div>
+</details>
 <div class="grid" id="grid"></div>
 <div class="hint" id="hint">Chart.js 4.4.7 · legend 单击可切换单条系列，双击隔离；tooltip 随鼠标移动；隐藏后 y 轴按剩余可见系列自适应。</div>
 <script>
@@ -219,53 +251,31 @@ const SPEC = __SPEC_JSON__;
 document.getElementById('title').textContent = SPEC.summary.title;
 document.getElementById('subtitle').textContent = SPEC.summary.subtitle;
 const kb = document.getElementById('kpis');
-// KPI 列数随实际 chip 数自适应（缺省 CSS 6 列仅为无 JS 兼容底座）。
+// KPI 两行（三层第二层）：每行最多 5 chip——第一行指标五连（发送 QPS /
+// 成功调度 / 错误率 / Gini / pacing），第二行结果五连（请求数量 / 成功 /
+// 失败·cancel / 成功率 / 持续时间）；列数随行内实际 chip 数自适应。
 if (SPEC.summary.kpis.length)
-  kb.style.gridTemplateColumns = 'repeat(' + SPEC.summary.kpis.length + ',1fr)';
-SPEC.summary.kpis.forEach(k=>{
-  const d=document.createElement('div'); d.className='kpi '+(k.tone||'');
-  d.innerHTML=`<div class="v">${k.value}</div><div class="l">${k.label}</div>`;
-  kb.appendChild(d);
-});
-// 头部元数据面板：数据源 / 规模 / 时间轴口径（SPEC.meta，生成器注入；
-// 旧 spec 无 meta 时整个面板移除，向后兼容）。
+  for (let i = 0; i < SPEC.summary.kpis.length; i += 5){
+    const seg = SPEC.summary.kpis.slice(i, i + 5);
+    const row = document.createElement('div'); row.className = 'kpi-row';
+    row.style.gridTemplateColumns = 'repeat(' + seg.length + ',1fr)';
+    seg.forEach(k=>{
+      const d=document.createElement('div'); d.className='kpi '+(k.tone||'');
+      d.innerHTML=`<div class="v">${k.value}</div><div class="l">${k.label}</div>`;
+      row.appendChild(d);
+    });
+    kb.appendChild(row);
+  }
+// 可见口径面板：时间轴口径 + 采样说明（口径标注纪律：必须直观可读；
+// 数据源/规模/版本等溯源性质信息全部下沉 detail 折叠层）。
 (function renderMeta(){
   const meta = SPEC.meta;
   const host = document.getElementById('meta');
   if (!meta){ host.remove(); return; }
   const div = (cls)=>{ const el=document.createElement('div'); el.className=cls; return el; };
   const h4 = (t)=>{ const el=document.createElement('h4'); el.textContent=t; return el; };
-  const addRow = (sec,k,v)=>{
-    const r=div('meta-row');
-    const kk=document.createElement('span'); kk.className='k'; kk.textContent=k; r.appendChild(kk);
-    const vv=document.createElement('span'); vv.className='v';
-    vv.textContent=(v==null||v==='')?'—（未加载）':String(v); r.appendChild(vv);
-    sec.appendChild(r);
-  };
-  // —— 分区一：数据源（绝对路径；engine_dist 内嵌于 aggregate 时标注）——
-  const so = meta.sources||{};
-  const s1 = document.createElement('section'); s1.className='meta-sec';
-  s1.appendChild(h4('数据源'));
-  addRow(s1,'aggregate',so.aggregate);
-  addRow(s1,'engine_dist',so.engineDist);
-  addRow(s1,'run 目录',so.runDir);
-  host.appendChild(s1);
-  // —— 分区二：规模（P / D / shards / replay / duration）——
-  const sc = meta.scale||{};
-  const s2 = document.createElement('section'); s2.className='meta-sec';
-  s2.appendChild(h4('规模'));
-  const wrap = div('meta-scale');
-  const chip=(k,v,suf)=>{ if(v==null||v==='') return;
-    const c=div('meta-chip'); c.appendChild(document.createTextNode(k+'='));
-    const b=document.createElement('b'); b.textContent=String(v)+(suf||''); c.appendChild(b);
-    wrap.appendChild(c); };
-  chip('P',sc.p); chip('D',sc.d); chip('shards',sc.shards); chip('replay',sc.replay);
-  chip('duration',sc.durationS,'s');
-  if(!wrap.childNodes.length) wrap.textContent='—';
-  s2.appendChild(wrap); host.appendChild(s2);
-  // —— 分区三：时间轴口径（T_END 动态值）——
-  const s3 = document.createElement('section'); s3.className='meta-sec';
-  s3.appendChild(h4('时间轴口径'));
+  const sec = div('meta-sec');
+  sec.appendChild(h4('时间轴口径'));
   const box = div('meta-ta');
   const t = meta.timeAxis;
   if (t && typeof t.tEnd==='number' && t.tEnd>0){
@@ -277,7 +287,102 @@ SPEC.summary.kpis.forEach(k=>{
   } else {
     box.textContent='无统一时间轴（报告不含时序面板）';
   }
-  s3.appendChild(box); host.appendChild(s3);
+  if (meta.sampling){
+    const p=document.createElement('p'); p.textContent=meta.sampling; box.appendChild(p);
+  }
+  sec.appendChild(box); host.appendChild(sec);
+})();
+// detail 折叠层（三层第三层，默认收起）：代码版本 / 测试数据集 / 数据源 /
+// 规模 chips / 实验参数全量 / FINAL ENV（client_env + flexlb_env）。
+(function renderDetail(){
+  const meta = SPEC.meta;
+  const host = document.getElementById('detail');
+  const body = document.getElementById('detail-body');
+  if (!meta || !body){ if(host) host.remove(); return; }
+  const div = (cls)=>{ const el=document.createElement('div'); el.className=cls; return el; };
+  const h4 = (t)=>{ const el=document.createElement('h4'); el.textContent=t; return el; };
+  const addRow = (sec,k,v)=>{
+    const r=div('meta-row');
+    const kk=document.createElement('span'); kk.className='k'; kk.textContent=k; r.appendChild(kk);
+    const vv=document.createElement('span'); vv.className='v';
+    vv.textContent=(v==null||v==='')?'—（未提供）':String(v); r.appendChild(vv);
+    sec.appendChild(r);
+  };
+  // —— 分区一：代码版本（branch / commit；远端 rsync 树无 .git，由重聚合
+  //    命令经 FLEXLB_GIT_BRANCH/FLEXLB_GIT_COMMIT 注入 aggregate meta）——
+  const ver = meta.version||{};
+  const s1 = div('detail-sec'); s1.appendChild(h4('代码版本'));
+  addRow(s1,'branch',ver.branch); addRow(s1,'commit',ver.commit);
+  body.appendChild(s1);
+  // —— 分区二：测试数据集（trace 路径 / 行数 / sha256）——
+  const ds = meta.dataset||{};
+  const s2 = div('detail-sec'); s2.appendChild(h4('测试数据集'));
+  addRow(s2,'trace',ds.traceFile);
+  addRow(s2,'行数',ds.traceLines);
+  addRow(s2,'sha256',ds.traceSha256);
+  body.appendChild(s2);
+  // —— 分区三：数据源（绝对路径；engine_dist 内嵌于 aggregate 时标注）——
+  const so = meta.sources||{};
+  const s3 = div('detail-sec'); s3.appendChild(h4('数据源'));
+  addRow(s3,'aggregate',so.aggregate);
+  addRow(s3,'engine_dist',so.engineDist);
+  addRow(s3,'run 目录',so.runDir);
+  body.appendChild(s3);
+  // —— 分区四：规模 chips（P / D / shards / replay / duration）——
+  const sc = meta.scale||{};
+  const s4 = div('detail-sec'); s4.appendChild(h4('规模'));
+  const wrap = div('meta-scale');
+  const chip=(k,v,suf)=>{ if(v==null||v==='') return;
+    const c=div('meta-chip'); c.appendChild(document.createTextNode(k+'='));
+    const b=document.createElement('b'); b.textContent=String(v)+(suf||''); c.appendChild(b);
+    wrap.appendChild(c); };
+  chip('P',sc.p); chip('D',sc.d); chip('shards',sc.shards); chip('replay',sc.replay);
+  chip('duration',sc.durationS,'s');
+  if(!wrap.childNodes.length) wrap.textContent='—';
+  s4.appendChild(wrap); body.appendChild(s4);
+  // —— 分区五：实验参数全量（run_meta.params：拓扑/端口/容量/JVM/配置
+  //    文件路径等；键排序 + 限高滚动，flexlb_config 长值完整保留）——
+  const s5 = div('detail-sec detail-wide'); s5.appendChild(h4('实验参数（run_meta.params）'));
+  const params = meta.params;
+  if (params && Object.keys(params).length){
+    const envBox = div('detail-env');
+    Object.keys(params).sort().forEach(k=>{
+      const r=div('meta-row');
+      const kk=document.createElement('span'); kk.className='k'; kk.textContent=k;
+      const vv=document.createElement('span'); vv.className='v';
+      vv.textContent=String(params[k]);
+      r.appendChild(kk); r.appendChild(vv); envBox.appendChild(r);
+    });
+    s5.appendChild(envBox);
+  } else {
+    const r=div('meta-row'); r.textContent='—（未提供）'; s5.appendChild(r);
+  }
+  body.appendChild(s5);
+  // —— 分区六：环境变量 FINAL ENV（JavaLoadClient client_env + FlexLB
+  //    flexlb_env 快照，consolidate 阶段嵌入 run_meta.json）——
+  const env = meta.env||{};
+  const s6 = div('detail-sec detail-wide'); s6.appendChild(h4('环境变量（FINAL ENV）'));
+  const envRender=(title,data)=>{
+    if (!data || !Object.keys(data).length) return;
+    const sub=div('detail-env');
+    const st=document.createElement('div'); st.className='meta-row';
+    const sk=document.createElement('span'); sk.className='k'; sk.textContent=title;
+    st.appendChild(sk); sub.appendChild(st);
+    Object.keys(data).sort().forEach(k=>{
+      const r=div('meta-row');
+      const kk=document.createElement('span'); kk.className='k'; kk.textContent=k;
+      const vv=document.createElement('span'); vv.className='v';
+      vv.textContent=String(data[k]);
+      r.appendChild(kk); r.appendChild(vv); sub.appendChild(r);
+    });
+    s6.appendChild(sub);
+  };
+  envRender('JavaLoadClient（client_env.json）', env.clientEnv);
+  envRender('FlexLB（flexlb_env.txt）', env.flexlbEnv);
+  if (!s6.querySelector('.detail-env')){
+    const r=div('meta-row'); r.textContent='—（未提供）'; s6.appendChild(r);
+  }
+  body.appendChild(s6);
 })();
 // y 轴自适应：只按 legend 可见系列重算 max（beginAtZero），legend/双击后 update()。
 // 时间轴面板数据点为 {x, y}（linear x 轴），此处兼容两种形态。
