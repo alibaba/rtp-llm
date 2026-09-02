@@ -1,6 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -18,6 +19,7 @@ class LoadBalanceStrategyWiringTest {
             .withBean(CacheAwareService.class, () -> mock(CacheAwareService.class))
             .withBean(ResourceMeasureFactory.class, () -> mock(ResourceMeasureFactory.class))
             .withBean(EngineHealthReporter.class, () -> mock(EngineHealthReporter.class))
+            .withBean(SessionPlacementStore.class)
             .withBean("shortestTtftStrategy", ShortestTTFTStrategy.class)
             .withBean("costBasedPrefillStrategy", CostBasedPrefillStrategy.class);
 
