@@ -87,7 +87,10 @@ SLA accuracy.
 - Per-geometry predictions: `dsv4_corrected_v4/formula/predictions.csv`
 - Dense 3D chart: `dsv4_corrected_v4/deepseek_v4_prefill_3d.svg`
 
-The chart uses X=uncached compute tokens, Y=observed cached tokens, and
-Z=measured prefill RT.  It plots every usable physical geometry without
-decimation; failed rows and positive-cache requests with zero observed reuse
-are excluded.
+The chart uses X=measured prefill RT (TTFT, ms), Y=observed cached tokens,
+and Z=uncached compute tokens (`input_len - observed_cache_len`).  All usable
+physical geometries are plotted as points; the solid warm guide lines are
+near-fixed-cache median trends and the dashed cool guide lines are
+near-fixed-compute median trends.  Colour is used only to identify guide
+families, never to encode RT.  Failed rows and positive-cache requests with
+zero observed reuse are excluded.
