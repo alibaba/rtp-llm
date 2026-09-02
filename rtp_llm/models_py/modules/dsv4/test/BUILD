@@ -229,6 +229,7 @@ py_test(
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
     ],
+    env = {"GPU_COUNT": "2"},
     tags = ["RTX_5000_PRO"],
     exec_properties = {
         "gpu": "RTX_5000_PRO",
