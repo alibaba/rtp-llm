@@ -13,6 +13,10 @@ namespace rtp_llm {
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
 
+namespace block_tree_cache_test {
+class BlockTreeCacheTestPeer;
+}
+
 class BlockTransferDispatcher {
 public:
     using TransferDoneCallback = std::function<void(ErrorInfo)>;
@@ -38,6 +42,8 @@ public:
     void shutdown() const;
 
 private:
+    friend class block_tree_cache_test::BlockTreeCacheTestPeer;
+
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
     size_t                                        max_device_host_descriptors_per_batch_{8};

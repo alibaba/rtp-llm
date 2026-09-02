@@ -18,8 +18,6 @@ namespace rtp_llm {
 
 namespace {
 
-constexpr size_t kTransferQueueSize = 10000;
-
 ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     switch (status) {
         case TransferStatus::OK:
@@ -54,7 +52,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, kTransferQueueSize, "BlockTransferEngine");
+        std::make_unique<BlockTreeTaskPool>(
+            transfer_worker_count, BlockTreeTaskPool::kDefaultQueueSize, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
 
     const bool any_disk_pool = std::any_of(group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group_set) {
@@ -138,6 +137,9 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
     const size_t batch_limit = device_host_direction ? max_device_host_descriptors_per_batch_ :
                                                        max_non_device_host_descriptors_per_batch_;
     auto context = std::make_shared<TransferBatchAsyncContext>();
+    auto on_timeout = [context]() {
+        context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"));
+    };
     const bool accepted = transfer_task_pool_->submit([this, descriptors, group_sets, hosts, context, batch_limit] {
         try {
             for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
@@ -167,7 +169,7 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         } catch (...) {
             context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
         }
-    });
+    }, BlockTreeTaskPool::kDefaultQueueWaitTimeout, std::move(on_timeout));
     if (!accepted) {
         context->complete(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: transfer queue is full or stopped"));

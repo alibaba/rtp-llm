@@ -568,7 +568,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         config.max_descriptors_per_transfer_batch,
         config.max_descriptors_per_non_device_host_transfer_batch);
     auto task_pool =
-        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
+        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size),
+                                            BlockTreeTaskPool::kDefaultQueueSize,
+                                            "BlockTreeCacheTaskPool");
 
     auto tree = std::make_unique<BlockTree>(std::move(group_sets));
 

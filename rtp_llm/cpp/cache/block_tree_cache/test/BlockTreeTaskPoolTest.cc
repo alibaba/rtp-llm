@@ -144,33 +144,5 @@ TEST(BlockTreeTaskPoolTest, FullQueueRejectsSubmissionWithoutBlockingAndRestores
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-TEST(BlockTreeTaskPoolTest, BusinessCreditsBoundInFlightWorkAndKeepWaitForIdleBlocked) {
-    BlockTreeTaskPool pool(1, 2, "BlockTreeTaskPoolTest");
-    ASSERT_TRUE(pool.start());
-
-    ASSERT_TRUE(pool.acquireBusinessCredit());
-    ASSERT_TRUE(pool.acquireBusinessCredit());
-    EXPECT_FALSE(pool.acquireBusinessCredit());
-
-    auto idle = std::async(std::launch::async, [&pool] { pool.waitForIdle(); });
-    EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
-
-    pool.releaseBusinessCredit();
-    EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
-    pool.releaseBusinessCredit();
-    EXPECT_EQ(idle.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-}
-
-TEST(BlockTreeTaskPoolTest, StopAdmissionRejectsNewBusinessCreditsButAllowsRelease) {
-    BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
-    ASSERT_TRUE(pool.start());
-    ASSERT_TRUE(pool.acquireBusinessCredit());
-    pool.stopAdmission();
-
-    EXPECT_FALSE(pool.acquireBusinessCredit());
-    pool.releaseBusinessCredit();
-    pool.waitForIdle();
-}
-
 }  // namespace
 }  // namespace rtp_llm

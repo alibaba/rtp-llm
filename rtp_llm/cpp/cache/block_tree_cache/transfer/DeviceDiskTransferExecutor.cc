@@ -141,6 +141,12 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
             }
 
             auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
+            auto on_timeout = [stage_state, begin, end]() {
+                stage_state->completeBatch(ErrorInfo(
+                    ErrorCode::DEADLINE_EXCEEDED,
+                    "disk-to-device expired in TE worker queue, descriptor_range=[" + std::to_string(begin) + ","
+                        + std::to_string(end) + ")"));
+            };
             const bool accepted = transfer_task_pool_.submit(
                 [this,
                  stage_state,
@@ -175,7 +181,7 @@ DeviceDiskTransferExecutor::execute(const std::vector<TransferDescriptor>& descr
                     stage_state->completeBatch(
                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown disk-to-device exception"));
                 }
-            });
+                }, BlockTreeTaskPool::kDefaultQueueWaitTimeout, std::move(on_timeout));
             if (!accepted) {
                 stage_state->completeBatch(ErrorInfo(
                     ErrorCode::EXECUTION_EXCEPTION,
@@ -206,6 +212,9 @@ DeviceDiskTransferExecutor::executeDeviceToDisk(const TransferDescriptor& descri
         }
 
         auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
+        auto on_timeout = [context]() {
+            context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "device-to-disk expired in TE worker queue"));
+        };
         const bool accepted = transfer_task_pool_.submit([this, context, descriptor, group_set_ptr, batch_leases] {
             try {
                 const std::vector<HostBufferView> hosts{
@@ -228,7 +237,7 @@ DeviceDiskTransferExecutor::executeDeviceToDisk(const TransferDescriptor& descri
             } catch (...) {
                 context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown device-to-disk exception"));
             }
-        });
+        }, BlockTreeTaskPool::kDefaultQueueWaitTimeout, std::move(on_timeout));
         if (!accepted) {
             context->complete(ErrorInfo(
                 ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: device-to-disk queue is full or stopped"));

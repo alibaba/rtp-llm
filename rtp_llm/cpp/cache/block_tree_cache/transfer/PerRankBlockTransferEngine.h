@@ -14,6 +14,10 @@
 
 namespace rtp_llm {
 
+namespace block_tree_cache_test {
+class BlockTreeCacheTestPeer;
+}
+
 class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
@@ -35,6 +39,8 @@ public:
     }
 
 private:
+    friend class block_tree_cache_test::BlockTreeCacheTestPeer;
+
     TransferStatus execute(const std::vector<HostBufferView>&       hosts,
                            const std::vector<TransferDescriptor>& descriptors,
                            const std::vector<const GroupSet*>&    group_sets) const;
