@@ -95,14 +95,13 @@ DURATION_S="${DURATION_S:-120}"
 # REPLAY_SPEED: replay pacing multiplier, pure pass-through. The caller is
 # expected to supply it (the skill layer auto-calibrates from the trace:
 # SPEED = max(1, round(target_qps * valid_span_s / valid_requests)), where
-# valid = ol>0 rows per the ZERO_OUTPUT_POLICY=skip client-side filter). The
+# valid = ol>0 rows are filtered client-side). The
 # bare 10 fallback below equals the JavaLoadClient built-in default and only
 # applies to direct invocations that omit the variable; it is NOT calibrated.
 REPLAY_SPEED="${REPLAY_SPEED:-10}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-999999999}"
 TIMEOUT_MS="${TIMEOUT_MS:-3600000}"
 SLA_TTFT_MS="${SLA_TTFT_MS:-500}"
-ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY:-skip}"
 MAX_INPUT_LEN="${MAX_INPUT_LEN:-0}"
 MAX_OUTPUT_LEN="${MAX_OUTPUT_LEN:-0}"
 GRADIENT="${GRADIENT:-0}"
@@ -399,7 +398,6 @@ consolidate_run_outputs_now() {
     --param "max_concurrency=${MAX_CONCURRENCY}" \
     --param "load_client_workers=${LOAD_CLIENT_WORKERS}" \
     --param "sla_ttft_ms=${SLA_TTFT_MS}" \
-    --param "zero_output_policy=${ZERO_OUTPUT_POLICY}" \
     --param "fetch_output_stream=${FETCH_OUTPUT_STREAM}" \
     --param "loop=${LOOP}" \
     --param "gradient=${GRADIENT}" \
@@ -1182,7 +1180,6 @@ launch_java_load_client() {
       "LIMIT=${LIMIT}" \
       "TIMEOUT_MS=${TIMEOUT_MS}" \
       "SLA_TTFT_MS=${SLA_TTFT_MS}" \
-      "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
       "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
       "FORCE_PRIORITY=${FORCE_PRIORITY}" \
       "LOOP=${LOOP}" \
@@ -1221,7 +1218,6 @@ launch_java_load_client() {
     "LIMIT=${LIMIT}" \
     "TIMEOUT_MS=${TIMEOUT_MS}" \
     "SLA_TTFT_MS=${SLA_TTFT_MS}" \
-    "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
     "FETCH_OUTPUT_STREAM=${FETCH_OUTPUT_STREAM}" \
     "FORCE_PRIORITY=${FORCE_PRIORITY}" \
     "LOOP=${LOOP}" \

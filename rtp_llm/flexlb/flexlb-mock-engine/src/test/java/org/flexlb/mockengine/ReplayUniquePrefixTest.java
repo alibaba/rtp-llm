@@ -35,7 +35,7 @@ class ReplayUniquePrefixTest {
         JavaLoadClient.Config config = new JavaLoadClient.Config(
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                120_000L, 500.0, "skip", false, true, 1, 1, 0L, 120, true,
+                120_000L, 500.0, false, true, 1, 1, 0L, 120, true,
                 "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true,
                 0, 0, "replay", 0.0, replayUniquePrefix);
@@ -102,7 +102,7 @@ class ReplayUniquePrefixTest {
         JavaLoadClient.Config config = new JavaLoadClient.Config(
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
-                120_000L, 500.0, "skip", false, true, 1, 1, 0L, 120, true,
+                120_000L, 500.0, false, true, 1, 1, 0L, 120, true,
                 "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true);
         JavaLoadClient.TraceRecord sent = new JavaLoadClient(config)

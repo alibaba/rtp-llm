@@ -60,7 +60,7 @@ class UniformRampUpTest {
         return new JavaLoadClient.Config(
                 traceFile, "127.0.0.1:7001", "127.0.0.1:7003",
                 durationS, 16, 1000.0, 1, outDir, numShards, shardIndex, limit,
-                120_000L, 500.0, "skip", false, loop, 1, 1, 0L, 120, true,
+                120_000L, 500.0, false, loop, 1, 1, 0L, 120, true,
                 "engine_service", "",
                 false, 10, 1000, 0, 0, "", false, "", true, 0, 0, sendMode, sendModeQps,
                 rampUpSeconds, true);

@@ -1090,13 +1090,9 @@ public final class JavaLoadClient {
 
         int outputLen = raw.path("ol").asInt(raw.path("output_token_len").asInt(0));
         if (outputLen <= 0) {
-            if ("skip".equals(config.zeroOutputPolicy)) {
-                return null;
-            } else if ("one".equals(config.zeroOutputPolicy)) {
-                outputLen = 1;
-            } else if ("default100".equals(config.zeroOutputPolicy)) {
-                outputLen = 100;
-            }
+            // zero-output trace rows are always filtered; 1-token/N-token
+            // behavior belongs to case tests (request params).
+            return null;
         }
 
         String sourceRid = raw.has("request_id") ? raw.get("request_id").asText()
@@ -1638,7 +1634,6 @@ public final class JavaLoadClient {
         final int limit;
         final long timeoutMs;
         final double slaTtftMs;
-        final String zeroOutputPolicy;
         /** When false the client skips reading engine output streams (FetchResponse/
          *  GenerateStreamCall phase 2) after a successful Schedule RPC. The engine
          *  still executes prefill + decode in full — only the client-side read is
@@ -1703,7 +1698,7 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
+               boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
                String model, String apiKey, boolean gradient,
@@ -1712,7 +1707,7 @@ public final class JavaLoadClient {
                boolean enableFallback, String endpointsFile, boolean dryRun) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
+                    slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
                     skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
@@ -1724,7 +1719,7 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
+               boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
                String model, String apiKey, boolean gradient,
@@ -1734,7 +1729,7 @@ public final class JavaLoadClient {
                int priority) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
+                    slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
                     skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
@@ -1746,7 +1741,7 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
+               boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
                String model, String apiKey, boolean gradient,
@@ -1757,7 +1752,7 @@ public final class JavaLoadClient {
                boolean replayUniquePrefix) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
-                    slaTtftMs, zeroOutputPolicy, fetchOutputStream, loop, nChannels,
+                    slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
                     skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
@@ -1769,7 +1764,7 @@ public final class JavaLoadClient {
                int durationS, int maxConcurrency, double replaySpeed,
                int loadClientWorkers, String outputDir, int numShards,
                int shardIndex, int limit, long timeoutMs, double slaTtftMs,
-               String zeroOutputPolicy, boolean fetchOutputStream, boolean loop,
+               boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
                String model, String apiKey, boolean gradient,
@@ -1791,7 +1786,6 @@ public final class JavaLoadClient {
             this.limit = limit;
             this.timeoutMs = timeoutMs;
             this.slaTtftMs = slaTtftMs;
-            this.zeroOutputPolicy = zeroOutputPolicy;
             this.fetchOutputStream = fetchOutputStream;
             this.loop = loop;
             this.nChannels = nChannels;
@@ -1858,7 +1852,6 @@ public final class JavaLoadClient {
                     envInt("LIMIT", 0),
                     envLong("TIMEOUT_MS", 3_600_000L),
                     envDouble("SLA_TTFT_MS", 500.0),
-                    env("ZERO_OUTPUT_POLICY", "skip"),
                     fetchOutputStream,
                     envBool("LOOP", false),
                     envInt("N_CHANNELS", 8),
@@ -1910,7 +1903,6 @@ public final class JavaLoadClient {
             System.out.println("  LIMIT=" + limit);
             System.out.println("  TIMEOUT_MS=" + timeoutMs);
             System.out.println("  SLA_TTFT_MS=" + slaTtftMs);
-            System.out.println("  ZERO_OUTPUT_POLICY=" + zeroOutputPolicy);
             System.out.println("  LOOP=" + loop);
             System.out.println("  N_CHANNELS=" + nChannels);
             System.out.println("  EVENT_LOOP_THREADS=" + eventLoopThreads);

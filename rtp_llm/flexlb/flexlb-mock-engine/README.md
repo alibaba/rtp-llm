@@ -262,7 +262,6 @@ entirely through environment variables (`Config.fromEnv`):
 | LIMIT | 0 | Max requests to replay (0 = all) |
 | TIMEOUT_MS | 3600000 | Global run timeout in ms |
 | SLA_TTFT_MS | 500.0 | TTFT SLA threshold for the report |
-| ZERO_OUTPUT_POLICY | skip | Zero-output trace rows: skip / one / default100 |
 | FETCH_OUTPUT_STREAM | true | Client reads engine output streams after Schedule; 0 skips the client-side stream read while the engine still executes prefill+decode in full (BATCH dispatcher only) |
 | LOOP | false | Loop the trace |
 | N_CHANNELS | 8 | gRPC channels |
