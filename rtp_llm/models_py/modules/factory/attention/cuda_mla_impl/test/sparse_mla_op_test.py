@@ -27,6 +27,7 @@ SKIP_REASON = f"Requires CUDA >= 12.9, current: {torch.version.cuda if torch.ver
 # Only import if CUDA version is sufficient
 if CUDA_VERSION_OK:
     from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+        SparseMlaFp8Op,
         SparseMlaOp,
     )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -465,6 +466,85 @@ class SparseMlaOpTest(TestCase):
                     batch_size=batch_size,
                 )
                 self._run_test(p)
+
+    def test_hy4_sm100_head64_matches_padded_head128_with_sink(self):
+        """Native h64 and the compatibility h128 path are numerically equivalent."""
+        p = TestParam(
+            num_tokens=7,
+            total_cache_len=2048,
+            num_heads=64,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            qk_nope_head_dim=512,
+            page_size=64,
+            top_k=2048,
+            batch_size=1,
+        )
+        testcase = generate_testcase(p)
+        sink = torch.randn(64, dtype=torch.float32, device="cuda")
+
+        native = SparseMlaOp(64, 512, 64, 512, 64, 1.0, 2048)
+        padded = SparseMlaOp(128, 512, 64, 512, 64, 1.0, 2048)
+        native.plan(testcase.mla_params, testcase.block_table)
+        padded.plan(testcase.mla_params, testcase.block_table)
+
+        native_output = native.forward(
+            testcase.q, testcase.kv, testcase.topk_indices, attn_sink=sink
+        )
+        padded_output = padded.forward(
+            testcase.q, testcase.kv, testcase.topk_indices, attn_sink=sink
+        )
+        abs_diff = (native_output.float() - padded_output.float()).abs()
+        rel_diff = abs_diff / padded_output.float().abs().clamp_min(1e-6)
+        tolerance = 1e-4 + 1e-2 * padded_output.float().abs()
+        print(
+            "HY4_HEAD64_DIFF",
+            {
+                "diff_count": torch.count_nonzero(
+                    native_output != padded_output
+                ).item(),
+                "max_abs": abs_diff.max().item(),
+                "mean_abs": abs_diff.mean().item(),
+                "max_rel": rel_diff.max().item(),
+                "mean_rel": rel_diff.mean().item(),
+                "relative_l2": (
+                    torch.linalg.vector_norm(abs_diff)
+                    / torch.linalg.vector_norm(padded_output.float()).clamp_min(1e-12)
+                ).item(),
+                "outside_tolerance": torch.count_nonzero(
+                    abs_diff > tolerance
+                ).item(),
+            },
+        )
+        torch.testing.assert_close(
+            native_output,
+            padded_output,
+            rtol=1e-2,
+            atol=1e-4,
+        )
+
+    def test_hy4_fp8_gather_uses_native_head64(self):
+        op = SparseMlaFp8Op(
+            64,
+            512,
+            64,
+            512,
+            64,
+            1.0,
+            2048,
+            bf16_prefill_num_heads=64,
+        )
+        query = torch.randn(2, 64, 576, dtype=torch.bfloat16, device="cuda")
+        sink = torch.randn(64, dtype=torch.float32, device="cuda")
+
+        prepared_query, prepared_sink, actual_heads = op._pad_query_and_sink(
+            query, sink, op.bf16_num_heads
+        )
+
+        self.assertEqual(op.bf16_num_heads, 64)
+        self.assertEqual(actual_heads, 64)
+        self.assertIs(prepared_query, query)
+        self.assertIs(prepared_sink, sink)
 
     def test_sparse_mla_op_decode(self):
         """

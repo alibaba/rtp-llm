@@ -13,7 +13,16 @@ def _load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerBase:
     local_path = fetch_remote_file_to_local(os.path.expanduser(tokenizer_path.strip()))
     try:
         return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
-    except (ValueError, KeyError, OSError):
+    except Exception as error:
+        # Newer huggingface_hub versions wrap invalid model-config fields in a
+        # StrictDataclassClassValidationError. Tokenizer-only perf workloads can
+        # still load the checkpoint's tokenizer.json without parsing config.json.
+        recoverable = isinstance(error, (ValueError, KeyError, OSError)) or (
+            error.__class__.__name__ == "StrictDataclassClassValidationError"
+        )
+        if not recoverable:
+            raise
+
         from tokenizers import Tokenizer
         from transformers import PreTrainedTokenizerFast
 

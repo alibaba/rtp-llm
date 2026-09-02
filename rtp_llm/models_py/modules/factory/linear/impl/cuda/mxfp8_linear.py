@@ -20,11 +20,10 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 class CudaMxfp8Linear(LinearBase):
     # The unfused path quantizes and packs UE8M0 scales internally. Upstream
-    # fused kernels should emit fp32 power-of-two scales with group=32; forward()
-    # packs them before DeepGEMM.
+    # fused kernels can emit DeepGEMM-ready packed UE8M0 scales directly.
     scale_ue8m0: bool = True
     input_quant_group_size: int = MX_BLOCK
-    input_quant_scale_ue8m0: bool = False
+    input_quant_scale_ue8m0: bool = True
     input_quant_round_to_pow2: bool = True
 
     @classmethod

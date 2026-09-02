@@ -15,7 +15,8 @@ Covered fuse paths:
     ``attn_output * torch.sigmoid(gate)`` PyTorch baseline.
   - ``DenseMLP._fuse_silu_quant`` (F2)
   - ``MlaAttention._fuse_kv_a_norm`` / ``_fuse_q_a_norm_mode``
-    (DSA-F1a / F1b)
+    (DSA-F1a / F1b), plus ``_fuse_gated_mla_quant`` for the HY4
+    sigmoid/multiply/MXFP8-quant output epilogue
   - ``Indexer._get_logits_head_gate`` (DSA-F3 logits gate)
 
 Not gated (always fused; no off branch):
