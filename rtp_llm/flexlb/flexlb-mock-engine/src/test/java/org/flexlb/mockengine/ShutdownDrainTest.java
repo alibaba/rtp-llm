@@ -292,10 +292,10 @@ class ShutdownDrainTest {
     }
 
     private MockPerformanceModel model(String formula) throws Exception {
-        // max_pending_requests=0 opts in to a hard concurrency gate with an
-        // unbounded queue; absence keeps legacy soft accounting.
+        // The decode hard concurrency gate is unconditional, so these
+        // drain tests always exercise the queued-backlog + drain path.
         return MockEngineTestSupport.performanceModel(
-                tempDir, formula, 1.0, 1.0, Map.of(), Map.of("max_pending_requests", 0));
+                tempDir, formula, 1.0, 1.0, Map.of(), Map.of());
     }
 
 }

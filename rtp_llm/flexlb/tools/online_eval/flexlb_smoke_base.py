@@ -2,7 +2,9 @@
 
 Provides reusable gRPC infrastructure (channel management, proto building,
 stream consumption, cancel, recovery verification, and HTTP mock-engine
-API access) shared by ``cancel_smoke.py`` and ``scheduling_smoke.py``.
+API access) shared by the smoke clients (currently
+``priority_preemption_smoke.py``; the retired ``cancel_smoke.py`` /
+``scheduling_smoke.py`` coverage lives in the ``flexlb_ft/`` framework).
 """
 
 from __future__ import annotations
@@ -15,8 +17,11 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from online_eval.mock_engine import encode_unique_key
-from online_eval.proto_utils import ensure_proto_modules, ensure_schedule_proto_modules
+from online_eval.proto_utils import (
+    encode_unique_key,
+    ensure_proto_modules,
+    ensure_schedule_proto_modules,
+)
 
 # ---------------------------------------------------------------------------
 # Result helpers
@@ -89,19 +94,6 @@ class FlexLBSmokeBase:
     def _next_request_id(self) -> int:
         self._request_counter += 1
         return self._request_counter
-
-    @property
-    def _deploy_mode(self) -> str:
-        """Derive the smoke-test path label from strict FLEXLB_CONFIG axes."""
-        document = os.environ.get("FLEXLB_CONFIG")
-        if not document:
-            return "batch"
-        config = json.loads(document)
-        if config.get("dispatcher", {}).get("type") == "BATCH":
-            return "batch"
-        if config.get("scheduler", {}).get("type") == "DIRECT":
-            return "direct"
-        return "queue"
 
     def _master_target(self) -> str:
         return f"{self.args.master_ip}:{self.args.master_http_port + 2}"
