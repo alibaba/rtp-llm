@@ -45,7 +45,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_fp4_ex
     _validate_execute_payload,
 )
 from rtp_llm.ops import MoeConfig, ParallelismConfig
-from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.model_weight import W, stack_moe_w1_s2_pair
 
 
 class B12xWeightPreparationTest(unittest.TestCase):
@@ -112,6 +112,40 @@ class B12xWeightPreparationTest(unittest.TestCase):
             prepared_scale.permute(5, 2, 4, 0, 1, 3).contiguous().reshape(2, 128, 8)
         )
         self.assertTrue(torch.equal(physical_scale, self._reference_swizzle(scale)))
+
+    def test_w1_distinct_up_gate_outer_scales_are_folded_independently(self):
+        kernel = torch.zeros((1, 256, 64), dtype=torch.uint8)
+        scale = torch.ones((1, 256, 8), dtype=torch.float8_e4m3fn)
+        scale_2_pair = stack_moe_w1_s2_pair(
+            [torch.tensor(2.0), torch.tensor(4.0)]
+        )
+
+        _, prepared_scale = prepare_static_weights_for_fp4_moe(
+            Fp4MoeOp.B12X.value,
+            W.moe_w1,
+            W.moe_s1,
+            kernel,
+            scale,
+            scale_2=torch.tensor([4.0], dtype=torch.float32),
+            scale_2_pair=scale_2_pair,
+            b12x_zeroed_energy_limit=B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
+        )
+
+        physical_scale = (
+            prepared_scale.permute(5, 2, 4, 0, 1, 3)
+            .contiguous()
+            .reshape(1, 256, 8)
+        )
+        folded = torch.cat(
+            [
+                torch.full((1, 128, 8), 2.0, dtype=torch.float8_e4m3fn),
+                torch.full((1, 128, 8), 4.0, dtype=torch.float8_e4m3fn),
+            ],
+            dim=1,
+        )
+        self.assertTrue(
+            torch.equal(physical_scale, self._reference_swizzle(folded))
+        )
 
     def test_b12x_preparation_requires_weight_scale_2(self):
         with self.assertRaisesRegex(ValueError, "requires weight_scale_2"):

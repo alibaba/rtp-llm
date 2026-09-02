@@ -31,6 +31,7 @@ from rtp_llm.utils.model_weight import (
     stack_moe_w1,
     max_scalar,
     stack_moe_w1_s2,
+    stack_moe_w1_s2_pair,
     merge_qkv_hf,
     identity,
     merge_qkvz_transpose_reorder,
@@ -187,6 +188,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         kernel: WeightModule = None
         scale: WeightModule = None
         scale_2: WeightModule = None
+        scale_2_pair: WeightModule = None
         input_scale: WeightModule = None
         
         if src_weight_info.name == W.linear_attn_qkvz_w:
@@ -211,9 +213,12 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
                 scale_2 = None
                 input_scale = None
         elif src_weight_info.name == W.moe_w1:
-            kernel, scale, scale_2, input_scale = self._get_moe_w1_quant_weight(src_weight_info)
+            kernel, scale, scale_2, scale_2_pair, input_scale = (
+                self._get_moe_w1_quant_weight(src_weight_info)
+            )
             if self._is_quark_fp4:
                 scale_2 = None
+                scale_2_pair = None
                 input_scale = None
         elif src_weight_info.name == W.moe_w2:
             kernel, scale, scale_2, input_scale = self._get_moe_w2_quant_weight(src_weight_info)
@@ -226,6 +231,8 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             sub_weights.update({scale.name: scale})
         if scale_2 is not None:
             sub_weights.update({scale_2.name: scale_2})
+        if scale_2_pair is not None:
+            sub_weights.update({scale_2_pair.name: scale_2_pair})
         if input_scale is not None:
             sub_weights.update({input_scale.name: input_scale})
 
@@ -233,6 +240,9 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         self.kernel = sub_weights.get(kernel.name)
         self.scale = sub_weights.get(scale.name) if scale is not None else None
         self.scale_2 = sub_weights.get(scale_2.name) if scale_2 is not None else None
+        self.scale_2_pair = (
+            sub_weights.get(scale_2_pair.name) if scale_2_pair is not None else None
+        )
         self.input_scale = sub_weights.get(input_scale.name) if input_scale is not None else None
 
     def _get_moe_scale_dtype(self) -> torch.dtype:
@@ -623,6 +633,17 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float32,
             config=src_weight_info.config,
         )
+        scale_2_pair = create_mixed_fp4_per_group_weight(
+            src_weight_info,
+            W.moe_w1_s2_pair,
+            [
+                CkptWeightInfo(w.name[: -len(W_SUFFIX)] + QS_2_SUFFIX, identity)
+                for w in src_weight_info.weights
+            ],
+            stack_moe_w1_s2_pair,
+            data_type=torch.float32,
+            config=src_weight_info.config,
+        )
         input_scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1_i_s,
@@ -634,7 +655,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             data_type=torch.float32,
             config=src_weight_info.config,
         )
-        return [kernel, scale, scale_2, input_scale]
+        return [kernel, scale, scale_2, scale_2_pair, input_scale]
 
     def _postprocess(
         self,
@@ -660,6 +681,11 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
                     scale_2=(
                         processed_res.get(self.scale_2.name)
                         if self.scale_2 is not None
+                        else None
+                    ),
+                    scale_2_pair=(
+                        processed_res.get(self.scale_2_pair.name)
+                        if self.scale_2_pair is not None
                         else None
                     ),
                     input_scale=(

@@ -26,6 +26,7 @@ def prepare_static_weights_for_fp4_moe(
     cache_permute_indices: Optional[dict[torch.Size, torch.Tensor]] = None,
     *,
     scale_2: Optional[torch.Tensor] = None,
+    scale_2_pair: Optional[torch.Tensor] = None,
     input_scale: Optional[torch.Tensor] = None,
     b12x_zeroed_energy_limit: Optional[float] = None,
 ):
@@ -76,7 +77,11 @@ def prepare_static_weights_for_fp4_moe(
             "w1" if kernel_name == W.moe_w1 else "w2",
             kernel,
             swizzled_scale,
-            scale_2,
+            (
+                scale_2_pair
+                if kernel_name == W.moe_w1 and scale_2_pair is not None
+                else scale_2
+            ),
             input_scale,
             b12x_zeroed_energy_limit,
         )
@@ -685,6 +690,7 @@ class CudaImpl(GpuImpl):
         scale: torch.Tensor,
         *,
         scale_2: Optional[torch.Tensor] = None,
+        scale_2_pair: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
         return prepare_static_weights_for_fp4_moe(
@@ -695,6 +701,7 @@ class CudaImpl(GpuImpl):
             scale,
             self._cache_permute_indices,
             scale_2=scale_2,
+            scale_2_pair=scale_2_pair,
             input_scale=input_scale,
             b12x_zeroed_energy_limit=(
                 self.py_env_configs.moe_config.b12x_zeroed_energy_limit

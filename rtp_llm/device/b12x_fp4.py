@@ -114,15 +114,19 @@ def prepare_b12x_blockscale(
             f"b12x FP4 {name} blockscale shape must be {expected_scale_shape}, "
             f"got {tuple(blockscale.shape)}"
         )
-    if scale_2.dtype is not torch.float32 or (
-        scale_2.ndim == 0
-        or scale_2.shape[0] != num_experts
-        or scale_2.numel() != num_experts
+    scalar_per_expert = (
+        scale_2.ndim > 0
+        and scale_2.shape[0] == num_experts
+        and scale_2.numel() == num_experts
+    )
+    paired_w1_scale = name == "w1" and tuple(scale_2.shape) == (num_experts, 2)
+    if scale_2.dtype is not torch.float32 or not (
+        scalar_per_expert or paired_w1_scale
     ):
         raise ValueError(
             f"b12x FP4 {name} weight_scale_2 must contain one float32 scalar "
-            f"per expert ({num_experts} values), got shape={tuple(scale_2.shape)}, "
-            f"dtype={scale_2.dtype}"
+            "per expert, or an [up, gate] pair for each w1 expert; "
+            f"got shape={tuple(scale_2.shape)}, dtype={scale_2.dtype}"
         )
     expected_device = kernel.device
     if blockscale.device != expected_device or scale_2.device != expected_device:
@@ -137,9 +141,20 @@ def prepare_b12x_blockscale(
         )
     validate_b12x_checkpoint_input_scale(name, input_scale, expected_device)
 
-    product = blockscale.to(torch.float32) * scale_2.reshape(num_experts, 1, 1).to(
-        torch.float32
-    )
+    product = blockscale.to(torch.float32)
+    if paired_w1_scale:
+        if rows % 256 != 0:
+            raise ValueError(
+                "b12x FP4 w1 requires each up/gate blockscale half to be "
+                f"128-row aligned, got {rows // 2} rows per half"
+            )
+        # Swizzle is row-block-major. An aligned logical half therefore stays
+        # in the corresponding first/second physical half after swizzling.
+        half = rows // 2
+        product[:, :half, :].mul_(scale_2[:, 0].reshape(num_experts, 1, 1))
+        product[:, half:, :].mul_(scale_2[:, 1].reshape(num_experts, 1, 1))
+    else:
+        product.mul_(scale_2.reshape(num_experts, 1, 1))
     folded = product.to(torch.float8_e4m3fn)
     zeroed, lost_energy, subnormal_frac = validate_folded_b12x_blockscale(
         name, product, folded, zeroed_energy_limit
