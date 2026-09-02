@@ -62,6 +62,97 @@ def _block_stub(adapter: object | None) -> Block:
 
 
 class MegaCSARoutingTest(unittest.TestCase):
+    @staticmethod
+    def _make_transformer(args: V4Args, layers: list[torch.nn.Module]):
+        global_weights = MagicMock()
+        global_weights.__getitem__.return_value = torch.ones(1, dtype=torch.bfloat16)
+        model_weights = SimpleNamespace(
+            global_weights=global_weights, weights=[{} for _ in layers]
+        )
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.transformer._build_block",
+            side_effect=layers,
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.transformer.EmbeddingTorch",
+            return_value=torch.nn.Identity(),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.transformer.RMSNorm",
+            return_value=torch.nn.Identity(),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.transformer.build_hc_head",
+            return_value=torch.nn.Identity(),
+        ):
+            return V4Transformer(args, model_weights)
+
+    def test_fp8_tp1_defaults_to_mega_csa_and_hca(self) -> None:
+        layers = []
+        for _ in range(2):
+            layer = torch.nn.Module()
+            layer.enable_mega_csa = MagicMock()
+            layer.enable_mega_hca = MagicMock()
+            layer.enable_mega_front = MagicMock()
+            layers.append(layer)
+        args = V4Args(
+            n_layers=2,
+            n_mtp_layers=0,
+            compress_ratios=[4, 128],
+            fp8_kv_cache=True,
+            tp_size=1,
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            transformer = self._make_transformer(args, layers)
+
+        self.assertIsNotNone(transformer._mega_csa_runtime)
+        for layer in layers:
+            layer.enable_mega_csa.assert_called_once()
+            layer.enable_mega_hca.assert_called_once()
+            layer.enable_mega_front.assert_called_once_with()
+
+    def test_explicit_zero_disables_default_mega_path(self) -> None:
+        layer = torch.nn.Module()
+        layer.enable_mega_csa = MagicMock()
+        layer.enable_mega_hca = MagicMock()
+        layer.enable_mega_front = MagicMock()
+        args = V4Args(
+            n_layers=1,
+            n_mtp_layers=0,
+            compress_ratios=[4],
+            fp8_kv_cache=True,
+            tp_size=1,
+        )
+
+        with patch.dict(
+            os.environ, {"DSV4_MEGA_CSA": "0", "DSV4_MEGA_HCA": "0"}, clear=True
+        ):
+            transformer = self._make_transformer(args, [layer])
+
+        self.assertIsNone(transformer._mega_csa_runtime)
+        layer.enable_mega_csa.assert_not_called()
+        layer.enable_mega_hca.assert_not_called()
+        layer.enable_mega_front.assert_not_called()
+
+    def test_unsupported_geometry_does_not_enable_mega_by_default(self) -> None:
+        layer = torch.nn.Module()
+        layer.enable_mega_csa = MagicMock()
+        layer.enable_mega_hca = MagicMock()
+        layer.enable_mega_front = MagicMock()
+        args = V4Args(
+            n_layers=1,
+            n_mtp_layers=0,
+            compress_ratios=[4],
+            fp8_kv_cache=True,
+            tp_size=2,
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            transformer = self._make_transformer(args, [layer])
+
+        self.assertIsNone(transformer._mega_csa_runtime)
+        layer.enable_mega_csa.assert_not_called()
+        layer.enable_mega_hca.assert_not_called()
+        layer.enable_mega_front.assert_not_called()
+
     def test_pdfusion_role_can_attach_mega_adapter(self) -> None:
         class _Layer(torch.nn.Module):
             def __init__(self) -> None:
@@ -82,7 +173,9 @@ class MegaCSARoutingTest(unittest.TestCase):
             tp_size=1,
         )
 
-        with patch.dict(os.environ, {"DSV4_MEGA_CSA": "1"}), patch(
+        with patch.dict(
+            os.environ, {"DSV4_MEGA_CSA": "1", "DSV4_MEGA_HCA": "0"}
+        ), patch(
             "rtp_llm.models_py.modules.dsv4.transformer._build_block",
             return_value=layer,
         ), patch(
