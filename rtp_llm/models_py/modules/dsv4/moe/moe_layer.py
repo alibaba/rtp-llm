@@ -307,6 +307,20 @@ class MoE(nn.Module):
         input_ids: torch.Tensor,
         out: torch.Tensor,
     ) -> None:
+        if x.size(0) == 0 and self._strategy.requires_synchronized_chunk_schedule:
+            # A shorter rank still has to enter the routed-expert collective
+            # for every globally scheduled chunk.  Gate is explicitly
+            # empty-safe; shared experts have no local rows and can be skipped.
+            with record_function_range("dsv4.moe.gate"):
+                weights, indices = self.gate(x, input_ids)
+            with record_function_range("dsv4.moe.routed_experts"):
+                routed = self._strategy(x, weights, indices)
+            if routed.numel() != 0:
+                raise RuntimeError(
+                    "synchronized empty MoE chunk returned non-empty output"
+                )
+            return
+
         if self._gate_pack_static:
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
@@ -368,9 +382,16 @@ class MoE(nn.Module):
         x: torch.Tensor,
         input_ids_flat: torch.Tensor,
         shape: torch.Size,
+        schedule_tokens: int | None = None,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
+        schedule_tokens = T if schedule_tokens is None else int(schedule_tokens)
+        if schedule_tokens < T:
+            raise RuntimeError(
+                "MoE synchronized chunk extent is smaller than local input: "
+                f"schedule_tokens={schedule_tokens}, local_tokens={T}"
+            )
         chunk_tokens = int(self.max_tokens_per_rank)
         assert (
             chunk_tokens > 0
@@ -378,17 +399,19 @@ class MoE(nn.Module):
         if not _CHUNKED_MOE_LOGGED:
             _CHUNKED_MOE_LOGGED = True
             logging.info(
-                "[DSV4 MoE] chunked forward enabled: layer=%d tokens=%d "
+                "[DSV4 MoE] chunked forward enabled: layer=%d local_tokens=%d "
+                "schedule_tokens=%d "
                 "chunk_tokens=%d chunks=%d dim=%d device=%s",
                 self.layer_id,
                 T,
+                schedule_tokens,
                 chunk_tokens,
-                (T + chunk_tokens - 1) // chunk_tokens,
+                (schedule_tokens + chunk_tokens - 1) // chunk_tokens,
                 self.dim,
                 x.device,
             )
         out = _get_or_create_final_out(T, self.dim, x.dtype, x.device)[:T]
-        for token_start in range(0, T, chunk_tokens):
+        for token_start in range(0, schedule_tokens, chunk_tokens):
             token_end = min(token_start + chunk_tokens, T)
             self._run_chunk(
                 x[token_start:token_end],
@@ -429,8 +452,26 @@ class MoE(nn.Module):
                     f"L{self.layer_id:02d}_moe_x_in_{dbg_pos_name}",
                     x[dbg_pos_mask].contiguous(),
                 )
-        if self._should_chunk(x.size(0)):
-            return self._forward_chunked(x, input_ids_flat, shape)
+        schedule_tokens = x.size(0)
+        cuda_graph_capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+        if (
+            self._strategy.requires_synchronized_chunk_schedule
+            and not self._is_decode_role
+            and not cuda_graph_capturing
+            and chunked_moe_enabled()
+        ):
+            schedule_tokens = self._strategy.synchronized_chunk_extent(
+                x.size(0), x.device
+            )
+        if self._should_chunk(schedule_tokens):
+            return self._forward_chunked(
+                x,
+                input_ids_flat,
+                shape,
+                schedule_tokens=schedule_tokens,
+            )
 
         if self._gate_pack_static:
             if self._routed_includes_shared:

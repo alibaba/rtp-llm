@@ -79,6 +79,11 @@ class RoutedExpertsStrategy(nn.Module):
     # Mega variants that fuse the shared expert set this True.
     routed_includes_shared: ClassVar[bool] = False
 
+    # Collective strategies whose ranks may receive different prefill token
+    # counts must make the outer MoE chunk schedule identical on every rank.
+    # The default keeps local-only strategies free of distributed work.
+    requires_synchronized_chunk_schedule: ClassVar[bool] = False
+
     def __init__(self, cfg: MoeCfg):
         super().__init__()
         self.cfg = cfg
@@ -110,6 +115,17 @@ class RoutedExpertsStrategy(nn.Module):
         override it after checking env/static model properties.
         """
         return False
+
+    def synchronized_chunk_extent(self, local_tokens: int, device: torch.device) -> int:
+        """Return the common token extent used by outer MoE chunking.
+
+        Only strategies with ``requires_synchronized_chunk_schedule`` set may
+        override this method and perform collectives.  Keeping the method on
+        the strategy makes the process-group/topology choice explicit instead
+        of teaching the generic MoE layer about a concrete backend.
+        """
+        del device
+        return int(local_tokens)
 
     def forward_with_gate_pack(
         self,

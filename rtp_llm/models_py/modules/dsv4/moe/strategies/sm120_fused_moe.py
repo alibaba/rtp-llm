@@ -15,9 +15,6 @@ from typing import Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
-    PureCpRouterNoQuant,
-)
 from rtp_llm.models_py.utils.arch import is_sm120
 
 from ..._profiler import record_function_range
@@ -54,9 +51,15 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
     """SM120 FusedMoe compute with collective communication routers."""
 
     name = "sm120_fused_moe"
+    requires_synchronized_chunk_schedule = False
 
     def __init__(self, cfg: MoeCfg):
         super().__init__(cfg)
+        # Pure CP guarantees equal local token shapes and uses its own TP
+        # router.  Only the variable-size WORLD-collective fallback needs the
+        # explicit cross-rank outer chunk schedule.
+        self.requires_synchronized_chunk_schedule = not self._is_pure_cp()
+        self._chunk_extent_tensor: torch.Tensor | None = None
         self._sm120_grouped = None
         if _is_sm120_runtime() and _has_fp8_fp4_grouped_kernel():
             # GroupedFP4 owns only this EP rank's weights and therefore uses
@@ -85,6 +88,13 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
         # on that path.
         self._cp_fused_moe = None
         if self._is_pure_cp():
+            # This router imports CUDA-only quantization bindings.  Delay the
+            # import until exact-SM120 selection so importing the DSV4 strategy
+            # package remains valid on ROCm and CPU runtimes.
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_cp_router import (
+                PureCpRouterNoQuant,
+            )
+
             self._cp_fused_moe = build_sm120_fused_moe(
                 cfg,
                 self._local,
@@ -98,6 +108,21 @@ class Sm120FusedMoeStrategy(RoutedExpertsStrategy):
 
     def setup_weights(self, layer_weights: Dict) -> None:
         self._local.setup_weights(layer_weights)
+
+    def synchronized_chunk_extent(self, local_tokens: int, device: torch.device) -> int:
+        """Agree on one eager-prefill chunk count across all EP ranks."""
+        dist = torch.distributed
+        if not dist.is_initialized():
+            raise RuntimeError("SM120 collective MoE requires torch.distributed")
+        group = dist.group.WORLD
+        _validate_world_collective_topology(self.cfg, dist, group)
+        max_tokens = self._chunk_extent_tensor
+        if max_tokens is None or max_tokens.device != device:
+            max_tokens = torch.empty((1,), dtype=torch.int64, device=device)
+            self._chunk_extent_tensor = max_tokens
+        max_tokens.fill_(int(local_tokens))
+        dist.all_reduce(max_tokens, op=dist.ReduceOp.MAX, group=group)
+        return int(max_tokens.item())
 
     def forward(
         self,

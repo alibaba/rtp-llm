@@ -7,6 +7,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.models_py.utils.arch import is_blackwell
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,11 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     is_legacy_cutlass_fp4_available,
 )
 from rtp_llm.ops import HWKernelConfig
+
+
+def fp4_backend_available(device=None) -> bool:
+    """Whether this process exposes usable Blackwell FlashInfer FP4 APIs."""
+    return is_blackwell(device) and callable(fp4_quantize) and callable(mm_fp4)
 
 
 class CudaFp4GEMMLinear(LinearBase):
@@ -34,7 +40,9 @@ class CudaFp4GEMMLinear(LinearBase):
     ) -> bool:
         """Check if this strategy can handle the given configuration"""
         if (
-            weight_scales is None
+            not weight.is_cuda
+            or not fp4_backend_available(weight.device)
+            or weight_scales is None
             or quant_config is None
             or weight_scale_2 is None
             or input_scale is None
