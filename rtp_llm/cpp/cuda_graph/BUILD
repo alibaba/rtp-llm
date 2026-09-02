@@ -11,9 +11,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "cuda_graph_capture_range",
+    hdrs = ["cuda_graph_capture_range.h"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
+        "cuda_graph_capture_range.h",
         "cuda_graph_device_shims.cc",
         "cuda_graph_utils.cc",
         "cuda_graph_runner.cc",
@@ -27,6 +34,7 @@ filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
         "cuda_graph_base.h",
+        "cuda_graph_capture_range.h",
         "cuda_graph_device_shims.h",
         "cuda_graph_utils.h",
         "cuda_graph_runner.h",
@@ -65,6 +73,7 @@ cc_library(
     ],
     deps = torch_deps() + [
         ":cuda_graph_base",
+        ":cuda_graph_capture_range",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
