@@ -2,6 +2,10 @@
 # Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
 # Packages that link libcudart.so.12 (flash_attn, flashinfer_*, deep_ep,
 # fast_hadamard, nvidia_cutlass_dsl) are deferred.
+# Scope: this requirements/lock pair predates the FastSafeTensors update. This
+# transition only refreshes its existing wrapper/native wheel pins; CUDA 13 ARM
+# Bazel selection, wheel metadata, FlashInfer routing and CI coverage remain
+# unchanged from main and are intentionally outside this change.
 -r requirements_base.txt
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
